@@ -232,9 +232,9 @@ export function FileTreeDisclosureIcon({
 /** Ring shown on the row a drag is currently hovering (valid drop target). */
 const DROP_RING = "ring-1 ring-inset ring-primary bg-accent";
 /** Row interaction states shared by the reading tree and the writing sidebar. */
-export const FILE_TREE_ROW_STATE = `${TREE_ROW_TEXT_STATE} transition-colors duration-[var(--motion-duration-micro)] ease-[var(--motion-ease-out)] hover:bg-sidebar-accent/80 active:not-has-[[data-tex-compile]:active]:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/80`;
+export const FILE_TREE_ROW_STATE = `${TREE_ROW_TEXT_STATE} transition-[color,background-color,box-shadow,transform] duration-[var(--motion-duration-fast)] ease-[cubic-bezier(0.25,1,0.5,1)] hover:bg-sidebar-accent/85 active:not-has-[[data-tex-compile]:active]:scale-[0.99] active:not-has-[[data-tex-compile]:active]:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/80`;
 export const FILE_TREE_ROW_SELECTED_STATE =
-	"bg-sidebar-primary/75 text-sidebar-primary-foreground hover:text-sidebar-primary-foreground hover:bg-sidebar-primary/75 active:not-has-[[data-tex-compile]:active]:bg-sidebar-primary/75 [&_svg]:text-sidebar-primary-foreground/90";
+	"bg-sidebar-primary/85 text-sidebar-primary-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08),inset_0_0.5px_0_rgba(255,255,255,0.2)] hover:text-sidebar-primary-foreground hover:bg-sidebar-primary/85 active:not-has-[[data-tex-compile]:active]:bg-sidebar-primary/85 [&_svg]:text-sidebar-primary-foreground/95";
 
 /**
  * Flat folder ROW (no nested children) for virtualized rendering: renders the

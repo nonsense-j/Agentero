@@ -463,10 +463,10 @@ export function PlazaSourceRow({
 			path={source.path}
 			name={label}
 			style={style}
-			{...(source.id === "cool-papers" ? { "data-cool-papers": "" } : {})}
+			{...(source.id === "collection" ? { "data-cool-papers": "" } : {})}
 		>
 			<FileTreeIcon>
-				<Icon className="size-4" />
+				<Icon className="size-4 transition-transform duration-150 group-hover:scale-105" />
 			</FileTreeIcon>
 			<FileTreeName className="min-w-0 flex-1 truncate" title={label}>
 				{label}
