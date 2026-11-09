@@ -196,6 +196,7 @@ fn response(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response<V
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .expect("valid web proxy response")
 }

@@ -23,7 +23,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Categories used when the caller and the stored state have none.
-pub const DEFAULT_CATEGORIES: &[&str] = &["cs.AI", "cs.CL", "cs.LG", "cs.CV", "stat.ML"];
+pub const DEFAULT_CATEGORIES: &[&str] = &["cs.AI", "cs.CR", "cs.PL", "cs.SE"];
 
 /// Recommendations returned to the page when the caller does not ask for more.
 pub const DEFAULT_TOP_N: usize = 20;
