@@ -5,27 +5,29 @@
  * React/component imports.
  */
 
-import {
-	CalendarClock,
-	Landmark,
-	Rss,
-	Sparkles,
-	Telescope,
-} from "lucide-react";
+import { Landmark, Rss, Sparkles } from "lucide-react";
 import type { ComponentType, SVGProps } from "react";
 import { CoolPapersIcon } from "@/components/icons/cool-papers-icon";
 import { ModelScopeIcon } from "@/components/icons/modelscope-icon";
+import {
+	PlazaCollectionIcon,
+	PlazaDeadlineIcon,
+	PlazaDiscoverIcon,
+	PlazaRecommendIcon,
+} from "@/components/icons/plaza-icons";
 import type { PlazaSourceIcon } from "@/lib/plaza";
 
 export const PLAZA_SOURCE_ICONS: Record<
 	PlazaSourceIcon,
 	ComponentType<SVGProps<SVGSVGElement>>
 > = {
+	collection: PlazaCollectionIcon,
+	discover: PlazaDiscoverIcon,
 	coolPapers: CoolPapersIcon,
 	modelScope: ModelScopeIcon,
 	conference: Landmark,
 	sparkles: Sparkles,
 	rss: Rss,
-	telescope: Telescope,
-	calendarClock: CalendarClock,
+	telescope: PlazaRecommendIcon,
+	calendarClock: PlazaDeadlineIcon,
 };

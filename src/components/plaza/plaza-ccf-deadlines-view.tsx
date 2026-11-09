@@ -1,20 +1,28 @@
 /**
  * Native 广场 panel: upcoming CCF conference deadlines.
  *
- * A flat "what's due next" list sourced entirely from the upstream
- * ccf-deadlines dataset (see `lib/plaza/ccf-deadlines.ts`). Each row keeps only
- * the CCF rank, the submission deadline and the official site link.
+ * Supports toggling between the Magpie-styled Native Deadlines list and the
+ * embedded `https://ccfddl.com/` web view.
  */
 
-import { ExternalLink, Loader2 } from "lucide-react";
+import {
+	ExternalLink,
+	Globe,
+	LayoutList,
+	Loader2,
+	Search,
+	X,
+} from "lucide-react";
 import {
 	type ReactNode,
 	useCallback,
 	useEffect,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { PlazaWebFrame } from "@/components/plaza/plaza-web-frame";
 import { Button } from "@/components/ui/button";
 import {
 	Tooltip,
@@ -30,22 +38,38 @@ import {
 	type CcfRank,
 	loadCcfDeadlines,
 } from "@/lib/plaza/ccf-deadlines";
+import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 
 const RANKS: readonly CcfRank[] = ["A", "B", "C", "N"];
 
-/**
- * Monochrome rank ramp (no colour): A carries the most weight, N the least, so
- * the list stays scannable without a rainbow of badges.
- */
 const RANK_CLASS: Record<CcfRank, string> = {
-	A: "bg-foreground text-background",
+	A: "bg-foreground text-background shadow-xs",
 	B: "bg-foreground/15 text-foreground",
-	C: "bg-foreground/5 text-muted-foreground",
+	C: "bg-foreground/6 text-muted-foreground",
 	N: "text-muted-foreground/70",
 };
 
-const SEGMENT_CLASS =
-	"inline-flex h-6 min-w-6 items-center justify-center rounded-md px-2 font-medium text-caption tabular-nums transition-[color,background-color,transform] duration-[var(--motion-duration-micro)] ease-[var(--motion-ease-out)] active:scale-[0.96] motion-reduce:transition-none";
+const SE_AI_SPOTLIGHT = new Set([
+	"ICSE",
+	"FSE",
+	"ESEC/FSE",
+	"ASE",
+	"ISSTA",
+	"PLDI",
+	"POPL",
+	"OOPSLA",
+	"TOSEM",
+	"TSE",
+	"S&P",
+	"USENIX Security",
+	"CCS",
+	"NDSS",
+	"NeurIPS",
+	"ICML",
+	"ICLR",
+	"AAAI",
+	"ACL",
+]);
 
 export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
@@ -53,6 +77,9 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 	const [busy, setBusy] = useState(true);
 	const [error, setError] = useState(false);
 	const [rankFilter, setRankFilter] = useState<CcfRank[]>([]);
+	const [focusAiSe, setFocusAiSe] = useState(false);
+	const [query, setQuery] = useState("");
+	const [displayMode, setDisplayMode] = useState<"native" | "web">("native");
 	const loadedRef = useRef(false);
 
 	const load = useCallback(async () => {
@@ -68,17 +95,35 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 		}
 	}, [t]);
 
-	// Refresh on every open.
 	useEffect(() => {
 		if (loadedRef.current) return;
 		loadedRef.current = true;
 		void load();
 	}, [load]);
 
-	const visible =
-		rankFilter.length === 0
-			? items
-			: items.filter((item) => rankFilter.includes(item.rank));
+	const visible = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		return items.filter((item) => {
+			if (rankFilter.length > 0 && !rankFilter.includes(item.rank)) {
+				return false;
+			}
+			if (focusAiSe) {
+				const upper = item.title.toUpperCase();
+				const matched = Array.from(SE_AI_SPOTLIGHT).some(
+					(v) =>
+						upper === v.toUpperCase() ||
+						upper.startsWith(`${v.toUpperCase()} `),
+				);
+				if (!matched) return false;
+			}
+			if (q) {
+				const hay =
+					`${item.title} ${item.comment ?? ""} ${item.year}`.toLowerCase();
+				if (!hay.includes(q)) return false;
+			}
+			return true;
+		});
+	}, [focusAiSe, items, query, rankFilter]);
 
 	const toggleRank = (rank: CcfRank) =>
 		setRankFilter((prev) =>
@@ -86,21 +131,94 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 		);
 
 	return (
-		<div className={cn("relative flex h-full min-h-0 flex-col", className)}>
-			<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto">
-				{/* Translucent chrome: rows scroll under it (Apple material). */}
-				<div
-					data-plaza-header
-					className="sticky top-0 z-10 flex items-center gap-2 bg-background/72 px-2.5 py-2 shadow-[0_1px_0_0_color-mix(in_oklch,var(--border)_55%,transparent)] backdrop-blur-xl backdrop-saturate-150 supports-backdrop-blur:bg-background/60 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-4 after:bg-gradient-to-b after:from-background/80 after:to-transparent after:content-['']"
-				>
-					<RankFilter
-						selected={rankFilter}
-						onToggle={toggleRank}
-						onClear={() => setRankFilter([])}
+		<div
+			className={cn(
+				"magpie-canvas magpie-view-in relative flex h-full min-h-0 flex-col",
+				className,
+			)}
+		>
+			{/* Sticky Translucent Magpie Header */}
+			<div
+				data-plaza-header
+				className="sticky top-0 z-10 flex flex-wrap items-center gap-2 bg-background/80 px-3 py-2.5 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
+			>
+				<RankFilter
+					selected={rankFilter}
+					onToggle={toggleRank}
+					onClear={() => setRankFilter([])}
+				/>
+
+				{displayMode === "native" ? (
+					<>
+						<button
+							type="button"
+							data-active={focusAiSe}
+							onClick={() => setFocusAiSe((v) => !v)}
+							className="magpie-chip"
+						>
+							{t("plaza.ccfDeadlines.focusAiSe")}
+						</button>
+
+						<div className="relative min-w-[140px] flex-1">
+							<Search
+								className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+								aria-hidden
+							/>
+							<input
+								type="search"
+								value={query}
+								onChange={(e) => setQuery(e.target.value)}
+								placeholder={t("plaza.ccfDeadlines.searchPlaceholder")}
+								className="h-7 w-full rounded-lg bg-[var(--magpie-surface)] pr-7 pl-8 text-xs shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-brand/60"
+							/>
+							{query ? (
+								<button
+									type="button"
+									onClick={() => setQuery("")}
+									className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+								>
+									<X className="size-3" />
+								</button>
+							) : null}
+						</div>
+					</>
+				) : null}
+
+				{/* Native vs Web Mode Segmented Toggle */}
+				<div className="magpie-seg ml-auto">
+					<button
+						type="button"
+						data-active={displayMode === "native"}
+						onClick={() => setDisplayMode("native")}
+						className="magpie-seg-btn"
+					>
+						<LayoutList className="size-3" />
+						<span>{t("plaza.ccfDeadlines.modeNative")}</span>
+					</button>
+					<button
+						type="button"
+						data-active={displayMode === "web"}
+						onClick={() => setDisplayMode("web")}
+						className="magpie-seg-btn"
+					>
+						<Globe className="size-3" />
+						<span>ccfddl.com</span>
+					</button>
+				</div>
+			</div>
+
+			{displayMode === "web" ? (
+				<div className="min-h-0 flex-1">
+					<PlazaWebFrame
+						homeUrl="https://ccfddl.com/"
+						embedOrigin={webViewProxyUrl("https://ccfddl.com/")}
+						lastPathStorageKey="agentero:plaza:ccf-deadlines:last-path"
+						title="ccfddl.com"
+						className="h-full w-full"
 					/>
 				</div>
-
-				<div className="p-1.5">
+			) : (
+				<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
 					{busy && items.length === 0 ? (
 						<div className="flex items-center justify-center py-10 text-muted-foreground text-xs">
 							<Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -116,10 +234,14 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 								: t("plaza.ccfDeadlines.emptyFiltered")}
 						</p>
 					) : (
-						visible.map((item) => <DeadlineRow key={item.key} item={item} />)
+						<div className="grid gap-1.5">
+							{visible.map((item) => (
+								<DeadlineRow key={item.key} item={item} />
+							))}
+						</div>
 					)}
 				</div>
-			</div>
+			)}
 		</div>
 	);
 }
@@ -137,7 +259,7 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 				: t("plaza.ccfDeadlines.daysLeft", { days });
 
 	return (
-		<div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors duration-[var(--motion-duration-micro)] hover:bg-muted/60 motion-reduce:transition-none">
+		<div className="magpie-card group flex items-center gap-2.5 px-3 py-2">
 			<span
 				className={cn(
 					"inline-flex size-5 shrink-0 items-center justify-center rounded-md font-semibold text-caption tabular-nums",
@@ -147,7 +269,7 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 			>
 				{item.rank}
 			</span>
-			<span className="min-w-0 truncate text-sm font-medium">{item.title}</span>
+			<span className="min-w-0 truncate font-medium text-sm">{item.title}</span>
 			{item.estimated ? (
 				<span
 					className="shrink-0 rounded border border-border/60 px-1 text-caption text-muted-foreground/70"
@@ -167,7 +289,7 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 				</span>
 			) : null}
 			<span className="ml-auto flex shrink-0 items-center gap-2">
-				<span className="font-mono text-caption tabular-nums text-muted-foreground/70">
+				<span className="font-mono text-caption tabular-nums text-muted-foreground/75">
 					{item.deadline.slice(0, 16)}
 					{item.timezone ? (
 						<span className="ml-1 text-muted-foreground/50">
@@ -179,9 +301,7 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 					<span
 						className={cn(
 							"w-14 whitespace-nowrap text-right text-caption tabular-nums",
-							urgent
-								? "font-semibold text-foreground"
-								: "text-muted-foreground",
+							urgent ? "font-semibold text-brand" : "text-muted-foreground",
 						)}
 					>
 						{countdown}
@@ -212,11 +332,6 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 	);
 }
 
-/**
- * Segmented control for the rank filter. Multi-select: tapping a rank toggles
- * it; the leading "all" segment clears the selection. The selected segment uses
- * a foreground-alpha fill so it contrasts with the track in both themes.
- */
 function RankFilter({
 	selected,
 	onToggle,
@@ -229,7 +344,7 @@ function RankFilter({
 	const { t } = useTranslation("sidebar");
 	const allActive = selected.length === 0;
 	return (
-		<fieldset className="m-0 flex items-center gap-0.5 rounded-lg bg-foreground/5 p-0.5">
+		<fieldset className="magpie-seg m-0">
 			<legend className="sr-only">{t("plaza.ccfDeadlines.filterLabel")}</legend>
 			<Segment active={allActive} onClick={onClear}>
 				{t("plaza.ccfDeadlines.rankAll")}
@@ -260,13 +375,9 @@ function Segment({
 		<button
 			type="button"
 			aria-pressed={active}
+			data-active={active}
 			onClick={onClick}
-			className={cn(
-				SEGMENT_CLASS,
-				active
-					? "bg-foreground/15 text-foreground"
-					: "text-muted-foreground hover:text-foreground",
-			)}
+			className="magpie-seg-btn"
 		>
 			{children}
 		</button>

@@ -24,7 +24,7 @@ export function openPlazaMentionPath(path: string | null | undefined): void {
 	if (!sourceId) return;
 	const source = PLAZA_SOURCES.find((candidate) =>
 		sourceId === "feed"
-			? candidate.id === "feeds"
+			? candidate.id === "collection" || candidate.id === "feeds"
 			: candidate.id === "arxiv-rec",
 	);
 	if (!source) return;

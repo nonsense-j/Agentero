@@ -1,44 +1,37 @@
-import { SelectionSurface } from "@/components/selection/selection-surface";
 /**
- * Native 广场 panel: today's arXiv papers ranked against the Vault library.
+ * Native 广场 panel: Paper Recommend.
  *
- * The Host caches its same-day run, so opening this panel renders the stored
- * result first and only recomputes when the categories change or on request.
+ * Matches and pushes papers from the local 2026 Paper Collection pool using
+ * user-configured keyword chips (`LLM Agent`, `Program Analysis`, `Fuzzing`,
+ * `Vulnerability Detection`, `Code Generation`, `Formal Verification`, etc.).
  *
- * Before showing anything we probe the user's configured embedding endpoint
- * (POST /embeddings with one tiny input). Until the probe passes, the panel
- * hides the stored cache so the user never sees "stale results from a setup
- * that no longer works" — they get a direct route to the settings page.
+ * Strictly non-repeating: every pushed paper ID is recorded in `pushedIds` and
+ * never pushed again. Supports toggling between `Recent` (latest push batch)
+ * and `Full` (complete recommendation history), abstract translation, and
+ * single/multi-select "Add to Library".
  */
 
 import {
+	ArrowUpRight,
 	BookOpen,
 	Check,
+	CheckSquare,
 	Download,
-	ExternalLink,
+	History,
 	Languages,
 	Loader2,
 	Plus,
 	RefreshCw,
-	RotateCw,
+	Sparkles,
+	Square,
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
+import { SelectionSurface } from "@/components/selection/selection-surface";
 import { Button } from "@/components/ui/button";
-import {
-	Command,
-	CommandEmpty,
-	CommandGroup,
-	CommandInput,
-	CommandItem,
-	CommandList,
-} from "@/components/ui/command";
-import {
-	Popover,
-	PopoverContent,
-	PopoverTrigger,
-} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Tooltip,
 	TooltipContent,
@@ -48,245 +41,152 @@ import { formatLocaleTimestamp } from "@/i18n";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
-import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { cn } from "@/lib/core/utils";
 import { lookupSubmit } from "@/lib/paper/import-actions";
-import { ARXIV_ALL_CATEGORIES, ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
 import {
-	isEmptyCorpusError,
-	isNoCandidatesError,
-	isNoEmbeddingError,
-	isProbeFailedError,
-	probeEmbedding,
-	type RecommendItem,
-	recommendArxiv,
-	recommendArxivLast,
-} from "@/lib/recommend";
-import type { EmbeddingSettings } from "@/lib/settings";
-import { loadSettings, subscribeSettings } from "@/lib/settings/store";
-import { openSettingsWindow } from "@/lib/shell/settings-window";
+	loadRecommendPoolState,
+	type PushedRecommendPaper,
+	pushFromCollection,
+	type RecommendKeywordChip,
+	type RecommendPoolState,
+	saveRecommendPoolState,
+} from "@/lib/plaza/recommend-pool";
 import { runTranslate } from "@/lib/translate";
-import { getVaultPath } from "@/lib/vault/store";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
-const CATEGORIES_STORAGE_KEY = "plaza:arxiv-rec:categories";
-
-function loadCategories(): string[] {
-	const parsed = readJsonStorage<unknown>(CATEGORIES_STORAGE_KEY, null);
-	if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-	return [...ARXIV_FEED_CHIPS];
-}
-
-function persistCategories(categories: string[]) {
-	writeJsonStorage(CATEGORIES_STORAGE_KEY, categories);
-}
-
-/** Empty-state reason, so the panel can offer the matching next action. */
-type EmptyReason =
-	| "noEmbedding"
-	| "probeFailed"
-	| "emptyCorpus"
-	| "noCandidates"
-	| null;
-
-/** Gate for showing the stored run or running recompute. */
-type ProbeStatus = "pending" | "unconfigured" | "ok" | "failed";
-
-/** Snapshot of the embedding config used to decide whether to re-probe. */
-function embeddingProbeKey(e: EmbeddingSettings): string {
-	return `${e.source}|${e.baseUrl}|${e.apiKey}|${e.model}`;
-}
-
-function readEmbeddingKey(): string {
-	return embeddingProbeKey(loadSettings().embedding);
-}
+type RecommendViewMode = "recent" | "full";
 
 export function PlazaArxivRecView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
-	const [items, setItems] = useState<RecommendItem[]>([]);
-	const [categories, setCategories] = useState<string[]>(loadCategories);
-	const [computedAt, setComputedAt] = useState<string | null>(null);
+	const [poolState, setPoolState] = useState<RecommendPoolState>(
+		loadRecommendPoolState,
+	);
+	const [viewMode, setViewMode] = useState<RecommendViewMode>("recent");
+	const [newKeyword, setNewKeyword] = useState("");
+	const [addingKeyword, setAddingKeyword] = useState(false);
 	const [busy, setBusy] = useState(false);
-	const [emptyReason, setEmptyReason] = useState<EmptyReason>(null);
 	const [translations, setTranslations] = useState<Record<string, string>>({});
 	const [translating, setTranslating] = useState(false);
-	const [probeStatus, setProbeStatus] = useState<ProbeStatus>("pending");
-	const [probeError, setProbeError] = useState<string | null>(null);
-	/** Bumped on every new probe; in-flight stale probes are discarded. */
-	const probeTokenRef = useRef(0);
-	/** Last embedding config we've probed against (re-probe on change). */
-	const lastEmbeddingKeyRef = useRef<string>("");
-	const loadedRef = useRef(false);
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
+	const [batchImporting, setBatchImporting] = useState(false);
+	const mountedRef = useRef(false);
 
-	const handleError = useCallback((error: unknown) => {
-		if (isNoEmbeddingError(error)) {
-			setEmptyReason("noEmbedding");
-			return;
+	const runPush = useCallback(async () => {
+		if (busy) return;
+		setBusy(true);
+		try {
+			const res = await pushFromCollection({
+				maxBatchSize: 16,
+				ensureCollectionLoaded: true,
+			});
+			setPoolState(res.state);
+		} catch (err) {
+			notifyError(errorText(err));
+		} finally {
+			setBusy(false);
 		}
-		if (isProbeFailedError(error)) {
-			setEmptyReason("probeFailed");
-			return;
-		}
-		if (isEmptyCorpusError(error)) {
-			setEmptyReason("emptyCorpus");
-			return;
-		}
-		if (isNoCandidatesError(error)) {
-			setEmptyReason("noCandidates");
-			return;
-		}
-		notifyError(errorText(error));
-	}, []);
+	}, [busy]);
 
-	/**
-	 * Probe the embedding endpoint. On success returns true; on failure updates
-	 * `probeStatus`/`emptyReason` and the caller should bail. Stale results
-	 * from earlier probes (token bumped underneath) are dropped.
-	 */
-	const runProbe = useCallback(async (): Promise<boolean> => {
-		const token = ++probeTokenRef.current;
-		setProbeStatus((prev) =>
-			prev === "failed" || prev === "unconfigured" ? prev : "pending",
+	// On first open, if there are no items yet, push an initial batch from Collection.
+	useEffect(() => {
+		if (mountedRef.current) return;
+		mountedRef.current = true;
+		if (poolState.history.length === 0) {
+			void runPush();
+		}
+	}, [poolState.history.length, runPush]);
+
+	const handleAddKeyword = useCallback(() => {
+		const term = newKeyword.trim();
+		if (!term) return;
+		const exists = poolState.keywords.some(
+			(k) => k.term.toLowerCase() === term.toLowerCase(),
 		);
-		setProbeError(null);
-		try {
-			await probeEmbedding();
-			if (token !== probeTokenRef.current) return false;
-			setProbeStatus("ok");
-			return true;
-		} catch (error) {
-			if (token !== probeTokenRef.current) return false;
-			const message = errorText(error);
-			const probeFailed = isProbeFailedError(error);
-			setProbeError(probeFailed ? null : message);
-			if (isNoEmbeddingError(error)) {
-				setProbeStatus("unconfigured");
-				setEmptyReason("noEmbedding");
-			} else {
-				setProbeStatus("failed");
-				setEmptyReason("probeFailed");
-				if (!probeFailed) notifyError(message);
-			}
-			return false;
-		}
-	}, []);
+		const nextKeywords: RecommendKeywordChip[] = exists
+			? poolState.keywords.map((k) =>
+					k.term.toLowerCase() === term.toLowerCase()
+						? { ...k, enabled: true }
+						: k,
+				)
+			: [
+					...poolState.keywords,
+					{
+						id: `kw-${Date.now()}`,
+						term,
+						enabled: true,
+					},
+				];
+		const next: RecommendPoolState = {
+			...poolState,
+			keywords: nextKeywords,
+		};
+		saveRecommendPoolState(next);
+		setPoolState(next);
+		setNewKeyword("");
+		setAddingKeyword(false);
+		void runPush();
+	}, [newKeyword, poolState, runPush]);
 
-	/** After a successful probe, pull the same-day stored run. */
-	const loadStored = useCallback(async () => {
-		const vaultPath = getVaultPath();
-		if (!vaultPath) return;
-		try {
-			const stored = await recommendArxivLast(vaultPath);
-			if (!stored) return;
-			setItems(stored.items);
-			setComputedAt(stored.computedAt);
-		} catch {
-			/* no stored run yet — the user can refresh */
-		}
-	}, []);
-
-	const run = useCallback(
-		async (nextCategories: string[]) => {
-			const vaultPath = getVaultPath();
-			if (!vaultPath) return;
-			setBusy(true);
-			setEmptyReason(null);
-			try {
-				const ok = await runProbe();
-				if (!ok) return;
-				const result = await recommendArxiv({
-					vaultPath,
-					categories: nextCategories,
-					force: true,
-				});
-				setItems(result.items);
-				setComputedAt(result.computedAt);
-				if (result.items.length === 0) setEmptyReason("noCandidates");
-			} catch (error) {
-				handleError(error);
-			} finally {
-				setBusy(false);
-			}
+	const handleToggleKeyword = useCallback(
+		(id: string) => {
+			const nextKeywords = poolState.keywords.map((k) =>
+				k.id === id ? { ...k, enabled: !k.enabled } : k,
+			);
+			if (!nextKeywords.some((k) => k.enabled)) return;
+			const next: RecommendPoolState = {
+				...poolState,
+				keywords: nextKeywords,
+			};
+			saveRecommendPoolState(next);
+			setPoolState(next);
 		},
-		[handleError, runProbe],
+		[poolState],
 	);
 
-	// First mount: probe → load stored. The vault-open prewarm keeps it current.
-	useEffect(() => {
-		if (loadedRef.current) return;
-		loadedRef.current = true;
-		lastEmbeddingKeyRef.current = readEmbeddingKey();
-		void (async () => {
-			const ok = await runProbe();
-			if (ok) await loadStored();
-		})();
-	}, [loadStored, runProbe]);
-
-	// Re-probe when the user edits the embedding config in Settings.
-	useEffect(() => {
-		return subscribeSettings((next) => {
-			const key = embeddingProbeKey(next.embedding);
-			if (key === lastEmbeddingKeyRef.current) return;
-			lastEmbeddingKeyRef.current = key;
-			// Drop any visible stored cache so we don't flash stale results
-			// from before the user fixed their config.
-			setItems([]);
-			setComputedAt(null);
-			setEmptyReason(null);
-			void (async () => {
-				const ok = await runProbe();
-				if (ok) await loadStored();
-			})();
-		});
-	}, [loadStored, runProbe]);
-
-	const retryProbe = useCallback(() => {
-		setEmptyReason(null);
-		void (async () => {
-			const ok = await runProbe();
-			if (ok) await loadStored();
-		})();
-	}, [loadStored, runProbe]);
-
-	const addCategory = useCallback(
-		(category: string) => {
-			if (categories.includes(category)) return;
-			const next = [...categories, category];
-			setCategories(next);
-			persistCategories(next);
-			void run(next);
+	const handleRemoveKeyword = useCallback(
+		(id: string) => {
+			const nextKeywords = poolState.keywords.filter((k) => k.id !== id);
+			if (nextKeywords.length === 0) return;
+			const next: RecommendPoolState = {
+				...poolState,
+				keywords: nextKeywords,
+			};
+			saveRecommendPoolState(next);
+			setPoolState(next);
 		},
-		[categories, run],
+		[poolState],
 	);
 
-	const removeCategory = useCallback(
-		(category: string) => {
-			const next = categories.filter((c) => c !== category);
-			if (next.length === 0) return;
-			setCategories(next);
-			persistCategories(next);
-			void run(next);
-		},
-		[categories, run],
+	const recentItems = useMemo(() => {
+		if (!poolState.recentBatchId) return poolState.history.slice(0, 16);
+		return poolState.history.filter(
+			(item: PushedRecommendPaper) => item.batchId === poolState.recentBatchId,
+		);
+	}, [poolState.history, poolState.recentBatchId]);
+
+	const visibleItems = useMemo(
+		() => (viewMode === "recent" ? recentItems : poolState.history),
+		[poolState.history, recentItems, viewMode],
 	);
 
 	const translateAll = useCallback(async () => {
-		if (translating || items.length === 0) return;
+		if (translating || visibleItems.length === 0) return;
 		setTranslating(true);
 		const results = await Promise.allSettled(
-			items.map((item) =>
+			visibleItems.map((item: PushedRecommendPaper) =>
 				runTranslate({
-					text: item.abstract,
-					context: { surface: "arxiv-rec", paperId: item.arxivId },
+					text: item.abstract || item.title,
+					context: { surface: "arxiv-rec", paperId: item.id },
 				}),
 			),
 		);
 		const next: Record<string, string> = { ...translations };
 		let failed = 0;
-		items.forEach((item, i) => {
+		visibleItems.forEach((item: PushedRecommendPaper, i: number) => {
 			const r = results[i];
-			if (r.status === "fulfilled") {
-				next[item.arxivId] = r.value;
+			if (r && r.status === "fulfilled") {
+				next[item.id] = r.value;
 			} else {
 				failed += 1;
 			}
@@ -295,119 +195,323 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		setTranslating(false);
 		if (failed > 0) {
 			notifyError(
-				failed === items.length
+				failed === visibleItems.length
 					? "Translation failed"
-					: `Translation failed for ${failed} of ${items.length} papers`,
+					: `Translation failed for ${failed} of ${visibleItems.length} papers`,
 			);
 		}
-	}, [items, translating, translations]);
+	}, [translating, translations, visibleItems]);
 
-	const probeOk = probeStatus === "ok";
-	const probePending = probeStatus === "pending";
-	const showEmpty = items.length === 0 || !probeOk;
+	const toggleSelect = useCallback((id: string) => {
+		setSelectedIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	}, []);
+
+	const toggleSelectAllVisible = useCallback(() => {
+		setSelectedIds((prev) => {
+			const allSelected =
+				visibleItems.length > 0 &&
+				visibleItems.every((item: PushedRecommendPaper) => prev.has(item.id));
+			if (allSelected) return new Set();
+			return new Set(visibleItems.map((item: PushedRecommendPaper) => item.id));
+		});
+	}, [visibleItems]);
+
+	const importPapers = useCallback(
+		async (targets: PushedRecommendPaper[]) => {
+			if (targets.length === 0 || batchImporting) return;
+			const identifiers = targets
+				.map((tItem) =>
+					tItem.arxivId
+						? `arXiv:${tItem.arxivId}`
+						: tItem.doi
+							? `https://doi.org/${tItem.doi}`
+							: tItem.url || tItem.title,
+				)
+				.filter(Boolean);
+			if (identifiers.length === 0) return;
+			setBatchImporting(true);
+			try {
+				await lookupSubmit(identifiers, {
+					onComplete: () => {
+						setImportedIds((prev) => {
+							const next = new Set(prev);
+							for (const item of targets) next.add(item.id);
+							return next;
+						});
+						setSelectedIds((prev) => {
+							const next = new Set(prev);
+							for (const item of targets) next.delete(item.id);
+							return next;
+						});
+						setBatchImporting(false);
+					},
+				});
+			} catch (err) {
+				notifyError(errorText(err));
+				setBatchImporting(false);
+			}
+		},
+		[batchImporting],
+	);
+
+	const selectedItems = useMemo(
+		() =>
+			visibleItems.filter((item: PushedRecommendPaper) =>
+				selectedIds.has(item.id),
+			),
+		[selectedIds, visibleItems],
+	);
 
 	return (
-		<div className={cn("flex h-full min-h-0 flex-col", className)}>
-			<div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b px-2.5 py-2">
-				{categories.map((category) => (
-					<span
-						key={category}
-						className={cn(
-							"group inline-flex items-center gap-0.5 rounded-full border border-primary/40 bg-primary/10 py-0.5 pl-2 pr-0.5 font-mono text-caption text-foreground",
-							(busy || !probeOk) && "opacity-60",
-						)}
-					>
-						{category}
+		<div
+			className={cn(
+				"magpie-canvas magpie-view-in relative flex h-full min-h-0 flex-col",
+				className,
+			)}
+		>
+			{/* Sticky Translucent Magpie Header */}
+			<div
+				data-plaza-header
+				className="sticky top-0 z-10 flex flex-col gap-2 bg-background/80 px-3 py-2.5 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
+			>
+				<div className="flex flex-wrap items-center gap-2">
+					{/* View Mode Segmented Control: Recent vs Full History */}
+					<div className="magpie-seg">
 						<button
 							type="button"
-							disabled={busy || categories.length <= 1 || !probeOk}
-							className="rounded-full p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-foreground/10"
-							aria-label={t("plaza.arxivRec.removeCategory", { category })}
-							onClick={(e) => {
-								e.stopPropagation();
-								removeCategory(category);
-							}}
+							data-active={viewMode === "recent"}
+							onClick={() => setViewMode("recent")}
+							className="magpie-seg-btn"
 						>
-							<X className="size-2.5" aria-hidden />
+							<Sparkles className="size-3" />
+							<span>{t("plaza.arxivRec.viewRecent")}</span>
+							<span className="text-muted-foreground tabular-nums">
+								{recentItems.length}
+							</span>
 						</button>
-					</span>
-				))}
-				<CategoryPicker
-					disabled={busy || !probeOk}
-					existing={categories}
-					onSelect={addCategory}
-				/>
-				<span className="ml-auto flex items-center gap-1.5">
-					{computedAt && probeOk ? (
-						<span className="text-muted-foreground text-caption">
-							{formatLocaleTimestamp(computedAt)}
+						<button
+							type="button"
+							data-active={viewMode === "full"}
+							onClick={() => setViewMode("full")}
+							className="magpie-seg-btn"
+						>
+							<History className="size-3" />
+							<span>{t("plaza.arxivRec.viewFull")}</span>
+							<span className="text-muted-foreground tabular-nums">
+								{poolState.history.length}
+							</span>
+						</button>
+					</div>
+
+					{/* Right actions */}
+					<div className="ml-auto flex items-center gap-1.5">
+						{poolState.lastPushedAt ? (
+							<span className="hidden text-caption text-muted-foreground sm:inline">
+								{formatLocaleTimestamp(poolState.lastPushedAt)}
+							</span>
+						) : null}
+
+						{selectedItems.length > 0 ? (
+							<Button
+								type="button"
+								size="sm"
+								disabled={batchImporting}
+								onClick={() => void importPapers(selectedItems)}
+								className="h-6 gap-1 rounded-md px-2.5 text-caption"
+							>
+								{batchImporting ? (
+									<Loader2 className="size-3 animate-spin" />
+								) : (
+									<Download className="size-3" />
+								)}
+								{t("plaza.collection.importSelected", {
+									count: selectedItems.length,
+								})}
+							</Button>
+						) : null}
+
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									disabled={visibleItems.length === 0}
+									onClick={toggleSelectAllVisible}
+									aria-label={t("plaza.collection.toggleSelectAll")}
+								>
+									{selectedItems.length > 0 &&
+									selectedItems.length === visibleItems.length ? (
+										<CheckSquare className="size-3.5 text-brand" />
+									) : (
+										<Square className="size-3.5" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>
+								{t("plaza.collection.toggleSelectAll")}
+							</TooltipContent>
+						</Tooltip>
+
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									disabled={translating || busy || visibleItems.length === 0}
+									aria-label={
+										translating
+											? t("plaza.arxivRec.translating")
+											: t("plaza.arxivRec.translate")
+									}
+									onClick={() => void translateAll()}
+								>
+									{translating ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<Languages className="size-3.5" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>
+								{translating
+									? t("plaza.arxivRec.translating")
+									: t("plaza.arxivRec.translate")}
+							</TooltipContent>
+						</Tooltip>
+
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={busy}
+									onClick={() => void runPush()}
+									className="h-6 gap-1 rounded-md px-2.5 text-caption"
+								>
+									{busy ? (
+										<Loader2 className="size-3 animate-spin" />
+									) : (
+										<RefreshCw className="size-3" />
+									)}
+									{t("plaza.arxivRec.pushNext")}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>{t("plaza.arxivRec.refresh")}</TooltipContent>
+						</Tooltip>
+					</div>
+				</div>
+
+				{/* Dynamic Keyword Chips Row */}
+				<div className="flex flex-wrap items-center gap-1.5">
+					{poolState.keywords.map((kw: RecommendKeywordChip) => (
+						<span
+							key={kw.id}
+							data-active={kw.enabled}
+							className="magpie-chip group gap-1"
+						>
+							<button
+								type="button"
+								onClick={() => handleToggleKeyword(kw.id)}
+								className="cursor-pointer"
+							>
+								{kw.term}
+							</button>
+							<button
+								type="button"
+								disabled={busy || poolState.keywords.length <= 1}
+								onClick={() => handleRemoveKeyword(kw.id)}
+								aria-label={t("plaza.arxivRec.removeCategory", {
+									category: kw.term,
+								})}
+								className="rounded-full p-0.5 text-muted-foreground opacity-60 transition-opacity hover:text-foreground group-hover:opacity-100"
+							>
+								<X className="size-2.5" />
+							</button>
 						</span>
-					) : null}
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
+					))}
+
+					{addingKeyword ? (
+						<div className="inline-flex items-center gap-1">
+							<input
+								type="text"
+								value={newKeyword}
+								onChange={(e) => setNewKeyword(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										e.preventDefault();
+										handleAddKeyword();
+									} else if (e.key === "Escape") {
+										setAddingKeyword(false);
+										setNewKeyword("");
+									}
+								}}
+								placeholder={t("plaza.arxivRec.keywordPlaceholder")}
+								className="h-6 w-32 rounded-full border bg-background px-2.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-brand/60"
+							/>
+							<button
 								type="button"
-								variant="ghost"
-								size="icon-sm"
-								disabled={translating || busy || items.length === 0}
-								aria-label={
-									translating
-										? t("plaza.arxivRec.translating")
-										: t("plaza.arxivRec.translate")
-								}
-								onClick={() => void translateAll()}
+								onClick={handleAddKeyword}
+								className="magpie-chip px-1.5"
 							>
-								{translating ? (
-									<Loader2 className="size-3.5 animate-spin" aria-hidden />
-								) : (
-									<Languages className="size-3.5" aria-hidden />
-								)}
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent>
-							{translating
-								? t("plaza.arxivRec.translating")
-								: t("plaza.arxivRec.translate")}
-						</TooltipContent>
-					</Tooltip>
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-sm"
-								disabled={busy || !probeOk}
-								aria-label={t("plaza.arxivRec.refresh")}
-								onClick={() => void run(categories)}
-							>
-								{busy ? (
-									<Loader2 className="size-3.5 animate-spin" aria-hidden />
-								) : (
-									<RefreshCw className="size-3.5" aria-hidden />
-								)}
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent>{t("plaza.arxivRec.refresh")}</TooltipContent>
-					</Tooltip>
-				</span>
+								<Check className="size-3" />
+							</button>
+						</div>
+					) : (
+						<button
+							type="button"
+							onClick={() => setAddingKeyword(true)}
+							aria-label={t("plaza.arxivRec.addKeyword")}
+							className="magpie-chip px-2 text-muted-foreground hover:text-foreground"
+						>
+							<Plus className="size-3" />
+							<span>{t("plaza.arxivRec.addKeyword")}</span>
+						</button>
+					)}
+				</div>
 			</div>
 
-			<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-2.5">
-				{showEmpty ? (
-					<EmptyState
-						reason={emptyReason}
-						busy={busy}
-						probePending={probePending}
-						probeError={probeError}
-						onRetry={retryProbe}
-					/>
+			{/* Recommended Papers Stream */}
+			<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
+				{busy && visibleItems.length === 0 ? (
+					<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
+						<Loader2 className="size-4 animate-spin" />
+						<span>{t("plaza.arxivRec.computing")}</span>
+					</div>
+				) : visibleItems.length === 0 ? (
+					<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
+						<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
+							{t("plaza.arxivRec.noMoreUnpushed")}
+						</p>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							disabled={busy}
+							onClick={() => void runPush()}
+						>
+							<RefreshCw className="size-3.5" />
+							{t("plaza.arxivRec.pushNext")}
+						</Button>
+					</div>
 				) : (
-					<div className="grid gap-2">
-						{items.map((item) => (
-							<RecommendCard
-								key={item.arxivId}
+					<div className="grid gap-2.5">
+						{visibleItems.map((item: PushedRecommendPaper) => (
+							<RecommendPoolCard
+								key={item.id}
 								item={item}
-								translation={translations[item.arxivId]}
+								translation={translations[item.id]}
+								selected={selectedIds.has(item.id)}
+								imported={importedIds.has(item.id)}
+								onToggleSelect={() => toggleSelect(item.id)}
+								onImport={() => void importPapers([item])}
 							/>
 						))}
 					</div>
@@ -417,178 +521,138 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 	);
 }
 
-function EmptyState({
-	reason,
-	busy,
-	probePending,
-	probeError,
-	onRetry,
-}: {
-	reason: EmptyReason;
-	busy: boolean;
-	probePending: boolean;
-	probeError: string | null;
-	onRetry: () => void;
-}) {
-	const { t } = useTranslation("sidebar");
-	if (busy || probePending) {
-		return (
-			<div className="flex items-center justify-center gap-2 py-10 text-muted-foreground text-xs">
-				<Loader2 className="size-3.5 animate-spin" aria-hidden />
-				{reason === "probeFailed" || reason === "noEmbedding"
-					? t("plaza.arxivRec.probing")
-					: t("plaza.arxivRec.computing")}
-			</div>
-		);
-	}
-	if (reason === "noEmbedding") {
-		return (
-			<div className="flex flex-col items-center gap-2 py-10 text-center">
-				<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
-					{t("plaza.arxivRec.needsEmbedding")}
-				</p>
-				<Button
-					type="button"
-					variant="outline"
-					size="sm"
-					onClick={() => openSettingsWindow("agent")}
-				>
-					{t("plaza.arxivRec.openSettings")}
-				</Button>
-			</div>
-		);
-	}
-	if (reason === "probeFailed") {
-		return (
-			<div className="flex flex-col items-center gap-2 py-10 text-center">
-				<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
-					{t("plaza.arxivRec.probeFailed")}
-				</p>
-				{probeError ? (
-					<p className="max-w-sm text-muted-foreground/70 text-caption leading-relaxed">
-						{probeError}
-					</p>
-				) : null}
-				<div className="flex items-center gap-2">
-					<Button type="button" variant="outline" size="sm" onClick={onRetry}>
-						<RotateCw className="size-3.5" aria-hidden />
-						{t("plaza.arxivRec.retry")}
-					</Button>
-					<Button
-						type="button"
-						variant="ghost"
-						size="sm"
-						onClick={() => openSettingsWindow("agent")}
-					>
-						{t("plaza.arxivRec.openSettings")}
-					</Button>
-				</div>
-			</div>
-		);
-	}
-	return (
-		<div className="flex flex-col items-center gap-2 py-10 text-center">
-			<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
-				{reason === "emptyCorpus"
-					? t("plaza.arxivRec.needsCorpus")
-					: reason === "noCandidates"
-						? t("plaza.arxivRec.noCandidates")
-						: t("plaza.arxivRec.idle")}
-			</p>
-		</div>
-	);
-}
-
-function RecommendCard({
+function RecommendPoolCard({
 	item,
 	translation,
+	selected,
+	imported,
+	onToggleSelect,
+	onImport,
 }: {
-	item: RecommendItem;
+	item: PushedRecommendPaper;
 	translation?: string;
+	selected: boolean;
+	imported: boolean;
+	onToggleSelect: () => void;
+	onImport: () => void;
 }) {
 	const { t } = useTranslation("sidebar");
 	const [busy, setBusy] = useState(false);
-	const [imported, setImported] = useState(false);
 
-	const importPaper = useCallback(async () => {
+	const triggerImport = async () => {
 		if (busy || imported) return;
 		setBusy(true);
 		try {
-			await lookupSubmit([item.url], {
-				onComplete: (result) => {
-					const ok =
-						result.imported.length > 0 ||
-						result.skipped.some(
-							(row) =>
-								row.reason === "already_in_library" ||
-								row.reason === "duplicate_in_batch",
-						);
-					if (ok) setImported(true);
-					setBusy(false);
-				},
-			});
-		} catch (error) {
-			notifyError(errorText(error));
+			await onImport();
+		} finally {
 			setBusy(false);
 		}
-	}, [busy, imported, item.url]);
+	};
 
 	return (
-		<div className="group relative rounded-lg border bg-background p-2.5 pr-16 transition-colors hover:border-foreground/20 hover:bg-muted/50">
-			<div className="flex items-baseline gap-2">
-				<span
-					className="line-clamp-2 min-w-0 flex-1 font-medium text-sm leading-snug"
+		<div
+			className={cn(
+				"magpie-card group relative flex items-start gap-3 p-3.5",
+				selected && "magpie-card-selected",
+			)}
+		>
+			<div className="pt-0.5">
+				<Checkbox
+					checked={selected}
+					onCheckedChange={() => onToggleSelect()}
+					aria-label={item.title}
+				/>
+			</div>
+
+			<div className="min-w-0 flex-1">
+				<div className="flex flex-wrap items-center gap-1.5">
+					<PlazaSourceBadge source={item.sourceType} label={item.sourceLabel} />
+					{item.matchedKeywords.map((kw: string) => (
+						<span
+							key={kw}
+							className="inline-flex h-4 items-center rounded-full bg-brand/12 px-2 font-medium text-[10px] text-foreground"
+						>
+							#{kw}
+						</span>
+					))}
+					<span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+						{item.publishedAt.slice(0, 10)}
+					</span>
+				</div>
+
+				<h3
+					className="mt-1 line-clamp-2 font-medium text-foreground text-sm leading-snug"
 					title={item.title}
 				>
 					{item.title}
-				</span>
+				</h3>
+
+				{translation || item.abstract ? (
+					<SelectionSurface
+						source={{
+							sourcePath: item.url,
+							sourceUrl: item.url,
+							sourceTitle: item.title,
+							origin: "markdown",
+							surface: "abstract",
+						}}
+						className="mt-1.5 line-clamp-3 select-text text-muted-foreground text-xs leading-relaxed"
+					>
+						{translation ?? item.abstract}
+					</SelectionSurface>
+				) : null}
 			</div>
-			<SelectionSurface
-				source={{
-					sourcePath: item.url,
-					sourceUrl: item.url,
-					sourceTitle: item.title,
-					origin: "markdown",
-					surface: "abstract",
-				}}
-				className="mt-1 line-clamp-3 select-text text-muted-foreground text-xs leading-snug"
-			>
-				{translation ?? item.abstract}
-			</SelectionSurface>
-			<div className="absolute top-2 right-2 flex items-center gap-0.5">
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							type="button"
-							variant="ghost"
-							size="icon-sm"
-							aria-label={t("plaza.arxivRec.read")}
-							onClick={() => openRemoteArxivPaper(item)}
-						>
-							<BookOpen className="size-3.5" aria-hidden />
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent>{t("plaza.arxivRec.read")}</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							type="button"
-							variant="ghost"
-							size="icon-sm"
-							aria-label={t("plaza.feeds.openOriginal")}
-							onClick={() => openExternalUrl(item.url)}
-						>
-							<ExternalLink className="size-3.5" aria-hidden />
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent>{t("plaza.feeds.openOriginal")}</TooltipContent>
-				</Tooltip>
+
+			<div className="flex shrink-0 items-center gap-0.5">
+				{item.arxivId ? (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-sm"
+								aria-label={t("plaza.arxivRec.read")}
+								onClick={() =>
+									openRemoteArxivPaper({
+										arxivId: item.arxivId ?? "",
+										title: item.title,
+										abstract: item.abstract,
+										url: item.url,
+										score: item.score,
+									})
+								}
+							>
+								<BookOpen className="size-3.5" />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{t("plaza.arxivRec.read")}</TooltipContent>
+					</Tooltip>
+				) : null}
+
+				{item.url ? (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-sm"
+								aria-label={t("plaza.feeds.openOriginal")}
+								onClick={() => openExternalUrl(item.url)}
+							>
+								<ArrowUpRight className="size-3.5" />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{t("plaza.feeds.openOriginal")}</TooltipContent>
+					</Tooltip>
+				) : null}
+
 				{imported ? (
-					<Check
-						className="size-3.5 text-muted-foreground"
-						aria-label={t("plaza.feeds.imported")}
-					/>
+					<span
+						className="inline-flex size-7 items-center justify-center text-brand"
+						title={t("plaza.feeds.imported")}
+					>
+						<Check className="size-3.5" />
+					</span>
 				) : (
 					<Tooltip>
 						<TooltipTrigger asChild>
@@ -598,12 +662,12 @@ function RecommendCard({
 								size="icon-sm"
 								disabled={busy}
 								aria-label={t("plaza.feeds.import")}
-								onClick={() => void importPaper()}
+								onClick={() => void triggerImport()}
 							>
 								{busy ? (
-									<Loader2 className="size-3.5 animate-spin" aria-hidden />
+									<Loader2 className="size-3.5 animate-spin" />
 								) : (
-									<Download className="size-3.5" aria-hidden />
+									<Download className="size-3.5" />
 								)}
 							</Button>
 						</TooltipTrigger>
@@ -612,77 +676,5 @@ function RecommendCard({
 				)}
 			</div>
 		</div>
-	);
-}
-
-function CategoryPicker({
-	disabled,
-	existing,
-	onSelect,
-}: {
-	disabled: boolean;
-	existing: string[];
-	onSelect: (category: string) => void;
-}) {
-	const { t } = useTranslation("sidebar");
-	const [open, setOpen] = useState(false);
-
-	const filtered = useMemo(
-		() => ARXIV_ALL_CATEGORIES.filter((c) => !existing.includes(c)),
-		[existing],
-	);
-
-	return (
-		<Popover open={open} onOpenChange={setOpen}>
-			<Tooltip>
-				<TooltipTrigger asChild>
-					<PopoverTrigger asChild>
-						<button
-							type="button"
-							disabled={disabled}
-							className={cn(
-								"inline-flex size-5 items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground transition-colors hover:border-primary/60 hover:text-foreground",
-								disabled && "cursor-not-allowed opacity-60",
-								"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-							)}
-							aria-label={t("plaza.arxivRec.addCategory")}
-						>
-							<Plus className="size-3" aria-hidden />
-						</button>
-					</PopoverTrigger>
-				</TooltipTrigger>
-				<TooltipContent>{t("plaza.arxivRec.addCategory")}</TooltipContent>
-			</Tooltip>
-			<PopoverContent
-				align="start"
-				className="w-56 p-0"
-				onOpenAutoFocus={(e) => e.preventDefault()}
-			>
-				<Command shouldFilter={false}>
-					<CommandInput
-						placeholder={t("plaza.arxivRec.searchCategory")}
-						className="h-8 text-xs"
-					/>
-					<CommandList>
-						<CommandEmpty>{t("plaza.arxivRec.noCategoryMatch")}</CommandEmpty>
-						<CommandGroup>
-							{filtered.map((cat) => (
-								<CommandItem
-									key={cat}
-									value={cat}
-									onSelect={() => {
-										onSelect(cat);
-										setOpen(false);
-									}}
-									className="font-mono text-xs"
-								>
-									{cat}
-								</CommandItem>
-							))}
-						</CommandGroup>
-					</CommandList>
-				</Command>
-			</PopoverContent>
-		</Popover>
 	);
 }

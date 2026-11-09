@@ -1,5 +1,5 @@
 /**
- * 广场（Plaza）— external discovery sources.
+ * 广场（Plaza）— academic discovery & collection sources.
  *
  * Virtual tree/tab paths only; nothing here ever touches disk. Adding a source
  * is a single {@link PLAZA_SOURCES} entry — the sidebar child row and the
@@ -19,6 +19,8 @@ export const PLAZA_VIRTUAL_PATH = "agentero:plaza";
  * (`components/plaza/source-icons.ts`).
  */
 export type PlazaSourceIcon =
+	| "collection"
+	| "discover"
 	| "coolPapers"
 	| "modelScope"
 	| "conference"
@@ -39,8 +41,14 @@ export type PlazaSource = {
 	url: string | null;
 	/** Minimum virtual viewport for a fixed desktop layout; other sites reflow normally. */
 	desktopWidth?: number;
-	/** Native plaza panel (not an iframe). */
-	panel?: "skills" | "feeds" | "arxivRec" | "ccfDeadlines";
+	/** Native plaza panel (not a bare iframe). */
+	panel?:
+		| "collection"
+		| "discover"
+		| "arxivRec"
+		| "ccfDeadlines"
+		| "skills"
+		| "feeds";
 	/**
 	 * Host proxy scheme origin used for embedding. A cross-origin frame cannot
 	 * retarget the site's `target="_blank"` links or report its navigations, so
@@ -56,63 +64,29 @@ function sourcePath(id: string): string {
 	return `${PLAZA_VIRTUAL_PATH}/${id}`;
 }
 
-/** Custom-scheme origin, spelled the way each platform's WebView expects. */
-function schemeOrigin(scheme: string): string {
-	// Windows WebView2 intercepts http(s)://<scheme>.localhost; the filter is
-	// registered as http:// unless useHttpsSchemeForCustomProtocol is set.
-	return navigator.userAgent.includes("Windows")
-		? `http://${scheme}.localhost`
-		: `${scheme}://localhost`;
-}
-
 export const PLAZA_SOURCES: readonly PlazaSource[] = [
 	{
-		id: "cool-papers",
-		path: sourcePath("cool-papers"),
-		label: "Cool Papers",
-		url: "https://papers.cool/",
-		embedOrigin: () => schemeOrigin("agentero-coolpapers"),
-		icon: "coolPapers",
-	},
-	{
-		id: "modelscope",
-		path: sourcePath("modelscope"),
-		label: "ModelScope Papers",
-		url: "https://modelscope.cn/papers",
-		desktopWidth: 1280,
-		embedOrigin: () => schemeOrigin("agentero-modelscope"),
-		icon: "modelScope",
-	},
-	{
-		id: "papers-with-code",
-		path: sourcePath("papers-with-code"),
-		label: "Papers with Code",
-		url: "https://paperswithcode.co/conferences",
-		embedOrigin: () => schemeOrigin("agentero-pwc"),
-		icon: "conference",
-	},
-	{
-		id: "skills",
-		path: sourcePath("skills"),
-		label: "Skill picks",
+		id: "collection",
+		path: sourcePath("collection"),
+		label: "Paper Collection",
 		url: null,
 		embedOrigin: null,
-		panel: "skills",
-		icon: "sparkles",
+		panel: "collection",
+		icon: "collection",
 	},
 	{
-		id: "feeds",
-		path: sourcePath("feeds"),
-		label: "Feeds",
+		id: "discover",
+		path: sourcePath("discover"),
+		label: "Paper Discover",
 		url: null,
 		embedOrigin: null,
-		panel: "feeds",
-		icon: "rss",
+		panel: "discover",
+		icon: "discover",
 	},
 	{
 		id: "arxiv-rec",
 		path: sourcePath("arxiv-rec"),
-		label: "arXiv Daily",
+		label: "Paper Recommend",
 		url: null,
 		embedOrigin: null,
 		panel: "arxivRec",
@@ -121,7 +95,7 @@ export const PLAZA_SOURCES: readonly PlazaSource[] = [
 	{
 		id: "ccf-deadlines",
 		path: sourcePath("ccf-deadlines"),
-		label: "CCF Deadlines",
+		label: "CCF Deadline",
 		url: "https://ccfddl.com/",
 		embedOrigin: null,
 		panel: "ccfDeadlines",
@@ -157,18 +131,22 @@ export function visiblePlazaSources(
 /** Tab title for any Plaza path. */
 export function plazaSourceLabel(source: PlazaSource): string {
 	switch (source.id) {
-		case "skills":
-			return i18n.t("sidebar:plaza.skills.title");
-		case "modelscope":
-			return i18n.t("sidebar:plaza.modelscope");
-		case "papers-with-code":
-			return i18n.t("sidebar:plaza.pwc.label");
-		case "feeds":
-			return i18n.t("sidebar:plaza.feeds.label");
+		case "collection":
+			return i18n.t("sidebar:plaza.collection.label", {
+				defaultValue: "Paper Collection",
+			});
+		case "discover":
+			return i18n.t("sidebar:plaza.discover.label", {
+				defaultValue: "Paper Discover",
+			});
 		case "arxiv-rec":
-			return i18n.t("sidebar:plaza.arxivRec.label");
+			return i18n.t("sidebar:plaza.arxivRec.label", {
+				defaultValue: "Paper Recommend",
+			});
 		case "ccf-deadlines":
-			return i18n.t("sidebar:plaza.ccfDeadlines.label");
+			return i18n.t("sidebar:plaza.ccfDeadlines.label", {
+				defaultValue: "CCF Deadline",
+			});
 		default:
 			return source.label;
 	}

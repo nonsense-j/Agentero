@@ -10,7 +10,9 @@ import {
 } from "@/lib/plaza/mention-open";
 import { PLAZA_SOURCES } from "@/lib/plaza/sources";
 
-const FEEDS_SOURCE = PLAZA_SOURCES.find((source) => source.id === "feeds");
+const FEEDS_SOURCE = PLAZA_SOURCES.find(
+	(source) => source.id === "collection" || source.id === "feeds",
+);
 const ARXIV_SOURCE = PLAZA_SOURCES.find((source) => source.id === "arxiv-rec");
 
 beforeEach(() => {
