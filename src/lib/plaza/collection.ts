@@ -18,10 +18,10 @@ import { getVaultPath } from "@/lib/vault/store";
 import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 
 export const DEFAULT_ARXIV_CATEGORIES = [
-	"cs.AI",
+	"cs.SE",
 	"cs.CR",
 	"cs.PL",
-	"cs.SE",
+	"cs.AI",
 ] as const;
 
 export type CollectionSourceType = "arxiv" | "venue";
@@ -136,9 +136,14 @@ type Listener = (state: CollectionState) => void;
 const listeners = new Set<Listener>();
 
 function isLegacyDefaultCategories(cats: string[]): boolean {
-	const legacy = ["cs.AI", "cs.CL", "cs.LG", "cs.CV", "stat.ML"];
-	return (
-		cats.length === legacy.length && cats.every((c, idx) => c === legacy[idx])
+	const legacySets: readonly (readonly string[])[] = [
+		["cs.AI", "cs.CL", "cs.LG", "cs.CV", "stat.ML"],
+		["cs.AI", "cs.CR", "cs.PL", "cs.SE"],
+	];
+	return legacySets.some(
+		(legacy) =>
+			cats.length === legacy.length &&
+			cats.every((c, idx) => c === legacy[idx]),
 	);
 }
 
@@ -285,8 +290,16 @@ function decodeHtmlEntities(input: string): string {
 export function parseArxivAtomXml(
 	xmlText: string,
 	filterYear: number | null = TARGET_YEAR,
+	options?: {
+		preferredCategories?: readonly string[];
+		defaultCategory?: string;
+	},
 ): CollectionPaperItem[] {
 	const items: CollectionPaperItem[] = [];
+	const preferredSet = new Set(
+		(options?.preferredCategories ?? []).map((c) => c.trim()),
+	);
+	const fallbackCat = options?.defaultCategory?.trim() || "cs.SE";
 	const entryRegex = /<entry>([\s\S]*?)<\/entry>/gi;
 	for (const match of xmlText.matchAll(entryRegex)) {
 		const block = match[1] ?? "";
@@ -327,11 +340,23 @@ export function parseArxivAtomXml(
 				categories.push(term);
 			}
 		}
+		if (
+			options?.defaultCategory &&
+			!categories.includes(options.defaultCategory)
+		) {
+			categories.push(options.defaultCategory);
+		}
 
-		const primaryCat =
+		const rawPrimaryCat =
 			/<arxiv:primary_category[^>]*\bterm=["']([^"']+)["']/i.exec(block)?.[1] ??
 			categories[0] ??
-			"cs.AI";
+			fallbackCat;
+		const primaryCat =
+			preferredSet.size > 0 && !preferredSet.has(rawPrimaryCat)
+				? (categories.find((c) => preferredSet.has(c)) ??
+					options?.defaultCategory ??
+					rawPrimaryCat)
+				: rawPrimaryCat;
 
 		const url = `https://arxiv.org/abs/${arxivId}`;
 		const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
@@ -363,11 +388,13 @@ export function parseArxivAtomXml(
 }
 
 /**
- * Fetch 2026 arXiv papers for the given categories (`cs.AI`, `cs.CR`, `cs.PL`, `cs.SE`).
+ * Fetch 2026 arXiv papers for the given categories (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`).
+ * Queries each category independently in parallel so high-volume categories (`cs.AI`)
+ * never crowd out specialized categories (`cs.SE`, `cs.PL`, `cs.CR`).
  */
 export async function fetchArxivCollection(
 	categories: readonly string[],
-	maxResults = 80,
+	maxResultsPerCategory = 60,
 ): Promise<{
 	items: CollectionPaperItem[];
 	latest: ArxivLatestRecord | null;
@@ -376,13 +403,45 @@ export async function fetchArxivCollection(
 	if (cleanCats.length === 0) {
 		return { items: [], latest: null };
 	}
-	const catQuery =
-		cleanCats.length === 1
-			? `cat:${cleanCats[0]}`
-			: `(${cleanCats.map((c) => `cat:${c}`).join("+OR+")})`;
-	const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResults}`;
-	const xml = await plazaFetchText(apiUrl, "application/atom+xml,text/xml,*/*");
-	const items = parseArxivAtomXml(xml, TARGET_YEAR);
+	const perCatResults = await Promise.allSettled(
+		cleanCats.map(async (cat) => {
+			const apiUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResultsPerCategory}`;
+			const xml = await plazaFetchText(
+				apiUrl,
+				"application/atom+xml,text/xml,*/*",
+			);
+			return parseArxivAtomXml(xml, TARGET_YEAR, {
+				preferredCategories: cleanCats,
+				defaultCategory: cat,
+			});
+		}),
+	);
+
+	const groups: CollectionPaperItem[][] = [];
+	for (const outcome of perCatResults) {
+		if (outcome.status === "fulfilled" && outcome.value.length > 0) {
+			groups.push(outcome.value);
+		}
+	}
+
+	if (groups.length === 0) {
+		const catQuery =
+			cleanCats.length === 1
+				? `cat:${cleanCats[0]}`
+				: `(${cleanCats.map((c) => `cat:${c}`).join("+OR+")})`;
+		const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResultsPerCategory * cleanCats.length}`;
+		const xml = await plazaFetchText(
+			apiUrl,
+			"application/atom+xml,text/xml,*/*",
+		);
+		groups.push(
+			parseArxivAtomXml(xml, TARGET_YEAR, {
+				preferredCategories: cleanCats,
+			}),
+		);
+	}
+
+	const items = mergeCollectionItems(groups);
 	const newest = items[0] ?? null;
 	const latest: ArxivLatestRecord | null = newest
 		? {
@@ -394,6 +453,81 @@ export async function fetchArxivCollection(
 			}
 		: null;
 	return { items, latest };
+}
+
+/**
+ * Search arXiv papers on-demand across the configured categories (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`)
+ * so user searches in Paper Collection are not limited to the initial cached snapshot.
+ */
+export async function searchArxivCollection(
+	query: string,
+	categories: readonly string[] = DEFAULT_ARXIV_CATEGORIES,
+	maxResults = 40,
+): Promise<CollectionPaperItem[]> {
+	const trimmed = query.trim();
+	if (trimmed.length < 2) return [];
+	const cleanCats =
+		categories.length > 0
+			? categories.map((c) => c.trim()).filter(Boolean)
+			: [...DEFAULT_ARXIV_CATEGORIES];
+
+	const bareArxivMatch = /^(?:arxiv:)?(\d{4}\.\d{4,5})(?:v\d+)?$/i.exec(
+		trimmed,
+	);
+	if (bareArxivMatch?.[1]) {
+		const idUrl = `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(bareArxivMatch[1])}&max_results=5`;
+		const xml = await plazaFetchText(
+			idUrl,
+			"application/atom+xml,text/xml,*/*",
+		);
+		return parseArxivAtomXml(xml, null, {
+			preferredCategories: cleanCats,
+		});
+	}
+
+	const tokens = trimmed
+		.split(/\s+/)
+		.map((t) => t.replace(/[()"']/g, "").trim())
+		.filter((t) => t.length >= 2);
+	if (tokens.length === 0) return [];
+
+	const termExpr =
+		tokens.length === 1
+			? `all:${encodeURIComponent(tokens[0] ?? "")}`
+			: `(${tokens.map((t) => `all:${encodeURIComponent(t)}`).join("+AND+")})`;
+	const catExpr =
+		cleanCats.length === 1
+			? `cat:${cleanCats[0]}`
+			: `(${cleanCats.map((c) => `cat:${c}`).join("+OR+")})`;
+
+	const searchQuery = `(${termExpr})+AND+${catExpr}`;
+	const [byDate, byRelevance] = await Promise.allSettled([
+		plazaFetchText(
+			`https://export.arxiv.org/api/query?search_query=${searchQuery}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResults}`,
+			"application/atom+xml,text/xml,*/*",
+		),
+		plazaFetchText(
+			`https://export.arxiv.org/api/query?search_query=${searchQuery}&sortBy=relevance&sortOrder=descending&max_results=${maxResults}`,
+			"application/atom+xml,text/xml,*/*",
+		),
+	]);
+
+	const groups: CollectionPaperItem[][] = [];
+	if (byDate.status === "fulfilled") {
+		groups.push(
+			parseArxivAtomXml(byDate.value, TARGET_YEAR, {
+				preferredCategories: cleanCats,
+			}),
+		);
+	}
+	if (byRelevance.status === "fulfilled") {
+		groups.push(
+			parseArxivAtomXml(byRelevance.value, TARGET_YEAR, {
+				preferredCategories: cleanCats,
+			}),
+		);
+	}
+	return mergeCollectionItems(groups);
 }
 
 /**

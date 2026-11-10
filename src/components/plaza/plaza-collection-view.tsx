@@ -50,9 +50,12 @@ import {
 	type CollectionSourceType,
 	type CollectionState,
 	checkArxivCollectionUpdate,
+	DEFAULT_ARXIV_CATEGORIES,
 	loadCollectionState,
+	mergeCollectionItems,
 	refreshPaperCollection,
 	saveCollectionState,
+	searchArxivCollection,
 	type VenueConfig,
 } from "@/lib/plaza/collection";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
@@ -127,20 +130,33 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		}
 	}, [handleRefresh, runCheckUpdate, state.items.length]);
 
-	// Trigger update check when user searches (debounced) so they get reminded if newer arXiv papers exist.
+	// Trigger update check and on-demand arXiv category search when user searches (debounced).
 	const handleQueryChange = useCallback(
 		(nextQuery: string) => {
 			setQuery(nextQuery);
 			if (checkTimerRef.current) {
 				window.clearTimeout(checkTimerRef.current);
 			}
-			if (nextQuery.trim().length >= 2) {
+			const trimmed = nextQuery.trim();
+			if (trimmed.length >= 2) {
 				checkTimerRef.current = window.setTimeout(() => {
 					void runCheckUpdate(true);
-				}, 650);
+					void searchArxivCollection(trimmed, state.categories)
+						.then((found) => {
+							if (found.length === 0) return;
+							setState((prev) => {
+								const merged = mergeCollectionItems([prev.items, found]);
+								if (merged.length === prev.items.length) return prev;
+								const next = { ...prev, items: merged };
+								saveCollectionState(next);
+								return next;
+							});
+						})
+						.catch(() => undefined);
+				}, 550);
 			}
 		},
-		[runCheckUpdate],
+		[runCheckUpdate, state.categories],
 	);
 
 	const updateConfig = useCallback(
@@ -157,11 +173,16 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const visiblePapers = useMemo(() => {
 		const now = Date.now();
 		const q = query.trim().toLowerCase();
+		const qTokens = q ? q.split(/\s+/).filter(Boolean) : [];
 		return state.items.filter((paper: CollectionPaperItem) => {
 			if (sourceFilter !== "all" && paper.sourceType !== sourceFilter) {
 				return false;
 			}
-			if (subFilter && paper.sourceLabel !== subFilter) {
+			if (
+				subFilter &&
+				paper.sourceLabel !== subFilter &&
+				!paper.categories.includes(subFilter)
+			) {
 				return false;
 			}
 			if (timeRange !== "all") {
@@ -171,10 +192,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					return false;
 				}
 			}
-			if (q) {
+			if (qTokens.length > 0) {
 				const hay =
-					`${paper.title} ${paper.abstract} ${paper.authors.join(" ")} ${paper.sourceLabel}`.toLowerCase();
-				if (!hay.includes(q)) return false;
+					`${paper.title} ${paper.abstract} ${paper.authors.join(" ")} ${paper.sourceLabel} ${paper.categories.join(" ")} ${paper.arxivId ?? ""} ${paper.doi ?? ""}`.toLowerCase();
+				if (!qTokens.every((tok) => hay.includes(tok))) return false;
 			}
 			return true;
 		});
@@ -182,12 +203,40 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const availableSubFilters = useMemo(() => {
 		const counts = new Map<string, number>();
+		if (sourceFilter !== "venue") {
+			for (const cat of state.categories) {
+				counts.set(cat, 0);
+			}
+		}
 		for (const p of state.items) {
 			if (sourceFilter !== "all" && p.sourceType !== sourceFilter) continue;
-			counts.set(p.sourceLabel, (counts.get(p.sourceLabel) ?? 0) + 1);
+			if (p.sourceType === "arxiv") {
+				const matchedCats = state.categories.filter(
+					(cat) => p.sourceLabel === cat || p.categories.includes(cat),
+				);
+				if (matchedCats.length > 0) {
+					for (const cat of matchedCats) {
+						counts.set(cat, (counts.get(cat) ?? 0) + 1);
+					}
+				} else {
+					counts.set(p.sourceLabel, (counts.get(p.sourceLabel) ?? 0) + 1);
+				}
+			} else {
+				counts.set(p.sourceLabel, (counts.get(p.sourceLabel) ?? 0) + 1);
+			}
 		}
-		return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-	}, [sourceFilter, state.items]);
+		const pinnedOrder = new Map(state.categories.map((cat, idx) => [cat, idx]));
+		return Array.from(counts.entries())
+			.filter(([label, count]) => count > 0 || pinnedOrder.has(label))
+			.sort((a, b) => {
+				const aPin = pinnedOrder.get(a[0]);
+				const bPin = pinnedOrder.get(b[0]);
+				if (aPin !== undefined && bPin !== undefined) return aPin - bPin;
+				if (aPin !== undefined) return -1;
+				if (bPin !== undefined) return 1;
+				return b[1] - a[1];
+			});
+	}, [sourceFilter, state.categories, state.items]);
 
 	const toggleSelect = useCallback((id: string) => {
 		setSelectedIds((prev) => {
@@ -370,9 +419,15 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						<CollectionConfigPopover
 							arxivCategories={state.categories}
 							venues={state.venues}
-							onChangeCategories={(cats) =>
-								updateConfig((prev) => ({ ...prev, categories: cats }))
-							}
+							onChangeCategories={(cats) => {
+								updateConfig((prev) => ({ ...prev, categories: cats }));
+								void refreshPaperCollection({
+									categories: cats,
+									venues: state.venues,
+								})
+									.then((next) => setState(next))
+									.catch(() => undefined);
+							}}
 							onChangeVenues={(venues) =>
 								updateConfig((prev) => ({ ...prev, venues }))
 							}
@@ -681,9 +736,28 @@ function CollectionConfigPopover({
 	onChangeVenues: (next: VenueConfig[]) => void;
 }) {
 	const { t } = useTranslation("sidebar");
+	const [catSearch, setCatSearch] = useState("");
 	const [newVenueLabel, setNewVenueLabel] = useState("");
 	const [newVenueUrl, setNewVenueUrl] = useState("");
 	const [newVenueAgent, setNewVenueAgent] = useState(true);
+
+	const orderedCategories = useMemo(() => {
+		const seen = new Set<string>();
+		const list: string[] = [];
+		for (const cat of [
+			...DEFAULT_ARXIV_CATEGORIES,
+			...arxivCategories,
+			...ARXIV_ALL_CATEGORIES,
+		]) {
+			if (!seen.has(cat)) {
+				seen.add(cat);
+				list.push(cat);
+			}
+		}
+		const q = catSearch.trim().toLowerCase();
+		if (!q) return list;
+		return list.filter((cat) => cat.toLowerCase().includes(q));
+	}, [arxivCategories, catSearch]);
 
 	const toggleCategory = (cat: string) => {
 		if (arxivCategories.includes(cat)) {
@@ -733,11 +807,30 @@ function CollectionConfigPopover({
 			</Tooltip>
 			<PopoverContent align="end" className="w-80 space-y-3 p-3">
 				<div>
-					<p className="font-medium text-xs">
-						{t("plaza.collection.arxivCategories")}
-					</p>
-					<div className="mt-1.5 flex flex-wrap gap-1">
-						{ARXIV_ALL_CATEGORIES.slice(0, 12).map((cat) => {
+					<div className="flex items-center justify-between gap-2">
+						<p className="font-medium text-xs">
+							{t("plaza.collection.arxivCategories")}
+						</p>
+						<input
+							type="search"
+							value={catSearch}
+							onChange={(e) => setCatSearch(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									const custom = catSearch.trim();
+									if (custom && !arxivCategories.includes(custom)) {
+										e.preventDefault();
+										onChangeCategories([...arxivCategories, custom]);
+										setCatSearch("");
+									}
+								}
+							}}
+							placeholder={t("plaza.arxivRec.searchCategory")}
+							className="h-6 w-32 rounded-md border bg-background px-2 text-[11px]"
+						/>
+					</div>
+					<div className="agentero-scroll mt-1.5 flex max-h-40 flex-wrap gap-1 overflow-y-auto pr-1">
+						{orderedCategories.map((cat) => {
 							const active = arxivCategories.includes(cat);
 							return (
 								<button

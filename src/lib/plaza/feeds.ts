@@ -15,7 +15,7 @@ export type { FeedItem, FeedSub };
 
 export type FeedFilter = "all" | "paper" | "other" | "unread";
 
-export const ARXIV_FEED_CHIPS = ["cs.AI", "cs.CR", "cs.PL", "cs.SE"] as const;
+export const ARXIV_FEED_CHIPS = ["cs.SE", "cs.CR", "cs.PL", "cs.AI"] as const;
 
 /**
  * Full arXiv category list for autocomplete suggestions.

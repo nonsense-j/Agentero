@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PLAZA_SOURCES } from "@/lib/plaza";
 import {
 	type CollectionPaperItem,
+	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
 	parseArxivAtomXml,
 	parseResearchrHtml,
@@ -20,8 +21,14 @@ import {
 } from "@/lib/plaza/recommend-pool";
 
 describe("Plaza AI & SE overhaul", () => {
-	it("sets default arXiv categories to cs.AI, cs.CR, cs.PL, cs.SE", () => {
-		expect(ARXIV_FEED_CHIPS).toEqual(["cs.AI", "cs.CR", "cs.PL", "cs.SE"]);
+	it("sets default arXiv categories to cs.SE, cs.CR, cs.PL, cs.AI", () => {
+		expect(DEFAULT_ARXIV_CATEGORIES).toEqual([
+			"cs.SE",
+			"cs.CR",
+			"cs.PL",
+			"cs.AI",
+		]);
+		expect(ARXIV_FEED_CHIPS).toEqual(["cs.SE", "cs.CR", "cs.PL", "cs.AI"]);
 	});
 
 	it("exposes the 4 Plaza modules in order: collection, discover, arxiv-rec, ccf-deadlines", () => {
