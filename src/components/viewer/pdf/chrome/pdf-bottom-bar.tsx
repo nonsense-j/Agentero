@@ -1,4 +1,9 @@
-import { ChevronLeft, ChevronRight, Palette } from "lucide-react";
+import {
+	ChevronLeft,
+	ChevronRight,
+	MoveHorizontal,
+	Palette,
+} from "lucide-react";
 import type { RefObject } from "react";
 import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -46,6 +51,8 @@ type PdfBottomBarProps = {
 	zoomLevel: number;
 	/** Apply a zoom scale from the slider. */
 	onZoomChange: (zoom: number) => void;
+	/** Fit the page width to the reading area. */
+	onFitWidth: () => void;
 	/** True for remote arXiv papers with no local sidecar. */
 	isRemotePaper?: boolean;
 };
@@ -63,6 +70,7 @@ export const PdfBottomBar = memo(function PdfBottomBar({
 	onSetPdfTone,
 	zoomLevel,
 	onZoomChange,
+	onFitWidth,
 	isRemotePaper = false,
 }: PdfBottomBarProps) {
 	const { t } = useTranslation("viewer");
@@ -198,6 +206,20 @@ export const PdfBottomBar = memo(function PdfBottomBar({
 					>
 						{formatPdfZoomPercentage(zoomLevel)}%
 					</span>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								size="icon-xs"
+								variant="ghost"
+								aria-label={t("pdf.zoomFit")}
+								onClick={onFitWidth}
+							>
+								<MoveHorizontal className="size-3.5" />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent side="top">{t("pdf.zoomFit")}</TooltipContent>
+					</Tooltip>
 				</div>
 				<span aria-hidden className="mx-0.5 h-3.5 w-px shrink-0 bg-border" />
 				{tone}

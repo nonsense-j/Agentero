@@ -9,8 +9,8 @@ PDF、RSS 正文、arXiv Daily 摘要、Markdown 笔记、Agent 消息正文、�
 | 工具栏 | `components/selection/selection-action-menu.tsx` | 翻译、复制、加入对话、快速对话；动作回调可选；`beforeActions` / `afterActions` 组合业务扩展 |
 | DOM 正文 | `SelectionSurface` | 用 `source` 提供来源，注册正文区域并在卸载时取消对应瞬态结果；`autoCopy` 保留 RSS 原有自动复制行为 |
 | 已有编辑器 / 消息根节点 | `selectionSurfaceProps` + `useSelectionSource` | 不增加 DOM 包装；沿用编辑器的格式工具栏和选区发布机制 |
-| 特殊选区 | `openSelectionChat(input, screen, "menu")` | CodeMirror 和跨域 iframe 把选区快照交给窗口宿主 |
-| 窗口宿主 | `SelectionChatPopover` + `SelectionActions` | 一个窗口一个 DOM 监听器和动作控制器；共享翻译、Quick chat 和加入对话批注流程 |
+| 特殊选区 | `openSelectionChat(input, screen)` | CodeMirror 和跨域 iframe 把选区快照交给窗口宿主 |
+| 窗口宿主 | `SelectionChatPopover` + `SelectionActions` | 一个窗口一个 DOM 监听器和动作控制器；共享翻译、Quick chat 和加入对话直接固定流程 |
 | PDF 扩展 | `viewer/pdf/cards/selection-menu.tsx` | 组合高亮色、笔记、书签和插件动作；继续使用 PDF 的几何锚点、持久化 Ask / 翻译流程 |
 
 新增正文入口示例：
@@ -34,9 +34,9 @@ PDF、RSS 正文、arXiv Daily 摘要、Markdown 笔记、Agent 消息正文、�
 ## 交互与生命周期
 
 - 鼠标完成选区或键盘扩展选区后显示工具栏。两个端点必须在同一注册正文内；输入框、工具栏自身、IME 输入不会触发正文捕获。
-- `⌘K` / `Ctrl+K` 打开快速对话，`⇧⌘L` / `Ctrl+Shift+L` 将快照加入 Agent；实际快捷键和工具栏提示跟随设置。点击加入对话可先写一条针对选区的批注。
-- 工具栏按实际宽度放置，优先在选区上方；靠近边缘时翻转或限位。PDF 调色板展开预留空间，扩展操作不挤动锚点。
-- 选区快照携带选区矩形（DOM Range、CodeMirror 行框或 iframe 桥坐标）。翻译卡和快速对话卡优先在选区上方打开，空间不足时翻到下方或侧边，避免盖住正在阅读的原文；PDF 的 Ask 卡继续锚在页边针旁。
+- `⌘K` / `Ctrl+K` 打开快速对话，`⇧⌘L` / `Ctrl+Shift+L` 将快照加入 Agent；实际快捷键和工具栏提示跟随设置。点击加入对话直接固定引用并聚焦 Agent 输入框，不再先弹批注输入框。
+- 工具栏按实际宽度放置，并以最后一次光标位置为中心、跟随手势结束侧：向下拖选时在光标下方，向上拖选时在光标上方；靠近边缘时翻转或限位。PDF 调色板展开预留空间，扩展操作不挤动锚点。
+- 选区快照携带选区矩形（DOM Range、CodeMirror 行框或 iframe 桥坐标）。翻译卡在选区下方打开（空间不足时才翻到侧边或上方）；快速对话卡优先在选区上方打开，空间不足时翻到另一侧或侧边，避免盖住正在阅读的原文；PDF 的 Ask 卡继续锚在页边针旁。
 - 点击外部、滚动、收起选区或 Escape 收起工具栏。翻译 / Ask 卡保留原文快照；新选区不会替换已打开 Ask 的问题。来源卸载、切换工作区标签或 Vault 会关闭瞬态请求。
 - 翻译与 Ask 每次请求使用独立的取消引用；即使 Agent 尚未完成发现或接受请求，关闭后也不能用晚到结果覆盖新卡。PDF 与普通正文共享一个窗口的翻译卡所有权。
 - RSS / 网页 / 消息 / 文本 Quick chat 只存在本次浮层中，不写 PDF `marks/`；PDF 原有持久化行为保持不变。
@@ -53,7 +53,7 @@ Vault 选区交给 Host 上下文解析器。RSS、网页和消息引文携带�
 
 父窗口同时校验消息来源标记、代理 origin 和发送窗口身份；`null` origin 仅显式用于对应的沙盒 `srcdoc`。坐标按 iframe 偏移与广场缩放比例换算。导航后的公开 URL 从代理路径还原，来源记录不保存代理地址。
 
-键盘事件不会穿出跨域 frame：桥转发匹配的快捷键，并在 window 捕获阶段把非输入元素上的 `Escape` 作为 `escape` 消息交给父窗口，SPA 站点为自己的浮层调用 `stopPropagation` / `preventDefault` 也不会吞掉它；桥不拦截按键，站点自己的 Escape 行为不受影响。共享选区宿主收到后关闭工具栏 / 批注 / 结果卡。
+键盘事件不会穿出跨域 frame：桥转发匹配的快捷键，并在 window 捕获阶段把非输入元素上的 `Escape` 作为 `escape` 消息交给父窗口，SPA 站点为自己的浮层调用 `stopPropagation` / `preventDefault` 也不会吞掉它；桥不拦截按键，站点自己的 Escape 行为不受影响。共享选区宿主收到后关闭工具栏 / 结果卡。
 
 ## 限制与后续
 

@@ -234,6 +234,7 @@
 		"zoomIn": "Zoom in page",
 		"fitWidth": "Fit page to panel width (automatic)",
 		"openInSystemBrowser": "Open in system browser",
+		"importToFolder": "Import to folder",
 		"comingSoonFor": "{{label}} is coming soon.",
 		"modelscope": "ModelScope Papers",
 		"pwc": {
@@ -482,9 +483,6 @@
 		"skillImportInstalled": "Installed",
 		"skillImportSelectAll": "Select all",
 		"skillImportSelectNone": "Select none",
-		"queueSelectAll": "Select all",
-		"queueRemove": "Remove selected",
-		"queueMoveToFront": "Move to front",
 		"skillCandidatesFound": "Found {{count}} Skill candidates. Choose which to install.",
 		"searchTitle": "Results for “{{query}}”",
 		"searchCancel": "Cancel",

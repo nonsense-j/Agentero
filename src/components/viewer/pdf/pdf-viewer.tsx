@@ -171,7 +171,6 @@ import {
 	linkPreviewDragActive,
 	subscribeLinkPreviewDrag,
 } from "@/lib/pdf/link-preview-drag";
-import { unionNormalizedRegions } from "@/lib/pdf/region";
 import type { PdfReloadPosition } from "@/lib/pdf/reload-position";
 import {
 	type ActiveSelectionCard,
@@ -2303,28 +2302,12 @@ function PdfViewerInner({
 	const handleToggleTranslatePin = useCallback(() => {
 		if (activeTranslate) toggleTranslatePin(activeTranslate);
 	}, [activeTranslate, toggleTranslatePin]);
-	const handleLocateTranslateSource = useCallback(() => {
-		if (!activeTranslate) return;
-		const { id, page, rects } = activeTranslate;
-		const bbox = unionNormalizedRegions(rects);
-		if (!bbox) {
-			handleGoToPage(page);
-			return;
-		}
-		goToRegion({
-			id: `translate-source-${id}`,
-			pageIndex: page - 1,
-			bbox,
-			kind: "text",
-		});
-	}, [activeTranslate, goToRegion, handleGoToPage]);
 	const cardTranslate = useMemo(
 		() => ({
 			record: isActive ? activeTranslate : null,
 			streaming: translateStreaming,
 			error: translateError,
 			onOpenSettings: openTranslateSettings,
-			onLocateSource: handleLocateTranslateSource,
 			onTogglePin:
 				paperAbsPath && activeTranslate?.rects.length
 					? handleToggleTranslatePin
@@ -2337,7 +2320,6 @@ function PdfViewerInner({
 			translateStreaming,
 			translateError,
 			openTranslateSettings,
-			handleLocateTranslateSource,
 			paperAbsPath,
 			handleToggleTranslatePin,
 			hideActiveCard,
@@ -2356,6 +2338,35 @@ function PdfViewerInner({
 	);
 	const handleZoomSliderChange = useCallback((next: number) => {
 		zoomCapRef.current?.requestZoom(next);
+	}, []);
+	const handleFitWidth = useCallback(() => {
+		const requestFitWidth = (retry = false) => {
+			const capability = zoomCapRef.current;
+			if (!capability) {
+				if (!retry) {
+					window.requestAnimationFrame(() => requestFitWidth(true));
+				}
+				return;
+			}
+
+			try {
+				capability.requestZoom(ZoomMode.FitWidth);
+				// A capability can be available one render before the viewport has
+				// non-zero metrics. EmbedPDF treats that as a silent no-op; retry
+				// once on the next frame after ResizeObserver has committed them.
+				if (!retry) {
+					window.requestAnimationFrame(() => requestFitWidth(true));
+				}
+			} catch {
+				// The document scope can be recreated while a PDF buffer is reloading.
+				// Give the next render a chance to expose a fresh capability.
+				if (!retry) {
+					window.requestAnimationFrame(() => requestFitWidth(true));
+				}
+			}
+		};
+
+		requestFitWidth();
 	}, []);
 
 	return (
@@ -2522,6 +2533,7 @@ function PdfViewerInner({
 					onSetPdfTone={setPdfTone}
 					zoomLevel={zoomLevel}
 					onZoomChange={handleZoomSliderChange}
+					onFitWidth={handleFitWidth}
 					isRemotePaper={isRemotePaper}
 				/>
 			)}

@@ -9,7 +9,7 @@
 		"node": "Node.js",
 		"agent": "Agent",
 		"translate": "翻译",
-		"layout": "图表公式",
+		"layout": "公式和图表解析配置",
 		"vault": "开始使用"
 	},
 	"welcome": {},
@@ -89,10 +89,15 @@
 		"probeIdle": "尚未测试",
 		"probeProbing": "测试中…",
 		"probeOk": "可用",
-		"probeFail": "请检查你的 Key 后重试"
+		"probeFail": "请检查你的 Key 后重试",
+		"displayMode": {
+			"label": "翻译显示方式",
+			"overlay": "原地覆盖",
+			"dualPane": "双栏对照"
+		}
 	},
 	"layout": {
-		"title": "自动识别图表和公式",
+		"title": "公式和图表解析配置",
 		"configureOwn": "配置云端服务（推荐）",
 		"configureOwnDesc": "填入 Paddle、MinerU 或兼容 OpenAI 的 API Key，图表公式识别更精准。",
 		"useDefault": "用本地免费模型",

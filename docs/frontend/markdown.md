@@ -90,8 +90,6 @@ Plate WYSIWYG；用于普通笔记与论文 `NOTES.md`。磁盘上始终是标�
 - **编辑器 memo 边界**：`MarkdownEditor` 按 props memo；`onDirtyChange` 在 DocView 内 `useCallback` 固定；`patchTab` 对无变化 patch 返回原数组与原 tab 引用——`notesDirty` 重复跳变、PDF 编译状态等 tab patch 不再重渲染其它面板的编辑器（Plate 全量协调）。
 - **跳转优先于滚动记忆**：`navigationIntent`（`[[note#标题]]` / 块锚 / 划词来源跳转）生效期间，scroll-memory 的挂载恢复让位，不再把视图拉回旧偏移；记录滚动不触发渲染，写入 localStorage 有 400ms 合并，退出时立刻落盘。
 
-三面板（PDF + 笔记 + 对话）同开的整体调优见 [bug_fix/notes-pane-jank-multi-panel.md](../bug_fix/notes-pane-jank-multi-panel.md)。
-
 ## 限制与后续
 
 - **~~`@platejs/toc` 每 scroll 事件重建 IntersectionObserver~~**：已修复（`patches/@platejs__toc@53.0.0.patch`）。原实现里 scroll 监听每事件 `setStatus(Date.now())`，observer effect 依赖它，于是每个 scroll 事件都 disconnect + 重建 IO（每个标题一次 `NodeApi.get` + `toDOMNode` + `observe`）并全量重渲染 TOC（约 2–5ms/事件，与滚动距离无关）。现在 observer 长生命周期保留，滚动只按 rAF 合并做一次 diff 重挂（仅重新 observe DOM 节点真的换过的标题），也不再触发 React 状态更新。见 [bug_fix/toc-scroll-observer-rebuild.md](../bug_fix/toc-scroll-observer-rebuild.md)。
@@ -234,8 +232,8 @@ Vault 文件约定：[../backend/data-model.md](../backend/data-model.md)。
 
 ### 选区加入对话
 
-正文选中文字后出现「加入对话」浮动入口，点击后可直接填写可选批注并确认加入聊天草稿。块手柄菜单的「加入会话」直接固定当前块，不经过批注框。引用插在 Agent 输入框当前光标之后，显示为行内引用块。批注绑定原文和笔记路径，不写入 Markdown 文件。编辑态和只读笔记均可使用，格式工具栏与右键编辑菜单不受影响。见 [agent.md](agent.md)。
+正文选中文字后出现「加入对话」浮动入口，点击后直接把选区固定为 Agent 输入框里的行内引用块，不再弹出批注输入框，也不在原文旁画编号角标。块手柄菜单的「加入会话」同样直接固定当前块。引用插在 Agent 输入框当前光标之后，显示为行内引用块；删除、查看来源和原文都在引用块的悬停卡片里。编辑态和只读笔记均可使用，格式工具栏与右键编辑菜单不受影响。见 [agent.md](agent.md)。
 
-选区「加入对话」确认后，在仍打开的原文旁显示编号批注角标；悬停查看批注，点击重新编辑。Markdown 右键菜单保留打开时的编辑器 RangeRef，并用 CSS Highlight 在菜单取得焦点时继续显示原文选区；关闭菜单时清除临时高亮。
+Markdown 右键菜单保留打开时的编辑器 RangeRef，并用 CSS Highlight 在菜单取得焦点时继续显示原文选区；关闭菜单时清除临时高亮。
 
-批注输入点击外部会暂存，再点原句或重新选择同一处可恢复；Escape 明确取消。汇总中的来源按钮会定位并短暂高亮原文；重开笔记后使用原文及邻近文字重新定位，找不到或多处匹配时提示失败，避免错位。
+汇总中的来源按钮会定位并短暂高亮原文；重开笔记后使用原文及邻近文字重新定位，找不到或多处匹配时提示失败，避免错位。

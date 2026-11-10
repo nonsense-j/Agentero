@@ -57,10 +57,7 @@ export function useWebViewSelection({
 		let selectionSource = srcUrl;
 		const closeMenu = () => {
 			const draft = selectionChatStore.getState().draft;
-			if (
-				draft?.stage === "menu" &&
-				draft.selection.sourcePath === selectionSource
-			)
+			if (draft && draft.selection.sourcePath === selectionSource)
 				dismissSelectionChat();
 		};
 		const onMessage = (event: MessageEvent) => {
@@ -125,8 +122,9 @@ export function useWebViewSelection({
 							height: msg.rect.height * scale,
 						},
 						bounds,
+						msg.side,
+						msg.cursorX != null ? msg.cursorX * scale : undefined,
 					),
-					"menu",
 				);
 				void copyTextToClipboard(msg.text);
 			} else if (msg.type === "scroll") closeMenu();

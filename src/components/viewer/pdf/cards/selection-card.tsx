@@ -24,6 +24,8 @@ import { useSelectionOverlayGuard } from "@/lib/workspace/selection-overlay";
 
 /** Minimum inset from the viewport edges (px). */
 export const SELECTION_CARD_EDGE = 12;
+/** Gap between a text-selection box and its card (px). */
+const SELECTION_ANCHOR_GAP = 8;
 /** Default preferred max height when callers omit `height` (px). */
 const SELECTION_CARD_DEFAULT_MAX_HEIGHT = 420;
 /** Floor so a clipped card remains usable on short viewports (px). */
@@ -68,10 +70,21 @@ type PlaceSelectionCardOptions = {
 	trackPin?: boolean;
 	/** Open to the right of the anchor when there is room (default true). */
 	preferRight?: boolean;
+	/**
+	 * Open below the selected lines instead of above. Translation cards use
+	 * this so the result never covers the text the reader just selected.
+	 */
+	preferBelow?: boolean;
 	/** Gap from the anchor point (default 4). */
 	gap?: number;
 	/** The rendered height, used to align a card above a selection. */
 	contentHeight?: number;
+	/**
+	 * Screen-space rect that placement must stay inside (defaults to the
+	 * window). Page-anchored PDF cards pass the reading viewport so they never
+	 * open over the tab strip or the viewer toolbars.
+	 */
+	container?: { left: number; top: number; width: number; height: number };
 };
 
 type PlaceSelectionCardResult = {
@@ -105,25 +118,33 @@ export function placeSelectionCard(
 	const edge = SELECTION_CARD_EDGE;
 	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
 	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+	// Placement bounds: the window by default, the reading area when the card
+	// is clipped to a PDF scroller.
+	const minX = (opts.container?.left ?? 0) + edge;
+	const minY = (opts.container?.top ?? 0) + edge;
+	const maxX =
+		(opts.container ? opts.container.left + opts.container.width : vw) - edge;
+	const maxY =
+		(opts.container ? opts.container.top + opts.container.height : vh) - edge;
 
 	if (screen.selectionBounds) {
 		const bounds = screen.selectionBounds;
-		const gap = 8;
-		const usableHeight = Math.max(0, vh - edge * 2);
+		const gap = SELECTION_ANCHOR_GAP;
+		const usableHeight = Math.max(0, maxY - minY);
 		const minHeight = Math.min(SELECTION_CARD_MIN_HEIGHT, usableHeight);
-		const upperEdge = clamp(bounds.top - gap, edge, edge + usableHeight);
-		const lowerEdge = clamp(bounds.bottom + gap, edge, edge + usableHeight);
-		const above = upperEdge - edge;
-		const below = edge + usableHeight - lowerEdge;
+		const upperEdge = clamp(bounds.top - gap, minY, minY + usableHeight);
+		const lowerEdge = clamp(bounds.bottom + gap, minY, minY + usableHeight);
+		const above = upperEdge - minY;
+		const below = minY + usableHeight - lowerEdge;
 		const left = clamp(
 			screen.x - preferredWidth / 2,
-			edge,
-			Math.max(edge, vw - edge - preferredWidth),
+			minX,
+			Math.max(minX, maxX - preferredWidth),
 		);
 
 		if (above < minHeight && below < minHeight) {
-			const leftSpace = bounds.left - gap - edge;
-			const rightSpace = vw - edge - bounds.right - gap;
+			const leftSpace = bounds.left - gap - minX;
+			const rightSpace = maxX - bounds.right - gap;
 			if (Math.max(leftSpace, rightSpace) >= preferredWidth) {
 				const maxHeight = Math.min(preferredMaxH, usableHeight);
 				return {
@@ -131,13 +152,13 @@ export function placeSelectionCard(
 						rightSpace >= leftSpace
 							? bounds.right + gap
 							: bounds.left - gap - preferredWidth,
-					top: clamp(bounds.top, edge, edge + usableHeight - maxHeight),
+					top: clamp(bounds.top, minY, minY + usableHeight - maxHeight),
 					maxHeight,
 				};
 			}
 		}
 
-		if (above >= minHeight || (below < minHeight && above >= below)) {
+		const openAbove = () => {
 			const maxHeight = Math.min(preferredMaxH, Math.max(minHeight, above));
 			const contentHeight = Math.min(
 				maxHeight,
@@ -145,54 +166,69 @@ export function placeSelectionCard(
 			);
 			return {
 				left,
-				top: Math.max(edge, upperEdge - contentHeight),
+				top: Math.max(minY, upperEdge - contentHeight),
 				maxHeight,
 			};
-		}
-		return {
-			left,
-			top: Math.min(lowerEdge, edge + usableHeight - minHeight),
-			maxHeight: Math.min(preferredMaxH, Math.max(minHeight, below)),
 		};
+		const openBelow = (fillMinimum: boolean) => {
+			const height = fillMinimum ? Math.max(minHeight, below) : below;
+			return {
+				left,
+				top: fillMinimum
+					? Math.min(lowerEdge, minY + usableHeight - minHeight)
+					: lowerEdge,
+				maxHeight: Math.min(preferredMaxH, Math.max(0, height)),
+			};
+		};
+
+		if (opts.preferBelow) {
+			if (below >= minHeight || above < minHeight) return openBelow(false);
+			return openAbove();
+		}
+
+		if (above >= minHeight || (below < minHeight && above >= below)) {
+			return openAbove();
+		}
+		return openBelow(true);
 	}
 
 	// Layout footprint for flip/clamp (stable across compact → expanded).
 	const planWidth = Math.min(
 		opts.placementWidth ?? preferredWidth,
-		Math.max(0, vw - edge * 2),
+		Math.max(0, maxX - minX),
 	);
 	const planHeight = Math.min(
 		opts.placementHeight ?? preferredMaxH,
-		Math.max(0, vh - edge * 2),
+		Math.max(0, maxY - minY),
 	);
 
 	// Prefer the pin's side: right of anchor, or fully to the left of it.
 	let left = preferRight ? screen.x + gap : screen.x - planWidth - gap;
-	if (preferRight && left + planWidth > vw - edge) {
+	if (preferRight && left + planWidth > maxX) {
 		// Not enough room on the right — flip left of the pin.
-		left = Math.max(edge, screen.x - planWidth - gap);
-	} else if (!preferRight && left < edge) {
+		left = Math.max(minX, screen.x - planWidth - gap);
+	} else if (!preferRight && left < minX) {
 		// Not enough room on the left — flip right of the pin.
-		left = Math.min(vw - edge - planWidth, screen.x + gap);
+		left = Math.min(maxX - planWidth, screen.x + gap);
 	}
-	left = clamp(left, edge, Math.max(edge, vw - planWidth - edge));
+	left = clamp(left, minX, Math.max(minX, maxX - planWidth));
 
-	const viewportCap = Math.max(SELECTION_CARD_MIN_HEIGHT, vh - edge * 2);
+	const viewportCap = Math.max(SELECTION_CARD_MIN_HEIGHT, maxY - minY);
 
 	if (trackPin) {
 		// Content-sized cards: follow the pin; shrink maxHeight near edges
 		// instead of pre-shifting top by the full preferred height.
 		let top = screen.y - 8;
-		if (top < edge) top = edge;
-		let maxHeight = Math.min(preferredMaxH, viewportCap, vh - edge - top);
+		if (top < minY) top = minY;
+		let maxHeight = Math.min(preferredMaxH, viewportCap, maxY - top);
 		if (
 			maxHeight < SELECTION_CARD_MIN_HEIGHT &&
-			vh - edge * 2 >= SELECTION_CARD_MIN_HEIGHT
+			maxY - minY >= SELECTION_CARD_MIN_HEIGHT
 		) {
 			// Not enough room below the pin — slide up just enough to fit.
 			maxHeight = Math.min(preferredMaxH, viewportCap);
-			top = Math.max(edge, vh - edge - maxHeight);
-			maxHeight = Math.min(maxHeight, vh - edge - top);
+			top = Math.max(minY, maxY - maxHeight);
+			maxHeight = Math.min(maxHeight, maxY - top);
 		}
 		return { left, top, maxHeight: Math.max(0, maxHeight) };
 	}
@@ -201,23 +237,23 @@ export function placeSelectionCard(
 	// Keep the card top near the pin; only slide up when it would overflow.
 	const plannedMaxH = Math.min(planHeight, viewportCap);
 	let top = screen.y - 8;
-	if (top + plannedMaxH > vh - edge) {
-		top = vh - edge - plannedMaxH;
+	if (top + plannedMaxH > maxY) {
+		top = maxY - plannedMaxH;
 	}
-	if (top < edge) {
-		top = edge;
+	if (top < minY) {
+		top = minY;
 	}
 
 	// Visual max height still follows the caller's current preferred height.
-	let maxHeight = Math.min(preferredMaxH, viewportCap, vh - edge - top);
+	let maxHeight = Math.min(preferredMaxH, viewportCap, maxY - top);
 	if (
 		maxHeight < SELECTION_CARD_MIN_HEIGHT &&
-		vh - edge * 2 >= SELECTION_CARD_MIN_HEIGHT
+		maxY - minY >= SELECTION_CARD_MIN_HEIGHT
 	) {
 		// Prefer min usable height by sliding further up when possible.
 		maxHeight = SELECTION_CARD_MIN_HEIGHT;
-		top = Math.max(edge, vh - edge - maxHeight);
-		maxHeight = Math.min(maxHeight, vh - edge - top);
+		top = Math.max(minY, maxY - maxHeight);
+		maxHeight = Math.min(maxHeight, maxY - top);
 	}
 	maxHeight = Math.max(0, maxHeight);
 
@@ -251,10 +287,19 @@ type SelectionCardProps = {
 	lockHeight?: boolean;
 	/** Allow native corner resizing within the available viewport. */
 	resizable?: boolean;
-	/** Minimum native corner-resize height (px). Defaults to 200. */
+	/** Minimum native resize width (px). Defaults to 280. */
+	resizeMinWidth?: number;
+	/** Minimum native resize height (px). Defaults to 200. */
 	resizeMinHeight?: number;
-	/** Allow repositioning from the title, independently of the source anchor. */
+	/**
+	 * Design/content cap for horizontal resizing (px). Omit to use the viewport
+	 * room; prose cards pass their reading width so lines never grow unbounded.
+	 */
+	resizeMaxWidth?: number;
+	/** Allow repositioning from the title. */
 	draggable?: boolean;
+	/** Show the centered grip glyph in a draggable header (default true). */
+	showDragHandle?: boolean;
 	/**
 	 * When false, the body does not scroll (`agentero-scroll` off) and grows
 	 * with content. Use for short tables that should show fully (formula legend).
@@ -262,6 +307,10 @@ type SelectionCardProps = {
 	 */
 	bodyScroll?: boolean;
 	preferRight?: boolean;
+	/** Open below the selected lines instead of above (translation cards). */
+	preferBelow?: boolean;
+	/** Extra header classes, e.g. tighter padding for the translation card. */
+	headerClassName?: string;
 	title: string;
 	/** Optional header glyph; omit for a title-only header. */
 	icon?: ReactNode;
@@ -298,10 +347,15 @@ export function SelectionCard({
 	trackPin = false,
 	lockHeight = false,
 	resizable = false,
+	resizeMinWidth = RESIZE_MIN_WIDTH,
 	resizeMinHeight = RESIZE_MIN_HEIGHT,
+	resizeMaxWidth,
 	draggable = false,
+	showDragHandle = true,
 	bodyScroll = true,
 	preferRight = true,
+	preferBelow = false,
+	headerClassName,
 	title,
 	icon,
 	actions,
@@ -316,9 +370,18 @@ export function SelectionCard({
 	children,
 }: SelectionCardProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
-	const [position, setPosition] = useState<{ left: number; top: number }>();
+	/** Manual placement relative to the page anchor or the viewport origin. */
+	const [offset, setOffset] = useState<{ dx: number; dy: number }>();
+	const screenRef = useRef(screen);
+	screenRef.current = screen;
 	const [contentHeight, setContentHeight] = useState<number>();
-	const dragRef = useRef<{ pointerId: number; x: number; y: number }>(null);
+	const dragRef = useRef<{
+		pointerId: number;
+		x: number;
+		y: number;
+		anchorX: number;
+		anchorY: number;
+	} | null>(null);
 	const reduceMotion = useReducedMotion();
 	const [viewport, setViewport] = useState(() => ({
 		width: typeof window !== "undefined" ? window.innerWidth : 1200,
@@ -342,13 +405,34 @@ export function SelectionCard({
 			: typeof window !== "undefined"
 				? window.innerWidth
 				: 1200;
+	/**
+	 * Page-anchored cards are clipped to the reading viewport (see
+	 * `clipInset`). Placement and dragging stay inside that same rect so the
+	 * card never opens or moves over the tab strip / toolbars.
+	 */
+	const container = screen.clipInset
+		? {
+				left: screen.clipInset.left,
+				top: screen.clipInset.top,
+				width: Math.max(
+					0,
+					viewport.width - screen.clipInset.left - screen.clipInset.right,
+				),
+				height: Math.max(
+					0,
+					viewport.height - screen.clipInset.top - screen.clipInset.bottom,
+				),
+			}
+		: undefined;
 	const renderedWidth = Math.min(
 		width,
 		Math.max(0, viewportWidth - SELECTION_CARD_EDGE * 2),
 	);
 	const anchor = placeSelectionCard(screen, {
 		width: renderedWidth,
-		height,
+		// Page-anchored cards may use the whole reading area; short results still
+		// hug their content, long ones no longer stop at a fixed 480px cap.
+		height: container ? Math.max(height, container.height) : height,
 		placementWidth: placementWidth
 			? Math.min(
 					placementWidth,
@@ -358,17 +442,46 @@ export function SelectionCard({
 		placementHeight,
 		trackPin,
 		preferRight,
+		preferBelow,
 		contentHeight,
+		container,
 	});
-	const anchoredToSelection = Boolean(screen.selectionBounds) && !position;
+	const selectionBounds = screen.selectionBounds;
+	const followsPage = Boolean(selectionBounds);
+	const dragOriginX = followsPage ? screen.x : 0;
+	const dragOriginY = followsPage ? screen.y : 0;
+	/**
+	 * Freeze the placement a page-anchored card received when it opened, then
+	 * track the text: side, horizontal offset and height cap stay put while the
+	 * card follows the page. Re-running the viewport clamp on every scroll tick
+	 * would pin the card to the top edge instead of scrolling it out.
+	 */
+	const trackRef = useRef<{
+		side: "above" | "below";
+		dx: number;
+		maxHeight: number;
+	} | null>(null);
+	if (!trackRef.current && selectionBounds) {
+		trackRef.current = {
+			side: anchor.top < selectionBounds.top ? "above" : "below",
+			dx: anchor.left - screen.x,
+			maxHeight: anchor.maxHeight,
+		};
+	}
+	const track = trackRef.current;
+	const anchoredToSelection = followsPage && !offset;
 	useLayoutEffect(() => {
 		const card = rootRef.current;
 		if (!anchoredToSelection || !card) return;
 		const measure = () => {
 			const rect = card.getBoundingClientRect();
 			if (resizable && !lockHeight && card.style.height) {
-				// Native corner resizing takes over from the initial anchor.
-				setPosition({ left: rect.left, top: rect.top });
+				// Native corner resizing takes over from the initial anchor, but
+				// keeps tracking the page through the stored anchor offset.
+				setOffset({
+					dx: rect.left - screenRef.current.x,
+					dy: rect.top - screenRef.current.y,
+				});
 			} else {
 				setContentHeight(rect.height);
 			}
@@ -379,39 +492,69 @@ export function SelectionCard({
 		return () => observer.disconnect();
 	}, [anchoredToSelection, lockHeight, resizable]);
 	const edge = SELECTION_CARD_EDGE;
-	const left = position
-		? clamp(
-				position.left,
-				edge,
-				Math.max(
-					edge,
-					viewport.width -
-						edge -
-						(resizable ? RESIZE_MIN_WIDTH : renderedWidth),
-				),
+	const boundLeft = (container?.left ?? 0) + edge;
+	const boundTop = (container?.top ?? 0) + edge;
+	const boundRight =
+		(container ? container.left + container.width : viewport.width) - edge;
+	const boundBottom =
+		(container ? container.top + container.height : viewport.height) - edge;
+	const rawLeft = offset
+		? dragOriginX + offset.dx
+		: track
+			? screen.x + track.dx
+			: null;
+	const left =
+		rawLeft == null
+			? anchor.left
+			: followsPage
+				? rawLeft
+				: clamp(
+						rawLeft,
+						boundLeft,
+						Math.max(
+							boundLeft,
+							boundRight - (resizable ? RESIZE_MIN_WIDTH : renderedWidth),
+						),
+					);
+	const rawTop = offset
+		? dragOriginY + offset.dy
+		: track && selectionBounds
+			? track.side === "above"
+				? contentHeight != null
+					? selectionBounds.top - SELECTION_ANCHOR_GAP - contentHeight
+					: anchor.top
+				: selectionBounds.bottom + SELECTION_ANCHOR_GAP
+			: null;
+	const top =
+		rawTop == null
+			? anchor.top
+			: followsPage
+				? rawTop
+				: clamp(
+						rawTop,
+						boundTop,
+						Math.max(boundTop, boundBottom - SELECTION_CARD_MIN_HEIGHT),
+					);
+	const maxHeight = track
+		? Math.min(
+				track.maxHeight,
+				Math.max(SELECTION_CARD_MIN_HEIGHT, boundBottom - boundTop),
 			)
-		: anchor.left;
-	const top = position
-		? clamp(
-				position.top,
-				edge,
-				Math.max(edge, viewport.height - edge - SELECTION_CARD_MIN_HEIGHT),
-			)
-		: anchor.top;
-	const maxHeight = anchor.maxHeight;
-	const resizeMaxWidth = Math.max(
-		0,
-		viewport.width - left - SELECTION_CARD_EDGE,
-	);
-	const resizeMaxHeight = Math.min(
+		: anchor.maxHeight;
+	const resizeRoomWidth = Math.max(0, boundRight - left);
+	const resizeRoomHeight = Math.min(
 		anchoredToSelection ? maxHeight : Infinity,
-		Math.max(0, viewport.height - top - SELECTION_CARD_EDGE),
+		Math.max(0, boundBottom - top),
 	);
+	const resizeWidthCap =
+		resizeMaxWidth !== undefined && Number.isFinite(resizeMaxWidth)
+			? Math.min(resizeRoomWidth, Math.max(0, resizeMaxWidth))
+			: resizeRoomWidth;
 	// Locked cards use the placement cap while anchored; after a drag, shrink
-	// to the room below the new top so a short window does not overflow.
-	const cardMaxHeight = position
-		? Math.min(height, resizeMaxHeight)
-		: maxHeight;
+	// to the room below the new top so a short window does not overflow. Cards
+	// that follow the page keep their cap so scrolling never compresses them.
+	const cardMaxHeight =
+		offset && !followsPage ? Math.min(height, resizeRoomHeight) : maxHeight;
 	// The gutter pin sits on the side the card opens toward. Reveal the card
 	// from that corner so it looks like the pin expands into the full card.
 	const isRightSide = anchor.left + renderedWidth / 2 >= screen.x;
@@ -420,9 +563,9 @@ export function SelectionCard({
 		: "inset(0 0 100% 100%)";
 	const transition = reduceMotion
 		? { duration: 0 }
-		: { type: "spring" as const, bounce: 0.15, duration: 0.35 };
+		: { type: "spring" as const, bounce: 0, duration: 0.35 };
 	const titleNode = (
-		<span className="min-w-0 flex-1 truncate font-medium text-foreground text-sm">
+		<span className="min-w-0 flex-1 truncate font-semibold text-[13px] text-foreground tracking-[-0.01em]">
 			{title}
 		</span>
 	);
@@ -437,6 +580,8 @@ export function SelectionCard({
 			pointerId: event.pointerId,
 			x: event.clientX - rect.left,
 			y: event.clientY - rect.top,
+			anchorX: dragOriginX,
+			anchorY: dragOriginY,
 		};
 	};
 
@@ -445,18 +590,17 @@ export function SelectionCard({
 		if (!drag || drag.pointerId !== event.pointerId) return;
 		const rect = rootRef.current?.getBoundingClientRect();
 		if (!rect) return;
-		setPosition({
-			left: clamp(
-				event.clientX - drag.x,
-				edge,
-				Math.max(edge, viewport.width - edge - rect.width),
-			),
-			top: clamp(
-				event.clientY - drag.y,
-				edge,
-				Math.max(edge, viewport.height - edge - rect.height),
-			),
-		});
+		const left = clamp(
+			event.clientX - drag.x,
+			boundLeft,
+			Math.max(boundLeft, boundRight - rect.width),
+		);
+		const top = clamp(
+			event.clientY - drag.y,
+			boundTop,
+			Math.max(boundTop, boundBottom - rect.height),
+		);
+		setOffset({ dx: left - drag.anchorX, dy: top - drag.anchorY });
 	};
 
 	// If the card mounts / remounts under an existing pointer (mode switch,
@@ -506,10 +650,10 @@ export function SelectionCard({
 				...(resizable
 					? {
 							resize: "both",
-							minWidth: Math.min(RESIZE_MIN_WIDTH, resizeMaxWidth),
-							minHeight: Math.min(resizeMinHeight, resizeMaxHeight),
-							maxWidth: resizeMaxWidth,
-							maxHeight: resizeMaxHeight,
+							minWidth: Math.min(resizeMinWidth, resizeWidthCap),
+							minHeight: Math.min(resizeMinHeight, resizeRoomHeight),
+							maxWidth: resizeWidthCap,
+							maxHeight: resizeRoomHeight,
 						}
 					: null),
 			}}
@@ -525,9 +669,11 @@ export function SelectionCard({
 		>
 			<header
 				className={cn(
-					"relative flex shrink-0 items-center gap-2 border-border/60 border-b px-3 py-2",
+					"relative flex shrink-0 items-center gap-2 border-border/50 border-b px-3 py-1.5",
 					draggable &&
-						"touch-none select-none cursor-grab pt-2.5 active:cursor-grabbing",
+						"touch-none select-none cursor-grab active:cursor-grabbing",
+					draggable && showDragHandle && "pt-2",
+					headerClassName,
 				)}
 				onPointerDown={draggable ? startDrag : undefined}
 				onPointerMove={draggable ? moveDrag : undefined}
@@ -535,9 +681,9 @@ export function SelectionCard({
 					dragRef.current = null;
 				}}
 			>
-				{draggable ? (
+				{draggable && showDragHandle ? (
 					<GripHorizontal
-						className="pointer-events-none absolute top-1 left-1/2 size-3.5 -translate-x-1/2 text-muted-foreground"
+						className="pointer-events-none absolute top-0.5 left-1/2 size-3.5 -translate-x-1/2 text-muted-foreground/70"
 						aria-hidden
 					/>
 				) : null}

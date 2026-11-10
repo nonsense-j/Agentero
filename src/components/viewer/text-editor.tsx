@@ -36,6 +36,7 @@ import {
 	markTexEditorActive,
 	registerTexEditor,
 } from "@/lib/tex/editor-navigation";
+import { latexFromClipboard } from "@/lib/tex/html-to-latex";
 import { type TexOutlineItem, texOutlineFromTree } from "@/lib/tex/outline";
 import { isInsideProject } from "@/lib/tex/project";
 import {
@@ -322,6 +323,16 @@ export function TextEditor({
 			EditorView.domEventHandlers({
 				focus(_event, view) {
 					markTexEditorActive(pathRef.current, view);
+				},
+				paste(event, view) {
+					if (!isTexPath(pathRef.current)) return false;
+					const html = event.clipboardData?.getData("text/html") ?? "";
+					const plain = event.clipboardData?.getData("text/plain") ?? "";
+					const latex = latexFromClipboard(html, plain);
+					if (!latex) return false;
+					event.preventDefault();
+					view.dispatch(view.state.replaceSelection(latex));
+					return true;
 				},
 			}),
 			EditorView.updateListener.of((update) => {

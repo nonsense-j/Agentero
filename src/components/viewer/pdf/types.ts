@@ -6,6 +6,7 @@
 import type { FormattedSelection } from "@embedpdf/plugin-selection/react";
 import type { RefObject } from "react";
 import type { PromptImage } from "@/lib/agent/api";
+import type { SelectionSide } from "@/lib/agent/selection-side";
 import type { PaperMetadata } from "@/lib/paper";
 import type { Citation } from "@/lib/paper/refs";
 import type { PdfVisualSessionTrace } from "@/lib/pdf/agent-trace";
@@ -164,11 +165,25 @@ export type ScreenPoint = {
 	y: number;
 	top?: number;
 	bottom?: number;
+	/** Side of the selection where the gesture ended; drives menu placement. */
+	side?: SelectionSide;
+	/** Viewport x of the gesture endpoint; the menu centers on this point. */
+	cursorX?: number;
 };
 
 /** Screen anchor for a floating card, including which side to open on. */
 export type CardScreenPoint = ScreenPoint & {
 	preferRight?: boolean;
+	/**
+	 * Inset from the window edges that page-anchored cards are clipped to, so
+	 * a card scrolling with the page never paints over the app chrome.
+	 */
+	clipInset?: {
+		top: number;
+		right: number;
+		bottom: number;
+		left: number;
+	};
 	selectionBounds?: {
 		left: number;
 		top: number;
@@ -180,6 +195,8 @@ export type CardScreenPoint = ScreenPoint & {
 export type SelectionMenuState = {
 	/** Top-center of the selection — floating toolbar anchor. */
 	screen: ScreenPoint;
+	/** Page-local x fraction of the gesture endpoint; re-mapped on scroll/zoom. */
+	cursorXFraction?: number;
 	anchor: PdfAskAnchor;
 	/** Original PDF geometry. Empty when a translated quote could not be located. */
 	pages: FormattedSelection[];

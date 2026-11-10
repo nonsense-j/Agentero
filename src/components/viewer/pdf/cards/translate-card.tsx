@@ -1,15 +1,6 @@
-import {
-	Check,
-	Copy,
-	LocateFixed,
-	Pin,
-	PinOff,
-	Settings2Icon,
-	X,
-} from "lucide-react";
+import { Check, Copy, Pin, PinOff, Settings2Icon, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import agenteroAppIcon from "@/assets/agentero-app-icon.svg";
 import { MessageResponse } from "@/components/agent/message";
 import { Button } from "@/components/ui/button";
 import { Shimmer } from "@/components/ui/shimmer";
@@ -18,6 +9,11 @@ import { isEditableClipboardTarget } from "@/components/viewer/pdf/host-dom";
 import type { CardScreenPoint } from "@/components/viewer/pdf/types";
 import { copyTextToClipboard } from "@/lib/core/clipboard";
 
+const TRANSLATE_CARD_WIDTH = 340;
+const TRANSLATE_CARD_MIN_WIDTH = 220;
+const TRANSLATE_CARD_MAX_WIDTH = 500;
+const TRANSLATE_CARD_HEIGHT = 480;
+
 type TranslateCardProps = {
 	screen: CardScreenPoint;
 	preferRight?: boolean;
@@ -25,7 +21,6 @@ type TranslateCardProps = {
 		quote?: string;
 		page?: number;
 		title?: string;
-		onLocate: () => void;
 	};
 	/** Translation text (may stream in) */
 	result: string;
@@ -46,8 +41,8 @@ type TranslateCardProps = {
 /**
  * PDF selection translation — shared SelectionCard shell with dismiss / pin.
  * Content-sized up to a generous cap so long paragraphs read in full; only
- * results that overflow the cap (or the viewport) scroll, with an always
- * visible scrollbar so the overflow is discoverable.
+ * results that overflow the cap (or the viewport) scroll, without a visible
+ * scrollbar inside the card.
  */
 export function TranslateCard({
 	screen,
@@ -69,6 +64,12 @@ export function TranslateCard({
 	const scrollPortRef = useRef<HTMLDivElement>(null);
 	const stickToBottomRef = useRef(true);
 	const [copied, setCopied] = useState(false);
+	const quoteText = source
+		? source.quote?.trim() || t("selection.sourcePage", { page: source.page })
+		: "";
+
+	/** Smallest height that still shows the header and source quote. */
+	const [resizeMinHeight, setResizeMinHeight] = useState<number>();
 
 	useEffect(() => {
 		// This nonmodal card stays open when focus leaves it. Scope the keys to
@@ -136,35 +137,48 @@ export function TranslateCard({
 		el.scrollTop = el.scrollHeight;
 	}, [result, streaming]);
 
+	// Keep the source context visible when the card is shrunk: the floor is
+	// everything above the translation scrollport (header + quote + margins).
+	useEffect(() => {
+		const port = scrollPortRef.current;
+		const card = port?.closest<HTMLElement>('[role="dialog"]');
+		if (!port || !card) return;
+		const measure = () => {
+			setResizeMinHeight(Math.ceil(card.offsetHeight - port.clientHeight));
+		};
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(card);
+		observer.observe(port);
+		return () => observer.disconnect();
+	}, []);
+
 	return (
 		<SelectionCard
 			screen={screen}
-			width={340}
-			height={480}
+			width={TRANSLATE_CARD_WIDTH}
+			height={TRANSLATE_CARD_HEIGHT}
 			// Content-sized: hug the anchor and shrink near viewport edges instead
 			// of pre-shifting by the full preferred height.
 			trackPin
 			draggable
 			resizable
+			resizeMinWidth={TRANSLATE_CARD_MIN_WIDTH}
+			resizeMaxWidth={TRANSLATE_CARD_MAX_WIDTH}
+			// Never shrink past the header + source quote (0 until measured).
+			resizeMinHeight={resizeMinHeight ?? 0}
 			preferRight={preferRight}
+			preferBelow
+			// Opaque card: the default translucent shell picks up the white paper
+			// behind it and reads as a washed-out gray in the dark theme.
+			className="bg-background!"
+			// Slightly tighter header than other selection cards.
+			headerClassName="pt-2 pb-1.5"
 			title={t("selection.translateTitle")}
-			icon={<img src={agenteroAppIcon} alt="" className="size-5 rounded" />}
 			ariaLive="polite"
 			onPointerEnter={onPointerEnter}
 			onPointerLeave={onPointerLeave}
-			// Leave WebKit's native resize corner outside the nested scrollport.
-			className="pb-3"
 			actions={[
-				...(source
-					? [
-							{
-								id: "locate",
-								label: t("selection.locateSource"),
-								onClick: source.onLocate,
-								icon: <LocateFixed />,
-							},
-						]
-					: []),
 				...(showResult
 					? [
 							{
@@ -202,31 +216,25 @@ export function TranslateCard({
 					shortcut: "Escape",
 				},
 			]}
-			// Body only constrains flex; the translation owns its own scrollport.
-			bodyClassName="min-h-0 overflow-hidden p-0"
+			// Body only constrains flex; the content owns its own scrollport so the
+			// card body never scrolls and never draws a bar under the resize grip.
+			bodyClassName="min-h-0 overflow-hidden p-0 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden!"
 		>
-			{source ? (
-				<div className="mx-2.5 mt-2 flex min-h-6 shrink-0 flex-col justify-end border-border/70 border-l-2 pl-2 text-muted-foreground">
-					{source.title && (
-						<button
-							type="button"
-							className="mb-1 truncate text-left text-xs hover:text-foreground"
-							onClick={source.onLocate}
-						>
-							{source.title}
-						</button>
-					)}
-					<p className="line-clamp-2 break-words text-xs leading-relaxed">
-						{source.quote?.trim() ||
-							t("selection.sourcePage", { page: source.page })}
-					</p>
-				</div>
-			) : null}
 			<div
 				ref={scrollPortRef}
 				onScroll={handleScroll}
-				className="agentero-scroll agentero-scroll-visible mx-2.5 mt-2 flex min-h-0 flex-1 flex-col gap-1.5 overflow-x-hidden overflow-y-auto rounded-md border border-border/70 px-2.5 py-2"
+				className="agentero-scroll mx-3 mt-2 mb-2.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-x-hidden overflow-y-auto py-0.5 pr-0.5 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden!"
 			>
+				{source ? (
+					<div className="flex min-h-6 shrink-0 flex-col justify-end gap-0.5 border-border/60 border-l-2 pr-2.5 pl-2.5 text-muted-foreground">
+						{source.title && (
+							<div className="mb-0.5 truncate font-medium text-[11px] tracking-[0.01em]">
+								{source.title}
+							</div>
+						)}
+						<p className="break-words text-xs leading-relaxed">{quoteText}</p>
+					</div>
+				) : null}
 				{showLoading ? (
 					<Shimmer className="text-sm" as="p">
 						{t("selection.translating")}
@@ -234,7 +242,7 @@ export function TranslateCard({
 				) : null}
 
 				{showResult ? (
-					<MessageResponse className="min-w-0 whitespace-pre-wrap break-words text-[0.875rem] text-foreground leading-snug">
+					<MessageResponse className="min-w-0 whitespace-pre-wrap break-words text-[0.9375rem] text-foreground leading-relaxed">
 						{result}
 					</MessageResponse>
 				) : null}

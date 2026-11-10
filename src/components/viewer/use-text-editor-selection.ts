@@ -50,6 +50,7 @@ function selectionMenuScreen(view: EditorView): SelectionDraftScreen | null {
 	if (selection.empty) return null;
 	const start = view.coordsAtPos(selection.from, -1);
 	const end = view.coordsAtPos(selection.to, 1);
+	const head = view.coordsAtPos(selection.head);
 	if (!start) return null;
 	const sameLine = end != null && Math.abs(end.top - start.top) < 1;
 	const x =
@@ -62,6 +63,9 @@ function selectionMenuScreen(view: EditorView): SelectionDraftScreen | null {
 	return {
 		x,
 		y: top,
+		// CodeMirror keeps the move endpoint in `head`; follow it for placement.
+		side: selection.head >= selection.anchor ? "below" : "above",
+		cursorX: head?.left,
 		selectionBounds: {
 			left: Math.min(start.left, end?.left ?? start.left),
 			top,
@@ -100,10 +104,7 @@ export function useTextEditorSelection({
 
 	const hideMenu = useCallback(() => {
 		menuRef.current = null;
-		if (
-			selectionChatStore.getState().draft?.selection.id === ownedId.current &&
-			selectionChatStore.getState().draft?.stage === "menu"
-		)
+		if (selectionChatStore.getState().draft?.selection.id === ownedId.current)
 			dismissSelectionChat();
 		if (publishedRef.current) {
 			publishedRef.current = false;
@@ -137,7 +138,6 @@ export function useTextEditorSelection({
 				lineTo,
 			},
 			screen,
-			"menu",
 		);
 		ownedId.current = selectionChatStore.getState().draft?.selection.id ?? null;
 		publishedRef.current = true;
@@ -215,7 +215,7 @@ export function useTextEditorSelection({
 				return;
 			menuRef.current = { ...current, screen };
 			const draft = selectionChatStore.getState().draft;
-			if (draft?.stage === "menu" && draft.selection.id === ownedId.current)
+			if (draft?.selection.id === ownedId.current)
 				selectionChatStore.setState({ draft: { ...draft, screen } });
 		};
 		window.addEventListener("scroll", onScroll, true);

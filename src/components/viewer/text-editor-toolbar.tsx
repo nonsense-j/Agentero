@@ -62,7 +62,6 @@ export function TextEditorToolbar({
 						{tx("insertCitation")}
 					</Button>
 				) : null}
-
 				<Popover open={open} onOpenChange={setOpen}>
 					<PopoverTrigger asChild>
 						<Button
