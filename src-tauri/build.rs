@@ -54,7 +54,9 @@ fn forward_build_env() {
     for key in BUILD_ENV_KEYS {
         println!("cargo:rerun-if-env-changed={key}");
     }
-    println!("cargo:rerun-if-changed={}", dotenv.display());
+    if dotenv.exists() {
+        println!("cargo:rerun-if-changed={}", dotenv.display());
+    }
     if BUILD_ENV_KEYS.iter().all(|key| env::var(key).is_ok()) {
         return;
     }

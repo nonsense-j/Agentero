@@ -36,6 +36,34 @@ const outDir = path.join(root, "src-tauri", "pdfium");
 
 fs.mkdirSync(outDir, { recursive: true });
 
+if (
+	process.platform === "win32" &&
+	!process.env.HTTPS_PROXY &&
+	!process.env.HTTP_PROXY
+) {
+	try {
+		const out = execFileSync(
+			"reg",
+			[
+				"query",
+				"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+			],
+			{ encoding: "utf8", windowsHide: true },
+		);
+		if (/\bProxyEnable\s+REG_DWORD\s+0x1\b/i.test(out)) {
+			const raw = /\bProxyServer\s+REG_SZ\s+([^\r\n]+)/i.exec(out)?.[1]?.trim();
+			if (raw) {
+				const url = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`;
+				process.env.HTTP_PROXY = url;
+				process.env.HTTPS_PROXY = url;
+				process.env.NODE_USE_ENV_PROXY = "1";
+			}
+		}
+	} catch {}
+} else if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
+	process.env.NODE_USE_ENV_PROXY ||= "1";
+}
+
 function hostTriple() {
 	try {
 		return execFileSync("rustc", ["--print", "host-tuple"], {
@@ -245,6 +273,14 @@ if (extractIndex !== -1) {
 }
 
 let src = findStaged();
+if (!src && fs.existsSync(dest) && fs.statSync(dest).size >= 1024 * 1024) {
+	fs.mkdirSync(cacheLibDir, { recursive: true });
+	fs.mkdirSync(path.join(cacheDir, "include"), { recursive: true });
+	fs.mkdirSync(path.join(cacheDir, "lib"), { recursive: true });
+	const cachedPath = path.join(cacheLibDir, libName);
+	fs.copyFileSync(dest, cachedPath);
+	src = cachedPath;
+}
 if (!src) {
 	await download();
 	src = findStaged();

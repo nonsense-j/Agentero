@@ -257,9 +257,6 @@ mod build_tesseract {
         );
 
         println!("cargo:rerun-if-changed=build.rs");
-        println!("cargo:rerun-if-changed={}", third_party_dir.display());
-        println!("cargo:rerun-if-changed={}", leptonica_dir.display());
-        println!("cargo:rerun-if-changed={}", tesseract_dir.display());
 
         println!(
             "cargo:rustc-link-search=native={}",
@@ -503,13 +500,16 @@ mod build_tesseract {
                     "libleptonica.lib".to_string(),
                     "leptonica-static.lib".to_string(),
                     "leptonica-1.84.1.lib".to_string(),
+                    "leptonica-1.84.1d.lib".to_string(),
                 ],
                 "tesseract" => vec![
                     "tesseract.lib".to_string(),
                     "libtesseract.lib".to_string(),
                     "tesseract-static.lib".to_string(),
                     "tesseract53.lib".to_string(),
+                    "tesseract53d.lib".to_string(),
                     "tesseract54.lib".to_string(),
+                    "tesseract54d.lib".to_string(),
                 ],
                 _ => vec![format!("{}.lib", name)],
             }
@@ -522,10 +522,12 @@ mod build_tesseract {
 
         if cached_path.exists() {
             println!("Using cached {} library", name);
-            if let Err(e) = fs::copy(&cached_path, &out_path) {
-                println!("cargo:warning=Failed to copy cached library: {}", e);
-                // If cache copy fails, rebuild
-                build_fn();
+            if !out_path.exists() {
+                if let Err(e) = fs::copy(&cached_path, &out_path) {
+                    println!("cargo:warning=Failed to copy cached library: {}", e);
+                    // If cache copy fails, rebuild
+                    build_fn();
+                }
             }
         } else {
             println!("Building {} library", name);

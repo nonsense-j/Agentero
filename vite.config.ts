@@ -1,9 +1,57 @@
 /// <reference types="vitest" />
 
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+
+function applyWindowsSystemProxyToNodeEnv(): void {
+	if (process.platform !== "win32") return;
+	if (
+		process.env.HTTPS_PROXY ||
+		process.env.https_proxy ||
+		process.env.HTTP_PROXY ||
+		process.env.http_proxy ||
+		process.env.ALL_PROXY ||
+		process.env.all_proxy
+	) {
+		process.env.NODE_USE_ENV_PROXY ||= "1";
+		return;
+	}
+	try {
+		const out = execFileSync(
+			"reg",
+			[
+				"query",
+				"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+			],
+			{ encoding: "utf8", windowsHide: true },
+		);
+		const enabled = /\bProxyEnable\s+REG_DWORD\s+0x1\b/i.test(out);
+		if (!enabled) return;
+		const serverMatch = /\bProxyServer\s+REG_SZ\s+([^\r\n]+)/i.exec(out);
+		const rawServer = serverMatch?.[1]?.trim();
+		if (!rawServer) return;
+		const firstEntry =
+			rawServer
+				.split(";")
+				.map((s) => s.trim())
+				.find((s) => s.startsWith("http=") || s.startsWith("https="))
+				?.replace(/^https?=/i, "") ?? rawServer.split(";")[0]?.trim();
+		if (!firstEntry) return;
+		const proxyUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstEntry)
+			? firstEntry
+			: `http://${firstEntry}`;
+		process.env.HTTP_PROXY = proxyUrl;
+		process.env.HTTPS_PROXY = proxyUrl;
+		process.env.NODE_USE_ENV_PROXY = "1";
+	} catch {
+		// Ignore registry query failures.
+	}
+}
+
+applyWindowsSystemProxyToNodeEnv();
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;

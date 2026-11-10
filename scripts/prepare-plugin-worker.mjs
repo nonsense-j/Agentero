@@ -97,10 +97,18 @@ if (size < MIN_BYTES) {
 const outDir = path.join(root, "src-tauri", "binaries");
 fs.mkdirSync(outDir, { recursive: true });
 const dest = path.join(outDir, `agentero-plugin-host-${triple}${ext}`);
-fs.copyFileSync(src, dest);
-try {
-	fs.chmodSync(dest, 0o755);
-} catch {
-	// windows
+const unchanged =
+	fs.existsSync(dest) &&
+	fs.statSync(dest).size === size &&
+	fs.readFileSync(src).equals(fs.readFileSync(dest));
+if (!unchanged) {
+	fs.copyFileSync(src, dest);
+	try {
+		fs.chmodSync(dest, 0o755);
+	} catch {
+		// windows
+	}
 }
-console.log(`[prepare-plugin-worker] ${src} → ${dest}`);
+console.log(
+	`[prepare-plugin-worker] ${src} → ${dest}${unchanged ? " (unchanged)" : ""}`,
+);
