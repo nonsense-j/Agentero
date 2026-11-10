@@ -109,7 +109,7 @@ export const DEFAULT_COLLECTION_VENUES: readonly VenueConfig[] = [
 	{
 		id: "issta-2026",
 		name: "ISSTA 2026",
-		url: "https://conf.researchr.org/track/issta-2026/issta-2026-papers?#event-overview",
+		url: "https://conf.researchr.org/track/issta-2026/issta-2026-research-papers?#event-overview",
 		mode: "auto",
 	},
 	{
@@ -149,6 +149,55 @@ function isLegacyDefaultCategories(cats: string[]): boolean {
 
 let memoryState: CollectionState | null = null;
 
+function migrateCachedVenues(venues: VenueConfig[]): VenueConfig[] {
+	return venues.map((venue) => {
+		if (
+			venue.id === "issta-2026" &&
+			venue.url.includes("/issta-2026/issta-2026-papers")
+		) {
+			return {
+				...venue,
+				url: "https://conf.researchr.org/track/issta-2026/issta-2026-research-papers?#event-overview",
+			};
+		}
+		return venue;
+	});
+}
+
+function sanitizeCachedItems(
+	items: CollectionPaperItem[],
+): CollectionPaperItem[] {
+	const researchrVenueIds = new Set([
+		"ase-2026",
+		"icse-2026",
+		"fse-2026",
+		"issta-2026",
+		"pldi-2026",
+	]);
+	const out: CollectionPaperItem[] = [];
+	for (const item of items) {
+		if (
+			item.sourceType === "venue" &&
+			item.venueId &&
+			researchrVenueIds.has(item.venueId) &&
+			(!Array.isArray(item.authors) || item.authors.length === 0)
+		) {
+			// Drop schedule modal non-paper entries (e.g. "ICSE Yoga", "Welcome") from legacy cache.
+			continue;
+		}
+		const cleanedTitle = item.title
+			.replace(
+				/\s*(?:Distinguished Paper|Virtual Attendance|Artifact Available|Artifact Evaluated)\s*$/gi,
+				"",
+			)
+			.trim();
+		out.push(
+			cleanedTitle !== item.title ? { ...item, title: cleanedTitle } : item,
+		);
+	}
+	return out;
+}
+
 export function loadCollectionState(): CollectionState {
 	const raw = readJsonStorage<Partial<CollectionState> | null>(
 		STORAGE_KEY,
@@ -161,11 +210,16 @@ export function loadCollectionState(): CollectionState {
 	const categories = isLegacyDefaultCategories(rawCategories)
 		? [...DEFAULT_ARXIV_CATEGORIES]
 		: rawCategories;
-	const venues =
+	const rawVenues =
 		Array.isArray(raw?.venues) && raw.venues.length > 0
-			? raw.venues
+			? migrateCachedVenues(raw.venues)
 			: [...DEFAULT_COLLECTION_VENUES];
-	const items = Array.isArray(raw?.items) ? raw.items : [];
+	const existingIds = new Set(rawVenues.map((v) => v.id));
+	const venues = [
+		...rawVenues,
+		...DEFAULT_COLLECTION_VENUES.filter((v) => !existingIds.has(v.id)),
+	];
+	const items = Array.isArray(raw?.items) ? sanitizeCachedItems(raw.items) : [];
 	return {
 		categories,
 		venues,
@@ -387,14 +441,46 @@ export function parseArxivAtomXml(
 	return items;
 }
 
+async function fetchArxivCategoryWithRetry(
+	cat: string,
+	cleanCats: readonly string[],
+	maxResults: number,
+	startOffset = 0,
+): Promise<CollectionPaperItem[]> {
+	const apiUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&start=${startOffset}&max_results=${maxResults}`;
+	let lastErr: unknown = null;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			const xml = await plazaFetchText(
+				apiUrl,
+				"application/atom+xml,text/xml,*/*",
+			);
+			const parsed = parseArxivAtomXml(xml, TARGET_YEAR, {
+				preferredCategories: cleanCats,
+				defaultCategory: cat,
+			});
+			if (parsed.length > 0 || attempt === 2) {
+				return parsed;
+			}
+		} catch (err) {
+			lastErr = err;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+	}
+	if (lastErr) throw lastErr;
+	return [];
+}
+
 /**
  * Fetch 2026 arXiv papers for the given categories (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`).
- * Queries each category independently in parallel so high-volume categories (`cs.AI`)
- * never crowd out specialized categories (`cs.SE`, `cs.PL`, `cs.CR`).
+ * Queries each category independently in parallel with retry so high-volume categories (`cs.AI`)
+ * never crowd out specialized categories (`cs.SE`, `cs.PL`, `cs.CR`) and transient throttling
+ * never drops a category.
  */
 export async function fetchArxivCollection(
 	categories: readonly string[],
-	maxResultsPerCategory = 60,
+	maxResultsPerCategory = 120,
+	startOffset = 0,
 ): Promise<{
 	items: CollectionPaperItem[];
 	latest: ArxivLatestRecord | null;
@@ -404,41 +490,49 @@ export async function fetchArxivCollection(
 		return { items: [], latest: null };
 	}
 	const perCatResults = await Promise.allSettled(
-		cleanCats.map(async (cat) => {
-			const apiUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResultsPerCategory}`;
+		cleanCats.map((cat) =>
+			fetchArxivCategoryWithRetry(
+				cat,
+				cleanCats,
+				maxResultsPerCategory,
+				startOffset,
+			),
+		),
+	);
+
+	const groups: CollectionPaperItem[][] = [];
+	const failedCats: string[] = [];
+	for (let i = 0; i < cleanCats.length; i++) {
+		const outcome = perCatResults[i];
+		const cat = cleanCats[i];
+		if (outcome?.status === "fulfilled" && outcome.value.length > 0) {
+			groups.push(outcome.value);
+		} else if (cat) {
+			failedCats.push(cat);
+		}
+	}
+
+	if (failedCats.length > 0) {
+		try {
+			const catQuery =
+				failedCats.length === 1
+					? `cat:${failedCats[0]}`
+					: `(${failedCats.map((c) => `cat:${c}`).join("+OR+")})`;
+			const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&start=${startOffset}&max_results=${maxResultsPerCategory * failedCats.length}`;
 			const xml = await plazaFetchText(
 				apiUrl,
 				"application/atom+xml,text/xml,*/*",
 			);
-			return parseArxivAtomXml(xml, TARGET_YEAR, {
-				preferredCategories: cleanCats,
-				defaultCategory: cat,
-			});
-		}),
-	);
-
-	const groups: CollectionPaperItem[][] = [];
-	for (const outcome of perCatResults) {
-		if (outcome.status === "fulfilled" && outcome.value.length > 0) {
-			groups.push(outcome.value);
+			groups.push(
+				parseArxivAtomXml(xml, TARGET_YEAR, {
+					preferredCategories: cleanCats,
+				}),
+			);
+		} catch {
+			if (groups.length === 0) {
+				throw new Error("Failed to fetch arXiv categories");
+			}
 		}
-	}
-
-	if (groups.length === 0) {
-		const catQuery =
-			cleanCats.length === 1
-				? `cat:${cleanCats[0]}`
-				: `(${cleanCats.map((c) => `cat:${c}`).join("+OR+")})`;
-		const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&max_results=${maxResultsPerCategory * cleanCats.length}`;
-		const xml = await plazaFetchText(
-			apiUrl,
-			"application/atom+xml,text/xml,*/*",
-		);
-		groups.push(
-			parseArxivAtomXml(xml, TARGET_YEAR, {
-				preferredCategories: cleanCats,
-			}),
-		);
 	}
 
 	const items = mergeCollectionItems(groups);
@@ -453,6 +547,46 @@ export async function fetchArxivCollection(
 			}
 		: null;
 	return { items, latest };
+}
+
+/**
+ * Paginate deeper into 2026 arXiv submissions across all configured categories
+ * and merge them into the persisted Paper Collection state.
+ */
+export async function fetchMoreArxivCollection(options?: {
+	categories?: readonly string[];
+	startOffset?: number;
+	maxResultsPerCategory?: number;
+}): Promise<{ state: CollectionState; addedCount: number }> {
+	const current = loadCollectionState();
+	const categories =
+		options?.categories && options.categories.length > 0
+			? [...options.categories]
+			: current.categories;
+	const maxPerCat = options?.maxResultsPerCategory ?? 100;
+	const existingArxivCount = current.items.filter(
+		(i) => i.sourceType === "arxiv",
+	).length;
+	const defaultOffset = Math.max(
+		60,
+		Math.floor(existingArxivCount / Math.max(1, categories.length)),
+	);
+	const startOffset = options?.startOffset ?? defaultOffset;
+
+	const fetched = await fetchArxivCollection(
+		categories,
+		maxPerCat,
+		startOffset,
+	);
+	const merged = mergeCollectionItems([current.items, fetched.items]);
+	const addedCount = Math.max(0, merged.length - current.items.length);
+	const nextState: CollectionState = {
+		...current,
+		items: merged,
+		lastRefreshedAt: new Date().toISOString(),
+	};
+	saveCollectionState(nextState);
+	return { state: nextState, addedCount };
 }
 
 /**
@@ -617,9 +751,79 @@ export async function checkArxivCollectionUpdate(
 	};
 }
 
+function stripResearchrBadges(rawTitleHtmlOrText: string): string {
+	return rawTitleHtmlOrText
+		.replace(
+			/<span[^>]*class=["'][^"']*(?:pull-right|output-badge|badge)[^"']*["'][^>]*>[\s\S]*?<\/span>/gi,
+			" ",
+		)
+		.replace(/<[^>]+>/g, " ")
+		.replace(
+			/\s*(?:Distinguished Paper|Virtual Attendance|Artifact Available|Artifact Evaluated)\s*$/gi,
+			"",
+		)
+		.trim();
+}
+
+function extractResearchrPublicationMeta(
+	rowHtml: string,
+	baseUrl: string,
+): {
+	url: string;
+	arxivId?: string;
+	pdfUrl?: string;
+	doi?: string;
+} {
+	let url = baseUrl;
+	let arxivId: string | undefined;
+	let pdfUrl: string | undefined;
+	let doi: string | undefined;
+
+	const pubLinkMatch =
+		/<a[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*publication-link[^"']*["']/i.exec(
+			rowHtml,
+		) ??
+		/<a[^>]*class=["'][^"']*publication-link[^"']*["'][^>]*href=["']([^"']+)["']/i.exec(
+			rowHtml,
+		);
+	const rawLink = pubLinkMatch?.[1]?.trim();
+	if (rawLink && rawLink !== "#" && !rawLink.startsWith("javascript:")) {
+		try {
+			url = new URL(rawLink, baseUrl).href;
+		} catch {
+			url = rawLink;
+		}
+	}
+
+	const arxivMatch = /arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,5})(?:v\d+)?/i.exec(
+		rowHtml,
+	);
+	if (arxivMatch?.[1]) {
+		arxivId = arxivMatch[1];
+		pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
+		if (url === baseUrl) {
+			url = `https://arxiv.org/abs/${arxivId}`;
+		}
+	}
+
+	const doiMatch =
+		/(?:doi\.org|dl\.acm\.org\/doi(?:\/abs|\/pdf)?)\/(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i.exec(
+			rowHtml,
+		);
+	if (doiMatch?.[1]) {
+		doi = doiMatch[1].replace(/[.,;>)"']+$/, "");
+		if (url === baseUrl) {
+			url = `https://doi.org/${doi}`;
+		}
+	}
+
+	return { url, arxivId, pdfUrl, doi };
+}
+
 /**
  * Deterministic parser for `conf.researchr.org/track/<conf>/<track>` HTML pages.
- * Extracts accepted papers from `#event-overview` and program tables.
+ * Extracts accepted papers from `#event-overview` and program tables while
+ * filtering out non-paper schedule rows (e.g. "ICSE Yoga", "Welcome") and badge labels.
  */
 export function parseResearchrHtml(
 	html: string,
@@ -634,9 +838,10 @@ export function parseResearchrHtml(
 	if (typeof DOMParser !== "undefined") {
 		try {
 			const doc = new DOMParser().parseFromString(html, "text/html");
-			const rows = doc.querySelectorAll(
-				"#event-overview tr, table.table-condensed tr, table.table tr",
-			);
+			const overview = doc.getElementById("event-overview");
+			const rows = overview
+				? overview.querySelectorAll("tr")
+				: doc.querySelectorAll("table.table-condensed tr, table.table tr");
 			for (const row of rows) {
 				const titleAnchor =
 					row.querySelector<HTMLAnchorElement>("a[data-event-modal]") ??
@@ -644,12 +849,20 @@ export function parseResearchrHtml(
 						"td a[href*='/details/'], td strong a",
 					);
 				if (!titleAnchor) continue;
-				const title = cleanWhitespace(titleAnchor.textContent ?? "");
-				if (!title || title.length < 6) continue;
-				const normTitle = title.toLowerCase();
-				if (seenTitles.has(normTitle)) continue;
-				seenTitles.add(normTitle);
 
+				// Clone anchor and strip award/attendance badge elements before reading title text.
+				const anchorClone = titleAnchor.cloneNode(true) as HTMLElement;
+				for (const badge of anchorClone.querySelectorAll(
+					".pull-right, .output-badge, .badge, [data-facet-badge]",
+				)) {
+					badge.remove();
+				}
+				const title = stripResearchrBadges(
+					cleanWhitespace(anchorClone.textContent ?? ""),
+				);
+				if (!title || title.length < 6) continue;
+
+				const performersContainer = row.querySelector(".performers");
 				const authorEls = row.querySelectorAll(".performers a, .performers");
 				const authors: string[] = [];
 				if (authorEls.length > 0) {
@@ -659,9 +872,9 @@ export function parseResearchrHtml(
 							if (name && !authors.includes(name)) authors.push(name);
 						}
 					}
-					if (authors.length === 0) {
+					if (authors.length === 0 && performersContainer) {
 						const rawAuthors = cleanWhitespace(
-							row.querySelector(".performers")?.textContent ?? "",
+							performersContainer.textContent ?? "",
 						);
 						for (const part of rawAuthors.split(",")) {
 							const name = part.trim();
@@ -669,15 +882,25 @@ export function parseResearchrHtml(
 						}
 					}
 				}
+				// Real accepted papers on conf.researchr.org always have a .performers block with authors;
+				// schedule modal entries ("ICSE Yoga", "Welcome", coffee breaks) do not.
+				if (authors.length === 0) continue;
+
+				const normTitle = title.toLowerCase();
+				if (seenTitles.has(normTitle)) continue;
+				seenTitles.add(normTitle);
 
 				const trackText = cleanWhitespace(
 					row.querySelector(".prog-track")?.textContent ?? venue.name,
 				);
 				const href = titleAnchor.getAttribute("href") ?? "";
+				const pubMeta = extractResearchrPublicationMeta(row.innerHTML, baseUrl);
 				const itemUrl =
-					href && href !== "#" && !href.startsWith("javascript:")
-						? new URL(href, baseUrl).href
-						: baseUrl;
+					pubMeta.url !== baseUrl
+						? pubMeta.url
+						: href && href !== "#" && !href.startsWith("javascript:")
+							? new URL(href, baseUrl).href
+							: baseUrl;
 
 				const slug = normTitle
 					.replace(/[^a-z0-9]+/g, "-")
@@ -685,7 +908,11 @@ export function parseResearchrHtml(
 					.slice(0, 64);
 
 				results.push({
-					id: `venue:${venue.id}:${slug}`,
+					id: pubMeta.doi
+						? `doi:${pubMeta.doi.toLowerCase()}`
+						: pubMeta.arxivId
+							? `arxiv:${pubMeta.arxivId}`
+							: `venue:${venue.id}:${slug}`,
 					title,
 					authors,
 					abstract: trackText ? `${venue.name} · ${trackText}` : venue.name,
@@ -695,6 +922,9 @@ export function parseResearchrHtml(
 					sourceLabel: venue.name,
 					categories: [venue.name, ...(trackText ? [trackText] : [])],
 					url: itemUrl,
+					pdfUrl: pubMeta.pdfUrl,
+					arxivId: pubMeta.arxivId,
+					doi: pubMeta.doi,
 					venueId: venue.id,
 				});
 			}
@@ -704,34 +934,59 @@ export function parseResearchrHtml(
 	}
 
 	if (results.length === 0) {
-		const rowRegex =
-			/<a[^>]*data-event-modal=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>([\s\S]*?)<\/tr>/gi;
-		for (const match of html.matchAll(rowRegex)) {
-			const title = decodeHtmlEntities(match[2] ?? "");
+		const overviewIdx = html.search(/id=["']event-overview["']/i);
+		const scopedHtml = overviewIdx >= 0 ? html.slice(overviewIdx) : html;
+		const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+		for (const trMatch of scopedHtml.matchAll(trRegex)) {
+			const rowHtml = trMatch[1] ?? "";
+			if (!/class=["'][^"']*performers/i.test(rowHtml)) continue;
+			const anchorMatch =
+				/<a[^>]*data-event-modal=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(
+					rowHtml,
+				);
+			if (!anchorMatch) continue;
+			const rawTitle = stripResearchrBadges(anchorMatch[2] ?? "");
+			const title = decodeHtmlEntities(rawTitle);
 			if (!title || title.length < 6) continue;
-			const normTitle = title.toLowerCase();
-			if (seenTitles.has(normTitle)) continue;
-			seenTitles.add(normTitle);
 
-			const tail = match[3] ?? "";
 			const authors: string[] = [];
 			const performersBlock =
 				/<div[^>]*class=["'][^"']*performers[^"']*["'][^>]*>([\s\S]*?)<\/div>/i.exec(
-					tail,
-				)?.[1] ?? tail;
+					rowHtml,
+				)?.[1] ?? "";
 			for (const aMatch of performersBlock.matchAll(
 				/<a[^>]*>([\s\S]*?)<\/a>/gi,
 			)) {
 				const name = decodeHtmlEntities(aMatch[1] ?? "");
 				if (name && !authors.includes(name)) authors.push(name);
 			}
+			if (authors.length === 0 && performersBlock) {
+				const plainPerformers = decodeHtmlEntities(
+					performersBlock.replace(/<[^>]+>/g, " "),
+				);
+				for (const part of plainPerformers.split(",")) {
+					const name = part.trim();
+					if (name) authors.push(name);
+				}
+			}
+			if (authors.length === 0) continue;
+
+			const normTitle = title.toLowerCase();
+			if (seenTitles.has(normTitle)) continue;
+			seenTitles.add(normTitle);
+
+			const pubMeta = extractResearchrPublicationMeta(rowHtml, baseUrl);
 			const slug = normTitle
 				.replace(/[^a-z0-9]+/g, "-")
 				.replace(/^-|-$/g, "")
 				.slice(0, 64);
 
 			results.push({
-				id: `venue:${venue.id}:${slug}`,
+				id: pubMeta.doi
+					? `doi:${pubMeta.doi.toLowerCase()}`
+					: pubMeta.arxivId
+						? `arxiv:${pubMeta.arxivId}`
+						: `venue:${venue.id}:${slug}`,
 				title,
 				authors,
 				abstract: `${venue.name} Accepted Paper`,
@@ -740,7 +995,10 @@ export function parseResearchrHtml(
 				sourceType: "venue",
 				sourceLabel: venue.name,
 				categories: [venue.name],
-				url: baseUrl,
+				url: pubMeta.url,
+				pdfUrl: pubMeta.pdfUrl,
+				arxivId: pubMeta.arxivId,
+				doi: pubMeta.doi,
 				venueId: venue.id,
 			});
 		}
@@ -931,7 +1189,64 @@ async function fetchDblpForVenue(
 		}
 		return mergeCollectionItems([crossrefItems, out]);
 	} catch {
-		return crossrefItems;
+		if (crossrefItems.length > 0) return crossrefItems;
+		try {
+			const oaUrl = `https://api.openalex.org/works?search=${q}&per_page=35&filter=from_publication_date:${year}-01-01&mailto=agentero@users.noreply.github.com`;
+			const oaData = await plazaFetchJson<{
+				results?: Array<{
+					id?: string;
+					title?: string;
+					publication_year?: number;
+					publication_date?: string;
+					doi?: string | null;
+					primary_location?: {
+						landing_page_url?: string | null;
+						pdf_url?: string | null;
+						source?: { display_name?: string | null } | null;
+					} | null;
+					authorships?: Array<{
+						author?: { display_name?: string | null };
+					}>;
+				}>;
+			}>(oaUrl);
+			const out: CollectionPaperItem[] = [];
+			for (const row of oaData.results ?? []) {
+				const title = decodeHtmlEntities(row.title ?? "");
+				if (!title) continue;
+				const itemYear = row.publication_year ?? year;
+				if (itemYear < TARGET_YEAR) continue;
+				const doi =
+					(row.doi ?? "").replace(/^https?:\/\/doi\.org\//i, "").trim() ||
+					undefined;
+				const authors = (row.authorships ?? [])
+					.map((a) => (a.author?.display_name ?? "").trim())
+					.filter(Boolean);
+				const slug = title
+					.toLowerCase()
+					.replace(/[^a-z0-9]+/g, "-")
+					.slice(0, 64);
+				out.push({
+					id: doi ? `doi:${doi.toLowerCase()}` : `venue:${venue.id}:${slug}`,
+					title,
+					authors,
+					abstract: `${venue.name}${row.primary_location?.source?.display_name ? ` · ${row.primary_location.source.display_name}` : ""}`,
+					publishedAt: `${row.publication_date || `${itemYear}-01-01`}T00:00:00Z`,
+					year: itemYear,
+					sourceType: "venue",
+					sourceLabel: venue.name,
+					categories: [venue.name],
+					url:
+						row.primary_location?.landing_page_url ||
+						(doi ? `https://doi.org/${doi}` : venue.url),
+					pdfUrl: row.primary_location?.pdf_url || undefined,
+					doi,
+					venueId: venue.id,
+				});
+			}
+			return out;
+		} catch {
+			return crossrefItems;
+		}
 	}
 }
 
@@ -1123,14 +1438,17 @@ export async function refreshPaperCollection(options?: {
 	const venues = options?.venues ?? current.venues;
 
 	const [arxivOutcome, ...venueOutcomes] = await Promise.allSettled([
-		fetchArxivCollection(categories, 100),
+		fetchArxivCollection(categories, 150),
 		...venues.map((v) => fetchSingleVenuePapers(v)),
 	]);
 
+	const existingArxivItems = current.items.filter(
+		(i) => i.sourceType === "arxiv",
+	);
 	const arxivItems =
 		arxivOutcome.status === "fulfilled"
-			? arxivOutcome.value.items
-			: current.items.filter((i) => i.sourceType === "arxiv");
+			? mergeCollectionItems([arxivOutcome.value.items, existingArxivItems])
+			: existingArxivItems;
 	const latestArxiv =
 		arxivOutcome.status === "fulfilled" && arxivOutcome.value.latest
 			? arxivOutcome.value.latest
@@ -1139,7 +1457,7 @@ export async function refreshPaperCollection(options?: {
 	const nowIso = new Date().toISOString();
 	const updatedVenues: VenueConfig[] = venues.map((venue, idx) => {
 		const outcome = venueOutcomes[idx];
-		if (outcome?.status === "fulfilled") {
+		if (outcome?.status === "fulfilled" && outcome.value.length > 0) {
 			return {
 				...venue,
 				lastFetchedAt: nowIso,
@@ -1150,7 +1468,7 @@ export async function refreshPaperCollection(options?: {
 	});
 
 	const venueItemGroups = venueOutcomes.map((outcome, idx) => {
-		if (outcome.status === "fulfilled") {
+		if (outcome.status === "fulfilled" && outcome.value.length > 0) {
 			return outcome.value;
 		}
 		const venueId = venues[idx]?.id;

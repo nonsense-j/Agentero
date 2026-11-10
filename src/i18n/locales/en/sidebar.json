@@ -268,6 +268,8 @@
 			"updateAvailable": "New arXiv submissions available",
 			"allTags": "All",
 			"loading": "Collecting 2026 papers from arXiv & Venues…",
+			"loadMoreArxiv": "Load more arXiv papers",
+			"loadingMoreArxiv": "Loading more arXiv papers…",
 			"empty": "No papers collected yet. Click refresh to fetch 2026 papers.",
 			"emptyFiltered": "No papers match the current filter."
 		},

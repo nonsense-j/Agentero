@@ -140,8 +140,89 @@ function normalizeTitleKey(title: string): string {
 		.trim();
 }
 
+async function searchCrossrefGeneral(
+	query: string,
+	maxResults: number,
+	yearFrom: number | undefined,
+	targetSource: DiscoverSourceId,
+	containerQuery?: string,
+): Promise<DiscoverPaper[]> {
+	const filters: string[] = [];
+	if (yearFrom) {
+		filters.push(`from-pub-date:${yearFrom}`);
+	}
+	const filterParam =
+		filters.length > 0
+			? `&filter=${encodeURIComponent(filters.join(","))}`
+			: "";
+	const containerParam = containerQuery
+		? `&query.container-title=${encodeURIComponent(containerQuery)}`
+		: "";
+	const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}${containerParam}${filterParam}&rows=${Math.min(maxResults * 2, 30)}&sort=relevance&mailto=agentero@users.noreply.github.com`;
+	const data = await plazaFetchJson<{
+		message?: {
+			items?: Array<{
+				DOI?: string;
+				title?: string[];
+				abstract?: string;
+				author?: Array<{ given?: string; family?: string }>;
+				"container-title"?: string[];
+				"is-referenced-by-count"?: number;
+				published?: { "date-parts"?: number[][] };
+				"published-print"?: { "date-parts"?: number[][] };
+				"published-online"?: { "date-parts"?: number[][] };
+			}>;
+		};
+	}>(url);
+
+	const items = data.message?.items ?? [];
+	const out: DiscoverPaper[] = [];
+
+	for (const item of items) {
+		const doi = (item.DOI ?? "").trim();
+		const title = cleanText(item.title?.[0] ?? "");
+		if (!doi || !title) continue;
+
+		const dateParts =
+			item["published-print"]?.["date-parts"]?.[0] ??
+			item["published-online"]?.["date-parts"]?.[0] ??
+			item.published?.["date-parts"]?.[0] ??
+			[];
+		const year = typeof dateParts[0] === "number" ? dateParts[0] : null;
+		if (yearFrom && year && year < yearFrom) continue;
+
+		const authors = (item.author ?? [])
+			.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
+			.filter(Boolean);
+		const venue = cleanText(
+			item["container-title"]?.[0] ?? targetSource.toUpperCase(),
+		);
+		const abstract = cleanText(item.abstract ?? "");
+
+		out.push({
+			id: `doi:${doi.toLowerCase()}`,
+			title,
+			authors,
+			abstract,
+			year,
+			venue,
+			source: targetSource,
+			sources: [targetSource],
+			doi,
+			arxivId: "",
+			url: `https://doi.org/${doi}`,
+			pdfUrl: "",
+			citationCount: item["is-referenced-by-count"] ?? 0,
+			matchedQueries: [query],
+		});
+		if (out.length >= maxResults) break;
+	}
+	return out;
+}
+
 /**
  * Ported from `dr-dumpling/PaperSearch/src/platforms/DBLPSearcher.ts`.
+ * Falls back to Crossref when `dblp.org` is rate-limited or behind an anti-bot gate.
  */
 async function searchDblp(
 	query: string,
@@ -150,102 +231,108 @@ async function searchDblp(
 ): Promise<DiscoverPaper[]> {
 	const q = encodeURIComponent(query.trim());
 	const url = `https://dblp.org/search/publ/api?q=${q}&format=json&h=${Math.min(maxResults * 2, 50)}&c=0`;
-	const data = await plazaFetchJson<{
-		result?: {
-			hits?: {
-				hit?:
-					| Array<{
-							"@id"?: string;
-							info?: {
-								title?: string;
-								venue?: string;
-								year?: string;
-								doi?: string;
-								ee?: string | string[];
-								url?: string;
-								key?: string;
-								authors?: {
-									author?:
-										| Array<{ text?: string } | string>
-										| { text?: string }
-										| string;
+	try {
+		const data = await plazaFetchJson<{
+			result?: {
+				hits?: {
+					hit?:
+						| Array<{
+								"@id"?: string;
+								info?: {
+									title?: string;
+									venue?: string;
+									year?: string;
+									doi?: string;
+									ee?: string | string[];
+									url?: string;
+									key?: string;
+									authors?: {
+										author?:
+											| Array<{ text?: string } | string>
+											| { text?: string }
+											| string;
+									};
 								};
-							};
-					  }>
-					| {
-							"@id"?: string;
-							info?: {
-								title?: string;
-								venue?: string;
-								year?: string;
-								doi?: string;
-								ee?: string | string[];
-								url?: string;
-								key?: string;
-								authors?: {
-									author?:
-										| Array<{ text?: string } | string>
-										| { text?: string }
-										| string;
+						  }>
+						| {
+								"@id"?: string;
+								info?: {
+									title?: string;
+									venue?: string;
+									year?: string;
+									doi?: string;
+									ee?: string | string[];
+									url?: string;
+									key?: string;
+									authors?: {
+										author?:
+											| Array<{ text?: string } | string>
+											| { text?: string }
+											| string;
+									};
 								};
-							};
-					  };
+						  };
+				};
 			};
-		};
-	}>(url);
+		}>(url);
 
-	const rawHit = data.result?.hits?.hit;
-	const hits = Array.isArray(rawHit) ? rawHit : rawHit ? [rawHit] : [];
-	const out: DiscoverPaper[] = [];
+		const rawHit = data.result?.hits?.hit;
+		const hits = Array.isArray(rawHit) ? rawHit : rawHit ? [rawHit] : [];
+		const out: DiscoverPaper[] = [];
 
-	for (const hit of hits) {
-		const info = hit.info;
-		if (!info?.title) continue;
-		const year = info.year ? Number(info.year) || null : null;
-		if (yearFrom && year && year < yearFrom) continue;
+		for (const hit of hits) {
+			const info = hit.info;
+			if (!info?.title) continue;
+			const year = info.year ? Number(info.year) || null : null;
+			if (yearFrom && year && year < yearFrom) continue;
 
-		const rawAuthors = info.authors?.author;
-		const authorArr = Array.isArray(rawAuthors)
-			? rawAuthors
-			: rawAuthors
-				? [rawAuthors]
-				: [];
-		const authors = authorArr
-			.map((a) => (typeof a === "string" ? a : (a.text ?? "")))
-			.map((s) => s.trim())
-			.filter(Boolean);
+			const rawAuthors = info.authors?.author;
+			const authorArr = Array.isArray(rawAuthors)
+				? rawAuthors
+				: rawAuthors
+					? [rawAuthors]
+					: [];
+			const authors = authorArr
+				.map((a) => (typeof a === "string" ? a : (a.text ?? "")))
+				.map((s) => s.trim())
+				.filter(Boolean);
 
-		const doi = (info.doi ?? "").trim();
-		const ee = Array.isArray(info.ee) ? (info.ee[0] ?? "") : (info.ee ?? "");
-		const itemUrl = ee || (doi ? `https://doi.org/${doi}` : (info.url ?? ""));
-		const title = cleanText(info.title.replace(/\.$/, ""));
-		const venue = cleanText(info.venue ?? "DBLP");
-		const arxivMatch = /arxiv\.org\/abs\/([^\s/?#]+)/i.exec(ee);
-		const arxivId = arxivMatch ? arxivMatch[1].replace(/v\d+$/i, "") : "";
+			const doi = (info.doi ?? "").trim();
+			const ee = Array.isArray(info.ee) ? (info.ee[0] ?? "") : (info.ee ?? "");
+			const itemUrl = ee || (doi ? `https://doi.org/${doi}` : (info.url ?? ""));
+			const title = cleanText(info.title.replace(/\.$/, ""));
+			const venue = cleanText(info.venue ?? "DBLP");
+			const arxivMatch = /arxiv\.org\/abs\/([^\s/?#]+)/i.exec(ee);
+			const arxivId = arxivMatch ? arxivMatch[1].replace(/v\d+$/i, "") : "";
 
-		out.push({
-			id: doi
-				? `doi:${doi.toLowerCase()}`
-				: info.key
-					? `dblp:${info.key}`
-					: `dblp:${normalizeTitleKey(title)}`,
-			title,
-			authors,
-			abstract: "",
-			year,
-			venue,
-			source: "dblp",
-			sources: ["dblp"],
-			doi,
-			arxivId,
-			url: itemUrl || `https://dblp.org/rec/${info.key ?? ""}`,
-			pdfUrl: arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : "",
-			citationCount: 0,
-			matchedQueries: [query],
-		});
-		if (out.length >= maxResults) break;
+			out.push({
+				id: doi
+					? `doi:${doi.toLowerCase()}`
+					: info.key
+						? `dblp:${info.key}`
+						: `dblp:${normalizeTitleKey(title)}`,
+				title,
+				authors,
+				abstract: "",
+				year,
+				venue,
+				source: "dblp",
+				sources: ["dblp"],
+				doi,
+				arxivId,
+				url: itemUrl || `https://dblp.org/rec/${info.key ?? ""}`,
+				pdfUrl: arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : "",
+				citationCount: 0,
+				matchedQueries: [query],
+			});
+			if (out.length >= maxResults) break;
+		}
+		if (out.length > 0) return out;
+	} catch {
+		// Fall through to Crossref fallback when dblp.org returns non-JSON or 429.
 	}
-	return out;
+
+	return await searchCrossrefGeneral(query, maxResults, yearFrom, "dblp");
 }
 
 /**
@@ -345,7 +432,7 @@ async function searchUsenix(
 		Math.max(maxResults * 3, 24),
 		yearFrom,
 	);
-	return dblpItems
+	const matched = dblpItems
 		.filter((paper) => {
 			const hay =
 				`${paper.title} ${paper.venue} ${paper.url} ${paper.doi}`.toLowerCase();
@@ -355,8 +442,17 @@ async function searchUsenix(
 			...paper,
 			source: "usenix" as const,
 			sources: ["usenix" as const],
+			matchedQueries: [query],
 		}))
 		.slice(0, maxResults);
+	if (matched.length > 0) return matched;
+	return await searchCrossrefGeneral(
+		query,
+		maxResults,
+		yearFrom,
+		"usenix",
+		"USENIX",
+	);
 }
 
 /**
@@ -528,6 +624,24 @@ async function searchArxiv(
 	}));
 }
 
+function reconstructOpenAlexAbstract(
+	invertedIndex: Record<string, number[]> | null | undefined,
+): string {
+	if (!invertedIndex || typeof invertedIndex !== "object") return "";
+	const words: Array<[number, string]> = [];
+	for (const [word, positions] of Object.entries(invertedIndex)) {
+		if (!Array.isArray(positions)) continue;
+		for (const pos of positions) {
+			if (typeof pos === "number") {
+				words.push([pos, word]);
+			}
+		}
+	}
+	if (words.length === 0) return "";
+	words.sort((a, b) => a[0] - b[0]);
+	return cleanText(words.map((w) => w[1]).join(" "));
+}
+
 async function searchSemanticScholar(
 	query: string,
 	maxResults: number,
@@ -535,63 +649,67 @@ async function searchSemanticScholar(
 ): Promise<DiscoverPaper[]> {
 	const yearParam = yearFrom ? `&year=${yearFrom}-` : "";
 	const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=${Math.min(maxResults, 25)}&fields=title,authors,year,abstract,venue,externalIds,url,openAccessPdf,citationCount${yearParam}`;
-	const data = await plazaFetchJson<{
-		data?: Array<{
-			paperId?: string;
-			title?: string;
-			abstract?: string | null;
-			year?: number | null;
-			venue?: string | null;
-			url?: string | null;
-			citationCount?: number | null;
-			authors?: Array<{ name?: string }>;
-			externalIds?: { DOI?: string; ArXiv?: string };
-			openAccessPdf?: { url?: string };
-		}>;
-	}>(url);
+	try {
+		const data = await plazaFetchJson<{
+			data?: Array<{
+				paperId?: string;
+				title?: string;
+				abstract?: string | null;
+				year?: number | null;
+				venue?: string | null;
+				url?: string | null;
+				citationCount?: number | null;
+				authors?: Array<{ name?: string }>;
+				externalIds?: { DOI?: string; ArXiv?: string };
+				openAccessPdf?: { url?: string };
+			}>;
+		}>(url);
 
-	const rows = data.data ?? [];
-	const out: DiscoverPaper[] = [];
-	for (const row of rows) {
-		const title = cleanText(row.title ?? "");
-		if (!title) continue;
-		const doi = (row.externalIds?.DOI ?? "").trim();
-		const arxivId = (row.externalIds?.ArXiv ?? "").trim();
-		const pdfUrl =
-			row.openAccessPdf?.url ??
-			(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : "");
-		const itemUrl =
-			row.url ||
-			(doi
-				? `https://doi.org/${doi}`
-				: arxivId
-					? `https://arxiv.org/abs/${arxivId}`
-					: "");
+		const rows = data.data ?? [];
+		const out: DiscoverPaper[] = [];
+		for (const row of rows) {
+			const title = cleanText(row.title ?? "");
+			if (!title) continue;
+			const doi = (row.externalIds?.DOI ?? "").trim();
+			const arxivId = (row.externalIds?.ArXiv ?? "").trim();
+			const pdfUrl =
+				row.openAccessPdf?.url ??
+				(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : "");
+			const itemUrl =
+				row.url ||
+				(doi
+					? `https://doi.org/${doi}`
+					: arxivId
+						? `https://arxiv.org/abs/${arxivId}`
+						: "");
 
-		out.push({
-			id: doi
-				? `doi:${doi.toLowerCase()}`
-				: arxivId
-					? `arxiv:${arxivId}`
-					: `s2:${row.paperId ?? normalizeTitleKey(title)}`,
-			title,
-			authors: (row.authors ?? [])
-				.map((a) => (a.name ?? "").trim())
-				.filter(Boolean),
-			abstract: cleanText(row.abstract ?? ""),
-			year: row.year ?? null,
-			venue: cleanText(row.venue || (arxivId ? "arXiv" : "Semantic Scholar")),
-			source: "s2",
-			sources: ["s2"],
-			doi,
-			arxivId,
-			url: itemUrl,
-			pdfUrl,
-			citationCount: row.citationCount ?? 0,
-			matchedQueries: [query],
-		});
+			out.push({
+				id: doi
+					? `doi:${doi.toLowerCase()}`
+					: arxivId
+						? `arxiv:${arxivId}`
+						: `s2:${row.paperId ?? normalizeTitleKey(title)}`,
+				title,
+				authors: (row.authors ?? [])
+					.map((a) => (a.name ?? "").trim())
+					.filter(Boolean),
+				abstract: cleanText(row.abstract ?? ""),
+				year: row.year ?? null,
+				venue: cleanText(row.venue || (arxivId ? "arXiv" : "Semantic Scholar")),
+				source: "s2",
+				sources: ["s2"],
+				doi,
+				arxivId,
+				url: itemUrl,
+				pdfUrl,
+				citationCount: row.citationCount ?? 0,
+				matchedQueries: [query],
+			});
+		}
+		return out;
+	} catch {
+		return await searchCrossrefGeneral(query, maxResults, yearFrom, "s2");
 	}
-	return out;
 }
 
 async function searchOpenAlex(
@@ -602,62 +720,78 @@ async function searchOpenAlex(
 	const filterParam = yearFrom
 		? `&filter=from_publication_date:${yearFrom}-01-01`
 		: "";
-	const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=${Math.min(maxResults, 25)}${filterParam}`;
-	const data = await plazaFetchJson<{
-		results?: Array<{
-			id?: string;
-			title?: string;
-			publication_year?: number;
-			doi?: string | null;
-			cited_by_count?: number;
-			primary_location?: {
-				landing_page_url?: string | null;
-				pdf_url?: string | null;
-				source?: { display_name?: string | null } | null;
-			} | null;
-			authorships?: Array<{
-				author?: { display_name?: string | null };
+	const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per_page=${Math.min(maxResults, 25)}${filterParam}&mailto=agentero@users.noreply.github.com`;
+	try {
+		const data = await plazaFetchJson<{
+			results?: Array<{
+				id?: string;
+				title?: string;
+				publication_year?: number;
+				doi?: string | null;
+				cited_by_count?: number;
+				abstract_inverted_index?: Record<string, number[]> | null;
+				primary_location?: {
+					landing_page_url?: string | null;
+					pdf_url?: string | null;
+					source?: { display_name?: string | null } | null;
+				} | null;
+				authorships?: Array<{
+					author?: { display_name?: string | null };
+				}>;
 			}>;
-		}>;
-	}>(url);
+		}>(url);
 
-	const rows = data.results ?? [];
-	const out: DiscoverPaper[] = [];
-	for (const row of rows) {
-		const title = cleanText(row.title ?? "");
-		if (!title) continue;
-		const rawDoi = (row.doi ?? "")
-			.replace(/^https?:\/\/doi\.org\//i, "")
-			.trim();
-		const venue = cleanText(
-			row.primary_location?.source?.display_name ?? "OpenAlex",
-		);
-		const itemUrl =
-			row.primary_location?.landing_page_url ||
-			(rawDoi ? `https://doi.org/${rawDoi}` : (row.id ?? ""));
+		const rows = data.results ?? [];
+		const out: DiscoverPaper[] = [];
+		for (const row of rows) {
+			const title = cleanText(row.title ?? "");
+			if (!title) continue;
+			const rawDoi = (row.doi ?? "")
+				.replace(/^https?:\/\/doi\.org\//i, "")
+				.trim();
+			const venue = cleanText(
+				row.primary_location?.source?.display_name ?? "OpenAlex",
+			);
+			const itemUrl =
+				row.primary_location?.landing_page_url ||
+				(rawDoi ? `https://doi.org/${rawDoi}` : (row.id ?? ""));
+			const arxivFromDoi = /^10\.48550\/arxiv\.(\d{4}\.\d{4,5})/i.exec(
+				rawDoi,
+			)?.[1];
+			const arxivFromUrl = /arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,5})/i.exec(
+				itemUrl,
+			)?.[1];
+			const arxivId = arxivFromDoi || arxivFromUrl || "";
 
-		out.push({
-			id: rawDoi
-				? `doi:${rawDoi.toLowerCase()}`
-				: `openalex:${row.id ?? normalizeTitleKey(title)}`,
-			title,
-			authors: (row.authorships ?? [])
-				.map((a) => (a.author?.display_name ?? "").trim())
-				.filter(Boolean),
-			abstract: "",
-			year: row.publication_year ?? null,
-			venue,
-			source: "openalex",
-			sources: ["openalex"],
-			doi: rawDoi,
-			arxivId: "",
-			url: itemUrl,
-			pdfUrl: row.primary_location?.pdf_url ?? "",
-			citationCount: row.cited_by_count ?? 0,
-			matchedQueries: [query],
-		});
+			out.push({
+				id: rawDoi
+					? `doi:${rawDoi.toLowerCase()}`
+					: arxivId
+						? `arxiv:${arxivId}`
+						: `openalex:${row.id ?? normalizeTitleKey(title)}`,
+				title,
+				authors: (row.authorships ?? [])
+					.map((a) => (a.author?.display_name ?? "").trim())
+					.filter(Boolean),
+				abstract: reconstructOpenAlexAbstract(row.abstract_inverted_index),
+				year: row.publication_year ?? null,
+				venue,
+				source: "openalex",
+				sources: ["openalex"],
+				doi: rawDoi,
+				arxivId,
+				url: itemUrl,
+				pdfUrl:
+					row.primary_location?.pdf_url ||
+					(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : ""),
+				citationCount: row.cited_by_count ?? 0,
+				matchedQueries: [query],
+			});
+		}
+		return out;
+	} catch {
+		return await searchCrossrefGeneral(query, maxResults, yearFrom, "openalex");
 	}
-	return out;
 }
 
 /**

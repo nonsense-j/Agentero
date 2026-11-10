@@ -79,13 +79,19 @@ describe("Plaza AI & SE overhaul", () => {
 		expect(items[0]?.sourceLabel).toBe("cs.SE");
 	});
 
-	it("extracts accepted papers from conf.researchr.org #event-overview HTML", () => {
+	it("extracts accepted papers from conf.researchr.org #event-overview HTML while ignoring schedule noise and award badges", () => {
 		const html = `
+<div class="schedule-modal">
+  <table class="table-condensed">
+    <tr><td><a href="#" data-event-modal="yoga-1">ICSE Yoga</a></td></tr>
+  </table>
+</div>
 <div id="event-overview">
   <table>
     <tr>
       <td>
-        <a href="#" data-event-modal="event-1">Automated Program Repair via Neuro-Symbolic Execution</a>
+        <a href="#" data-event-modal="event-1">Automated Program Repair via Neuro-Symbolic Execution<span class="pull-right">Distinguished Paper</span></a>
+        <a href="https://arxiv.org/abs/2602.09876" class="publication-link">Preprint</a>
         <div class="performers"><a href="/profile/1">Jane Doe</a>, <a href="/profile/2">John Roe</a></div>
       </td>
     </tr>
@@ -101,6 +107,7 @@ describe("Plaza AI & SE overhaul", () => {
 			"Automated Program Repair via Neuro-Symbolic Execution",
 		);
 		expect(papers[0]?.authors).toEqual(["Jane Doe", "John Roe"]);
+		expect(papers[0]?.arxivId).toBe("2602.09876");
 		expect(papers[0]?.sourceLabel).toBe("ICSE 2026");
 	});
 

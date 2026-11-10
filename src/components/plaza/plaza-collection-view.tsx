@@ -51,6 +51,7 @@ import {
 	type CollectionState,
 	checkArxivCollectionUpdate,
 	DEFAULT_ARXIV_CATEGORIES,
+	fetchMoreArxivCollection,
 	loadCollectionState,
 	mergeCollectionItems,
 	refreshPaperCollection,
@@ -79,6 +80,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
 	const [batchImporting, setBatchImporting] = useState(false);
+	const [loadingMore, setLoadingMore] = useState(false);
+	const [arxivOffset, setArxivOffset] = useState(150);
 	const mountedRef = useRef(false);
 	const checkTimerRef = useRef<number | null>(null);
 
@@ -112,6 +115,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				venues: state.venues,
 			});
 			setState(next);
+			setArxivOffset(150);
 		} catch (err) {
 			notifyError(errorText(err));
 		} finally {
@@ -119,16 +123,60 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		}
 	}, [busy, state.categories, state.venues]);
 
-	// Initial load: if empty, refresh automatically; otherwise check for arXiv updates silently.
+	const handleLoadMoreArxiv = useCallback(async () => {
+		if (loadingMore || busy) return;
+		setLoadingMore(true);
+		try {
+			const targetCats =
+				subFilter && state.categories.includes(subFilter)
+					? [subFilter]
+					: state.categories;
+			const { state: next } = await fetchMoreArxivCollection({
+				categories: targetCats,
+				startOffset: arxivOffset,
+				maxResultsPerCategory: 100,
+			});
+			setState(next);
+			setArxivOffset((prev) => prev + 100);
+		} catch (err) {
+			notifyError(errorText(err));
+		} finally {
+			setLoadingMore(false);
+		}
+	}, [arxivOffset, busy, loadingMore, state.categories, subFilter]);
+
+	// Initial load: if empty or any configured category/venue is missing from cache, refresh automatically; otherwise check for arXiv updates silently.
 	useEffect(() => {
 		if (mountedRef.current) return;
 		mountedRef.current = true;
-		if (state.items.length === 0) {
+		const missingCategory = state.categories.some(
+			(cat) =>
+				!state.items.some(
+					(item) =>
+						item.sourceType === "arxiv" &&
+						(item.sourceLabel === cat || item.categories.includes(cat)),
+				),
+		);
+		const missingVenue = state.venues.some(
+			(venue) =>
+				!state.items.some(
+					(item) =>
+						item.sourceType === "venue" &&
+						(item.venueId === venue.id || item.sourceLabel === venue.name),
+				),
+		);
+		if (state.items.length === 0 || missingCategory || missingVenue) {
 			void handleRefresh();
 		} else {
 			void runCheckUpdate(true);
 		}
-	}, [handleRefresh, runCheckUpdate, state.items.length]);
+	}, [
+		handleRefresh,
+		runCheckUpdate,
+		state.categories,
+		state.items,
+		state.venues,
+	]);
 
 	// Trigger update check and on-demand arXiv category search when user searches (debounced).
 	const handleQueryChange = useCallback(
@@ -560,6 +608,31 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								onImport={() => void importPapers([paper])}
 							/>
 						))}
+						{sourceFilter !== "venue" &&
+						(!subFilter || state.categories.includes(subFilter)) ? (
+							<div className="flex justify-center py-2">
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={loadingMore || busy}
+									onClick={() => void handleLoadMoreArxiv()}
+									className="h-7 gap-1.5 text-xs"
+								>
+									{loadingMore ? (
+										<>
+											<Loader2 className="size-3.5 animate-spin" />
+											<span>{t("plaza.collection.loadingMoreArxiv")}</span>
+										</>
+									) : (
+										<>
+											<RefreshCw className="size-3.5" />
+											<span>{t("plaza.collection.loadMoreArxiv")}</span>
+										</>
+									)}
+								</Button>
+							</div>
+						) : null}
 					</div>
 				)}
 			</div>
