@@ -371,7 +371,7 @@
 		"ccfDeadlines": {
 			"label": "CCF Deadline",
 			"rankAll": "全部",
-			"focusAiSe": "AI / SE / 安全 / PL",
+			"focusCollection": "关注会议",
 			"searchPlaceholder": "筛选会议名称…",
 			"modeNative": "原生列表",
 			"filterLabel": "按 CCF 评级筛选",

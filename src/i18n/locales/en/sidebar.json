@@ -371,7 +371,7 @@
 		"ccfDeadlines": {
 			"label": "CCF Deadline",
 			"rankAll": "All",
-			"focusAiSe": "AI / SE / Sec / PL",
+			"focusCollection": "Collection",
 			"searchPlaceholder": "Filter conferences…",
 			"modeNative": "List",
 			"filterLabel": "Filter by CCF rank",

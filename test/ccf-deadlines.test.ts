@@ -3,6 +3,8 @@ import {
 	ccfDeadlineInstant,
 	ccfNextYearDeadline,
 	ccfTimezoneOffsetHours,
+	extractCollectionVenueKeys,
+	filterCcfDeadlinesByVenues,
 	parseCcfDeadlines,
 	predictCcfDeadlines,
 } from "@/lib/plaza/ccf-deadlines";
@@ -212,5 +214,67 @@ describe("predictCcfDeadlines", () => {
 			now,
 		);
 		expect(item?.year).toBe(2027);
+	});
+});
+
+describe("filterCcfDeadlinesByVenues", () => {
+	const now = Date.UTC(2026, 0, 1);
+	const payload = {
+		conferences: [
+			{
+				title: "ICSE",
+				conference_key: "SE/icse",
+				rank: { ccf: "A" },
+				confs: [
+					{
+						id: "icse27",
+						year: 2027,
+						link: "https://icse.example",
+						timezone: "AoE",
+						timeline: [{ deadline: "2026-08-01 23:59:59" }],
+					},
+				],
+			},
+			{
+				title: "ESEC/FSE",
+				conference_key: "SE/fse",
+				rank: { ccf: "A" },
+				confs: [
+					{
+						id: "fse27",
+						year: 2027,
+						link: "https://fse.example",
+						timezone: "AoE",
+						timeline: [{ deadline: "2026-09-10 23:59:59" }],
+					},
+				],
+			},
+			{
+				title: "SIGGRAPH",
+				conference_key: "CG/siggraph",
+				rank: { ccf: "A" },
+				confs: [
+					{
+						id: "siggraph27",
+						year: 2027,
+						link: "https://siggraph.example",
+						timezone: "AoE",
+						timeline: [{ deadline: "2026-05-01 23:59:59" }],
+					},
+				],
+			},
+		],
+	};
+
+	it("keeps only deadlines matching Collection venues", () => {
+		const all = parseCcfDeadlines(payload, now);
+		const filtered = filterCcfDeadlinesByVenues(all, [
+			{ id: "icse-2026", name: "ICSE 2026" },
+			{ id: "fse-2026", name: "FSE 2026" },
+		]);
+		expect(filtered.map((item) => item.title)).toEqual(["ICSE", "ESEC/FSE"]);
+		expect([
+			...extractCollectionVenueKeys([{ name: "IEEE S&P 2026" }]),
+		]).toEqual(expect.arrayContaining(["IEEE S&P", "S&P"]));
 	});
 });

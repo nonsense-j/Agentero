@@ -296,7 +296,7 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 | 时区 | `confs[].timezone` 标签换算成瞬时（`AoE` = UTC-12，`PT` = UTC-8，`UTC±N`）；未知标签该项排最后且不给倒计时 |
 | 预测 | 对**没有任何未来官方截稿**的 CCF A/B/C 会议，取最近一届截稿日 +1 年并保留星期几（多数会议锚定「某月第 N 个周四」）生成预计项，标记 `estimated`；为免僵尸会议与过远猜测，限定最近一届在 18 个月内、且预测落在未来 12 个月内。历史部分拉取为**尽力而为**：失败即静默降级为「仅官方截稿」 |
 | 缓存 | 每次打开面板强制拉取（不提供刷新按钮）；失败时回退到 `localStorage` 里上次的结果并 `notifyError` |
-| 呈现 | 单列「接下来要投什么」：单色 CCF 徽标（A 最重 → N 最轻的明度梯度，不用颜色）+ 会议名与年份 + 会议官网外链 + 原站本地截稿时间与时区标签 + 剩余天数（≤3 天加粗强调）；预计项额外带一枚弱化的「预计」角标（Tooltip 说明为往届推算），与官方项按时间混排。头部为半透明吸顶材质（`data-plaza-header`，随 `prefers-reduced-transparency` 退化为实底 + 细边框），内嵌分段控件做 CCF 评级多选（A / B / C / N 可叠加，「全部」清空） |
+| 呈现 | 单列「接下来要投什么」：单色 CCF 徽标（A 最重 → N 最轻的明度梯度，不用颜色）+ 会议名与年份 + 会议官网外链 + 原站本地截稿时间与时区标签 + 剩余天数（≤3 天加粗强调）；预计项额外带一枚弱化的「预计」角标（Tooltip 说明为往届推算），与官方项按时间混排。头部为半透明吸顶材质（`data-plaza-header`，随 `prefers-reduced-transparency` 退化为实底 + 细边框），默认开启「关注会议（Collection）」过滤（直接联动 `Paper Collection` 中配置的关注 `venues`），并支持 CCF 评级多选（A / B / C / N 可叠加，「全部」清空）及右上角一键切换 `ccfddl.com` 官网 |
 | 落点 | `src/lib/plaza/ccf-deadlines.ts`（拉取 / 解析 / 缓存）、`src/components/plaza/plaza-ccf-deadlines-view.tsx`（面板） |
 
 **为什么自建 UI 而非内嵌 ccfddl.top**：数据结构稳定（MIT，schema 3.0.x 带版本号）、CORS 全开、解析成本低；内嵌站点是 jQuery 老表格，且整站 `<base target="_blank">`，仍要写代理改写链接，等于付出代理成本却换不来可用 UI。
@@ -416,4 +416,4 @@ DocTab：`kind: "plaza"`（或 `file` + mode `plaza` + path 虚拟 URI——实�
   1. **Paper Collection (`agentero:plaza/collection`)**：本地优先的 2026 论文池（`src/lib/plaza/collection.ts` + `src/components/plaza/plaza-collection-view.tsx`），分为 `arXiv` 与 `Venue` 两类来源，默认覆盖 `ASE 2026`、`ICSE 2026`、`FSE 2026`、`ISSTA 2026`、`PLDI 2026` 以及顶刊 **`TOSEM 2026`**（`1049-331X`）与 **`TSE 2026`**（`0098-5589`）；支持检索时自动检测 arXiv 最新提交并提醒刷新、固定解析器 + Agent 自定义网页抽取、时间与关键词过滤、单选/多选批量入库。
   2. **Paper Discover (`agentero:plaza/discover`)**：移植 `dr-dumpling/PaperSearch` 的多源纯元数据检索器（`DBLP`、`ACM`、`USENIX`、`OpenReview`、`IACR ePrint`、`arXiv`、`Semantic Scholar`、`OpenAlex`，检索阶段零 PDF 下载），提供「快速检索」与「Grill-Me 式交互式 Agent 深度检索」（动态拆分检索词芯片 + 逐个澄清问题 + 随时一键「立即开始检索 / 不再追问」）。
   3. **Paper Recommend (`agentero:plaza/arxiv-rec`)**：基于可配置推荐关键词芯片从 `Paper Collection` 匹配推送，记录 `pushedIds` 保证历史已推送论文永不重复推送，支持切换 `Recent`（最新推送）与 `Full`（全部历史）视图。
-  4. **CCF Deadline (`agentero:plaza/ccf-deadlines`)**：支持在 Magpie 风格原生截稿列表（含 AI/SE/安全/PL 快捷筛选）与内嵌 `https://ccfddl.com/` 网页视图之间一键切换。
+  4. **CCF Deadline (`agentero:plaza/ccf-deadlines`)**：从 `ccfddl` 同步截稿日程，原生列表默认联动 `Paper Collection` 仅展示所关注会议的截稿倒计时，支持与内嵌 `https://ccfddl.com/` 网页视图一键切换。

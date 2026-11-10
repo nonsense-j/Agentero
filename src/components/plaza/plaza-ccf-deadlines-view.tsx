@@ -36,8 +36,14 @@ import { cn } from "@/lib/core/utils";
 import {
 	type CcfDeadlineItem,
 	type CcfRank,
+	extractCollectionVenueKeys,
 	loadCcfDeadlines,
+	matchesCollectionVenueKeys,
 } from "@/lib/plaza/ccf-deadlines";
+import {
+	loadCollectionState,
+	subscribeCollectionState,
+} from "@/lib/plaza/collection";
 import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 
 const RANKS: readonly CcfRank[] = ["A", "B", "C", "N"];
@@ -49,38 +55,26 @@ const RANK_CLASS: Record<CcfRank, string> = {
 	N: "text-muted-foreground/70",
 };
 
-const SE_AI_SPOTLIGHT = new Set([
-	"ICSE",
-	"FSE",
-	"ESEC/FSE",
-	"ASE",
-	"ISSTA",
-	"PLDI",
-	"POPL",
-	"OOPSLA",
-	"TOSEM",
-	"TSE",
-	"S&P",
-	"USENIX Security",
-	"CCS",
-	"NDSS",
-	"NeurIPS",
-	"ICML",
-	"ICLR",
-	"AAAI",
-	"ACL",
-]);
-
 export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
 	const [items, setItems] = useState<CcfDeadlineItem[]>([]);
 	const [busy, setBusy] = useState(true);
 	const [error, setError] = useState(false);
 	const [rankFilter, setRankFilter] = useState<CcfRank[]>([]);
-	const [focusAiSe, setFocusAiSe] = useState(false);
+	const [collectionVenues, setCollectionVenues] = useState(
+		() => loadCollectionState().venues,
+	);
+	const [focusCollection, setFocusCollection] = useState(true);
 	const [query, setQuery] = useState("");
 	const [displayMode, setDisplayMode] = useState<"native" | "web">("native");
 	const loadedRef = useRef(false);
+
+	useEffect(() => {
+		setCollectionVenues(loadCollectionState().venues);
+		return subscribeCollectionState((state) => {
+			setCollectionVenues(state.venues);
+		});
+	}, []);
 
 	const load = useCallback(async () => {
 		setBusy(true);
@@ -101,20 +95,22 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 		void load();
 	}, [load]);
 
+	const collectionVenueKeys = useMemo(
+		() => extractCollectionVenueKeys(collectionVenues),
+		[collectionVenues],
+	);
+
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		return items.filter((item) => {
 			if (rankFilter.length > 0 && !rankFilter.includes(item.rank)) {
 				return false;
 			}
-			if (focusAiSe) {
-				const upper = item.title.toUpperCase();
-				const matched = Array.from(SE_AI_SPOTLIGHT).some(
-					(v) =>
-						upper === v.toUpperCase() ||
-						upper.startsWith(`${v.toUpperCase()} `),
-				);
-				if (!matched) return false;
+			if (
+				focusCollection &&
+				!matchesCollectionVenueKeys(item, collectionVenueKeys)
+			) {
+				return false;
 			}
 			if (q) {
 				const hay =
@@ -123,7 +119,7 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 			}
 			return true;
 		});
-	}, [focusAiSe, items, query, rankFilter]);
+	}, [collectionVenueKeys, focusCollection, items, query, rankFilter]);
 
 	const toggleRank = (rank: CcfRank) =>
 		setRankFilter((prev) =>
@@ -142,21 +138,22 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 				data-plaza-header
 				className="sticky top-0 z-10 flex flex-wrap items-center gap-2 bg-background/80 px-3 py-2.5 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
 			>
-				<RankFilter
-					selected={rankFilter}
-					onToggle={toggleRank}
-					onClear={() => setRankFilter([])}
-				/>
-
 				{displayMode === "native" ? (
 					<>
+						<RankFilter
+							selected={rankFilter}
+							onToggle={toggleRank}
+							onClear={() => setRankFilter([])}
+						/>
+
 						<button
 							type="button"
-							data-active={focusAiSe}
-							onClick={() => setFocusAiSe((v) => !v)}
+							aria-pressed={focusCollection}
+							data-active={focusCollection}
+							onClick={() => setFocusCollection((v) => !v)}
 							className="magpie-chip"
 						>
-							{t("plaza.ccfDeadlines.focusAiSe")}
+							{t("plaza.ccfDeadlines.focusCollection")}
 						</button>
 
 						<div className="relative min-w-[140px] flex-1">

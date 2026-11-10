@@ -281,10 +281,24 @@ export function predictCcfDeadlines(
 		if (hasFuture || latest === null || latest.at === null) continue;
 		if (latest.at < now - ESTIMATE_RECENT_MS) continue;
 
-		const projected = ccfNextYearDeadline(latest.deadline);
-		if (!projected) continue;
-		const at = ccfDeadlineInstant(projected, latest.timezone);
-		if (at === null || at < now || at > now + ESTIMATE_HORIZON_MS) continue;
+		let projected: string | null = latest.deadline;
+		let at: number | null = latest.at;
+		for (
+			let step = 0;
+			step < 2 && projected && at !== null && at < now;
+			step++
+		) {
+			projected = ccfNextYearDeadline(projected);
+			at = projected ? ccfDeadlineInstant(projected, latest.timezone) : null;
+		}
+		if (
+			!projected ||
+			at === null ||
+			at < now ||
+			at > now + ESTIMATE_HORIZON_MS
+		) {
+			continue;
+		}
 
 		items.push({
 			key: `${conferenceKey}:est:${projected}`,
@@ -300,6 +314,101 @@ export function predictCcfDeadlines(
 		});
 	}
 	return items.sort(compareItems);
+}
+
+export type CollectionVenueLike = {
+	id?: string;
+	name: string;
+};
+
+function normalizeVenueToken(raw: string): string {
+	return raw
+		.toUpperCase()
+		.replace(/\b(?:19|20)\d{2}\b/g, " ")
+		.replace(
+			/\b(?:RESEARCH\s+PAPERS|RESEARCH\s+TRACK|MAIN\s+TRACK|TRACK|PAPERS|CONFERENCE)\b/g,
+			" ",
+		)
+		.replace(/\s+/g, " ")
+		.replace(/^[\s\-_/:,]+|[\s\-_/:,]+$/g, "");
+}
+
+function stripOrgPrefix(token: string): string {
+	return token.replace(/^(?:ACM|IEEE)\s+/i, "").trim();
+}
+
+/**
+ * Extract normalized conference acronym/title keys from Paper Collection
+ * venues (e.g. `{ id: "icse-2026", name: "ICSE 2026" }` -> `"ICSE"`).
+ */
+export function extractCollectionVenueKeys(
+	venues: readonly CollectionVenueLike[],
+): Set<string> {
+	const keys = new Set<string>();
+	const addToken = (raw: string) => {
+		const norm = normalizeVenueToken(raw);
+		if (!norm) return;
+		keys.add(norm);
+		const stripped = stripOrgPrefix(norm);
+		if (stripped) keys.add(stripped);
+		if (norm.includes("/")) {
+			for (const part of norm.split("/")) {
+				const sub = normalizeVenueToken(part);
+				if (sub) keys.add(sub);
+			}
+		}
+	};
+
+	for (const venue of venues) {
+		if (venue.name) addToken(venue.name);
+		if (venue.id) {
+			const cleanedId = venue.id
+				.replace(/-(?:19|20)\d{2}$/i, "")
+				.replace(/-/g, " ");
+			addToken(cleanedId);
+		}
+	}
+	return keys;
+}
+
+/**
+ * Check whether a CCF deadline item belongs to the given normalized Collection
+ * venue key set. Matches conference title, slash-separated aliases (e.g.
+ * `ESEC/FSE` <-> `FSE`), and upstream `conference_key` slug (`SE/fse`).
+ */
+export function matchesCollectionVenueKeys(
+	item: Pick<CcfDeadlineItem, "title" | "key">,
+	venueKeys: ReadonlySet<string>,
+): boolean {
+	if (venueKeys.size === 0) return false;
+	const titleNorm = normalizeVenueToken(item.title);
+	if (titleNorm) {
+		if (venueKeys.has(titleNorm)) return true;
+		const stripped = stripOrgPrefix(titleNorm);
+		if (stripped && venueKeys.has(stripped)) return true;
+		if (titleNorm.includes("/")) {
+			for (const part of titleNorm.split("/")) {
+				const sub = normalizeVenueToken(part);
+				if (sub && venueKeys.has(sub)) return true;
+			}
+		}
+	}
+	const confKey = item.key.split(":")[0] ?? "";
+	const slug = confKey.includes("/")
+		? (confKey.split("/").pop() ?? "")
+		: confKey;
+	const slugNorm = normalizeVenueToken(slug);
+	return Boolean(slugNorm && venueKeys.has(slugNorm));
+}
+
+/** Filter CCF deadlines to only conferences present in Paper Collection. */
+export function filterCcfDeadlinesByVenues(
+	items: readonly CcfDeadlineItem[],
+	venues: readonly CollectionVenueLike[],
+): CcfDeadlineItem[] {
+	const keys = extractCollectionVenueKeys(venues);
+	if (keys.size === 0) return [];
+	return items.filter((item) => matchesCollectionVenueKeys(item, keys));
 }
 
 type CcfCache = { fetchedAt: number; items: CcfDeadlineItem[] };
