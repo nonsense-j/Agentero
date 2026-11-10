@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -28,12 +29,11 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. Refusing to publish an unsigned updater release."
-            exit 1
+            echo "::warning::Missing TAURI_SIGNING_PRIVATE_KEY. Proceeding with unsigned release artifacts."
+            exit 0
           fi
           if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
-            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD."
-            exit 1
+            echo "::warning::Missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD. Proceeding without password."
           fi
 
       - name: Create draft GitHub Release
@@ -41,7 +41,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Agentero ${{ github.ref_name }}
-          draft: true
+          draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             Installers and CLI for Agentero ${{ github.ref_name }}.
@@ -180,6 +180,25 @@ jobs:
             echo "APPLE_TEAM_ID=${TEAM}" >> "$GITHUB_ENV"
           fi
 
+      - name: Configure updater artifacts for unsigned fork builds
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "HAS_UPDATER_KEY=false" >> "$GITHUB_ENV"
+            node -e '
+              const fs = require("fs");
+              const p = "src-tauri/tauri.conf.json";
+              const c = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (c.bundle) c.bundle.createUpdaterArtifacts = false;
+              fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+            '
+          else
+            echo "HAS_UPDATER_KEY=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Build Tauri installers
         uses: tauri-apps/tauri-action@v1
         env:
@@ -218,13 +237,13 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Agentero ${{ github.ref_name }}
-          # Body is set by the prepare job; keep draft + same tag.
-          releaseDraft: true
+          # Body is set by the prepare job; keep same tag.
+          releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           # The action merges per-platform signed artifacts into latest.json.
           # NSIS supports user-level update installation; prefer it over MSI.
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
+          uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
+          uploadUpdaterSignatures: ${{ env.HAS_UPDATER_KEY == 'true' }}
           updaterJsonPreferNsis: true
 
   # tauri-action writes api.github.com asset URLs into latest.json; anonymous
@@ -243,7 +262,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: node scripts/rewrite-updater-json.mjs
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "Skipping updater manifest rewrite for unsigned release."
+            exit 0
+          fi
+          node scripts/rewrite-updater-json.mjs
 
   # Android ships its own signed APK into the same draft. Kept out of the
   # `installers` matrix because it needs the Android SDK/NDK and a keystore
@@ -473,7 +498,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          draft: true
+          draft: false
           files: |
             ${{ env.CLI_ASSET }}
             dist-cli/*.sha256
