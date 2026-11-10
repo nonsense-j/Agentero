@@ -10,6 +10,7 @@ import {
 	Globe,
 	LayoutList,
 	Loader2,
+	RefreshCw,
 	Search,
 	X,
 } from "lucide-react";
@@ -44,7 +45,6 @@ import {
 	loadCollectionState,
 	subscribeCollectionState,
 } from "@/lib/plaza/collection";
-import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 
 const RANKS: readonly CcfRank[] = ["A", "B", "C", "N"];
 
@@ -114,7 +114,7 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 			}
 			if (q) {
 				const hay =
-					`${item.title} ${item.comment ?? ""} ${item.year}`.toLowerCase();
+					`${item.title} ${item.description ?? ""} ${item.sub ?? ""} ${item.comment ?? ""} ${item.place ?? ""} ${item.year}`.toLowerCase();
 				if (!hay.includes(q)) return false;
 			}
 			return true;
@@ -182,25 +182,49 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 				) : null}
 
 				{/* Native vs Web Mode Segmented Toggle */}
-				<div className="magpie-seg ml-auto">
-					<button
-						type="button"
-						data-active={displayMode === "native"}
-						onClick={() => setDisplayMode("native")}
-						className="magpie-seg-btn"
-					>
-						<LayoutList className="size-3" />
-						<span>{t("plaza.ccfDeadlines.modeNative")}</span>
-					</button>
-					<button
-						type="button"
-						data-active={displayMode === "web"}
-						onClick={() => setDisplayMode("web")}
-						className="magpie-seg-btn"
-					>
-						<Globe className="size-3" />
-						<span>ccfddl.com</span>
-					</button>
+				<div className="ml-auto flex items-center gap-1.5">
+					{displayMode === "native" ? (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									disabled={busy}
+									onClick={() => void load()}
+									aria-label={t("plaza.reload")}
+								>
+									{busy ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<RefreshCw className="size-3.5" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>{t("plaza.reload")}</TooltipContent>
+						</Tooltip>
+					) : null}
+
+					<div className="magpie-seg">
+						<button
+							type="button"
+							data-active={displayMode === "native"}
+							onClick={() => setDisplayMode("native")}
+							className="magpie-seg-btn"
+						>
+							<LayoutList className="size-3" />
+							<span>{t("plaza.ccfDeadlines.modeNative")}</span>
+						</button>
+						<button
+							type="button"
+							data-active={displayMode === "web"}
+							onClick={() => setDisplayMode("web")}
+							className="magpie-seg-btn"
+						>
+							<Globe className="size-3" />
+							<span>ccfddl.com</span>
+						</button>
+					</div>
 				</div>
 			</div>
 
@@ -208,7 +232,7 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 				<div className="min-h-0 flex-1">
 					<PlazaWebFrame
 						homeUrl="https://ccfddl.com/"
-						embedOrigin={webViewProxyUrl("https://ccfddl.com/")}
+						embedOrigin={null}
 						lastPathStorageKey="agentero:plaza:ccf-deadlines:last-path"
 						title="ccfddl.com"
 						className="h-full w-full"
@@ -255,6 +279,9 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 				? t("plaza.ccfDeadlines.today")
 				: t("plaza.ccfDeadlines.daysLeft", { days });
 
+	const metaParts = [item.comment, item.place, item.date].filter(Boolean);
+	const metaText = metaParts.join(" · ");
+
 	return (
 		<div className="magpie-card group flex items-center gap-2.5 px-3 py-2">
 			<span
@@ -266,7 +293,22 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 			>
 				{item.rank}
 			</span>
-			<span className="min-w-0 truncate font-medium text-sm">{item.title}</span>
+			{item.sub ? (
+				<span className="shrink-0 rounded bg-foreground/7 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+					{item.sub}
+				</span>
+			) : null}
+			<span
+				className=" shrink-0 font-medium text-sm"
+				title={item.description || item.title}
+			>
+				{item.title}
+			</span>
+			{item.year ? (
+				<span className="shrink-0 text-caption tabular-nums text-muted-foreground">
+					{item.year}
+				</span>
+			) : null}
 			{item.estimated ? (
 				<span
 					className="shrink-0 rounded border border-border/60 px-1 text-caption text-muted-foreground/70"
@@ -275,14 +317,15 @@ function DeadlineRow({ item }: { item: CcfDeadlineItem }) {
 					{t("plaza.ccfDeadlines.estimated")}
 				</span>
 			) : null}
-			{item.year ? (
-				<span className="shrink-0 text-caption tabular-nums text-muted-foreground">
-					{item.year}
-				</span>
-			) : null}
-			{item.comment ? (
-				<span className="hidden min-w-0 truncate text-caption text-muted-foreground/80 md:inline">
-					{item.comment}
+			{metaText || item.description ? (
+				<span
+					className="hidden min-w-0 truncate text-caption text-muted-foreground/80 md:inline"
+					title={
+						[item.description, metaText].filter(Boolean).join(" — ") ||
+						undefined
+					}
+				>
+					{metaText || item.description}
 				</span>
 			) : null}
 			<span className="ml-auto flex shrink-0 items-center gap-2">

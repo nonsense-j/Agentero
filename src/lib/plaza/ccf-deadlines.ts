@@ -17,6 +17,7 @@
  */
 
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
+import { plazaFetchJson } from "@/lib/plaza/collection";
 
 /** Slim public dataset: latest + upcoming editions only. */
 export const CCF_DEADLINES_DATA_URL =
@@ -52,6 +53,14 @@ export type CcfDeadlineItem = {
 	at: number | null;
 	/** True when derived from a past edition (next cycle not yet announced). */
 	estimated?: boolean;
+	/** Full conference name from upstream `description`. */
+	description?: string;
+	/** CCF subject category code, e.g. `SE`, `AI`, `NW`, `SC`. */
+	sub?: string;
+	/** Conference dates string, e.g. `April 12-17, 2027`. */
+	date?: string;
+	/** Conference location string, e.g. `Rio de Janeiro, Brazil`. */
+	place?: string;
 };
 
 type RawTimelineNode = { deadline?: unknown; comment?: unknown };
@@ -61,9 +70,13 @@ type RawEdition = {
 	link?: unknown;
 	timezone?: unknown;
 	timeline?: unknown;
+	date?: unknown;
+	place?: unknown;
 };
 type RawConference = {
 	title?: unknown;
+	description?: unknown;
+	sub?: unknown;
 	conference_key?: unknown;
 	rank?: { ccf?: unknown } | null;
 	confs?: unknown;
@@ -83,6 +96,10 @@ type RawDeadline = {
 	/** Parsed instant; null for an unknown timezone label. */
 	at: number | null;
 	comment?: string;
+	description?: string;
+	sub?: string;
+	date?: string;
+	place?: string;
 };
 
 /** UTC offset (hours) for the upstream timezone labels; null when unknown. */
@@ -171,6 +188,9 @@ function* iterDeadlines(payloads: readonly unknown[]): Generator<RawDeadline> {
 			if (!title) continue;
 			const conferenceKey =
 				typeof raw.conference_key === "string" ? raw.conference_key : title;
+			const description =
+				typeof raw.description === "string" ? raw.description.trim() : "";
+			const sub = typeof raw.sub === "string" ? raw.sub.trim() : "";
 			const editions = Array.isArray(raw.confs)
 				? (raw.confs as RawEdition[])
 				: [];
@@ -185,6 +205,10 @@ function* iterDeadlines(payloads: readonly unknown[]): Generator<RawDeadline> {
 				const editionId = typeof edition.id === "string" ? edition.id : "";
 				const year = typeof edition.year === "number" ? edition.year : 0;
 				const link = typeof edition.link === "string" ? edition.link : "";
+				const date =
+					typeof edition.date === "string" ? edition.date.trim() : "";
+				const place =
+					typeof edition.place === "string" ? edition.place.trim() : "";
 
 				for (const node of timeline) {
 					if (!node || typeof node !== "object") continue;
@@ -204,6 +228,10 @@ function* iterDeadlines(payloads: readonly unknown[]): Generator<RawDeadline> {
 						deadline,
 						at: ccfDeadlineInstant(deadline, timezone),
 						comment: comment || undefined,
+						description: description || undefined,
+						sub: sub || undefined,
+						date: date || undefined,
+						place: place || undefined,
 					};
 				}
 			}
@@ -240,6 +268,10 @@ export function parseCcfDeadlines(
 			comment: raw.comment,
 			link: raw.link,
 			at: raw.at,
+			description: raw.description,
+			sub: raw.sub,
+			date: raw.date,
+			place: raw.place,
 		});
 	}
 	return items.sort(compareItems);
@@ -283,6 +315,7 @@ export function predictCcfDeadlines(
 
 		let projected: string | null = latest.deadline;
 		let at: number | null = latest.at;
+		let steps = 0;
 		for (
 			let step = 0;
 			step < 2 && projected && at !== null && at < now;
@@ -290,6 +323,7 @@ export function predictCcfDeadlines(
 		) {
 			projected = ccfNextYearDeadline(projected);
 			at = projected ? ccfDeadlineInstant(projected, latest.timezone) : null;
+			steps += 1;
 		}
 		if (
 			!projected ||
@@ -305,12 +339,15 @@ export function predictCcfDeadlines(
 			title: latest.title,
 			rank: latest.rank,
 			editionId: "",
-			year: Number(projected.slice(0, 4)),
+			year:
+				latest.year > 0 ? latest.year + steps : Number(projected.slice(0, 4)),
 			deadline: projected,
 			timezone: latest.timezone,
 			link: latest.link,
 			at,
 			estimated: true,
+			description: latest.description,
+			sub: latest.sub,
 		});
 	}
 	return items.sort(compareItems);
@@ -381,6 +418,17 @@ export function matchesCollectionVenueKeys(
 	venueKeys: ReadonlySet<string>,
 ): boolean {
 	if (venueKeys.size === 0) return false;
+	const confKey = item.key.split(":")[0] ?? "";
+	const confKeyUpper = confKey.toUpperCase();
+	// Disambiguate IACR Fast Software Encryption (`SC/fse`, CCF-B) from ACM SIGSOFT FSE (`SE/fse`, CCF-A).
+	if (
+		confKeyUpper === "SC/FSE" &&
+		!venueKeys.has("SC/FSE") &&
+		!venueKeys.has("FAST SOFTWARE ENCRYPTION") &&
+		!venueKeys.has("TOSC")
+	) {
+		return false;
+	}
 	const titleNorm = normalizeVenueToken(item.title);
 	if (titleNorm) {
 		if (venueKeys.has(titleNorm)) return true;
@@ -393,7 +441,6 @@ export function matchesCollectionVenueKeys(
 			}
 		}
 	}
-	const confKey = item.key.split(":")[0] ?? "";
 	const slug = confKey.includes("/")
 		? (confKey.split("/").pop() ?? "")
 		: confKey;
@@ -437,24 +484,23 @@ function resolveArchiveUrl(payload: unknown): string | null {
 }
 
 /**
- * Best-effort fetch of the history part to estimate unannounced cycles. Any
- * failure (offline, missing part) degrades to "official deadlines only".
+ * Best-effort fetch of the history part to estimate unannounced cycles. If the
+ * archive URL is absent or fails, still estimates from `initial.json` itself
+ * (which retains recent past cycles such as ASE, ICSE, FSE).
  */
 async function loadEstimatedDeadlines(
 	payload: unknown,
 	now: number,
 ): Promise<CcfDeadlineItem[]> {
 	const archiveUrl = resolveArchiveUrl(payload);
-	if (!archiveUrl) return [];
+	if (!archiveUrl) {
+		return predictCcfDeadlines([payload], now);
+	}
 	try {
-		const response = await fetch(archiveUrl, {
-			headers: { Accept: "application/json" },
-		});
-		if (!response.ok) return [];
-		const history = await response.json();
+		const history = await plazaFetchJson(archiveUrl);
 		return predictCcfDeadlines([payload, history], now);
 	} catch {
-		return [];
+		return predictCcfDeadlines([payload], now);
 	}
 }
 
@@ -466,13 +512,7 @@ async function loadEstimatedDeadlines(
 export async function loadCcfDeadlines(): Promise<CcfDeadlineItem[]> {
 	const now = Date.now();
 	try {
-		const response = await fetch(CCF_DEADLINES_DATA_URL, {
-			headers: { Accept: "application/json" },
-		});
-		if (!response.ok) {
-			throw new Error(`CCF deadlines request failed (${response.status})`);
-		}
-		const payload = await response.json();
+		const payload = await plazaFetchJson(CCF_DEADLINES_DATA_URL);
 		const official = parseCcfDeadlines(payload, now);
 		const estimated = await loadEstimatedDeadlines(payload, now);
 		const items = [...official, ...estimated].sort(compareItems);

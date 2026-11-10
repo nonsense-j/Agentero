@@ -215,6 +215,30 @@ describe("predictCcfDeadlines", () => {
 		);
 		expect(item?.year).toBe(2027);
 	});
+
+	it("increments edition year when the past deadline belonged to a next-year edition (e.g. ICSE 2027 deadline in 2026)", () => {
+		const icse = conference({
+			title: "ICSE",
+			conference_key: "SE/icse",
+			confs: [
+				{
+					id: "icse27",
+					year: 2027,
+					timezone: "AoE",
+					timeline: [{ deadline: "2026-06-30 23:59:59" }],
+				},
+			],
+		});
+		const [item] = predictCcfDeadlines(
+			[{ conferences: [icse] }],
+			Date.UTC(2026, 10, 10),
+		);
+		expect(item).toMatchObject({
+			title: "ICSE",
+			year: 2028,
+			estimated: true,
+		});
+	});
 });
 
 describe("filterCcfDeadlinesByVenues", () => {
@@ -266,8 +290,27 @@ describe("filterCcfDeadlinesByVenues", () => {
 		],
 	};
 
-	it("keeps only deadlines matching Collection venues", () => {
-		const all = parseCcfDeadlines(payload, now);
+	it("keeps only deadlines matching Collection venues and disambiguates SE/fse from SC/fse", () => {
+		const withIacrFse = {
+			conferences: [
+				...payload.conferences,
+				{
+					title: "FSE",
+					conference_key: "SC/fse",
+					rank: { ccf: "B" },
+					confs: [
+						{
+							id: "scfse27",
+							year: 2027,
+							link: "https://fse.iacr.org/2027",
+							timezone: "AoE",
+							timeline: [{ deadline: "2026-06-01 23:59:59" }],
+						},
+					],
+				},
+			],
+		};
+		const all = parseCcfDeadlines(withIacrFse, now);
 		const filtered = filterCcfDeadlinesByVenues(all, [
 			{ id: "icse-2026", name: "ICSE 2026" },
 			{ id: "fse-2026", name: "FSE 2026" },
