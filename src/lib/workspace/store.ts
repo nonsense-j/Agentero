@@ -59,10 +59,10 @@ export function initWorkspaceStore(): void {
 	initialized = true;
 	if (!isTauri() && import.meta.env.DEV && import.meta.env.MODE !== "test") {
 		const demoTabs = [
-			createPlaceholderTab("agentero:plaza/collection", "plaza"),
-			createPlaceholderTab("agentero:plaza/discover", "plaza"),
-			createPlaceholderTab("agentero:plaza/arxiv-rec", "plaza"),
-			createPlaceholderTab("agentero:plaza/ccf-deadlines", "plaza"),
+			createPlaceholderTab("agentero:plaza/collection"),
+			createPlaceholderTab("agentero:plaza/discover"),
+			createPlaceholderTab("agentero:plaza/arxiv-rec"),
+			createPlaceholderTab("agentero:plaza/ccf-deadlines"),
 		];
 		workspaceStore.setState({
 			tabs: demoTabs,
