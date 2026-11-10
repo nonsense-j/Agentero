@@ -142,12 +142,16 @@ let initialized = false;
 export function initVaultStore(): void {
 	if (initialized) return;
 	initialized = true;
+	const isBrowserDev =
+		!isTauri() && import.meta.env.DEV && import.meta.env.MODE !== "test";
 	const vaultPath = isTauri()
 		? getSavedVaultPath({ allowRestore: !perfActive() })
-		: null;
+		: isBrowserDev
+			? "/demo-vault"
+			: null;
 	vaultStore.setState({
 		vaultPath,
-		treeLoading: Boolean(vaultPath),
+		treeLoading: Boolean(vaultPath && isTauri()),
 		recentVaults: getRecentVaults(),
 		...deriveFromTree([], vaultPath),
 	});
@@ -239,7 +243,7 @@ export async function refreshTree(
 	path: string,
 	{ quiet = false }: { quiet?: boolean } = {},
 ): Promise<void> {
-	if (getVaultPath() !== path) return;
+	if (!isTauri() || getVaultPath() !== path) return;
 	const generation = treeLoadGeneration;
 	if (!quiet) {
 		vaultStore.setState({ treeLoading: true, busy: true });

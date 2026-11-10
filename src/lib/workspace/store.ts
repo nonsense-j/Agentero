@@ -57,6 +57,20 @@ let initialized = false;
 export function initWorkspaceStore(): void {
 	if (initialized) return;
 	initialized = true;
+	if (!isTauri() && import.meta.env.DEV && import.meta.env.MODE !== "test") {
+		const demoTabs = [
+			createPlaceholderTab("agentero:plaza/collection", "plaza"),
+			createPlaceholderTab("agentero:plaza/discover", "plaza"),
+			createPlaceholderTab("agentero:plaza/arxiv-rec", "plaza"),
+			createPlaceholderTab("agentero:plaza/ccf-deadlines", "plaza"),
+		];
+		workspaceStore.setState({
+			tabs: demoTabs,
+			activeTabId: demoTabs[0]?.id ?? null,
+			dockLayout: null,
+		});
+		return;
+	}
 	if (!isTauri() || perfActive()) return;
 	const persisted = loadPersistedTabs();
 	if (!persisted?.tabs.length) return;
