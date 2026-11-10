@@ -217,6 +217,18 @@ export async function plazaFetchText(
 		} catch {
 			// Fall through to direct fetch below.
 		}
+	} else if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
+		try {
+			const proxied = `/__plaza_proxy?url=${encodeURIComponent(cleanUrl)}`;
+			const res = await fetch(proxied, {
+				headers: { Accept: accept },
+			});
+			if (res.ok) {
+				return await res.text();
+			}
+		} catch {
+			// Fall through to direct fetch below.
+		}
 	}
 	const direct = await fetch(cleanUrl, {
 		headers: { Accept: accept },

@@ -12,7 +12,46 @@ const port = Number(process.env.TAURI_DEV_PORT) || 1420;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-	plugins: [react(), tailwindcss()],
+	plugins: [
+		react(),
+		tailwindcss(),
+		{
+			name: "agentero-dev-plaza-proxy",
+			configureServer(server) {
+				server.middlewares.use("/__plaza_proxy", async (req, res) => {
+					const rawUrl = new URL(
+						req.url ?? "",
+						"http://localhost",
+					).searchParams.get("url");
+					if (!rawUrl) {
+						res.statusCode = 400;
+						res.end("Missing url parameter");
+						return;
+					}
+					try {
+						const upstream = await fetch(rawUrl, {
+							headers: {
+								Accept:
+									(req.headers.accept as string) ||
+									"text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+								"User-Agent":
+									"Mozilla/5.0 (compatible; Agentero/0.1; +https://github.com/poco-ai/Agentero)",
+							},
+						});
+						res.statusCode = upstream.status;
+						const ct = upstream.headers.get("content-type");
+						if (ct) res.setHeader("Content-Type", ct);
+						res.setHeader("Access-Control-Allow-Origin", "*");
+						const buf = Buffer.from(await upstream.arrayBuffer());
+						res.end(buf);
+					} catch (err) {
+						res.statusCode = 502;
+						res.end(err instanceof Error ? err.message : String(err));
+					}
+				});
+			},
+		},
+	],
 
 	// Use a new URL prefix so WebViews with old immutable prebundles fetch a
 	// consistent dependency graph after upgrading the dev server.
