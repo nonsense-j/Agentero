@@ -22,7 +22,8 @@ import {
 	dedupeDiscoverPapers,
 } from "@/lib/plaza/paper-search";
 import {
-	pushFromCollection,
+	DEFAULT_WORD_CLOUD_TOP_N,
+	recommendFromCollection,
 	saveRecommendPoolState,
 	scorePaperAgainstKeywords,
 } from "@/lib/plaza/recommend-pool";
@@ -380,27 +381,26 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 				{ id: "k2", term: "Fuzzing", enabled: true },
 				{ id: "k3", term: "Formal Verification", enabled: true },
 			],
-			recentBatchId: null,
-			history: [],
-			pushedIds: [],
-			lastPushedAt: null,
+			selectedCloudTerms: [],
+			wordCloudTopN: DEFAULT_WORD_CLOUD_TOP_N,
+			lastRecommendedAt: null,
 		});
 
-		const firstPush = await pushFromCollection({
+		const firstPush = await recommendFromCollection({
 			maxBatchSize: 1,
 			ensureCollectionLoaded: false,
 		});
-		expect(firstPush.newlyPushedCount).toBe(1);
-		expect(firstPush.state.history[0]?.id).toBe("arxiv:2601.11111");
-		expect(firstPush.state.pushedIds).toContain("arxiv:2601.11111");
+		expect(firstPush.items).toHaveLength(1);
+		expect(firstPush.items[0]?.id).toBe("arxiv:2601.11111");
+		expect(firstPush.items[0]?.recommendedAt).toBeTruthy();
 
 		// Second push must NOT repeat arxiv:2601.11111 and must pick venue:tosem-2026:2
-		const secondPush = await pushFromCollection({
+		const secondPush = await recommendFromCollection({
 			maxBatchSize: 1,
 			ensureCollectionLoaded: false,
 		});
-		expect(secondPush.newlyPushedCount).toBe(1);
-		expect(secondPush.state.history[0]?.id).toBe("venue:tosem-2026:2");
-		expect(secondPush.state.history).toHaveLength(2);
+		expect(secondPush.items).toHaveLength(1);
+		expect(secondPush.items[0]?.id).toBe("venue:tosem-2026:2");
+		expect(secondPush.items[0]?.recommendedAt).toBeTruthy();
 	});
 });

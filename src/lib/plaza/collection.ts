@@ -37,7 +37,9 @@ import {
 	isWorkshopOrCompanionVenue,
 	loadItemsFromIndexedDb,
 	normalizePaperKeywords,
+	patchItemsInIndexedDb,
 	reconstructOpenAlexAbstract,
+	resetIndexedDbSyncCacheForTests,
 	saveItemsToIndexedDb,
 	VENUE_SPEC_BY_ID,
 	type VenueCcfRank,
@@ -97,6 +99,7 @@ export {
 	parseAcceptedVenueArxivXml,
 	parseCoolPapersVenueHtml,
 	parseOfficialVenueProgramHtml,
+	patchItemsInIndexedDb,
 	reconstructOpenAlexAbstract,
 	VENUE_SPEC_BY_ID,
 };
@@ -133,7 +136,7 @@ export type CollectionState = {
 };
 
 const STORAGE_KEY = "plaza:collection:state:v2";
-const LOCAL_STORAGE_MAX_ITEMS = 350;
+const LOCAL_STORAGE_MAX_ITEMS = 80;
 const TARGET_YEAR = 2026;
 
 export const DEFAULT_COLLECTION_VENUES: readonly VenueConfig[] =
@@ -192,6 +195,7 @@ export function resetCollectionMemoryForTests(): void {
 	idbHydrationPromise = null;
 	replacedVenueIds.clear();
 	attemptedDetailEnrichIds.clear();
+	resetIndexedDbSyncCacheForTests();
 }
 
 let memoryState: CollectionState | null = null;
@@ -269,8 +273,13 @@ function sanitizeCachedItems(
 			item.sourceType === "venue" && item.venueId
 				? buildVenuePaperId(item.venueId, item.doi, item.arxivId, cleanedTitle)
 				: item.id;
+		const recommendedAt =
+			typeof item.recommendedAt === "string" && item.recommendedAt.trim()
+				? item.recommendedAt.trim()
+				: undefined;
+		const { recommendedAt: _rawRec, ...restItem } = item;
 		out.push({
-			...item,
+			...restItem,
 			id: normalizedId,
 			title: cleanedTitle,
 			abstract: normalizedAbstract,
@@ -279,6 +288,7 @@ function sanitizeCachedItems(
 			ccfRank: item.ccfRank ?? spec?.ccfRank,
 			citationCount: item.citationCount ?? 0,
 			keywords,
+			...(recommendedAt ? { recommendedAt } : {}),
 		});
 	}
 	return out;
@@ -320,6 +330,36 @@ export function loadCollectionState(): CollectionState {
 	return loaded;
 }
 
+function stripHeavyFieldsForLocalStorage(
+	item: CollectionPaperItem,
+): CollectionPaperItem {
+	if (!item.bibtex) return item;
+	const { bibtex: _bibtex, ...rest } = item;
+	return rest;
+}
+
+function toCompactLocalStorageState(state: CollectionState): CollectionState {
+	const slice =
+		state.items.length > LOCAL_STORAGE_MAX_ITEMS
+			? state.items.slice(0, LOCAL_STORAGE_MAX_ITEMS)
+			: state.items;
+	let hasBibtex = false;
+	for (const item of slice) {
+		if (item.bibtex) {
+			hasBibtex = true;
+			break;
+		}
+	}
+	const compactItems = hasBibtex
+		? slice.map(stripHeavyFieldsForLocalStorage)
+		: slice;
+	if (compactItems === state.items) return state;
+	return {
+		...state,
+		items: compactItems,
+	};
+}
+
 export function saveCollectionState(next: CollectionState): void {
 	const stamped: CollectionState = {
 		...next,
@@ -328,19 +368,12 @@ export function saveCollectionState(next: CollectionState): void {
 		),
 	};
 	memoryState = stamped;
-	const compactForLocalStorage: CollectionState =
-		stamped.items.length > LOCAL_STORAGE_MAX_ITEMS
-			? {
-					...stamped,
-					items: stamped.items.slice(0, LOCAL_STORAGE_MAX_ITEMS),
-				}
-			: stamped;
-	writeJsonStorage(STORAGE_KEY, compactForLocalStorage);
+	writeJsonStorage(STORAGE_KEY, toCompactLocalStorageState(stamped));
 
 	if (idbHydrated || typeof indexedDB === "undefined") {
 		void saveItemsToIndexedDb(stamped.items);
 	} else {
-		// Prevent overwriting IndexedDB's full paper pool with localStorage's 350-item slice
+		// Prevent overwriting IndexedDB's full paper pool with localStorage's compact head slice
 		// if a save happens before `hydrateCollectionStateFromIdb()` has completed.
 		void (async () => {
 			const existingIdb = await loadItemsFromIndexedDb();
@@ -377,6 +410,87 @@ export function saveCollectionState(next: CollectionState): void {
 }
 
 /**
+ * Mark a batch of collection papers as recommended (`recommendedAt` ISO timestamp)
+ * using incremental in-memory patching and a single IndexedDB `store.put(...)` transaction
+ * for ONLY the updated records (never clearing or rewriting the full pool).
+ */
+export async function markCollectionPapersRecommended(
+	paperIds: readonly string[],
+	recommendedAt: string = new Date().toISOString(),
+): Promise<CollectionState> {
+	const targetIds = new Set(paperIds.map((id) => id.trim()).filter(Boolean));
+	if (targetIds.size === 0) {
+		return loadCollectionState();
+	}
+
+	const applyInMemoryPatch = (
+		base: CollectionState,
+	): { nextState: CollectionState; patchedItems: CollectionPaperItem[] } => {
+		const patchedItems: CollectionPaperItem[] = [];
+		let mutated = false;
+		const nextItems = base.items.map((item) => {
+			if (!targetIds.has(item.id) || item.recommendedAt) {
+				return item;
+			}
+			mutated = true;
+			const updated: CollectionPaperItem = {
+				...item,
+				recommendedAt,
+			};
+			patchedItems.push(updated);
+			return updated;
+		});
+		if (!mutated) {
+			return { nextState: base, patchedItems };
+		}
+		const nextState: CollectionState = {
+			...base,
+			items: nextItems,
+		};
+		memoryState = nextState;
+
+		let headMutated = false;
+		const headLimit = Math.min(nextItems.length, LOCAL_STORAGE_MAX_ITEMS);
+		for (let i = 0; i < headLimit; i++) {
+			if (nextItems[i] !== base.items[i]) {
+				headMutated = true;
+				break;
+			}
+		}
+		if (headMutated) {
+			writeJsonStorage(STORAGE_KEY, toCompactLocalStorageState(nextState));
+		}
+		for (const listener of listeners) {
+			listener(nextState);
+		}
+		return { nextState, patchedItems };
+	};
+
+	const initial = loadCollectionState();
+	const firstPass = applyInMemoryPatch(initial);
+	if (firstPass.patchedItems.length > 0) {
+		await patchItemsInIndexedDb(firstPass.patchedItems);
+	}
+
+	// If IndexedDB was not yet hydrated and some target IDs live outside localStorage's compact head slice,
+	// hydrate once and patch any remaining records.
+	if (
+		!idbHydrated &&
+		typeof indexedDB !== "undefined" &&
+		firstPass.patchedItems.length < targetIds.size
+	) {
+		const hydrated = await hydrateCollectionStateFromIdb();
+		const secondPass = applyInMemoryPatch(hydrated);
+		if (secondPass.patchedItems.length > 0) {
+			await patchItemsInIndexedDb(secondPass.patchedItems);
+		}
+		return secondPass.nextState;
+	}
+
+	return firstPass.nextState;
+}
+
+/**
  * Hydrate full `2026-Now` preloaded pool from IndexedDB into memory state.
  */
 export async function hydrateCollectionStateFromIdb(): Promise<CollectionState> {
@@ -400,7 +514,19 @@ export async function hydrateCollectionStateFromIdb(): Promise<CollectionState> 
 		);
 		if (sanitized.length === 0) return latest;
 		const merged = mergeCollectionItems([latest.items, sanitized]);
-		if (merged.length <= latest.items.length) return latest;
+		const latestById = new Map(latest.items.map((i) => [i.id, i]));
+		const hasMetadataUpgrade =
+			merged.length !== latest.items.length ||
+			merged.some((m) => {
+				const prev = latestById.get(m.id);
+				if (!prev) return true;
+				return (
+					m.recommendedAt !== prev.recommendedAt ||
+					m.bibtex !== prev.bibtex ||
+					m.abstract.length > prev.abstract.length
+				);
+			});
+		if (!hasMetadataUpgrade) return latest;
 		const next: CollectionState = { ...latest, items: merged };
 		memoryState = next;
 		for (const listener of listeners) {
@@ -2297,15 +2423,58 @@ export function applyFreshVenueItems(
 		return [...pool];
 	}
 	replacedVenueIds.add(venueId);
-	const rest = pool.filter(
-		(i) =>
-			!(
-				i.sourceType === "venue" &&
-				(i.venueId === venueId ||
-					(!i.venueId && venueName && i.sourceLabel === venueName))
-			),
-	);
-	return mergeCollectionItems([freshVenueItems, rest]);
+
+	const recommendedById = new Map<string, string>();
+	const recommendedByDoi = new Map<string, string>();
+	const recommendedByArxiv = new Map<string, string>();
+	const recommendedByTitle = new Map<string, string>();
+	const rest: CollectionPaperItem[] = [];
+
+	for (const oldItem of pool) {
+		const isTargetVenue =
+			oldItem.sourceType === "venue" &&
+			(oldItem.venueId === venueId ||
+				(!oldItem.venueId && venueName && oldItem.sourceLabel === venueName));
+		if (!isTargetVenue) {
+			rest.push(oldItem);
+			continue;
+		}
+		if (!oldItem.recommendedAt) continue;
+		recommendedById.set(oldItem.id, oldItem.recommendedAt);
+		if (oldItem.doi) {
+			recommendedByDoi.set(oldItem.doi.toLowerCase(), oldItem.recommendedAt);
+		}
+		if (oldItem.arxivId) {
+			recommendedByArxiv.set(
+				oldItem.arxivId.toLowerCase(),
+				oldItem.recommendedAt,
+			);
+		}
+		const normTitle = oldItem.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		if (normTitle) {
+			recommendedByTitle.set(normTitle, oldItem.recommendedAt);
+		}
+	}
+
+	const preservedFresh =
+		recommendedById.size === 0
+			? freshVenueItems
+			: freshVenueItems.map((item) => {
+					if (item.recommendedAt) return item;
+					const normTitle = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+					const prevRec =
+						recommendedById.get(item.id) ??
+						(item.doi
+							? recommendedByDoi.get(item.doi.toLowerCase())
+							: undefined) ??
+						(item.arxivId
+							? recommendedByArxiv.get(item.arxivId.toLowerCase())
+							: undefined) ??
+						(normTitle ? recommendedByTitle.get(normTitle) : undefined);
+					return prevRec ? { ...item, recommendedAt: prevRec } : item;
+				});
+
+	return mergeCollectionItems([preservedFresh, rest]);
 }
 
 /**
@@ -2435,9 +2604,15 @@ export async function ensurePaperFullDetails(
 	const cur = loadCollectionState();
 	const idx = cur.items.findIndex((i) => i.id === paper.id);
 	if (idx >= 0) {
+		const existing = cur.items[idx];
+		const finalized =
+			existing?.recommendedAt && !enriched.recommendedAt
+				? { ...enriched, recommendedAt: existing.recommendedAt }
+				: enriched;
 		const nextItems = [...cur.items];
-		nextItems[idx] = enriched;
+		nextItems[idx] = finalized;
 		saveCollectionState({ ...cur, items: nextItems });
+		return finalized;
 	}
 	return enriched;
 }
@@ -2506,6 +2681,16 @@ export function mergeCollectionItems(
 						issue: prev.issue || item.issue,
 						pages: prev.pages || item.pages,
 						bibtex: prev.bibtex || item.bibtex,
+						...(prev.recommendedAt || item.recommendedAt
+							? {
+									recommendedAt:
+										prev.recommendedAt && item.recommendedAt
+											? prev.recommendedAt <= item.recommendedAt
+												? prev.recommendedAt
+												: item.recommendedAt
+											: prev.recommendedAt || item.recommendedAt,
+								}
+							: {}),
 						citationCount: Math.max(
 							prev.citationCount ?? 0,
 							item.citationCount ?? 0,
