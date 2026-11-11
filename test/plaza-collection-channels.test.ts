@@ -178,6 +178,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 
 		// 1. Unchanged timestamp probe -> skips full feed & OpenAlex enrichment completely
 		const unchangedCalls: string[] = [];
+		const statusEvents: string[] = [];
 		const unchangedSync = await syncArxivCategoriesIncremental(
 			["cs.AI"],
 			[arxivCopy],
@@ -207,11 +208,15 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					unchangedCalls.push("openalex");
 					return {} as T;
 				},
+				onCategoryStatus: (cat, status) => {
+					statusEvents.push(`${cat}:${status}`);
+				},
 			},
 		);
 		expect(unchangedCalls).toHaveLength(1);
 		expect(unchangedCalls[0]).toContain("max_results=1");
 		expect(unchangedSync.deltaItems).toHaveLength(0);
+		expect(statusEvents).toEqual(["cs.AI:refreshing", "cs.AI:done"]);
 
 		// 2. Newer timestamp detected -> fetches incremental window since watermark & enriches ONLY the new item
 		const deltaUrls: string[] = [];

@@ -996,6 +996,10 @@ export async function syncArxivCategoriesIncremental(
 	transport?: {
 		fetchText?: FetchTextFn;
 		fetchJson?: FetchJsonFn;
+		onCategoryStatus?: (
+			category: string,
+			status: "refreshing" | "done" | "error",
+		) => void;
 	},
 ): Promise<{
 	deltaItems: CollectionPaperItem[];
@@ -1005,6 +1009,7 @@ export async function syncArxivCategoriesIncremental(
 }> {
 	const fetchTextFn = transport?.fetchText ?? plazaFetchText;
 	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
+	const onCategoryStatus = transport?.onCategoryStatus;
 	const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
 	const nextWatermarks: Record<string, ArxivCategoryWatermark> = {
 		...existingWatermarks,
@@ -1045,58 +1050,70 @@ export async function syncArxivCategoriesIncremental(
 			warmCategories.map(async (cat) => {
 				const wm = existingWatermarks[cat];
 				if (!wm) return;
-				const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
-				const probeXml = await fetchTextFn(
-					probeUrl,
-					"application/atom+xml,text/xml,*/*",
-				);
-				const probeParsed = parseArxivAtomXml(probeXml, TARGET_YEAR, {
-					preferredCategories: cleanCats,
-					defaultCategory: cat,
-				});
-				const top = probeParsed[0];
-				if (
-					top &&
-					stripVersion(top.arxivId ?? "") === stripVersion(wm.latestArxivId) &&
-					top.publishedAt <= wm.latestPublishedAt
-				) {
-					nextWatermarks[cat] = {
-						...wm,
-						lastSyncedAt: nowIso,
-					};
-					return;
-				}
+				onCategoryStatus?.(cat, "refreshing");
+				try {
+					const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
+					const probeXml = await fetchTextFn(
+						probeUrl,
+						"application/atom+xml,text/xml,*/*",
+					);
+					const probeParsed = parseArxivAtomXml(probeXml, TARGET_YEAR, {
+						preferredCategories: cleanCats,
+						defaultCategory: cat,
+					});
+					const top = probeParsed[0];
+					if (
+						top &&
+						stripVersion(top.arxivId ?? "") ===
+							stripVersion(wm.latestArxivId) &&
+						top.publishedAt <= wm.latestPublishedAt
+					) {
+						nextWatermarks[cat] = {
+							...wm,
+							lastSyncedAt: nowIso,
+						};
+						onCategoryStatus?.(cat, "done");
+						return;
+					}
 
-				// Newer timestamp detected -> pull ONLY incremental window since watermark
-				const fromStamp = toArxivSubmittedDateStamp(wm.latestPublishedAt, 12);
-				const [rssItems, deltaWindowItems] = await Promise.all([
-					fetchArxivRssFast(cat, cleanCats, fetchTextFn),
-					fetchArxivCategoryWithRetry(
-						cat,
-						cleanCats,
-						200,
-						0,
-						fromStamp,
-						fetchTextFn,
-					),
-				]);
-				const combinedCat = mergeCollectionItems([rssItems, deltaWindowItems]);
-				const newestCat = combinedCat[0] ?? top;
-				if (newestCat) {
-					nextWatermarks[cat] = {
-						latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
-						latestPublishedAt:
-							newestCat.publishedAt > wm.latestPublishedAt
-								? newestCat.publishedAt
-								: wm.latestPublishedAt,
-						lastSyncedAt: nowIso,
-					};
-				}
-				const unseen = combinedCat.filter(
-					(item) => !knownArxivIds.has(item.id),
-				);
-				if (unseen.length > 0) {
-					rawDeltaGroups.push(unseen);
+					// Newer timestamp detected -> pull ONLY incremental window since watermark
+					const fromStamp = toArxivSubmittedDateStamp(wm.latestPublishedAt, 12);
+					const [rssItems, deltaWindowItems] = await Promise.all([
+						fetchArxivRssFast(cat, cleanCats, fetchTextFn),
+						fetchArxivCategoryWithRetry(
+							cat,
+							cleanCats,
+							200,
+							0,
+							fromStamp,
+							fetchTextFn,
+						),
+					]);
+					const combinedCat = mergeCollectionItems([
+						rssItems,
+						deltaWindowItems,
+					]);
+					const newestCat = combinedCat[0] ?? top;
+					if (newestCat) {
+						nextWatermarks[cat] = {
+							latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
+							latestPublishedAt:
+								newestCat.publishedAt > wm.latestPublishedAt
+									? newestCat.publishedAt
+									: wm.latestPublishedAt,
+							lastSyncedAt: nowIso,
+						};
+					}
+					const unseen = combinedCat.filter(
+						(item) => !knownArxivIds.has(item.id),
+					);
+					if (unseen.length > 0) {
+						rawDeltaGroups.push(unseen);
+					}
+					onCategoryStatus?.(cat, "done");
+				} catch (err) {
+					onCategoryStatus?.(cat, "error");
+					throw err;
 				}
 			}),
 		);
@@ -1114,19 +1131,32 @@ export async function syncArxivCategoriesIncremental(
 
 	let coldFetchedItems: CollectionPaperItem[] = [];
 	if (coldStartCategories.length > 0) {
-		const coldRes = await fetchArxivCollection(coldStartCategories, 200, 0);
-		coldFetchedItems = coldRes.items;
 		for (const cat of coldStartCategories) {
-			const newestForCat = coldFetchedItems.find(
-				(i) => i.sourceLabel === cat || i.categories.includes(cat),
-			);
-			if (newestForCat) {
-				nextWatermarks[cat] = {
-					latestArxivId: stripVersion(newestForCat.arxivId ?? newestForCat.id),
-					latestPublishedAt: newestForCat.publishedAt,
-					lastSyncedAt: nowIso,
-				};
+			onCategoryStatus?.(cat, "refreshing");
+		}
+		try {
+			const coldRes = await fetchArxivCollection(coldStartCategories, 200, 0);
+			coldFetchedItems = coldRes.items;
+			for (const cat of coldStartCategories) {
+				const newestForCat = coldFetchedItems.find(
+					(i) => i.sourceLabel === cat || i.categories.includes(cat),
+				);
+				if (newestForCat) {
+					nextWatermarks[cat] = {
+						latestArxivId: stripVersion(
+							newestForCat.arxivId ?? newestForCat.id,
+						),
+						latestPublishedAt: newestForCat.publishedAt,
+						lastSyncedAt: nowIso,
+					};
+				}
+				onCategoryStatus?.(cat, "done");
 			}
+		} catch (err) {
+			for (const cat of coldStartCategories) {
+				onCategoryStatus?.(cat, "error");
+			}
+			throw err;
 		}
 	}
 
@@ -2143,6 +2173,10 @@ export async function refreshArxivCollection(options?: {
 	categories?: string[];
 	replaceCategories?: boolean;
 	incremental?: boolean;
+	onCategoryStatus?: (
+		category: string,
+		status: "refreshing" | "done" | "error",
+	) => void;
 }): Promise<CollectionState> {
 	const existingState = loadCollectionState();
 	const targetCategories = options?.categories ?? existingState.categories;
@@ -2161,6 +2195,9 @@ export async function refreshArxivCollection(options?: {
 		existingState.items,
 		nextWatermarks,
 		incremental,
+		{
+			onCategoryStatus: options?.onCategoryStatus,
+		},
 	);
 	nextWatermarks = arxivSync.nextWatermarks;
 	coldStartCats = arxivSync.coldStartCategories;
@@ -2207,6 +2244,12 @@ export async function refreshVenueCollection(options?: {
 	venueIds?: string[];
 	skipLoaded?: boolean;
 	onVenueProgress?: (venue: VenueConfig, index: number, total: number) => void;
+	onVenueStatus?: (
+		venue: VenueConfig,
+		status: "refreshing" | "done" | "error",
+		index: number,
+		total: number,
+	) => void;
 }): Promise<CollectionState> {
 	const current = loadCollectionState();
 	const baseVenues = options?.venues ?? current.venues;
@@ -2237,10 +2280,17 @@ export async function refreshVenueCollection(options?: {
 			const liveVenue =
 				loadCollectionState().venues.find((v) => v.id === target.id) ?? target;
 			options?.onVenueProgress?.(liveVenue, idx + 1, targets.length);
+			options?.onVenueStatus?.(
+				liveVenue,
+				"refreshing",
+				idx + 1,
+				targets.length,
+			);
 			try {
 				await ensureVenueLoaded(liveVenue.id);
+				options?.onVenueStatus?.(liveVenue, "done", idx + 1, targets.length);
 			} catch {
-				// Continue remaining venues smoothly.
+				options?.onVenueStatus?.(liveVenue, "error", idx + 1, targets.length);
 			}
 		}
 	};

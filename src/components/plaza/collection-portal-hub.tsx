@@ -1,5 +1,6 @@
 import {
 	BookMarked,
+	Check,
 	ChevronRight,
 	Layers,
 	Loader2,
@@ -91,7 +92,13 @@ export function CollectionPortalHub({
 	venues,
 	items,
 	refreshingArxiv = false,
+	refreshedArxiv = false,
 	refreshingVenue = false,
+	refreshedVenue = false,
+	refreshingCategories,
+	refreshedCategories,
+	refreshingVenueIds,
+	refreshedVenueIds,
 	onRefreshArxiv,
 	onRefreshVenue,
 	onEnterArxiv,
@@ -101,7 +108,13 @@ export function CollectionPortalHub({
 	venues: VenueConfig[];
 	items: CollectionPaperItem[];
 	refreshingArxiv?: boolean;
+	refreshedArxiv?: boolean;
 	refreshingVenue?: boolean;
+	refreshedVenue?: boolean;
+	refreshingCategories?: ReadonlySet<string>;
+	refreshedCategories?: ReadonlySet<string>;
+	refreshingVenueIds?: ReadonlySet<string>;
+	refreshedVenueIds?: ReadonlySet<string>;
 	onRefreshArxiv: () => void;
 	onRefreshVenue: () => void;
 	onEnterArxiv: (category: string | null) => void;
@@ -116,6 +129,8 @@ export function CollectionPortalHub({
 		venueCounts,
 		conferenceTotal,
 		journalTotal,
+		confList,
+		jourList,
 		conferences,
 		journals,
 	} = useMemo(() => {
@@ -148,8 +163,8 @@ export function CollectionPortalHub({
 			}
 		}
 
-		const confList = venues.filter((v) => inferVenueKind(v) === "conference");
-		const jourList = venues.filter((v) => inferVenueKind(v) === "journal");
+		const cList = venues.filter((v) => inferVenueKind(v) === "conference");
+		const jList = venues.filter((v) => inferVenueKind(v) === "journal");
 
 		return {
 			arxivTotal: aCount,
@@ -158,10 +173,23 @@ export function CollectionPortalHub({
 			venueCounts: vMap,
 			conferenceTotal: confCount,
 			journalTotal: jourCount,
-			conferences: groupVenuesByDomainAndRank(confList),
-			journals: groupVenuesByDomainAndRank(jourList),
+			confList: cList,
+			jourList: jList,
+			conferences: groupVenuesByDomainAndRank(cList),
+			journals: groupVenuesByDomainAndRank(jList),
 		};
 	}, [categories, items, venues]);
+
+	const isConfRefreshing = confList.some((v) => refreshingVenueIds?.has(v.id));
+	const isConfRefreshed =
+		!isConfRefreshing &&
+		confList.length > 0 &&
+		confList.every((v) => refreshedVenueIds?.has(v.id));
+	const isJourRefreshing = jourList.some((v) => refreshingVenueIds?.has(v.id));
+	const isJourRefreshed =
+		!isJourRefreshing &&
+		jourList.length > 0 &&
+		jourList.every((v) => refreshedVenueIds?.has(v.id));
 
 	return (
 		<div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4">
@@ -196,10 +224,15 @@ export function CollectionPortalHub({
 									disabled={refreshingArxiv}
 									onClick={onRefreshArxiv}
 									aria-label={`${t("plaza.collection.refresh")} · arXiv`}
-									className={HUB_ICON_BTN_CLASS}
+									className={`group/refresh-btn ${HUB_ICON_BTN_CLASS}`}
 								>
 									{refreshingArxiv ? (
-										<Loader2 className="size-3.5 animate-spin" />
+										<Loader2 className="size-3.5 animate-spin text-brand" />
+									) : refreshedArxiv ? (
+										<>
+											<Check className="size-3.5 text-emerald-500 group-hover/refresh-btn:hidden" />
+											<RefreshCw className="hidden size-3.5 group-hover/refresh-btn:block" />
+										</>
 									) : (
 										<RefreshCw className="size-3.5" />
 									)}
@@ -230,6 +263,9 @@ export function CollectionPortalHub({
 					{categories.map((cat) => {
 						const count = catCounts.get(cat) ?? 0;
 						const subtitle = ARXIV_CATEGORY_SUBTITLES[cat];
+						const catRefreshing = refreshingCategories?.has(cat) ?? false;
+						const catRefreshed =
+							!catRefreshing && (refreshedCategories?.has(cat) ?? false);
 						return (
 							<button
 								key={cat}
@@ -238,8 +274,13 @@ export function CollectionPortalHub({
 								className="group flex items-center justify-between gap-2 rounded-lg bg-[var(--magpie-surface)] px-3 py-2.5 text-left shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] transition-colors hover:bg-muted/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
 							>
 								<div className="min-w-0">
-									<div className="font-medium font-mono text-foreground text-xs">
-										{cat}
+									<div className="flex items-center gap-1.5 font-medium font-mono text-foreground text-xs">
+										<span>{cat}</span>
+										{catRefreshing ? (
+											<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+										) : catRefreshed ? (
+											<Check className="size-3 shrink-0 text-emerald-500" />
+										) : null}
 									</div>
 									{subtitle ? (
 										<div className="truncate text-[11px] text-muted-foreground">
@@ -293,10 +334,15 @@ export function CollectionPortalHub({
 									disabled={refreshingVenue}
 									onClick={onRefreshVenue}
 									aria-label={`${t("plaza.collection.refresh")} · ${t("plaza.collection.source.venue")}`}
-									className={HUB_ICON_BTN_CLASS}
+									className={`group/refresh-btn ${HUB_ICON_BTN_CLASS}`}
 								>
 									{refreshingVenue ? (
-										<Loader2 className="size-3.5 animate-spin" />
+										<Loader2 className="size-3.5 animate-spin text-brand" />
+									) : refreshedVenue ? (
+										<>
+											<Check className="size-3.5 text-emerald-500 group-hover/refresh-btn:hidden" />
+											<RefreshCw className="hidden size-3.5 group-hover/refresh-btn:block" />
+										</>
 									) : (
 										<RefreshCw className="size-3.5" />
 									)}
@@ -328,6 +374,11 @@ export function CollectionPortalHub({
 						<span className="inline-flex items-center gap-1.5 font-medium text-foreground text-xs">
 							<Layers className="size-3.5 text-brand" />
 							{t("plaza.collection.venueKind.conference")}
+							{isConfRefreshing ? (
+								<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+							) : isConfRefreshed ? (
+								<Check className="size-3 shrink-0 text-emerald-500" />
+							) : null}
 						</span>
 						<span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground tabular-nums group-hover:text-foreground">
 							{conferenceTotal}
@@ -344,6 +395,9 @@ export function CollectionPortalHub({
 								<div className="flex flex-wrap gap-1.5">
 									{grp.venues.map((v) => {
 										const cnt = venueCounts.get(v.id) ?? v.paperCount ?? 0;
+										const vRefreshing = refreshingVenueIds?.has(v.id) ?? false;
+										const vRefreshed =
+											!vRefreshing && (refreshedVenueIds?.has(v.id) ?? false);
 										return (
 											<button
 												key={v.id}
@@ -351,6 +405,11 @@ export function CollectionPortalHub({
 												onClick={() => onEnterVenue("conference", v.id)}
 												className="magpie-chip hover:border-brand/40 hover:text-foreground"
 											>
+												{vRefreshing ? (
+													<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+												) : vRefreshed ? (
+													<Check className="size-3 shrink-0 text-emerald-500" />
+												) : null}
 												<span>{v.name}</span>
 												{v.mode === "agent" ? (
 													<Sparkles className="size-2.5 text-brand" />
@@ -379,6 +438,11 @@ export function CollectionPortalHub({
 						<span className="inline-flex items-center gap-1.5 font-medium text-foreground text-xs">
 							<BookMarked className="size-3.5 text-brand" />
 							{t("plaza.collection.venueKind.journal")}
+							{isJourRefreshing ? (
+								<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+							) : isJourRefreshed ? (
+								<Check className="size-3 shrink-0 text-emerald-500" />
+							) : null}
 						</span>
 						<span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground tabular-nums group-hover:text-foreground">
 							{journalTotal}
@@ -395,6 +459,9 @@ export function CollectionPortalHub({
 								<div className="flex flex-wrap gap-1.5">
 									{grp.venues.map((v) => {
 										const cnt = venueCounts.get(v.id) ?? v.paperCount ?? 0;
+										const vRefreshing = refreshingVenueIds?.has(v.id) ?? false;
+										const vRefreshed =
+											!vRefreshing && (refreshedVenueIds?.has(v.id) ?? false);
 										return (
 											<button
 												key={v.id}
@@ -402,6 +469,11 @@ export function CollectionPortalHub({
 												onClick={() => onEnterVenue("journal", v.id)}
 												className="magpie-chip hover:border-brand/40 hover:text-foreground"
 											>
+												{vRefreshing ? (
+													<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+												) : vRefreshed ? (
+													<Check className="size-3 shrink-0 text-emerald-500" />
+												) : null}
 												<span>{v.name}</span>
 												{cnt > 0 ? (
 													<span className="font-mono text-[10px] text-muted-foreground tabular-nums">

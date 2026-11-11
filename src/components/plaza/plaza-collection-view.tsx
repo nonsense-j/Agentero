@@ -122,6 +122,18 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const [venueRefreshLabel, setVenueRefreshLabel] = useState<string | null>(
 		null,
 	);
+	const [refreshingCategories, setRefreshingCategories] = useState<Set<string>>(
+		new Set(),
+	);
+	const [refreshedCategories, setRefreshedCategories] = useState<Set<string>>(
+		new Set(),
+	);
+	const [refreshingVenueIds, setRefreshingVenueIds] = useState<Set<string>>(
+		new Set(),
+	);
+	const [refreshedVenueIds, setRefreshedVenueIds] = useState<Set<string>>(
+		new Set(),
+	);
 	const [idbReady, setIdbReady] = useState(false);
 	const [loadingVenueId, setLoadingVenueId] = useState<string | null>(null);
 	const [loadingMoreRemote, setLoadingMoreRemote] = useState(false);
@@ -174,8 +186,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 
 	const handleRefreshArxiv = useCallback(
-		async (targetCategories?: string[], replaceCategories = false) => {
+		async (
+			targetCategories?: string[],
+			replaceCategories = false,
+			isBackgroundInit = false,
+		) => {
 			if (refreshingArxiv) return;
+			const cats = targetCategories ?? state.categories;
 			const label =
 				targetCategories && targetCategories.length === 1
 					? (targetCategories[0] ?? "arXiv")
@@ -183,11 +200,37 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			setRefreshingArxiv(true);
 			setArxivRefreshLabel(label);
 			setUpdateHint(null);
+			setRefreshingCategories((prev) => {
+				const next = new Set(prev);
+				for (const c of cats) next.add(c);
+				return next;
+			});
+			if (!isBackgroundInit) {
+				setRefreshedCategories((prev) => {
+					const next = new Set(prev);
+					for (const c of cats) next.delete(c);
+					return next;
+				});
+			}
 			try {
 				const next = await refreshArxivCollection({
-					categories: targetCategories ?? state.categories,
+					categories: cats,
 					replaceCategories,
 					incremental: true,
+					onCategoryStatus: (cat, status) => {
+						if (status === "refreshing") {
+							setRefreshingCategories((prev) => new Set(prev).add(cat));
+							return;
+						}
+						setRefreshingCategories((prev) => {
+							const s = new Set(prev);
+							s.delete(cat);
+							return s;
+						});
+						if (status === "done" && !isBackgroundInit) {
+							setRefreshedCategories((prev) => new Set(prev).add(cat));
+						}
+					},
 				});
 				setState(next);
 			} catch (err) {
@@ -195,6 +238,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			} finally {
 				setRefreshingArxiv(false);
 				setArxivRefreshLabel(null);
+				setRefreshingCategories((prev) => {
+					const next = new Set(prev);
+					for (const c of cats) next.delete(c);
+					return next;
+				});
 			}
 		},
 		[refreshingArxiv, state.categories],
@@ -217,14 +265,26 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					state.venues.find((v) => v.id === singleId)?.name ?? venuePortalLabel;
 				setLoadingVenueId(singleId);
 				setVenueRefreshLabel(singleName);
+				setRefreshingVenueIds((prev) => new Set(prev).add(singleId));
+				setRefreshedVenueIds((prev) => {
+					const next = new Set(prev);
+					next.delete(singleId);
+					return next;
+				});
 				try {
 					const next = await ensureVenueLoaded(singleId);
 					setState(next);
+					setRefreshedVenueIds((prev) => new Set(prev).add(singleId));
 				} catch (err) {
 					notifyError(errorText(err));
 				} finally {
 					setLoadingVenueId((prev) => (prev === singleId ? null : prev));
 					setVenueRefreshLabel((prev) => (prev === singleName ? null : prev));
+					setRefreshingVenueIds((prev) => {
+						const next = new Set(prev);
+						next.delete(singleId);
+						return next;
+					});
 				}
 				return;
 			}
@@ -245,6 +305,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									: venue.name;
 							});
 						},
+						onVenueStatus: (venue, status) => {
+							setRefreshingVenueIds((prev) => {
+								const next = new Set(prev);
+								if (status === "refreshing") next.add(venue.id);
+								else next.delete(venue.id);
+								return next;
+							});
+						},
 					});
 					setState(next);
 				} catch (err) {
@@ -259,8 +327,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			}
 
 			if (refreshingVenue) return;
+			const scopedIds = targetVenueIds ?? state.venues.map((v) => v.id);
 			setRefreshingVenue(true);
 			setVenueRefreshLabel(venuePortalLabel);
+			setRefreshedVenueIds((prev) => {
+				const next = new Set(prev);
+				for (const id of scopedIds) next.delete(id);
+				return next;
+			});
 			try {
 				const next = await refreshVenueCollection({
 					venues: state.venues,
@@ -273,6 +347,20 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								: venue.name,
 						);
 					},
+					onVenueStatus: (venue, status) => {
+						if (status === "refreshing") {
+							setRefreshingVenueIds((prev) => new Set(prev).add(venue.id));
+							return;
+						}
+						setRefreshingVenueIds((prev) => {
+							const next = new Set(prev);
+							next.delete(venue.id);
+							return next;
+						});
+						if (status === "done") {
+							setRefreshedVenueIds((prev) => new Set(prev).add(venue.id));
+						}
+					},
 				});
 				setState(next);
 			} catch (err) {
@@ -280,6 +368,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			} finally {
 				setRefreshingVenue(false);
 				setVenueRefreshLabel(null);
+				setRefreshingVenueIds((prev) => {
+					const next = new Set(prev);
+					for (const id of scopedIds) next.delete(id);
+					return next;
+				});
 			}
 		},
 		[backgroundInitVenues, loadingVenueId, refreshingVenue, state.venues, t],
@@ -299,7 +392,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				),
 		);
 		if (missingCategories.length > 0) {
-			void handleRefreshArxiv(missingCategories);
+			void handleRefreshArxiv(missingCategories, false, true);
 		} else {
 			void runCheckUpdate(true);
 			const arxivCount = state.items.filter(
@@ -552,12 +645,56 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		return state.venues.find((v) => v.id === selectedVenueId)?.name ?? null;
 	}, [selectedVenueId, state.venues]);
 
+	const activeRefreshingVenueIds = useMemo(() => {
+		if (!loadingVenueId || refreshingVenueIds.has(loadingVenueId)) {
+			return refreshingVenueIds;
+		}
+		return new Set(refreshingVenueIds).add(loadingVenueId);
+	}, [loadingVenueId, refreshingVenueIds]);
+
+	const isHubArxivRefreshed =
+		!refreshingArxiv &&
+		state.categories.length > 0 &&
+		state.categories.every((cat) => refreshedCategories.has(cat));
+
+	const isHubVenueRefreshed =
+		!refreshingVenue &&
+		!backgroundInitVenues &&
+		state.venues.length > 0 &&
+		state.venues.every((v) => refreshedVenueIds.has(v.id));
+
+	const isAllArxivRefreshed = isHubArxivRefreshed;
+	const isAllArxivRefreshing =
+		refreshingArxiv &&
+		state.categories.length > 0 &&
+		state.categories.every((cat) => refreshingCategories.has(cat));
+
+	const isAllFilteredVenuesRefreshing =
+		refreshingVenue &&
+		filteredVenuesForBar.some((v) => activeRefreshingVenueIds.has(v.id));
+	const isAllFilteredVenuesRefreshed =
+		!isAllFilteredVenuesRefreshing &&
+		filteredVenuesForBar.length > 0 &&
+		filteredVenuesForBar.every((v) => refreshedVenueIds.has(v.id));
+
 	const isCurrentViewRefreshing =
 		activeSource === "arxiv"
-			? refreshingArxiv
+			? selectedCategory
+				? refreshingCategories.has(selectedCategory)
+				: refreshingArxiv
 			: selectedVenueId
-				? loadingVenueId === selectedVenueId || refreshingVenue
+				? activeRefreshingVenueIds.has(selectedVenueId)
 				: refreshingVenue || backgroundInitVenues || Boolean(loadingVenueId);
+
+	const isCurrentViewRefreshed =
+		!isCurrentViewRefreshing &&
+		(activeSource === "arxiv"
+			? selectedCategory
+				? refreshedCategories.has(selectedCategory)
+				: isAllArxivRefreshed
+			: selectedVenueId
+				? refreshedVenueIds.has(selectedVenueId)
+				: isAllFilteredVenuesRefreshed);
 
 	const hubRefreshTarget = arxivRefreshLabel ?? venueRefreshLabel;
 
@@ -740,7 +877,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							venues={state.venues}
 							items={state.items}
 							refreshingArxiv={refreshingArxiv}
+							refreshedArxiv={isHubArxivRefreshed}
 							refreshingVenue={refreshingVenue || backgroundInitVenues}
+							refreshedVenue={isHubVenueRefreshed}
+							refreshingCategories={refreshingCategories}
+							refreshedCategories={refreshedCategories}
+							refreshingVenueIds={activeRefreshingVenueIds}
+							refreshedVenueIds={refreshedVenueIds}
 							onRefreshArxiv={() => void handleRefreshArxiv()}
 							onRefreshVenue={() => void handleRefreshVenue(undefined, false)}
 							onEnterArxiv={handleEnterArxiv}
@@ -943,10 +1086,18 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											disabled={isCurrentViewRefreshing}
 											onClick={handleScopedListRefresh}
 											aria-label={scopedRefreshLabel}
-											className={COLLECTION_ICON_BTN_CLASS}
+											className={cn(
+												"group/refresh-btn",
+												COLLECTION_ICON_BTN_CLASS,
+											)}
 										>
 											{isCurrentViewRefreshing ? (
-												<Loader2 className="size-3.5 animate-spin" />
+												<Loader2 className="size-3.5 animate-spin text-brand" />
+											) : isCurrentViewRefreshed ? (
+												<>
+													<Check className="size-3.5 text-emerald-500 group-hover/refresh-btn:hidden" />
+													<RefreshCw className="hidden size-3.5 group-hover/refresh-btn:block" />
+												</>
 											) : (
 												<RefreshCw className="size-3.5" />
 											)}
@@ -969,30 +1120,45 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									}}
 									className="magpie-chip shrink-0"
 								>
+									{isAllArxivRefreshing ? (
+										<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+									) : isAllArxivRefreshed ? (
+										<Check className="size-3 shrink-0 text-emerald-500" />
+									) : null}
 									<span>{t("plaza.collection.allTags")}</span>
 									<span className="text-muted-foreground tabular-nums">
 										{arxivChipCounts.total}
 									</span>
 								</button>
-								{state.categories.map((cat) => (
-									<button
-										key={cat}
-										type="button"
-										data-active={selectedCategory === cat}
-										onClick={() => {
-											setSelectedCategory((prev) =>
-												prev === cat ? null : cat,
-											);
-											setDisplayLimit(INITIAL_DISPLAY_COUNT);
-										}}
-										className="magpie-chip shrink-0 font-mono"
-									>
-										<span>{cat}</span>
-										<span className="text-muted-foreground tabular-nums">
-											{arxivChipCounts.map.get(cat) ?? 0}
-										</span>
-									</button>
-								))}
+								{state.categories.map((cat) => {
+									const catRefreshing = refreshingCategories.has(cat);
+									const catRefreshed =
+										!catRefreshing && refreshedCategories.has(cat);
+									return (
+										<button
+											key={cat}
+											type="button"
+											data-active={selectedCategory === cat}
+											onClick={() => {
+												setSelectedCategory((prev) =>
+													prev === cat ? null : cat,
+												);
+												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+											}}
+											className="magpie-chip shrink-0 font-mono"
+										>
+											{catRefreshing ? (
+												<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+											) : catRefreshed ? (
+												<Check className="size-3 shrink-0 text-emerald-500" />
+											) : null}
+											<span>{cat}</span>
+											<span className="text-muted-foreground tabular-nums">
+												{arxivChipCounts.map.get(cat) ?? 0}
+											</span>
+										</button>
+									);
+								})}
 							</div>
 						) : (
 							<div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
@@ -1005,6 +1171,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									}}
 									className="magpie-chip shrink-0"
 								>
+									{isAllFilteredVenuesRefreshing ? (
+										<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+									) : isAllFilteredVenuesRefreshed ? (
+										<Check className="size-3 shrink-0 text-emerald-500" />
+									) : null}
 									<span>{t("plaza.collection.allTags")}</span>
 									<span className="text-muted-foreground tabular-nums">
 										{venueChipCounts.total}
@@ -1012,6 +1183,9 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								</button>
 								{filteredVenuesForBar.map((v) => {
 									const cnt = venueChipCounts.map.get(v.id) ?? 0;
+									const vRefreshing = activeRefreshingVenueIds.has(v.id);
+									const vRefreshed =
+										!vRefreshing && refreshedVenueIds.has(v.id);
 									return (
 										<button
 											key={v.id}
@@ -1025,6 +1199,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											}}
 											className="magpie-chip shrink-0"
 										>
+											{vRefreshing ? (
+												<Loader2 className="size-3 shrink-0 animate-spin text-brand" />
+											) : vRefreshed ? (
+												<Check className="size-3 shrink-0 text-emerald-500" />
+											) : null}
 											<span>{v.name}</span>
 											{v.ccfRank ? (
 												<span className="font-mono text-[10px] text-brand/80">
@@ -1065,10 +1244,15 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											)
 										}
 										className={cn(
-											"h-6 rounded-md px-2.5 text-caption",
+											"h-6 gap-1 rounded-md px-2.5 text-caption",
 											COLLECTION_PRIMARY_BTN_CLASS,
 										)}
 									>
+										{refreshingArxiv ? (
+											<Loader2 className="size-3 animate-spin" />
+										) : (
+											<RefreshCw className="size-3" />
+										)}
 										{t("plaza.collection.refreshNow")}
 									</Button>
 									<button
@@ -1112,7 +1296,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									onClick={handleScopedListRefresh}
 									className={COLLECTION_OUTLINE_BTN_CLASS}
 								>
-									<RefreshCw className="size-3.5" />
+									{isCurrentViewRefreshing ? (
+										<Loader2 className="size-3.5 animate-spin text-brand" />
+									) : isCurrentViewRefreshed ? (
+										<Check className="size-3.5 text-emerald-500" />
+									) : (
+										<RefreshCw className="size-3.5" />
+									)}
 									{scopedRefreshLabel}
 								</Button>
 							</div>
