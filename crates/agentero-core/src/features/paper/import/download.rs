@@ -40,8 +40,7 @@ static INSTITUTION_PROXY: Mutex<Option<InstitutionProxyConf>> = Mutex::new(None)
 /// downloads execute inside an offscreen WebView sharing that exact profile.
 pub type BrowserPdfFetchFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>;
-pub type BrowserPdfFetcher =
-    std::sync::Arc<dyn Fn(String) -> BrowserPdfFetchFuture + Send + Sync>;
+pub type BrowserPdfFetcher = std::sync::Arc<dyn Fn(String) -> BrowserPdfFetchFuture + Send + Sync>;
 
 static BROWSER_PDF_FETCHER: Mutex<Option<BrowserPdfFetcher>> = Mutex::new(None);
 
@@ -89,7 +88,9 @@ pub enum InstitutionProxyKind {
 
 impl InstitutionProxyKind {
     pub fn from_setting(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("wengine") {
+        if s.eq_ignore_ascii_case("direct") || s.eq_ignore_ascii_case("none") {
+            Self::Direct
+        } else if s.eq_ignore_ascii_case("wengine") {
             Self::Wengine
         } else if s.eq_ignore_ascii_case("carsi") {
             Self::Carsi
@@ -99,7 +100,9 @@ impl InstitutionProxyKind {
     }
 
     pub fn from_setting_and_prefix(s: &str, prefix: &str) -> Self {
-        if is_carsi_sso_prefix(prefix) {
+        if s.eq_ignore_ascii_case("direct") || s.eq_ignore_ascii_case("none") {
+            Self::Direct
+        } else if is_carsi_sso_prefix(prefix) {
             Self::Carsi
         } else {
             Self::from_setting(s)
@@ -130,8 +133,8 @@ pub fn set_institution_proxy(kind: InstitutionProxyKind, prefix: &str, cookie: &
         .chars()
         .filter(|c| !matches!(c, '\r' | '\n' | '\t'))
         .collect();
-    let disabled =
-        prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty());
+    let disabled = kind == InstitutionProxyKind::Direct
+        || (prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty()));
     let value = if disabled {
         None
     } else {

@@ -131,6 +131,15 @@ pub async fn webview_fetch_publisher_pdf(
     app: AppHandle,
     target_url: String,
 ) -> Result<Vec<u8>, String> {
+    webview_fetch_publisher_pdf_with_options(app, target_url, false, 25).await
+}
+
+async fn webview_fetch_publisher_pdf_with_options(
+    app: AppHandle,
+    target_url: String,
+    incognito: bool,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, String> {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tauri::webview::{DownloadEvent, PageLoadEvent};
@@ -240,7 +249,8 @@ pub async fn webview_fetch_publisher_pdf(
         txt.includes("access through your institution") ||
         txt.includes("get access") ||
         txt.includes("purchase pdf") ||
-        txt.includes("shibboleth")
+        txt.includes("shibboleth") ||
+        txt.includes("sign in")
       ) {
         signalSentinel("__agentero_auth_required__");
       } else {
@@ -253,10 +263,15 @@ pub async fn webview_fetch_publisher_pdf(
 })();
 "#;
 
-    let build_res = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(nav_url))
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(nav_url))
         .title("CARSI PDF Fetch")
         .inner_size(900.0, 700.0)
-        .visible(false)
+        .visible(false);
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    if incognito {
+        builder = builder.incognito(true);
+    }
+    let build_res = builder
         .on_download(move |_webview, event| match event {
             DownloadEvent::Requested { destination, .. } => {
                 let fname = destination
@@ -323,7 +338,7 @@ pub async fn webview_fetch_publisher_pdf(
         return Err(e.to_string());
     }
 
-    let result = match tokio::time::timeout(Duration::from_secs(25), rx).await {
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
         Ok(Ok(res)) => res,
         Ok(Err(_)) => Err("CARSI browser PDF channel closed unexpectedly".into()),
         Err(_) => Err("timed out waiting for publisher PDF in browser session".into()),
@@ -587,14 +602,20 @@ pub fn settings_set(
     }
 }
 
-/// Probe the configured institution proxy (EZProxy/WebVPN) by fetching a
+/// Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
 /// known paywalled DOI through the rewrite and checking the response is a
-/// PDF. Returns a short human-readable result for the settings UI.
+/// PDF. Optional `prefix_override` tests a specific gateway or CARSI publisher
+/// without clobbering saved settings.
 #[tauri::command]
 #[specta::specta]
-pub async fn institution_proxy_probe(app: AppHandle) -> ApiResult<String> {
+pub async fn institution_proxy_probe(
+    app: AppHandle,
+    prefix_override: Option<String>,
+) -> ApiResult<String> {
     let store = app.state::<AppSettingsStore>();
-    let Some((kind, prefix, cookie)) = store.institution_proxy() else {
+    let Some((kind, prefix, cookie)) =
+        store.institution_proxy_with_override(prefix_override.as_deref())
+    else {
         return ApiResult::err(agentero_core::error::AppError::message(
             "prefix not configured",
         ));
@@ -614,6 +635,81 @@ pub async fn institution_proxy_probe(app: AppHandle) -> ApiResult<String> {
             e,
         )),
     }
+}
+
+/// Direct access probe result for a single academic publisher (`ieee` or `acm`).
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PublisherAccessProbe {
+    pub publisher: String,
+    pub direct_ok: bool,
+    pub status: String,
+    pub detail: String,
+}
+
+/// Combined direct campus-network access detection for IEEE Xplore and ACM DL.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct InstitutionAccessDetectResult {
+    pub ieee: PublisherAccessProbe,
+    pub acm: PublisherAccessProbe,
+    pub needs_gateway: bool,
+}
+
+fn classify_direct_probe(publisher: &str, res: Result<Vec<u8>, String>) -> PublisherAccessProbe {
+    match res {
+        Ok(bytes) => PublisherAccessProbe {
+            publisher: publisher.to_string(),
+            direct_ok: true,
+            status: "ok".to_string(),
+            detail: format!("ok ({} bytes)", bytes.len()),
+        },
+        Err(e) if e.contains("authentication required") || e.contains("not a PDF") => {
+            PublisherAccessProbe {
+                publisher: publisher.to_string(),
+                direct_ok: false,
+                status: "auth_required".to_string(),
+                detail: e,
+            }
+        }
+        Err(e) => PublisherAccessProbe {
+            publisher: publisher.to_string(),
+            direct_ok: false,
+            status: "error".to_string(),
+            detail: e,
+        },
+    }
+}
+
+/// Probe IEEE Xplore and ACM Digital Library in an isolated incognito browser
+/// session (without saved CARSI/gateway cookies) to determine whether the
+/// current network IP already has direct subscription access or requires an
+/// institutional gateway.
+#[tauri::command]
+#[specta::specta]
+pub async fn institution_access_detect(app: AppHandle) -> ApiResult<InstitutionAccessDetectResult> {
+    let ieee_res = webview_fetch_publisher_pdf_with_options(
+        app.clone(),
+        "https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=7194613".to_string(),
+        true,
+        15,
+    )
+    .await;
+    let acm_res = webview_fetch_publisher_pdf_with_options(
+        app,
+        "https://dl.acm.org/doi/pdf/10.1145/2786805.2786814?download=true".to_string(),
+        true,
+        15,
+    )
+    .await;
+    let ieee = classify_direct_probe("ieee", ieee_res);
+    let acm = classify_direct_probe("acm", acm_res);
+    let needs_gateway = !(ieee.direct_ok && acm.direct_ok);
+    ApiResult::ok(InstitutionAccessDetectResult {
+        ieee,
+        acm,
+        needs_gateway,
+    })
 }
 
 /// Probe the configured EasyScholar key by querying a stable journal.

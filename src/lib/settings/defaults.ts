@@ -86,18 +86,20 @@ export const DEFAULT_TRANSLATOR_BASE_URL =
 export const DEFAULT_NETWORK_PROXY_URL = "http://127.0.0.1:7890";
 
 /** Gateway flavour for the institution proxy (`institutionProxyType`). */
-export type InstitutionProxyKind = "ezproxy" | "wengine" | "carsi";
+export type InstitutionProxyKind = "direct" | "carsi" | "wengine" | "ezproxy";
 
 export type InstitutionProxyPreset = {
 	id: string;
-	kind: InstitutionProxyKind;
+	kind: Exclude<InstitutionProxyKind, "direct">;
 	/** Gateway origin or CARSI publisher SSO entry URL. */
 	prefix: string;
+	/** Optional publisher domain for matching saved CARSI host cookies. */
+	host?: string;
 };
 
 /**
  * Built-in institution WebVPN gateways and CARSI publisher SSO portals offered
- * as quick-fill presets beside the free-text prefix field. Labels live at
+ * in mode-scoped settings panels. Labels live at
  * `general.institutionProxy.presets.{id}`.
  */
 export const INSTITUTION_PROXY_PRESETS = [
@@ -105,17 +107,25 @@ export const INSTITUTION_PROXY_PRESETS = [
 		id: "carsiAcm",
 		kind: "carsi",
 		prefix: "https://dl.acm.org/action/ssostart",
+		host: "dl.acm.org",
 	},
-	{ id: "carsiIeee", kind: "carsi", prefix: "https://ieeexplore.ieee.org" },
+	{
+		id: "carsiIeee",
+		kind: "carsi",
+		prefix: "https://ieeexplore.ieee.org",
+		host: "ieeexplore.ieee.org",
+	},
 	{
 		id: "carsiSpringer",
 		kind: "carsi",
 		prefix: "https://link.springer.com/institutional-login",
+		host: "link.springer.com",
 	},
 	{
 		id: "carsiElsevier",
 		kind: "carsi",
 		prefix: "https://www.sciencedirect.com",
+		host: "www.sciencedirect.com",
 	},
 	{ id: "zju", kind: "wengine", prefix: "https://webvpn.zju.edu.cn" },
 	{ id: "ustc", kind: "wengine", prefix: "https://webvpn.ustc.edu.cn" },

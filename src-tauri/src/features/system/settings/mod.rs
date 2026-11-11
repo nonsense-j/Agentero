@@ -1021,10 +1021,46 @@ impl AppSettingsStore {
         let kind =
             InstitutionProxyKind::from_setting_and_prefix(&guard.institution_proxy_type, prefix);
         let cookie = guard.institution_proxy_cookie.trim();
-        if prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty()) {
+        if kind == InstitutionProxyKind::Direct
+            || (prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty()))
+        {
             return None;
         }
         Some((kind, prefix.to_string(), cookie.to_string()))
+    }
+
+    /// Resolve institution proxy configuration, optionally probing a specific
+    /// gateway or CARSI publisher URL (`prefix_override`) without clobbering
+    /// saved settings.
+    pub fn institution_proxy_with_override(
+        &self,
+        prefix_override: Option<&str>,
+    ) -> Option<(
+        agentero_core::features::paper::import::download::InstitutionProxyKind,
+        String,
+        String,
+    )> {
+        use agentero_core::features::paper::import::download::InstitutionProxyKind;
+        let trimmed_override = prefix_override
+            .map(|p| p.trim().trim_end_matches('/'))
+            .filter(|p| !p.is_empty());
+        let Some(override_prefix) = trimmed_override else {
+            return self.institution_proxy();
+        };
+        let guard = self.inner.lock().ok()?;
+        let effective_type = if guard.institution_proxy_type.eq_ignore_ascii_case("direct")
+            || guard.institution_proxy_type.eq_ignore_ascii_case("none")
+        {
+            "ezproxy"
+        } else {
+            guard.institution_proxy_type.as_str()
+        };
+        let kind = InstitutionProxyKind::from_setting_and_prefix(effective_type, override_prefix);
+        Some((
+            kind,
+            override_prefix.to_string(),
+            guard.institution_proxy_cookie.trim().to_string(),
+        ))
     }
 
     /// Persist cookies captured after an interactive gateway login without
@@ -1266,17 +1302,20 @@ fn normalize(s: &mut AppSettings) {
         .trim_end_matches('/')
         .to_string();
     s.institution_proxy_cookie = s.institution_proxy_cookie.trim().to_string();
-    s.institution_proxy_type =
-        if agentero_core::features::paper::import::download::is_carsi_sso_prefix(
-            &s.institution_proxy_prefix,
-        ) || s.institution_proxy_type.eq_ignore_ascii_case("carsi")
-        {
-            "carsi".to_string()
-        } else if s.institution_proxy_type.eq_ignore_ascii_case("wengine") {
-            "wengine".to_string()
-        } else {
-            "ezproxy".to_string()
-        };
+    s.institution_proxy_type = if s.institution_proxy_type.eq_ignore_ascii_case("direct")
+        || s.institution_proxy_type.eq_ignore_ascii_case("none")
+    {
+        "direct".to_string()
+    } else if agentero_core::features::paper::import::download::is_carsi_sso_prefix(
+        &s.institution_proxy_prefix,
+    ) || s.institution_proxy_type.eq_ignore_ascii_case("carsi")
+    {
+        "carsi".to_string()
+    } else if s.institution_proxy_type.eq_ignore_ascii_case("wengine") {
+        "wengine".to_string()
+    } else {
+        "ezproxy".to_string()
+    };
     // Keep the core download fallback in sync on both load and set paths.
     let kind = agentero_core::features::paper::import::download::InstitutionProxyKind::from_setting_and_prefix(
         &s.institution_proxy_type,
@@ -2478,6 +2517,32 @@ mod tests {
             let (reloaded, _) = read_file(&path);
             assert_eq!(reloaded.translate.provider, provider);
         }
+    }
+
+    #[test]
+    fn direct_institution_proxy_mode_disables_gateway_even_with_saved_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "institutionProxyType": "direct",
+                "institutionProxyPrefix": "https://dl.acm.org/action/ssostart",
+                "institutionProxyCookie": "{\"dl.acm.org\":\"sid=1\"}"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (settings, _) = read_file(&path);
+        let store = AppSettingsStore::for_tests(settings);
+        assert_eq!(
+            store.get().unwrap().settings.institution_proxy_type,
+            "direct"
+        );
+        assert!(store.institution_proxy().is_none());
+        let override_cfg = store
+            .institution_proxy_with_override(Some("https://ieeexplore.ieee.org/servlet/wayf.jsp"));
+        assert!(override_cfg.is_some());
     }
 }
 

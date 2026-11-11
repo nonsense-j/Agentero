@@ -16,6 +16,7 @@ macro_rules! common_commands {
             crate::features::system::settings::commands::list_system_fonts,
             crate::features::system::settings::commands::easy_scholar_probe,
             crate::features::system::settings::commands::institution_proxy_probe,
+            crate::features::system::settings::commands::institution_access_detect,
             crate::features::system::settings::commands::institution_proxy_login_open,
             crate::features::system::builtin::builtin_provider_status,
             crate::features::paper::analyze::layout::model_assets::commands::layout_model_status,

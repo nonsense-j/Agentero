@@ -35,11 +35,19 @@ export const commands = {
 	 */
 	easyScholarProbe: () => __TAURI_INVOKE<ApiResult<boolean>>("easy_scholar_probe"),
 	/**
-	 *  Probe the configured institution proxy (EZProxy/WebVPN) by fetching a
+	 *  Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
 	 *  known paywalled DOI through the rewrite and checking the response is a
-	 *  PDF. Returns a short human-readable result for the settings UI.
+	 *  PDF. Optional `prefix_override` tests a specific gateway or CARSI publisher
+	 *  without clobbering saved settings.
 	 */
-	institutionProxyProbe: () => __TAURI_INVOKE<ApiResult<string>>("institution_proxy_probe"),
+	institutionProxyProbe: (prefixOverride: string | null) => __TAURI_INVOKE<ApiResult<string>>("institution_proxy_probe", { prefixOverride }),
+	/**
+	 *  Probe IEEE Xplore and ACM Digital Library in an isolated incognito browser
+	 *  session (without saved CARSI/gateway cookies) to determine whether the
+	 *  current network IP already has direct subscription access or requires an
+	 *  institutional gateway.
+	 */
+	institutionAccessDetect: () => __TAURI_INVOKE<ApiResult<InstitutionAccessDetectResult>>("institution_access_detect"),
 	/**
 	 *  Open the configured gateway in a dedicated webview for interactive SSO.
 	 *  Async is required when creating a window from WebView2 on Windows.
@@ -3458,6 +3466,13 @@ export type ImportLocalPdfResult_Serialize = {
 	errors: string[],
 };
 
+/**  Combined direct campus-network access detection for IEEE Xplore and ACM DL. */
+export type InstitutionAccessDetectResult = {
+	ieee: PublisherAccessProbe,
+	acm: PublisherAccessProbe,
+	needsGateway: boolean,
+};
+
 /**
  *  A parsed explicit Vault-local link. Markdown remains the source of truth; this
  *  is only an in-memory, rebuildable occurrence projection.
@@ -4917,6 +4932,14 @@ export type PropertyOption_Serialize = {
 	id: string,
 	name: string,
 	color?: string | null,
+};
+
+/**  Direct access probe result for a single academic publisher (`ieee` or `acm`). */
+export type PublisherAccessProbe = {
+	publisher: string,
+	directOk: boolean,
+	status: string,
+	detail: string,
 };
 
 export type PwcImportArgs = {

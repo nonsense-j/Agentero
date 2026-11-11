@@ -9,11 +9,12 @@ const CHECK_INTERVAL = 24 * 60 * 60 * 1000;
 
 /** Check saved gateway credentials at most once a day while the app is open. */
 export function useInstitutionProxyHealth(): void {
+	const type = useSettings((s) => s.institutionProxyType);
 	const prefix = useSettings((s) => s.institutionProxyPrefix);
 	const cookie = useSettings((s) => s.institutionProxyCookie);
 
 	useEffect(() => {
-		if (!isTauri() || !prefix || !cookie) return;
+		if (!isTauri() || type === "direct" || !prefix || !cookie) return;
 		let cancelled = false;
 		let checking = false;
 		const key = `institution-proxy-checked:${prefix}`;
@@ -26,7 +27,7 @@ export function useInstitutionProxyHealth(): void {
 			checking = true;
 			localStorage.setItem(key, String(Date.now()));
 			try {
-				const result = await commands.institutionProxyProbe();
+				const result = await commands.institutionProxyProbe(null);
 				if (
 					!cancelled &&
 					result.error?.code === "institution_proxy_auth_required"
@@ -48,5 +49,5 @@ export function useInstitutionProxyHealth(): void {
 			window.clearTimeout(initial);
 			window.clearInterval(interval);
 		};
-	}, [prefix, cookie]);
+	}, [type, prefix, cookie]);
 }

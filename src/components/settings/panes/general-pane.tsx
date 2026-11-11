@@ -1,10 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-	type InstitutionProxyPresetOption,
-	InstitutionProxyRow,
-	NetworkProxyRow,
-} from "@/components/settings/agent-common-rows";
+import { NetworkProxyRow } from "@/components/settings/agent-common-rows";
 import {
 	PageTitle,
 	SettingsGroup,
@@ -28,7 +24,7 @@ import {
 } from "@/components/ui/tooltip";
 import { commands } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
-import { callApi, callResult } from "@/lib/core/ipc";
+import { callApi } from "@/lib/core/ipc";
 import { notifyError, notifySuccess } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import {
@@ -41,8 +37,6 @@ import {
 	type AppSettings,
 	AUTO_UPDATE_INTERNAL_LINKS,
 	type AutoUpdateInternalLinks,
-	ensureSettingsLoaded,
-	loadSettings,
 	PAPER_NOTE_MODES,
 	type PaperNoteMode,
 	PDF_SCROLL_STRATEGIES,
@@ -51,15 +45,12 @@ import {
 	type PdfSpreadMode,
 	saveSettingsAsync,
 } from "@/lib/settings";
-import {
-	DEFAULT_NETWORK_PROXY_URL,
-	INSTITUTION_PROXY_PRESETS,
-} from "@/lib/settings/defaults";
-import type { ProbeStatus } from "@/lib/ui/probe-status";
+import { DEFAULT_NETWORK_PROXY_URL } from "@/lib/settings/defaults";
 import { notesTemplateSeed } from "@/lib/vault/note-template";
 import { ConnectorSettingsBlock } from "./general/connector-settings-block";
 import { EasyScholarSettingsBlock } from "./general/easy-scholar-settings-block";
 import { FinderIntegrationRow } from "./general/finder-integration-row";
+import { InstitutionAccessBlock } from "./general/institution-access-block";
 import { McpSettingsBlock } from "./general/mcp-settings-block";
 import { PrivacySettingsBlock } from "./general/privacy-settings-block";
 import { TerminalAppRow } from "./general/terminal-app-row";
@@ -83,119 +74,6 @@ export function GeneralPane({
 	// OS system proxy detected by the Host (Windows "Internet Settings"); used
 	// automatically while the app proxy is off — surface it for transparency.
 	const [systemProxy, setSystemProxy] = useState<string | null>(null);
-	const [institutionProxyPrefixDraft, setInstitutionProxyPrefixDraft] =
-		useState(settings.institutionProxyPrefix);
-	const [institutionProxyCookieDraft, setInstitutionProxyCookieDraft] =
-		useState(settings.institutionProxyCookie);
-	const cookieDirtyRef = useRef(false);
-	const [institutionProxyTesting, setInstitutionProxyTesting] = useState(false);
-	const [institutionProxyResult, setInstitutionProxyResult] = useState<
-		{ status: "ok" | "fail"; message: string } | undefined
-	>(undefined);
-	const flushInstitutionProxyAsync = useCallback(
-		async (overrides?: Partial<AppSettings>) => {
-			const latest = loadSettings();
-			const nextPrefix = (
-				overrides?.institutionProxyPrefix ?? institutionProxyPrefixDraft
-			).trim();
-			const nextCookie = cookieDirtyRef.current
-				? institutionProxyCookieDraft.trim()
-				: latest.institutionProxyCookie;
-			cookieDirtyRef.current = false;
-			await saveSettingsAsync({
-				...latest,
-				institutionProxyPrefix: nextPrefix,
-				institutionProxyCookie: nextCookie,
-				...(overrides?.institutionProxyType
-					? { institutionProxyType: overrides.institutionProxyType }
-					: {}),
-			});
-		},
-		[institutionProxyCookieDraft, institutionProxyPrefixDraft],
-	);
-	const commitInstitutionProxy = useCallback(() => {
-		void flushInstitutionProxyAsync();
-	}, [flushInstitutionProxyAsync]);
-	const testInstitutionProxy = useCallback(
-		async (skipFlush = false) => {
-			setInstitutionProxyTesting(true);
-			setInstitutionProxyResult(undefined);
-			try {
-				if (!skipFlush) {
-					await flushInstitutionProxyAsync();
-				}
-				const result = await commands.institutionProxyProbe();
-				setInstitutionProxyResult(
-					result.ok
-						? { status: "ok", message: result.data ?? "" }
-						: { status: "fail", message: result.error?.message ?? "failed" },
-				);
-				if (result.error?.code === "institution_proxy_auth_required") {
-					notifyError(t("general.institutionProxy.cookieExpired"));
-				}
-			} catch (error) {
-				setInstitutionProxyResult({
-					status: "fail",
-					message: error instanceof Error ? error.message : "failed",
-				});
-			} finally {
-				setInstitutionProxyTesting(false);
-			}
-		},
-		[flushInstitutionProxyAsync, t],
-	);
-	const openInstitutionLogin = useCallback(async () => {
-		try {
-			const trimmedPrefix = institutionProxyPrefixDraft.trim();
-			await flushInstitutionProxyAsync({
-				institutionProxyPrefix: trimmedPrefix,
-			});
-			const captured = await callResult(() =>
-				commands.institutionProxyLoginOpen(trimmedPrefix),
-			);
-			await ensureSettingsLoaded();
-			if (captured) void testInstitutionProxy(true);
-		} catch (error) {
-			notifyError(t("general.institutionProxy.loginFailed"), {
-				description: errorText(error),
-			});
-		}
-	}, [
-		flushInstitutionProxyAsync,
-		institutionProxyPrefixDraft,
-		t,
-		testInstitutionProxy,
-	]);
-	const institutionProxyPresets = useMemo(
-		() =>
-			INSTITUTION_PROXY_PRESETS.map((preset) => ({
-				...preset,
-				label: t(`general.institutionProxy.presets.${preset.id}`),
-			})),
-		[t],
-	);
-	const selectInstitutionProxyPreset = useCallback(
-		(preset: InstitutionProxyPresetOption) => {
-			setInstitutionProxyPrefixDraft(preset.prefix);
-			void flushInstitutionProxyAsync({
-				institutionProxyPrefix: preset.prefix,
-				institutionProxyType: preset.kind,
-			});
-		},
-		[flushInstitutionProxyAsync],
-	);
-	const institutionProxyProbeStatus: ProbeStatus = institutionProxyTesting
-		? "probing"
-		: (institutionProxyResult?.status ?? "idle");
-	const institutionProxyProbeLabel = t(
-		institutionProxyProbeStatus === "probing"
-			? "general.institutionProxy.probeProbing"
-			: institutionProxyProbeStatus === "ok"
-				? "general.institutionProxy.probeOk"
-				: institutionProxyProbeStatus === "fail"
-					? "general.institutionProxy.probeFail"
-					: "general.institutionProxy.probeIdle",
-	);
 	const [seedingTemplate, setSeedingTemplate] = useState(false);
 
 	// Custom note mode seeds `.agentero/templates/NOTES.md` in the active vault;
@@ -223,13 +101,7 @@ export function GeneralPane({
 
 	useEffect(() => {
 		setProxyUrlDraft(settings.networkProxyUrl);
-		setInstitutionProxyPrefixDraft(settings.institutionProxyPrefix);
-		setInstitutionProxyCookieDraft(settings.institutionProxyCookie);
-	}, [
-		settings.networkProxyUrl,
-		settings.institutionProxyPrefix,
-		settings.institutionProxyCookie,
-	]);
+	}, [settings.networkProxyUrl]);
 
 	useEffect(() => {
 		setEasyScholarKeyDraft(settings.easyScholarKey);
@@ -518,72 +390,7 @@ export function GeneralPane({
 					}
 				/>
 			</SettingsGroup>
-			<SettingsGroup>
-				<SettingsRow
-					label={t("general.institutionProxy.typeLabel")}
-					htmlFor="institution-proxy-type"
-				>
-					<Select
-						value={settings.institutionProxyType}
-						onValueChange={(institutionProxyType) =>
-							patch({ institutionProxyType })
-						}
-					>
-						<SelectTrigger
-							id="institution-proxy-type"
-							size="sm"
-							className="h-8 w-44 text-xs"
-							disabled={!isTauri()}
-						>
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="ezproxy" className="text-xs">
-								{t("general.institutionProxy.typeEzproxy")}
-							</SelectItem>
-							<SelectItem value="wengine" className="text-xs">
-								{t("general.institutionProxy.typeWengine")}
-							</SelectItem>
-							<SelectItem value="carsi" className="text-xs">
-								{t("general.institutionProxy.typeCarsi")}
-							</SelectItem>
-						</SelectContent>
-					</Select>
-				</SettingsRow>
-				<InstitutionProxyRow
-					htmlFor="institution-proxy-prefix"
-					label={t("general.institutionProxy.label")}
-					prefix={institutionProxyPrefixDraft}
-					cookie={institutionProxyCookieDraft}
-					prefixPlaceholder={
-						settings.institutionProxyType === "carsi"
-							? "https://dl.acm.org/action/ssostart"
-							: settings.institutionProxyType === "wengine"
-								? "https://webvpn.example.edu"
-								: "https://webvpn.example.edu/login?url="
-					}
-					cookiePlaceholder={t("general.institutionProxy.cookiePlaceholder")}
-					cookieLabel={t("general.institutionProxy.cookieLabel")}
-					loginLabel={t("general.institutionProxy.login")}
-					testLabel={t("general.institutionProxy.test")}
-					testingLabel={t("general.institutionProxy.testing")}
-					presetsLabel={t("general.institutionProxy.presetsLabel")}
-					presets={institutionProxyPresets}
-					onPrefixChange={setInstitutionProxyPrefixDraft}
-					onCookieChange={(val) => {
-						cookieDirtyRef.current = true;
-						setInstitutionProxyCookieDraft(val);
-					}}
-					onPresetSelect={selectInstitutionProxyPreset}
-					onCommit={commitInstitutionProxy}
-					onTest={() => void testInstitutionProxy()}
-					onLogin={() => void openInstitutionLogin()}
-					testing={institutionProxyTesting}
-					probeStatus={institutionProxyProbeStatus}
-					probeLabel={institutionProxyProbeLabel}
-					probeDetail={institutionProxyResult?.message}
-				/>
-			</SettingsGroup>
+			<InstitutionAccessBlock settings={settings} />
 			<SettingsSectionLabel className="mt-4">
 				{t("general.sections.integrations")}
 			</SettingsSectionLabel>
