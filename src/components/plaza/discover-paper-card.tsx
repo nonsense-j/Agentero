@@ -10,7 +10,7 @@ import {
 	Pin,
 	Quote,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
 import { SelectionSurface } from "@/components/selection/selection-surface";
@@ -25,7 +25,6 @@ import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import {
 	type CollectionPaperItem,
-	derivePaperKeywords,
 	formatPaperBibtex,
 	formatPaperCitationText,
 } from "@/lib/plaza/collection";
@@ -65,10 +64,7 @@ export function DiscoverPaperCard({
 		null,
 	);
 
-	const keywords = useMemo(() => {
-		if (paper.keywords && paper.keywords.length > 0) return paper.keywords;
-		return derivePaperKeywords(paper.title, paper.abstract, paper.categories);
-	}, [paper]);
+	const keywords = paper.keywords ?? [];
 
 	const copyToClipboard = async (kind: "citation" | "bibtex") => {
 		try {

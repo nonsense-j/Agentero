@@ -463,17 +463,17 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(sparqlRes.items[0]?.citationCount).toBe(4);
 	});
 
-	it("treats v6-synced Venues as immutable on open, upgrades pre-v6 caches once, and does not toggle preloading flag during Venue refresh", async () => {
+	it("treats v7-synced Venues as immutable on open, upgrades pre-v7 caches once, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		expect(CURRENT_VENUE_SYNC_VERSION).toBe(6);
+		expect(CURRENT_VENUE_SYNC_VERSION).toBe(7);
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v5 venue -> requires one-time v6 upgrade
+		// Legacy v6 venue -> requires one-time v7 upgrade
 		expect(
 			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 5, lastFetchedAt: "2026-06-01T00:00:00Z" },
+				{ ...ase, syncVersion: 6, lastFetchedAt: "2026-06-01T00:00:00Z" },
 				[],
 			),
 		).toBe(false);
@@ -1322,5 +1322,142 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		);
 		expect(replaced).toHaveLength(1);
 		expect(replaced[0]?.doi).toBe("10.1145/3832783.3832801");
+	});
+
+	it("hydrates Crossref abstract-less ASE 2026 papers (Doc2Test) via 0-credit OpenAlex DOI singletons during preload and enforces Option-B authentic keywords", async () => {
+		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
+		const esem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "esem-2026");
+		const iclr = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "iclr-2026");
+		if (!ase || !esem || !iclr) throw new Error("Missing venue configs");
+
+		// 1. OpenAlex list endpoint (`works?filter=`) returns HTTP 429, Crossref returns Doc2Test without abstract,
+		//    and 0-credit singleton `works/doi:10.1145/3832783.3834507` populates full abstract + authentic keywords during preload.
+		const singletonCalls: string[] = [];
+		const structured = await fetchVenueStructuredPapers(
+			ase,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works?")) {
+					throw new Error("HTTP 429 Daily list credits exhausted");
+				}
+				if (url.includes("api.openalex.org/works/doi:")) {
+					singletonCalls.push(url);
+					return {
+						id: "https://openalex.org/W_doc2test",
+						doi: "https://doi.org/10.1145/3832783.3834507",
+						title:
+							"Doc2Test: An Industrial Multi-agent Framework for Document-Driven End-to-End Selenium Test Generation",
+						cited_by_count: 3,
+						abstract_inverted_index: {
+							Industrial: [0],
+							"end-to-end": [1],
+							Selenium: [2],
+							test: [3],
+							generation: [4],
+							from: [5],
+							requirements: [6],
+							documents: [7],
+							remains: [8],
+							challenging: [9],
+							in: [10],
+							enterprise: [11],
+							practice: [12],
+						},
+						keywords: [
+							{ display_name: "Multi-agent Systems", score: 0.78 },
+							{ display_name: "Selenium Test Generation", score: 0.71 },
+							{ display_name: "Computer Science", score: 0.9 },
+							{ display_name: "Low Confidence Noise", score: 0.12 },
+						],
+					} as T;
+				}
+				if (url.includes("api.crossref.org/works")) {
+					return {
+						message: {
+							items: [
+								{
+									DOI: "10.1145/3832783.3834507",
+									type: "proceedings-article",
+									title: [
+										"Doc2Test: An Industrial Multi-agent Framework for Document-Driven End-to-End Selenium Test Generation",
+									],
+									subject: ["Software", "Computer Science Applications"],
+									"container-title": [
+										"Proceedings of the 41st IEEE/ACM International Conference on Automated Software Engineering",
+									],
+									author: [{ given: "Lin", family: "Chen" }],
+									published: { "date-parts": [[2026, 10, 12]] },
+								},
+							],
+						},
+					} as T;
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		);
+
+		expect(singletonCalls).toHaveLength(1);
+		expect(structured.items).toHaveLength(1);
+		expect(structured.items[0]?.abstract).toBe(
+			"Industrial end-to-end Selenium test generation from requirements documents remains challenging in enterprise practice",
+		);
+		expect(structured.items[0]?.citationCount).toBe(3);
+		expect(structured.items[0]?.keywords).toEqual([
+			"Multi-agent Systems",
+			"Selenium Test Generation",
+		]);
+
+		// 2. DataCite LIPIcs retains un-schemed author subjects while dropping ACM CCS classification subjects
+		const lipics = await fetchDataCiteLipicsPapers(
+			esem,
+			2026,
+			async <T>() =>
+				({
+					data: [
+						{
+							id: "10.4230/lipics.esem.2026.21",
+							attributes: {
+								titles: [
+									{
+										title:
+											"Empirical Study on Flaky Test Repair in Microservices",
+									},
+								],
+								creators: [{ givenName: "Jane", familyName: "Doe" }],
+								descriptions: [
+									{
+										descriptionType: "Abstract",
+										description:
+											"We conduct a large-scale study of flaky test repair across 55 microservice systems.",
+									},
+								],
+								subjects: [
+									{
+										subject:
+											"Software and its engineering -> Software testing and debugging",
+										subjectScheme: "ACM",
+									},
+									{ subject: "Flaky Tests" },
+									{ subject: "Microservices" },
+								],
+							},
+						},
+					],
+				}) as T,
+		);
+		expect(lipics.items[0]?.keywords).toEqual(["Flaky Tests", "Microservices"]);
+
+		// 3. `papers.cool` `<div keywords="...">` TF-IDF tokens are never surfaced as author keywords
+		const coolParsed = parseCoolPapersVenueHtml(
+			`<div id="abc123@OpenReview" class="panel paper" keywords="multi-agent,selenium,test,document">
+				<h2 class="title"><a href="https://openreview.net/forum?id=abc123" title="1/1"></a><a id="title-abc123">Agentic Planning Without Author Keywords</a></h2>
+				<p class="metainfo authors"><a class="author">Alice Zhang</a></p>
+				<p id="summary-abc123" class="summary">We study agentic planning in open-ended environments with rigorous evaluation.</p>
+			</div>`,
+			iclr,
+			VENUE_SPEC_BY_ID.get("iclr-2026"),
+			2026,
+		);
+		expect(coolParsed.items[0]?.keywords).toEqual([]);
 	});
 });

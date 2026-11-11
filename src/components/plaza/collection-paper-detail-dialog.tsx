@@ -25,11 +25,10 @@ import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import {
 	type CollectionPaperItem,
-	derivePaperKeywords,
 	ensurePaperFullDetails,
 	formatPaperBibtex,
 	formatPaperCitationText,
-	isPlaceholderAbstract,
+	shouldEnrichPaperOnDemand,
 } from "@/lib/plaza/collection";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
@@ -67,13 +66,7 @@ export function CollectionPaperDetailDialog({
 		setResolvedPaper(paper);
 		setCopiedKind(null);
 		if (!open || !paper) return;
-
-		const needsEnrich =
-			isPlaceholderAbstract(paper.abstract, paper.sourceLabel) ||
-			paper.citationCount === undefined ||
-			!paper.keywords ||
-			paper.keywords.length === 0;
-		if (!needsEnrich) return;
+		if (!shouldEnrichPaperOnDemand(paper)) return;
 
 		let cancelled = false;
 		setEnriching(true);
@@ -94,16 +87,7 @@ export function CollectionPaperDetailDialog({
 	}, [open, paper, onPaperUpdated]);
 
 	const active = resolvedPaper ?? paper;
-
-	const keywords = useMemo(() => {
-		if (!active) return [];
-		if (active.keywords && active.keywords.length > 0) return active.keywords;
-		return derivePaperKeywords(
-			active.title,
-			active.abstract,
-			active.categories,
-		);
-	}, [active]);
+	const keywords = active?.keywords ?? [];
 
 	const citationText = useMemo(
 		() => (active ? formatPaperCitationText(active) : ""),

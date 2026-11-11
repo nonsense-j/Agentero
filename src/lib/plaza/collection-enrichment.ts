@@ -8,7 +8,7 @@ export type VenueKind = "conference" | "journal";
 export type VenueDomain = "PL/SE" | "CR" | "AI";
 export type VenueCcfRank = "CCF-A" | "CCF-B";
 
-export const CURRENT_VENUE_SYNC_VERSION = 6;
+export const CURRENT_VENUE_SYNC_VERSION = 7;
 
 export type VenueConfig = {
 	id: string;
@@ -646,111 +646,81 @@ export function isExcludedByDoiPrefix(
 	return excludePrefixes.some((p) => lower.startsWith(p.toLowerCase()));
 }
 
-const DOMAIN_KEYWORD_DICTIONARY: readonly [RegExp, string][] = [
-	[/\bllm\s+agents?\b|\bagentic\b/i, "LLM Agent"],
-	[/\blarge\s+language\s+models?\b|\bllms?\b/i, "Large Language Model"],
-	[/\bmulti-agent\b/i, "Multi-Agent"],
-	[/\bfuzz(?:ing|er|ers)\b/i, "Fuzzing"],
-	[/\bstatic\s+analysis\b/i, "Static Analysis"],
-	[/\bdynamic\s+analysis\b/i, "Dynamic Analysis"],
-	[/\bsymbolic\s+execution\b/i, "Symbolic Execution"],
-	[/\bprogram\s+repair\b|\bapr\b/i, "Program Repair"],
-	[/\bvulnerabilit(?:y|ies)\b/i, "Vulnerability Detection"],
-	[/\bformal\s+verification\b/i, "Formal Verification"],
-	[/\bsmart\s+contracts?\b/i, "Smart Contract"],
-	[/\bcode\s+generation\b/i, "Code Generation"],
-	[/\bcode\s+translation\b|\bc-to-rust\b/i, "Code Translation"],
-	[/\bcompiler(?:s|\s+testing|\s+bugs?)?\b/i, "Compiler"],
-	[/\btype\s+systems?\b|\btyping\b/i, "Type System"],
-	[/\babstract\s+interpretation\b/i, "Abstract Interpretation"],
-	[/\bmodel\s+checking\b/i, "Model Checking"],
-	[/\bmutation\s+testing\b|\bmutation\s+analysis\b/i, "Mutation Testing"],
-	[/\bunit\s+test(?:s|ing)?\b|\btest\s+generation\b/i, "Test Generation"],
-	[/\bfault\s+localization\b/i, "Fault Localization"],
-	[/\bcode\s+review\b/i, "Code Review"],
-	[/\bdecompil(?:ation|er)\b|\bbinary\s+analysis\b/i, "Binary Analysis"],
-	[/\bmemory\s+safety\b|\buse-after-free\b/i, "Memory Safety"],
-	[/\brust\b/i, "Rust"],
-	[/\bwebassembly\b|\bwasm\b/i, "WebAssembly"],
-	[/\bretrieval-augmented\b|\brag\b/i, "RAG"],
-	[/\bprompt\s+injection\b/i, "Prompt Injection"],
-	[/\bjailbreak(?:ing)?\b/i, "Jailbreak"],
-	[/\bbackdoor\b|\bdata\s+poisoning\b/i, "Backdoor Attack"],
-	[/\bdifferential\s+privacy\b/i, "Differential Privacy"],
-	[/\bzero-knowledge\b|\bzkp\b/i, "Zero-Knowledge Proof"],
-	[/\bpost-quantum\b|\bcryptograph(?:y|ic)\b/i, "Cryptography"],
-	[/\bside-channel\b/i, "Side-Channel"],
-	[/\bmalware\b/i, "Malware Analysis"],
-	[/\breinforcement\s+learning\b|\brlhf\b/i, "Reinforcement Learning"],
-	[/\bchain-of-thought\b|\breasoning\b/i, "Reasoning"],
-	[/\bbenchmark(?:s|ing)?\b|\bswe-bench\b/i, "Benchmark"],
-	[/\btransformer(?:s)?\b|\battention\b/i, "Transformer"],
-	[/\bmultimodal\b|\bvision-language\b/i, "Multimodal"],
-	[/\bhallucination(?:s)?\b/i, "Hallucination"],
-];
+const NON_KEYWORD_LABELS = new Set([
+	"ai",
+	"cr",
+	"pl/se",
+	"ccf-a",
+	"ccf-b",
+	"ccf-c",
+	"article",
+	"business",
+	"computer networks and communications",
+	"computer science",
+	"artificial intelligence and robotics",
+	"engineering",
+	"general computer science",
+	"hardware and architecture",
+	"information systems",
+	"materials science",
+	"mathematics",
+	"medicine",
+	"physics",
+	"psychology",
+	"research",
+	"sociology",
+	"software",
+]);
+
+const ARXIV_CATEGORY_CODE_RE =
+	/^(?:cs|stat|math|eess|physics|q-bio|q-fin|econ|astro-ph|cond-mat|gr-qc|hep-[a-z]+|nlin|nucl-[a-z]+|quant-ph)(?:\.[a-z-]+)?$/i;
 
 /**
- * Normalize upstream keywords (OpenAlex / Crossref / S2) and supplement with
- * deterministic technical keyphrases from title + abstract so every paper has keywords.
+ * Normalize genuine paper-level keywords from publisher metadata or OpenAlex `work.keywords`,
+ * stripping broad discipline buckets, venue badges, and arXiv category codes.
  */
-export function derivePaperKeywords(
-	title: string,
-	abstract: string,
-	categories: readonly string[],
-	upstreamKeywords?: readonly string[],
+export function normalizePaperKeywords(
+	upstreamKeywords?: readonly string[] | null,
+	maxCount = 8,
 ): string[] {
+	if (!upstreamKeywords || upstreamKeywords.length === 0) return [];
 	const result: string[] = [];
 	const seen = new Set<string>();
 
-	const addKw = (raw: string) => {
-		const cleaned = raw.replace(/\s+/g, " ").trim();
-		if (cleaned.length < 2 || cleaned.length > 48) return;
-		const key = cleaned.toLowerCase();
-		if (seen.has(key)) return;
-		seen.add(key);
-		result.push(cleaned);
-	};
-
-	if (upstreamKeywords) {
-		for (const kw of upstreamKeywords) {
-			addKw(kw);
-			if (result.length >= 8) return result;
-		}
-	}
-
-	const hay = `${title} ${abstract}`;
-	for (const [pattern, label] of DOMAIN_KEYWORD_DICTIONARY) {
-		if (pattern.test(hay)) {
-			addKw(label);
-			if (result.length >= 8) return result;
-		}
-	}
-
-	// Extract salient capitalized / hyphenated technical terms from title if still sparse
-	if (result.length < 4) {
-		const titleParts = title
-			.replace(/[:?—–()[\]]/g, " ")
-			.split(/\s+/)
-			.filter((w) => /^[A-Z][A-Za-z0-9-]{2,20}$/.test(w))
-			.filter(
-				(w) =>
-					!/^(The|And|For|With|Via|From|Into|Over|Under|Toward|Towards|Beyond|Using|Based|Study|Empirical|Automated|Enhancing|Learning|Large|Model|Models|System|Systems|Framework|Approach|Analysis)$/.test(
-						w,
-					),
-			);
-		for (const part of titleParts.slice(0, 3)) {
-			addKw(part);
-		}
-	}
-
-	if (result.length === 0) {
-		for (const cat of categories) {
-			addKw(ARXIV_CATEGORY_SUBTITLES[cat] ?? cat);
-			if (result.length >= 3) break;
+	for (const rawEntry of upstreamKeywords) {
+		if (typeof rawEntry !== "string") continue;
+		const segments = rawEntry
+			.replace(/^keywords?\s*[:：-]\s*/i, "")
+			.split(/[;\n]+/);
+		for (const seg of segments) {
+			const cleaned = seg.replace(/\s+/g, " ").trim();
+			if (cleaned.length < 2 || cleaned.length > 48) continue;
+			if (/^\d+$/.test(cleaned)) continue;
+			if (ARXIV_CATEGORY_CODE_RE.test(cleaned)) continue;
+			if (/\b20\d{2}\b/.test(cleaned)) continue;
+			const key = cleaned.toLowerCase();
+			if (NON_KEYWORD_LABELS.has(key) || seen.has(key)) continue;
+			seen.add(key);
+			result.push(cleaned);
+			if (result.length >= maxCount) return result;
 		}
 	}
 
 	return result;
+}
+
+/**
+ * Normalize authentic upstream paper keywords (Option B: publisher/author keywords +
+ * OpenAlex `work.keywords`). Never infers or fabricates keywords from titles, abstracts,
+ * or venue/arXiv categories.
+ */
+export function derivePaperKeywords(
+	_title: string,
+	_abstract: string,
+	_categories: readonly string[],
+	upstreamKeywords?: readonly string[] | null,
+): string[] {
+	return normalizePaperKeywords(upstreamKeywords);
 }
 
 /** Academic reference string for citation display & one-click copy. */
@@ -944,8 +914,10 @@ export type OpenAlexWork = {
 	ids?: { arxiv?: string | null; doi?: string | null } | null;
 	cited_by_count?: number | null;
 	abstract_inverted_index?: Record<string, number[]> | null;
-	keywords?: Array<{ display_name?: string | null }> | null;
-	topics?: Array<{ display_name?: string | null }> | null;
+	keywords?: Array<{
+		display_name?: string | null;
+		score?: number | null;
+	}> | null;
 	biblio?: {
 		volume?: string | null;
 		issue?: string | null;
@@ -967,7 +939,7 @@ export type OpenAlexWork = {
 };
 
 export const OPENALEX_SELECT =
-	"id,type,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,topics,biblio,primary_location,open_access,authorships";
+	"id,type,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,biblio,primary_location,open_access,authorships";
 export const MAILTO = "agentero@users.noreply.github.com";
 
 export function cleanDoi(raw: string | null | undefined): string | undefined {
@@ -1020,14 +992,13 @@ function normTitleKey(title: string): string {
 }
 
 function extractOpenAlexUpstreamKeywords(row: OpenAlexWork): string[] {
-	const out: string[] = [];
-	for (const k of row.keywords ?? []) {
-		if (k?.display_name) out.push(k.display_name);
-	}
-	for (const t of row.topics ?? []) {
-		if (t?.display_name) out.push(t.display_name);
-	}
-	return out;
+	const entries = (row.keywords ?? []).filter(
+		(k): k is { display_name: string; score?: number | null } =>
+			Boolean(k?.display_name?.trim()) &&
+			(typeof k?.score !== "number" || k.score >= 0.25),
+	);
+	entries.sort((a, b) => (b.score ?? 1) - (a.score ?? 1));
+	return entries.map((k) => k.display_name);
 }
 
 function formatPages(
@@ -1381,7 +1352,7 @@ export async function fetchVenueStructuredPapers(
 			ccfRank: spec?.ccfRank,
 			venueFull: containerTitle || venue.name,
 			citationCount: Math.max(0, row["is-referenced-by-count"] ?? 0),
-			keywords: derivePaperKeywords(title, cleanAbs, categories, row.subject),
+			keywords: [],
 			volume: row.volume,
 			issue: row.issue,
 			pages: row.page,
@@ -1440,12 +1411,8 @@ export async function fetchVenueStructuredPapers(
 
 					for (const row of rows) {
 						const candidate = convertCrossrefRow(row, false);
-						if (!candidate) continue;
-						if (candidate.abstract) {
-							pushUnique(candidate);
-						} else {
-							rawCrossrefPendingEnrich.push(candidate);
-						}
+						if (!candidate || seenIds.has(candidate.id)) continue;
+						rawCrossrefPendingEnrich.push(candidate);
 					}
 
 					const nextCrCursor = crData.message?.["next-cursor"] ?? null;
@@ -1493,9 +1460,7 @@ export async function fetchVenueStructuredPapers(
 						const candidate = convertCrossrefRow(row, true);
 						if (!candidate) continue;
 						matchedOnPage += 1;
-						if (candidate.abstract) {
-							pushUnique(candidate);
-						} else {
+						if (!seenIds.has(candidate.id)) {
 							rawCrossrefPendingEnrich.push(candidate);
 						}
 					}
@@ -1510,14 +1475,13 @@ export async function fetchVenueStructuredPapers(
 	}
 
 	if (rawCrossrefPendingEnrich.length > 0) {
-		const finalizedCr = openAlexFailed
-			? rawCrossrefPendingEnrich
-			: await enrichDblpItemsBatch(
-					rawCrossrefPendingEnrich,
-					venue,
-					fetchJson,
-					out,
-				);
+		const finalizedCr = await enrichDblpItemsBatch(
+			rawCrossrefPendingEnrich,
+			venue,
+			fetchJson,
+			out,
+			{ skipOpenAlexFilter: openAlexFailed },
+		);
 		for (const item of finalizedCr) {
 			pushUnique(item);
 		}
@@ -1530,16 +1494,90 @@ export async function fetchVenueStructuredPapers(
 	};
 }
 
+const IS_ENRICH_TEST_ENV =
+	typeof import.meta !== "undefined" && import.meta.env?.MODE === "test";
+
+let openAlexSingletonNextSlotMs = 0;
+
+async function acquireOpenAlexSingletonSlot(): Promise<void> {
+	if (IS_ENRICH_TEST_ENV) return;
+	const now = Date.now();
+	const scheduled = Math.max(now, openAlexSingletonNextSlotMs);
+	openAlexSingletonNextSlotMs = scheduled + 125;
+	const waitMs = scheduled - now;
+	if (waitMs > 0) {
+		await new Promise((resolve) => setTimeout(resolve, waitMs));
+	}
+}
+
+async function fetchOpenAlexSingletonsByDoi(
+	dois: readonly string[],
+	fetchJson: FetchJsonFn,
+	outMap: Map<string, OpenAlexWork>,
+	maxItems = 260,
+): Promise<void> {
+	const targets = dois.filter((d) => !outMap.has(d)).slice(0, maxItems);
+	if (targets.length === 0) return;
+
+	const CONCURRENCY = 4;
+	let cursor = 0;
+	let succeeded = 0;
+	let consecutiveFailures = 0;
+
+	const worker = async () => {
+		while (cursor < targets.length) {
+			if (succeeded === 0 && consecutiveFailures >= 6) break;
+			const doi = targets[cursor++];
+			if (!doi) break;
+			const url = `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
+			let fetched: OpenAlexWork | null = null;
+			try {
+				await acquireOpenAlexSingletonSlot();
+				fetched = await fetchJson<OpenAlexWork>(url);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (!IS_ENRICH_TEST_ENV && /\b(?:429|502|503|504)\b/i.test(msg)) {
+					await new Promise((resolve) => setTimeout(resolve, 1100));
+					try {
+						await acquireOpenAlexSingletonSlot();
+						fetched = await fetchJson<OpenAlexWork>(url);
+					} catch {
+						fetched = null;
+					}
+				}
+			}
+			if (fetched && (fetched.id || fetched.doi || fetched.title)) {
+				const clean = cleanDoi(fetched.doi)?.toLowerCase() || doi;
+				outMap.set(clean, fetched);
+				outMap.set(doi, fetched);
+				succeeded += 1;
+				consecutiveFailures = 0;
+			} else {
+				consecutiveFailures += 1;
+			}
+		}
+	};
+
+	await Promise.all(
+		Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () =>
+			worker(),
+		),
+	);
+}
+
 /**
- * Batch-enrich DBLP records with abstracts, citation counts, and keywords
- * via preloaded OpenAlex/Crossref items first, followed by OpenAlex DOI batches and title lookup.
- * Retains all valid non-frontmatter papers even when no public abstract is available.
+ * Hydrate proceedings/journal records by DOI using preloaded items first, then OpenAlex
+ * `filter=doi:...` chunks (fast path when daily credits exist), automatically falling back
+ * to OpenAlex's 0-credit singleton endpoint (`/works/doi:{doi}`) when list credits are exhausted.
  */
 export async function enrichDblpItemsBatch(
 	items: CollectionPaperItem[],
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
 	preloadedItems?: readonly CollectionPaperItem[],
+	options?: {
+		skipOpenAlexFilter?: boolean;
+	},
 ): Promise<CollectionPaperItem[]> {
 	if (items.length === 0) return [];
 
@@ -1559,91 +1597,82 @@ export async function enrichDblpItemsBatch(
 	}
 
 	const byDoi = new Map<string, OpenAlexWork>();
-	const doisToFetch = Array.from(
+	const unmatchedDois = Array.from(
 		new Set(
 			items
 				.map((i) => i.doi?.toLowerCase())
-				.filter(
-					(d): d is string =>
-						Boolean(d) && !preloadedByDoi.get(d ?? "")?.abstract,
-				),
+				.filter((d): d is string => Boolean(d) && !preloadedByDoi.has(d ?? "")),
 		),
 	);
 
-	// Skip redundant OpenAlex DOI batch calls when `preloadedItems` already covered the DOIs
-	const unmatchedDois = doisToFetch.filter((d) => !preloadedByDoi.has(d));
-	let openAlexRateLimited = false;
-	const CHUNK = 45;
-	for (let i = 0; i < unmatchedDois.length; i += CHUNK) {
-		const batch = unmatchedDois.slice(i, i + CHUNK);
-		const filter = `doi:${batch.map((d) => `https://doi.org/${d}`).join("|")}`;
-		try {
-			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
-			const res = await fetchJson<{ error?: string; results?: OpenAlexWork[] }>(
-				url,
-			);
-			if (res.error) {
-				openAlexRateLimited = true;
+	let openAlexFilterFailed = Boolean(options?.skipOpenAlexFilter);
+	if (!openAlexFilterFailed && unmatchedDois.length > 0) {
+		const CHUNK = 50;
+		for (let i = 0; i < unmatchedDois.length; i += CHUNK) {
+			const batch = unmatchedDois.slice(i, i + CHUNK);
+			const filter = `doi:${batch.map((d) => `https://doi.org/${d}`).join("|")}`;
+			try {
+				const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
+				const res = await fetchJson<{
+					error?: string;
+					results?: OpenAlexWork[];
+				}>(url);
+				if (res.error) {
+					openAlexFilterFailed = true;
+					break;
+				}
+				for (const row of res.results ?? []) {
+					const d = cleanDoi(row.doi)?.toLowerCase();
+					if (d) byDoi.set(d, row);
+				}
+			} catch {
+				openAlexFilterFailed = true;
 				break;
 			}
-			for (const row of res.results ?? []) {
-				const d = cleanDoi(row.doi)?.toLowerCase();
-				if (d) byDoi.set(d, row);
-			}
-		} catch {
-			openAlexRateLimited = true;
-			break;
 		}
 	}
 
-	// Batch title lookup in OpenAlex ONLY for genuinely DOI-less DBLP records (max 24 titles),
-	// because OpenAlex bills `title.search:` at 100x the cost of `doi:` filter queries.
+	// Zero-credit OpenAlex singleton fallback (`/works/doi:{doi}`) when daily list credits
+	// were rate-limited or skipped, ensuring preload still hydrates ~100% abstracts + keywords.
+	if (openAlexFilterFailed && unmatchedDois.length > 0) {
+		await fetchOpenAlexSingletonsByDoi(unmatchedDois, fetchJson, byDoi);
+	}
+
+	// Strictly for DOI-less proceedings records (e.g. USENIX / official program schedules),
+	// run a small bounded title lookup when OpenAlex list credits are healthy.
 	const byTitle = new Map<string, OpenAlexWork>();
-	const missingDoiTitles = openAlexRateLimited
-		? []
-		: items
-				.filter((i) => {
-					if (i.doi) return false;
-					const tk = normTitleKey(i.title);
-					return !(tk && preloadedByTitle.get(tk)?.abstract);
-				})
-				.map((i) => i.title)
-				.slice(0, 24);
-	const TITLE_CHUNK = 12;
-	for (let i = 0; i < missingDoiTitles.length; i += TITLE_CHUNK) {
-		const batch = missingDoiTitles
-			.slice(i, i + TITLE_CHUNK)
-			.map((t) =>
-				t
-					.replace(/["|:;,()[\]{}\\/]+/g, " ")
-					.replace(/\s+/g, " ")
-					.trim(),
-			)
-			.filter((t) => t.length >= 12);
-		if (batch.length === 0) continue;
-		const expr = batch.map((t) => `"${t}"`).join("|");
-		try {
-			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(`title.search:${expr}`)}&per-page=50&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
-			const res = await fetchJson<{ error?: string; results?: OpenAlexWork[] }>(
-				url,
-			);
-			if (res.error) break;
-			for (const row of res.results ?? []) {
-				const rt = (row.title ?? row.display_name ?? "").trim();
-				if (!rt || /^artifact release for\b/i.test(rt)) continue;
-				const key = normTitleKey(rt);
-				if (!key) continue;
-				const prev = byTitle.get(key);
-				const nextWords = Object.keys(row.abstract_inverted_index ?? {}).length;
-				const prevWords = Object.keys(
-					prev?.abstract_inverted_index ?? {},
-				).length;
-				if (!prev || nextWords > prevWords) {
-					byTitle.set(key, row);
+	if (!openAlexFilterFailed) {
+		const doiLessItems = items
+			.filter((i) => !i.doi && !preloadedByTitle.has(normTitleKey(i.title)))
+			.slice(0, 24);
+		const TITLE_CHUNK = 6;
+		for (let i = 0; i < doiLessItems.length; i += TITLE_CHUNK) {
+			const batch = doiLessItems.slice(i, i + TITLE_CHUNK);
+			const clauses = batch
+				.map((item) =>
+					item.title
+						.replace(/[|,"'():[\]{}]/g, " ")
+						.replace(/\s+/g, " ")
+						.trim()
+						.slice(0, 110),
+				)
+				.filter((t) => t.length > 8);
+			if (clauses.length === 0) continue;
+			const filter = `title.search:${clauses.map((t) => `"${t}"`).join("|")},from_publication_date:2025-01-01`;
+			try {
+				const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=25&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
+				const res = await fetchJson<{
+					error?: string;
+					results?: OpenAlexWork[];
+				}>(url);
+				if (res.error) break;
+				for (const row of res.results ?? []) {
+					const tk = normTitleKey(row.title || row.display_name || "");
+					if (tk && !byTitle.has(tk)) byTitle.set(tk, row);
 				}
+			} catch {
+				break;
 			}
-		} catch {
-			break;
 		}
 	}
 
@@ -1757,12 +1786,7 @@ export async function enrichDblpItemsBatch(
 			volume,
 			issue,
 			pages,
-			keywords: derivePaperKeywords(
-				item.title,
-				normalizedAbstract,
-				item.categories,
-				upstreamKw,
-			),
+			keywords: normalizePaperKeywords(upstreamKw),
 		});
 	}
 
@@ -1770,8 +1794,8 @@ export async function enrichDblpItemsBatch(
 }
 
 /**
- * Batch-enrich arXiv items with OpenAlex `cited_by_count` and upstream `keywords`
- * using `10.48550/arxiv.<id>` DOIs, while immediately populating `keywords` & `citationCount`.
+ * Batch-enrich arXiv items with OpenAlex `cited_by_count` and paper-level `work.keywords`
+ * using `10.48550/arxiv.<id>` DOIs (falling back to 0-credit singletons when rate-limited).
  */
 export async function enrichArxivItemsBatch(
 	items: CollectionPaperItem[],
@@ -1782,28 +1806,25 @@ export async function enrichArxivItemsBatch(
 	const withDefaults = items.map((item) => ({
 		...item,
 		citationCount: item.citationCount ?? 0,
-		keywords:
-			item.keywords && item.keywords.length > 0
-				? item.keywords
-				: derivePaperKeywords(item.title, item.abstract, item.categories),
+		keywords: normalizePaperKeywords(item.keywords),
 	}));
 
 	const candidates = withDefaults.filter((i) => i.arxivId).slice(0, maxLookup);
 	const byArxiv = new Map<string, OpenAlexWork>();
-	const CHUNK = 45;
+	const CHUNK = 50;
 
 	for (let i = 0; i < candidates.length; i += CHUNK) {
 		const batch = candidates.slice(i, i + CHUNK);
 		const filter = `doi:${batch.map((p) => `https://doi.org/10.48550/arxiv.${p.arxivId}`).join("|")}`;
 		try {
-			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=doi,ids,cited_by_count,keywords,topics&mailto=${MAILTO}`;
+			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=doi,ids,cited_by_count,keywords&mailto=${MAILTO}`;
 			const res = await fetchJson<{ results?: OpenAlexWork[] }>(url);
 			for (const row of res.results ?? []) {
 				const aid = extractArxivIdFromOpenAlex(row);
 				if (aid) byArxiv.set(aid.toLowerCase(), row);
 			}
 		} catch {
-			// Best-effort citation & keyword enrichment.
+			break;
 		}
 	}
 
@@ -1813,19 +1834,17 @@ export async function enrichArxivItemsBatch(
 		const aid = item.arxivId?.toLowerCase();
 		const row = aid ? byArxiv.get(aid) : undefined;
 		if (!row) return item;
-		const upstream = extractOpenAlexUpstreamKeywords(row);
+		const upstream = [
+			...(item.keywords ?? []),
+			...extractOpenAlexUpstreamKeywords(row),
+		];
 		return {
 			...item,
 			doi:
 				item.doi ||
 				(item.arxivId ? `10.48550/arxiv.${item.arxivId}` : undefined),
 			citationCount: Math.max(item.citationCount ?? 0, row.cited_by_count ?? 0),
-			keywords: derivePaperKeywords(
-				item.title,
-				item.abstract,
-				item.categories,
-				upstream,
-			),
+			keywords: normalizePaperKeywords(upstream),
 		};
 	});
 }
@@ -1949,12 +1968,7 @@ export async function backfillSpringerAbstracts(
 				result[targetIdx] = {
 					...item,
 					abstract: abs,
-					keywords: derivePaperKeywords(
-						item.title,
-						abs,
-						item.categories,
-						item.keywords,
-					),
+					keywords: normalizePaperKeywords(item.keywords),
 				};
 			}
 		}
@@ -1970,7 +1984,10 @@ export async function backfillSpringerAbstracts(
 
 /**
  * On-demand single-paper detail resolver when clicking a paper card if any field
- * (complete abstract, citation count, or keywords) was not yet populated.
+ * (complete abstract, citation count, or authentic keywords) is still missing:
+ * 1. OpenAlex 0-credit singleton (`works/doi:{doi}`, or title fallback if DOI-less)
+ * 2. Direct publisher fallback (`CSDL GraphQL` for `10.1109/*`, Springer HTML for `10.1007/*`, or `papers.cool`)
+ * 3. Semantic Scholar (`DOI:` / `ARXIV:` — abstract, citationCount, OA PDF, arXiv ID)
  */
 export async function enrichSinglePaperOnDemand(
 	paper: CollectionPaperItem,
@@ -2015,68 +2032,40 @@ export async function enrichSinglePaperOnDemand(
 		venueFull = venueFull || row.primary_location?.source?.display_name?.trim();
 	};
 
+	// Step 1: OpenAlex 0-credit singleton by DOI (or title search only when paper has no DOI/arXiv)
 	const lookupDoi = doi || (arxivId ? `10.48550/arxiv.${arxivId}` : undefined);
 	if (lookupDoi) {
 		try {
 			const oa = await fetchJson<OpenAlexWork>(
-				`https://api.openalex.org/works/https://doi.org/${encodeURIComponent(lookupDoi)}?select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
+				`https://api.openalex.org/works/doi:${encodeURIComponent(lookupDoi)}?select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
 			);
 			applyOpenAlex(oa);
 		} catch {
-			// Fall through to title search / Semantic Scholar.
+			// Fall through to publisher / Semantic Scholar.
 		}
-	}
-
-	if (
+	} else if (
 		isPlaceholderAbstract(abstract, paper.sourceLabel) ||
 		citationCount === undefined
 	) {
 		try {
 			const oaSearch = await fetchJson<{ results?: OpenAlexWork[] }>(
-				`https://api.openalex.org/works?search=${encodeURIComponent(paper.title)}&per-page=5&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
+				`https://api.openalex.org/works?search=${encodeURIComponent(paper.title)}&per-page=3&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
 			);
 			const targetKey = normTitleKey(paper.title);
-			const matches = (oaSearch.results ?? []).filter(
-				(r) => normTitleKey(r.title ?? r.display_name ?? "") === targetKey,
-			);
-			if (matches.length > 0) {
-				for (const m of matches) applyOpenAlex(m);
-			} else if (oaSearch.results?.[0]) {
-				applyOpenAlex(oaSearch.results[0]);
-			}
-		} catch {
-			// Fall through to Crossref / Springer / Semantic Scholar.
-		}
-	}
-
-	if (isPlaceholderAbstract(abstract, paper.sourceLabel) && doi) {
-		try {
-			const cr = await fetchJson<{
-				message?: { abstract?: string; "is-referenced-by-count"?: number };
-			}>(
-				`https://api.crossref.org/works/${encodeURIComponent(doi)}?mailto=${MAILTO}`,
-			);
-			const crAbs = (cr.message?.abstract ?? "")
-				.replace(/<[^>]+>/g, " ")
-				.replace(/^abstract[:.\s-]*/i, "")
-				.replace(/\s+/g, " ")
-				.trim();
-			if (!isPlaceholderAbstract(crAbs, paper.sourceLabel)) {
-				abstract = crAbs;
-			}
-			if (typeof cr.message?.["is-referenced-by-count"] === "number") {
-				citationCount = Math.max(
-					citationCount ?? 0,
-					cr.message["is-referenced-by-count"],
-				);
+			for (const m of oaSearch.results ?? []) {
+				if (normTitleKey(m.title ?? m.display_name ?? "") === targetKey) {
+					applyOpenAlex(m);
+				}
 			}
 		} catch {
 			// Fall through.
 		}
 	}
 
+	// Step 2: Direct publisher fallback when abstract or IEEE author keywords are still missing
 	if (
-		isPlaceholderAbstract(abstract, paper.sourceLabel) &&
+		(isPlaceholderAbstract(abstract, paper.sourceLabel) ||
+			upstreamKw.length === 0) &&
 		doi?.toLowerCase().startsWith("10.1109/")
 	) {
 		try {
@@ -2105,7 +2094,7 @@ export async function enrichSinglePaperOnDemand(
 				}
 			}
 			if (art?.keywords?.length) {
-				upstreamKw.push(...art.keywords);
+				upstreamKw.unshift(...art.keywords);
 			}
 			volume = volume || art?.volume || undefined;
 			issue = issue || art?.issueNum || undefined;
@@ -2162,20 +2151,21 @@ export async function enrichSinglePaperOnDemand(
 		}
 	}
 
+	// Step 3: Semantic Scholar single-paper lookup (abstract, citations, OA PDF, arXiv ID)
 	if (
 		isPlaceholderAbstract(abstract, paper.sourceLabel) ||
 		citationCount === undefined
 	) {
-		try {
-			const s2Id = doi ? `DOI:${doi}` : arxivId ? `ARXIV:${arxivId}` : null;
-			if (s2Id) {
+		const s2Id = doi ? `DOI:${doi}` : arxivId ? `ARXIV:${arxivId}` : null;
+		if (s2Id) {
+			try {
 				const s2 = await fetchJson<{
 					abstract?: string | null;
 					citationCount?: number | null;
+					openAccessPdf?: { url?: string | null } | null;
 					externalIds?: { ArXiv?: string | null; DOI?: string | null } | null;
-					s2FieldsOfStudy?: Array<{ category?: string | null }> | null;
 				}>(
-					`https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(s2Id)}?fields=abstract,citationCount,externalIds,s2FieldsOfStudy`,
+					`https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(s2Id)}?fields=abstract,citationCount,externalIds,openAccessPdf`,
 				);
 				if (
 					s2.abstract &&
@@ -2187,43 +2177,41 @@ export async function enrichSinglePaperOnDemand(
 					citationCount = Math.max(citationCount ?? 0, s2.citationCount);
 				}
 				arxivId = arxivId || s2.externalIds?.ArXiv?.trim() || undefined;
-				for (const f of s2.s2FieldsOfStudy ?? []) {
-					if (f?.category) upstreamKw.push(f.category);
-				}
+				pdfUrl = pdfUrl || s2.openAccessPdf?.url?.trim() || undefined;
+			} catch {
+				// Best-effort fallback.
 			}
-		} catch {
-			// Fall through to title search if needed.
-		}
-	}
-
-	if (isPlaceholderAbstract(abstract, paper.sourceLabel)) {
-		try {
-			const s2Search = await fetchJson<{
-				data?: Array<{
-					title?: string | null;
-					abstract?: string | null;
-					citationCount?: number | null;
-					externalIds?: { ArXiv?: string | null } | null;
-				}>;
-			}>(
-				`https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(paper.title)}&limit=3&fields=title,abstract,citationCount,externalIds`,
-			);
-			const targetKey = normTitleKey(paper.title);
-			for (const cand of s2Search.data ?? []) {
-				if (normTitleKey(cand.title ?? "") !== targetKey) continue;
-				if (
-					cand.abstract &&
-					!isPlaceholderAbstract(cand.abstract, paper.sourceLabel)
-				) {
-					abstract = cand.abstract.trim();
+		} else if (isPlaceholderAbstract(abstract, paper.sourceLabel)) {
+			try {
+				const s2Search = await fetchJson<{
+					data?: Array<{
+						title?: string | null;
+						abstract?: string | null;
+						citationCount?: number | null;
+						openAccessPdf?: { url?: string | null } | null;
+						externalIds?: { ArXiv?: string | null } | null;
+					}>;
+				}>(
+					`https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(paper.title)}&limit=3&fields=title,abstract,citationCount,externalIds,openAccessPdf`,
+				);
+				const targetKey = normTitleKey(paper.title);
+				for (const cand of s2Search.data ?? []) {
+					if (normTitleKey(cand.title ?? "") !== targetKey) continue;
+					if (
+						cand.abstract &&
+						!isPlaceholderAbstract(cand.abstract, paper.sourceLabel)
+					) {
+						abstract = cand.abstract.trim();
+					}
+					if (typeof cand.citationCount === "number") {
+						citationCount = Math.max(citationCount ?? 0, cand.citationCount);
+					}
+					arxivId = arxivId || cand.externalIds?.ArXiv?.trim() || undefined;
+					pdfUrl = pdfUrl || cand.openAccessPdf?.url?.trim() || undefined;
 				}
-				if (typeof cand.citationCount === "number") {
-					citationCount = Math.max(citationCount ?? 0, cand.citationCount);
-				}
-				arxivId = arxivId || cand.externalIds?.ArXiv?.trim() || undefined;
+			} catch {
+				// Best-effort fallback completed.
 			}
-		} catch {
-			// Best-effort fallback completed.
 		}
 	}
 
@@ -2243,11 +2231,6 @@ export async function enrichSinglePaperOnDemand(
 		pages,
 		venueFull,
 		citationCount: citationCount ?? 0,
-		keywords: derivePaperKeywords(
-			paper.title,
-			finalAbstract,
-			paper.categories,
-			upstreamKw,
-		),
+		keywords: normalizePaperKeywords(upstreamKw),
 	};
 }

@@ -37,6 +37,7 @@ import {
 	isPlaceholderAbstract,
 	isWorkshopOrCompanionVenue,
 	loadItemsFromIndexedDb,
+	normalizePaperKeywords,
 	reconstructOpenAlexAbstract,
 	saveItemsToIndexedDb,
 	VENUE_SPEC_BY_ID,
@@ -94,6 +95,7 @@ export {
 	isFrontmatterTitle,
 	isPlaceholderAbstract,
 	isWorkshopOrCompanionVenue,
+	normalizePaperKeywords,
 	parseAcceptedVenueArxivXml,
 	parseCoolPapersVenueHtml,
 	parseOfficialVenueProgramHtml,
@@ -218,12 +220,14 @@ export function resetCollectionMemoryForTests(): void {
 	idbHydrated = false;
 	idbHydrationPromise = null;
 	replacedVenueIds.clear();
+	attemptedDetailEnrichIds.clear();
 }
 
 let memoryState: CollectionState | null = null;
 let idbHydrated = false;
 let idbHydrationPromise: Promise<CollectionState> | null = null;
 const replacedVenueIds = new Set<string>();
+const attemptedDetailEnrichIds = new Set<string>();
 
 function migrateCachedVenues(venues: VenueConfig[]): VenueConfig[] {
 	const migrated = venues.map((venue) => {
@@ -289,14 +293,7 @@ function sanitizeCachedItems(
 		) {
 			continue;
 		}
-		const keywords =
-			item.keywords && item.keywords.length > 0
-				? item.keywords
-				: derivePaperKeywords(
-						cleanedTitle,
-						normalizedAbstract,
-						item.categories,
-					);
+		const keywords = normalizePaperKeywords(item.keywords);
 		const normalizedId =
 			item.sourceType === "venue" && item.venueId
 				? buildVenuePaperId(item.venueId, item.doi, item.arxivId, cleanedTitle)
@@ -801,7 +798,7 @@ export function parseArxivAtomXml(
 			url,
 			pdfUrl,
 			citationCount: 0,
-			keywords: derivePaperKeywords(title, abstract, finalCats),
+			keywords: [],
 		});
 	}
 
@@ -934,7 +931,7 @@ export function parseArxivRssXml(
 			url: `https://arxiv.org/abs/${arxivId}`,
 			pdfUrl: `https://arxiv.org/pdf/${arxivId}.pdf`,
 			citationCount: 0,
-			keywords: derivePaperKeywords(title, abstract, categories),
+			keywords: [],
 		});
 	}
 	return items;
@@ -2338,7 +2335,7 @@ export async function extractVenueWithAgent(
 				venueId: venue.id,
 				venueKind: inferVenueKind(venue),
 				citationCount: 0,
-				keywords: derivePaperKeywords(title, abstract, categories),
+				keywords: [],
 			};
 		});
 }
@@ -2533,18 +2530,31 @@ export async function ensureVenueLoaded(
 }
 
 /**
- * Guarantee complete abstract, citation count, keywords, and bibliographic info
+ * True when opening a paper card's detail dialog should run on-demand enrichment:
+ * missing/placeholder abstract, missing citation count, or one-time DOI keyword check.
+ */
+export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
+	if (isPlaceholderAbstract(paper.abstract, paper.sourceLabel)) return true;
+	if (paper.citationCount === undefined) return true;
+	if (
+		paper.doi &&
+		(!paper.keywords || paper.keywords.length === 0) &&
+		!attemptedDetailEnrichIds.has(paper.id)
+	) {
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Guarantee complete abstract, citation count, authentic keywords, and bibliographic info
  * when clicking a paper card, persisting enriched fields back into local state.
  */
 export async function ensurePaperFullDetails(
 	paper: CollectionPaperItem,
 ): Promise<CollectionPaperItem> {
-	const needsEnrich =
-		isPlaceholderAbstract(paper.abstract, paper.sourceLabel) ||
-		paper.citationCount === undefined ||
-		!paper.keywords ||
-		paper.keywords.length === 0;
-	if (!needsEnrich) return paper;
+	if (!shouldEnrichPaperOnDemand(paper)) return paper;
+	attemptedDetailEnrichIds.add(paper.id);
 
 	const enriched = await enrichSinglePaperOnDemand(
 		paper,
@@ -2629,9 +2639,10 @@ export function mergeCollectionItems(
 							prev.citationCount ?? 0,
 							item.citationCount ?? 0,
 						),
-						keywords: Array.from(
-							new Set([...(prev.keywords ?? []), ...(item.keywords ?? [])]),
-						).slice(0, 8),
+						keywords: normalizePaperKeywords([
+							...(prev.keywords ?? []),
+							...(item.keywords ?? []),
+						]),
 						categories: Array.from(
 							new Set([...prev.categories, ...item.categories]),
 						),
