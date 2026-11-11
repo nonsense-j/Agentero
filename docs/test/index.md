@@ -6,10 +6,9 @@
 
 产品发布 / 打 tag / 分发安装包前的完整流程与 Checklist：
 
-- **[发布流程](release.md)** — 桌面版与 iPadOS 版的 bump、tag、Release 资产、签名与公证要求。
+- **[发布流程](release.md)** — 桌面版的 bump、tag、Release 资产、签名与公证要求。
 - **[macOS 签名与公证](macos-signing.md)** — Developer ID、notarytool 与 stapler。
-- **[iOS TestFlight](ios-testflight.md)** — iOS 签名、上传、App Store Connect 元数据与审核说明（无登录、配对 Notes）。
-- **[发布前测试大纲（Checklist）](release-checklist.md)** — 按功能域（Vault、Library、入库、PDF、Agent、远程、CLI、平台矩阵）勾选；含 5 分钟冒烟与明确非目标说明。
+- **[发布前测试大纲（Checklist）](release-checklist.md)** — 按功能域（Vault、Library、入库、PDF、Agent、CLI、平台矩阵）勾选；含 5 分钟冒烟与明确非目标说明。
 
 ## 目录结构
 

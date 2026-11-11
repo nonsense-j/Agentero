@@ -14,12 +14,11 @@ Streamable HTTP MCP，桌面端与 headless CLI 共用 `crates/agentero-mcp`。�
 |---|---|---|
 | `mcpEnabled` | `false` | 启停 listener |
 | `mcpPort` | `8765` | 只绑 `127.0.0.1` |
-| `mcpTunnelId` | `""` | OpenAI Secure MCP Tunnel ID（`tunnel_` + 32 hex） |
-| `mcpTunnelApiKey` | `""` | Runtime（Restricted）API key；回显为 mask |
+| `mcpExposePaperText` | `false` | 是否允许 `paper_text_get` 读取论文正文 |
 
 监听 URL：`http://127.0.0.1:{port}/mcp`。设置页端口旁绿点表示正在听；点击 URL 复制。
 
-Host commands：`mcp_get_status` / `mcp_set_enabled` / `mcp_set_port` / `mcp_set_vault` / `mcp_set_known_vaults` / `mcp_set_parent_dir`，以及隧道相关 `mcp_tunnel_status` / `mcp_tunnel_start` / `mcp_tunnel_stop`。状态事件 `mcp:status`、`mcp:tunnel-status`。前端把 `agentero-recent-vaults` 同步给 `mcp_set_known_vaults`；`mcp_set_vault` 也会把当前 Vault 记入已知列表。
+Host commands：`mcp_get_status` / `mcp_set_enabled` / `mcp_set_port` / `mcp_set_vault` / `mcp_set_known_vaults` / `mcp_set_parent_dir`。状态事件 `mcp:status`。前端把 `agentero-recent-vaults` 同步给 `mcp_set_known_vaults`；`mcp_set_vault` 也会把当前 Vault 记入已知列表。
 
 `initialize.serverInfo` 带 `title`、`websiteUrl` 和 `icons`（应用 PNG 的 data URI）。客户端可以忽略不画。
 
@@ -45,17 +44,9 @@ agentero mcp serve --vault /path/to/vault --listen 127.0.0.1:8765
 | `--note-mode` | `standard` | 入库时的 NOTES 壳：`standard` / `title-only` / `blank` / `custom` |
 | `--translator-url` | 无 | 全局参数。也会读 `AGENTERO_TRANSLATOR_URL` 和 CLI 配置 |
 
-不读桌面 `settings.json`（`--translator-url` 仍走 CLI 全局解析，包括 `AGENTERO_TRANSLATOR_URL` 和 CLI 配置）。进程一直占着前台，监听地址打到 stderr；`--json` 的成功包在进程退出时才写到 stdout。OpenAI 隧道、stdio 传输、非 loopback 监听仍只在桌面端。导入后的解析/版面任务、删除时取消进行中的任务、打开中的 Vault 的内存双链索引，只在桌面进程内的宿主钩子上发生。
+不读桌面 `settings.json`（`--translator-url` 仍走 CLI 全局解析，包括 `AGENTERO_TRANSLATOR_URL` 和 CLI 配置）。进程一直占着前台，监听地址打到 stderr；`--json` 的成功包在进程退出时才写到 stdout。导入后的解析/版面任务、删除时取消进行中的任务、打开中的 Vault 的内存双链索引，只在桌面进程内的宿主钩子上发生。
 
-## ChatGPT Secure MCP Tunnel
-
-App 开着且 MCP 开关打开后，设置区按界面顺序填写：先 **Runtime API key**，再 **Tunnel ID**，装好 `tunnel-client` 后点 **Start**。Agentero 随即 spawn 并持有 `tunnel-client run`。按钮旁绿点表示隧道已连通控制平面；**注意 `/readyz` 返回 200 不代表认证成功**，真正的 ready 信号是 `tunnel-client health --require-control-plane-poll` 的 `control_plane_poll.ok=true`。
-
-隧道子进程随 Agentero 退出而停止（`RunEvent::Exit` 里 kill），设置区 **Stop** 与关闭 MCP 开关也会真正结束进程；宿主异常退出（崩溃、强杀）遗留的孤儿会在下次启动时按 `--profile-dir` 清扫。找不到 `tunnel-client` 时按钮禁用，并提示可复制安装命令 `brew install openai/tools/tunnel-client`，不会自动安装。该状态不是进程级缓存：`mcp_tunnel_status` 在未运行时重新 `resolve_command`，设置页在缺失期间每 2 秒拉一次状态，二进制出现后相位回到 `stopped`，不必重启应用。
-
-Agentero 用独立 `--profile-dir`（`$XDG_CACHE_HOME/agentero/mcp-tunnel`）运行 tunnel-client，避免串到用户已有的 `~/.config/tunnel-client/*.yaml`；API key 只通过子进程 env `CONTROL_PLANE_API_KEY` 注入，不出现在命令行参数或 UI 日志。
-
-Codex / Inspector 也可直接打 loopback URL。stdio 子进程不是这条通路。详细逐步教程见 [用 MCP 连接外部 Agent](../usage/mcp.md)。
+Codex / Claude Code / Cursor / Inspector 可直接连接本机 loopback URL。详细教程见 [用 MCP 连接外部 Agent](../usage/mcp.md)。
 
 ## Resource
 
@@ -160,7 +151,7 @@ cargo test -p agentero-core pdf::layout_index
 
 ## 代码
 
-`crates/agentero-mcp/`：`McpController` + Streamable HTTP（`rmcp`）+ tools/resource。论文工具直接调 `agentero-core` 的 catalog、import、vault、`pdf::layout_index`；全文搜索在 `agentero-core` 的 `features::markdown::search`；`file_*` 复用 Vault 路径检查与原子写，支持 UTF-8 文本和 Base64 二进制写入；读取仍限文本。桌面侧 `src-tauri/src/integration/mcp/` 只留 Tauri 命令、状态事件、ChatGPT 隧道，以及导入后续任务、双链索引、删除取消任务、`mcpExposePaperText` 这些宿主钩子。CLI 入口是 `agentero mcp serve`。
+`crates/agentero-mcp/`：`McpController` + Streamable HTTP（`rmcp`）+ tools/resource。论文工具直接调 `agentero-core` 的 catalog、import、vault、`pdf::layout_index`；全文搜索在 `agentero-core` 的 `features::markdown::search`；`file_*` 复用 Vault 路径检查与原子写，支持 UTF-8 文本和 Base64 二进制写入；读取仍限文本。桌面侧 `src-tauri/src/integration/mcp/` 只留 Tauri 命令、状态事件，以及导入后续任务、双链索引、删除取消任务、`mcpExposePaperText` 这些宿主钩子。CLI 入口是 `agentero mcp serve`。
 
 ## 安全
 

@@ -99,16 +99,12 @@ UI (AI Elements: Conversation + Message + PromptInput + Sources)
 | 论文库 Library（含阅读热力条） | [library.md](library.md) |
 | 入库 UI | [paper-import.md](paper-import.md) |
 | Markdown 编辑 | [markdown.md](markdown.md) |
-| LaTeX 写作、编译与 SyncTeX | [latex.md](latex.md) |
-| 写作工作面 | [writing.md](writing.md) |
-| 写作模板与新增会议模板 | [writing-templates.md](writing-templates.md) |
+| 科研表格 | [research-tables.md](research-tables.md) |
 | PDF 阅读与划词 | [pdf.md](pdf.md) |
 | 应用内通用划词动作、来源与浮层生命周期 | [selection.md](selection.md) |
 | 网页论文阅读与划词（内置代理 + 选区桥）；本地 HTML 预览 | [web-view.md](web-view.md) |
 | PDF 版面分析（Figures / Tables / Algorithms / Formulas） | [pdf-layout-analysis.md](pdf-layout-analysis.md) |
 | Agent 面板 | [agent.md](agent.md) |
-| 知乎 Agent（内置，直答 / 检索） | [zhihu.md](zhihu.md) |
-| 移动端壳与 Bridge 客户端 | [mobile.md](mobile.md) |
 | 双链 UI | [wiki.md](wiki.md) |
 | 命令面板 | [command-palette.md](command-palette.md) |
 | 翻译 | [translate.md](translate.md) |

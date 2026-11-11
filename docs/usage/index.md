@@ -19,11 +19,8 @@
 | 接 Claude / Codex 等 ACP Agent | [接入 Agent](agents.md) |
 | 接 GenericAgent ACP | [接入 GenericAgent ACP](genericagent-acp.md) |
 | 配置 OpenAI 兼容翻译 | [配置 OpenAI 兼容翻译](translate-openai-compatible.md) |
-| 把 Vault 接到 ChatGPT / Codex MCP | [用 MCP 连接外部 Agent](mcp.md) |
-| 用 iPhone 连接桌面 Vault | [移动端](mobile.md) |
+| 把本地 Vault 接到 Codex / Claude / Cursor MCP | [用 MCP 连接外部 Agent](mcp.md) |
 | 用浏览器 Zotero Connector 保存 | [使用 Zotero Connector](zotero.md) |
-| 安装插件、配置权限与扩展阅读操作 | [使用本地插件](plugins.md) |
-| 打开服务器上的研究资料库 | [打开远程 Vault](remote-vault.md) |
 
 ## 三个概念
 
@@ -46,8 +43,7 @@ Agentero **不**捆绑 Agent，也**不**代管 Agent 的模型 API Key。通过
 ## 使用边界（当前）
 
 - 内置模型服务只在**构建时注入了凭证**的安装包里出现（官方 Release 有）。自己从源码构建或 CI 产物没有该凭证时，设置里的「Agentero 内置」选项隐藏或禁用，翻译回落免费引擎、正文解析回落本地 liteparse、arXiv 每日推荐在没填自定义 embedding 端点时不运行。
-- 桌面平台：macOS 12.0+；Linux 需 Ubuntu **22.04+**（webkit2gtk 4.1）。详见 [安装与首次使用](getting-started.md)。
-- 远程 Vault：macOS / Linux 客户端可用；Windows 客户端暂不支持打开远程 Vault。
+- 桌面平台：macOS 12.0+、Windows、Linux（Ubuntu **22.04+**，webkit2gtk 4.1）。详见 [安装与首次使用](getting-started.md)。
 - Zotero Connector 与 Zotero 桌面端不能同时占用本机 `23119` 端口。
 - Connector 支持保存条目与 PDF 附件；网页快照等能力未覆盖。
 - PDF 标注在 `marks/` 中，不改写原始 PDF。
