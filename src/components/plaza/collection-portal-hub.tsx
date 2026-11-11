@@ -138,7 +138,7 @@ export function CollectionPortalHub({
 	}, [categories, items, venues]);
 
 	return (
-		<div className="mx-auto grid w-full max-w-5xl gap-4 p-4 lg:grid-cols-2 lg:items-start">
+		<div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4">
 			{/* Card 1: arXiv Entry Portal */}
 			<section className="magpie-card flex flex-col gap-3.5 p-4">
 				<button
@@ -165,7 +165,7 @@ export function CollectionPortalHub({
 					</span>
 				</button>
 
-				<div className="grid gap-2 sm:grid-cols-2">
+				<div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
 					{categories.map((cat) => {
 						const count = catCounts.get(cat) ?? 0;
 						const subtitle = ARXIV_CATEGORY_SUBTITLES[cat];
