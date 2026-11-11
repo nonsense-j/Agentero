@@ -261,6 +261,7 @@
 			"venueDesc": "从 DBLP 读取 2026 会议与期刊（PL/SE · CR · AI），补全完整摘要与引用信息",
 			"backToHub": "返回入口总览",
 			"preloading": "正在后台预加载 2026–Now 论文…",
+			"refreshingTarget": "正在刷新 {{target}}…",
 			"papersCount": "{{count}} 篇",
 			"loadMoreStep": "加载更多 {{step}} 篇（已展示 {{shown}} / 共预载 {{total}} 篇）",
 			"showingAll": "已展示全部 {{total}} 篇论文",

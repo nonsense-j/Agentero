@@ -261,6 +261,7 @@
 			"venueDesc": "2026 Conference & Journal papers indexed via DBLP with full abstracts & citations",
 			"backToHub": "Back to sources",
 			"preloading": "Preloading 2026–Now papers…",
+			"refreshingTarget": "Refreshing {{target}}…",
 			"papersCount": "{{count}} papers",
 			"loadMoreStep": "Load {{step}} more ({{shown}} / {{total}})",
 			"showingAll": "Showing all {{total}} papers",

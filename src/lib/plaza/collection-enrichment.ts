@@ -8,7 +8,7 @@ export type VenueKind = "conference" | "journal";
 export type VenueDomain = "PL/SE" | "CR" | "AI";
 export type VenueCcfRank = "CCF-A" | "CCF-B";
 
-export const CURRENT_VENUE_SYNC_VERSION = 2;
+export const CURRENT_VENUE_SYNC_VERSION = 3;
 
 export type VenueConfig = {
 	id: string;
@@ -197,7 +197,7 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
 		dblpStream: "streams/conf/ecoop",
-		doiPrefixFilter: "10.4230/LIPIcs.ECOOP",
+		doiPrefixFilter: "10.4230/lipics.ecoop",
 		s2VenueNames: ["ECOOP"],
 		arxivVenueAliases: ["ECOOP 2026"],
 	},
@@ -269,6 +269,7 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 		ccfRank: "CCF-B",
 		dblpStream: "streams/conf/esem",
 		openAlexSourceIds: ["S4210197744"],
+		doiPrefixFilter: "10.4230/lipics.esem",
 		issn: "1949-3770",
 		s2VenueNames: ["ESEM"],
 		arxivVenueAliases: ["ESEM 2026"],
@@ -1024,9 +1025,15 @@ export async function fetchVenueStructuredPapers(
 		filters.push(
 			`locations.source.id:${spec.openAlexSourceIds.join("|")},${dateFilter}`,
 		);
-	} else if (spec?.doiPrefixFilter) {
-		filters.push(`doi_starts_with:${spec.doiPrefixFilter},${dateFilter}`);
-	} else if (spec?.issn) {
+	}
+	if (spec?.doiPrefixFilter) {
+		filters.push(
+			`doi_starts_with:${spec.doiPrefixFilter.toLowerCase()},${dateFilter}`,
+		);
+	} else if (
+		spec?.issn &&
+		(!spec.openAlexSourceIds || spec.openAlexSourceIds.length === 0)
+	) {
 		filters.push(`primary_location.source.issn:${spec.issn},${dateFilter}`);
 	}
 
@@ -1218,10 +1225,53 @@ export async function enrichDblpItemsBatch(
 		}
 	}
 
+	// Batch title lookup in OpenAlex for DOI-less DBLP records (e.g. OpenReview ICLR / USENIX Security)
+	const byTitle = new Map<string, OpenAlexWork>();
+	const missingDoiTitles = items
+		.filter((i) => !i.doi || !byDoi.has(i.doi.toLowerCase()))
+		.map((i) => i.title)
+		.slice(0, 360);
+	const TITLE_CHUNK = 12;
+	for (let i = 0; i < missingDoiTitles.length; i += TITLE_CHUNK) {
+		const batch = missingDoiTitles
+			.slice(i, i + TITLE_CHUNK)
+			.map((t) =>
+				t
+					.replace(/["|:;,()[\]{}\\/]+/g, " ")
+					.replace(/\s+/g, " ")
+					.trim(),
+			)
+			.filter((t) => t.length >= 12);
+		if (batch.length === 0) continue;
+		const expr = batch.map((t) => `"${t}"`).join("|");
+		try {
+			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(`title.search:${expr}`)}&per-page=50&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
+			const res = await fetchJson<{ results?: OpenAlexWork[] }>(url);
+			for (const row of res.results ?? []) {
+				const rt = (row.title ?? row.display_name ?? "").trim();
+				if (!rt || /^artifact release for\b/i.test(rt)) continue;
+				const key = normTitleKey(rt);
+				if (!key) continue;
+				const prev = byTitle.get(key);
+				const nextWords = Object.keys(row.abstract_inverted_index ?? {}).length;
+				const prevWords = Object.keys(
+					prev?.abstract_inverted_index ?? {},
+				).length;
+				if (!prev || nextWords > prevWords) {
+					byTitle.set(key, row);
+				}
+			}
+		} catch {
+			// Continue best-effort.
+		}
+	}
+
 	const enriched: CollectionPaperItem[] = [];
 	for (const item of items) {
 		if (isFrontmatterTitle(item.title)) continue;
-		const row = item.doi ? byDoi.get(item.doi.toLowerCase()) : undefined;
+		const row =
+			(item.doi ? byDoi.get(item.doi.toLowerCase()) : undefined) ??
+			byTitle.get(normTitleKey(item.title));
 		let abstract = item.abstract;
 		let citationCount = item.citationCount ?? 0;
 		let upstreamKw: string[] = item.keywords ?? [];

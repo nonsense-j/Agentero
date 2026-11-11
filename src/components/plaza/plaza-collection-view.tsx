@@ -115,6 +115,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const [refreshingArxiv, setRefreshingArxiv] = useState(false);
 	const [refreshingVenue, setRefreshingVenue] = useState(false);
+	const [backgroundInitVenues, setBackgroundInitVenues] = useState(false);
+	const [arxivRefreshLabel, setArxivRefreshLabel] = useState<string | null>(
+		null,
+	);
+	const [venueRefreshLabel, setVenueRefreshLabel] = useState<string | null>(
+		null,
+	);
 	const [idbReady, setIdbReady] = useState(false);
 	const [loadingVenueId, setLoadingVenueId] = useState<string | null>(null);
 	const [loadingMoreRemote, setLoadingMoreRemote] = useState(false);
@@ -169,7 +176,12 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const handleRefreshArxiv = useCallback(
 		async (targetCategories?: string[], replaceCategories = false) => {
 			if (refreshingArxiv) return;
+			const label =
+				targetCategories && targetCategories.length === 1
+					? (targetCategories[0] ?? "arXiv")
+					: "arXiv";
 			setRefreshingArxiv(true);
+			setArxivRefreshLabel(label);
 			setUpdateHint(null);
 			try {
 				const next = await refreshArxivCollection({
@@ -182,29 +194,95 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				notifyError(errorText(err));
 			} finally {
 				setRefreshingArxiv(false);
+				setArxivRefreshLabel(null);
 			}
 		},
 		[refreshingArxiv, state.categories],
 	);
 
 	const handleRefreshVenue = useCallback(
-		async (targetVenueIds?: string[], skipLoaded = false) => {
+		async (
+			targetVenueIds?: string[],
+			skipLoaded = false,
+			isBackgroundInit = false,
+		) => {
+			const venuePortalLabel = t("plaza.collection.source.venue");
+
+			// Single-venue manual refresh (e.g. inside `ASE 2026`) runs immediately without
+			// waiting behind any background cold-start batch.
+			if (!isBackgroundInit && targetVenueIds && targetVenueIds.length === 1) {
+				const singleId = targetVenueIds[0];
+				if (!singleId || loadingVenueId === singleId) return;
+				const singleName =
+					state.venues.find((v) => v.id === singleId)?.name ?? venuePortalLabel;
+				setLoadingVenueId(singleId);
+				setVenueRefreshLabel(singleName);
+				try {
+					const next = await ensureVenueLoaded(singleId);
+					setState(next);
+				} catch (err) {
+					notifyError(errorText(err));
+				} finally {
+					setLoadingVenueId((prev) => (prev === singleId ? null : prev));
+					setVenueRefreshLabel((prev) => (prev === singleName ? null : prev));
+				}
+				return;
+			}
+
+			if (isBackgroundInit) {
+				if (backgroundInitVenues) return;
+				setBackgroundInitVenues(true);
+				try {
+					const next = await refreshVenueCollection({
+						venues: state.venues,
+						venueIds: targetVenueIds,
+						skipLoaded,
+						onVenueProgress: (venue, idx, total) => {
+							setVenueRefreshLabel((prev) => {
+								if (refreshingVenue && prev) return prev;
+								return total > 1
+									? `${venuePortalLabel} · ${venue.name} (${idx}/${total})`
+									: venue.name;
+							});
+						},
+					});
+					setState(next);
+				} catch (err) {
+					notifyError(errorText(err));
+				} finally {
+					setBackgroundInitVenues(false);
+					if (!refreshingVenue) {
+						setVenueRefreshLabel(null);
+					}
+				}
+				return;
+			}
+
 			if (refreshingVenue) return;
 			setRefreshingVenue(true);
+			setVenueRefreshLabel(venuePortalLabel);
 			try {
 				const next = await refreshVenueCollection({
 					venues: state.venues,
 					venueIds: targetVenueIds,
 					skipLoaded,
+					onVenueProgress: (venue, idx, total) => {
+						setVenueRefreshLabel(
+							total > 1
+								? `${venuePortalLabel} · ${venue.name} (${idx}/${total})`
+								: venue.name,
+						);
+					},
 				});
 				setState(next);
 			} catch (err) {
 				notifyError(errorText(err));
 			} finally {
 				setRefreshingVenue(false);
+				setVenueRefreshLabel(null);
 			}
 		},
-		[refreshingVenue, state.venues],
+		[backgroundInitVenues, loadingVenueId, refreshingVenue, state.venues, t],
 	);
 
 	// Initial open: check arXiv incrementally; NEVER re-check or re-fetch Venues that are already loaded
@@ -239,7 +317,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			.filter((v) => !isVenueAlreadyLoaded(v, state.items))
 			.map((v) => v.id);
 		if (unloadedVenueIds.length > 0) {
-			void handleRefreshVenue(unloadedVenueIds, true);
+			void handleRefreshVenue(unloadedVenueIds, true, true);
 		}
 	}, [
 		handleRefreshArxiv,
@@ -477,7 +555,32 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const isCurrentViewRefreshing =
 		activeSource === "arxiv"
 			? refreshingArxiv
-			: refreshingVenue || Boolean(loadingVenueId);
+			: selectedVenueId
+				? loadingVenueId === selectedVenueId || refreshingVenue
+				: refreshingVenue || backgroundInitVenues || Boolean(loadingVenueId);
+
+	const hubRefreshTarget = arxivRefreshLabel ?? venueRefreshLabel;
+
+	const listRefreshTarget = useMemo(() => {
+		if (activeSource === "arxiv") {
+			return arxivRefreshLabel;
+		}
+		if (selectedVenueId) {
+			if (loadingVenueId === selectedVenueId) {
+				return selectedVenueName ?? venueRefreshLabel;
+			}
+			return refreshingVenue ? venueRefreshLabel : null;
+		}
+		return venueRefreshLabel ?? selectedVenueName;
+	}, [
+		activeSource,
+		arxivRefreshLabel,
+		loadingVenueId,
+		refreshingVenue,
+		selectedVenueId,
+		selectedVenueName,
+		venueRefreshLabel,
+	]);
 
 	const scopedRefreshLabel = useMemo(() => {
 		const base = t("plaza.collection.refresh");
@@ -592,7 +695,16 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-background/80 px-4 py-2 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
 					>
 						<div className="flex items-center gap-2 text-muted-foreground text-xs">
-							{refreshingArxiv || refreshingVenue || preloading ? (
+							{hubRefreshTarget ? (
+								<span className="inline-flex items-center gap-1.5 text-brand">
+									<Loader2 className="size-3.5 animate-spin" />
+									<span>
+										{t("plaza.collection.refreshingTarget", {
+											target: hubRefreshTarget,
+										})}
+									</span>
+								</span>
+							) : preloading ? (
 								<span className="inline-flex items-center gap-1.5 text-brand">
 									<Loader2 className="size-3.5 animate-spin" />
 									<span>{t("plaza.collection.preloading")}</span>
@@ -628,7 +740,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							venues={state.venues}
 							items={state.items}
 							refreshingArxiv={refreshingArxiv}
-							refreshingVenue={refreshingVenue}
+							refreshingVenue={refreshingVenue || backgroundInitVenues}
 							onRefreshArxiv={() => void handleRefreshArxiv()}
 							onRefreshVenue={() => void handleRefreshVenue(undefined, false)}
 							onEnterArxiv={handleEnterArxiv}
@@ -742,12 +854,22 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 							{/* Right actions */}
 							<div className="ml-auto flex items-center gap-1.5">
-								{preloading ? (
+								{isCurrentViewRefreshing && listRefreshTarget ? (
+									<span className="inline-flex items-center gap-1.5 text-brand text-xs">
+										<Loader2 className="size-3 animate-spin" />
+										<span className="max-w-56 truncate">
+											{t("plaza.collection.refreshingTarget", {
+												target: listRefreshTarget,
+											})}
+										</span>
+									</span>
+								) : activeSource === "arxiv" && preloading ? (
 									<span
-										className="hidden items-center gap-1 text-[11px] text-brand xl:inline-flex"
+										className="hidden items-center gap-1.5 text-[11px] text-brand xl:inline-flex"
 										title={t("plaza.collection.preloading")}
 									>
 										<Loader2 className="size-3 animate-spin" />
+										<span>{t("plaza.collection.preloading")}</span>
 									</span>
 								) : null}
 
@@ -967,7 +1089,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						{isCurrentViewRefreshing && visiblePapers.length === 0 ? (
 							<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
 								<Loader2 className="size-4 animate-spin" />
-								<span>{t("plaza.collection.loading")}</span>
+								<span>
+									{listRefreshTarget
+										? t("plaza.collection.refreshingTarget", {
+												target: listRefreshTarget,
+											})
+										: t("plaza.collection.loading")}
+								</span>
 							</div>
 						) : visiblePapers.length === 0 ? (
 							<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">

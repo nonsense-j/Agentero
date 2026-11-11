@@ -5,8 +5,10 @@ import {
 	CURRENT_VENUE_SYNC_VERSION,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	fetchDblpSparqlVenuePapers,
 	fetchVenueStructuredPapers,
 	isConfirmedVenueAcceptance,
+	isPreloadingCollection,
 	isVenueAlreadyLoaded,
 	loadCollectionState,
 	mergeCollectionItems,
@@ -337,21 +339,110 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("treats v2-synced Venues as immutable on open and skips them when skipLoaded is true", async () => {
+	it("fetches DOI-less DBLP 2026 papers via official SPARQL and enriches abstracts via OpenAlex title search, plus lowercase LIPIcs DOI prefixes", async () => {
+		const usenix = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "usenix-sec-2026",
+		);
+		const ecoop = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ecoop-2026");
+		if (!usenix || !ecoop)
+			throw new Error("Missing usenix-sec-2026 or ecoop-2026");
+
+		const ecoopUrls: string[] = [];
+		await fetchVenueStructuredPapers(ecoop, 2026, async <T>(url: string) => {
+			ecoopUrls.push(url);
+			return { meta: { count: 0, next_cursor: null }, results: [] } as T;
+		});
+		expect(
+			ecoopUrls.some((u) =>
+				decodeURIComponent(u).includes("doi_starts_with:10.4230/lipics.ecoop"),
+			),
+		).toBe(true);
+
+		const sparqlRes = await fetchDblpSparqlVenuePapers(
+			usenix,
+			2026,
+			new Set(),
+			async <T>(url: string) => {
+				if (url.includes("sparql.dblp.org")) {
+					return {
+						results: {
+							bindings: [
+								{
+									title: {
+										value:
+											"Kernel Isolation Against Speculative Side Channels.",
+									},
+									ee: {
+										value:
+											"https://www.usenix.org/conference/usenixsecurity26/presentation/alice",
+									},
+									authors: { value: "Alice Security 0001||Bob Systems" },
+								},
+							],
+						},
+					} as T;
+				}
+				if (decodeURIComponent(url).includes("title.search:")) {
+					return {
+						results: [
+							{
+								id: "https://openalex.org/W999",
+								title: "Kernel Isolation Against Speculative Side Channels",
+								publication_year: 2026,
+								publication_date: "2026-08-12",
+								cited_by_count: 4,
+								abstract_inverted_index: {
+									We: [0],
+									design: [1],
+									a: [2],
+									practical: [3],
+									kernel: [4],
+									isolation: [5],
+									mechanism: [6],
+									against: [7],
+									speculative: [8],
+									side: [9],
+									channels: [10],
+								},
+								authorships: [
+									{ author: { display_name: "Alice Security" } },
+									{ author: { display_name: "Bob Systems" } },
+								],
+							},
+						],
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+		);
+
+		expect(sparqlRes.items).toHaveLength(1);
+		expect(sparqlRes.items[0]?.authors).toEqual([
+			"Alice Security",
+			"Bob Systems",
+		]);
+		expect(sparqlRes.items[0]?.abstract).toContain(
+			"practical kernel isolation mechanism",
+		);
+		expect(sparqlRes.items[0]?.citationCount).toBe(4);
+	});
+
+	it("treats v3-synced Venues as immutable on open, upgrades pre-v3 caches once, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		// Cold venue before v2 sync -> not yet loaded
+		expect(CURRENT_VENUE_SYNC_VERSION).toBe(3);
+		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v1 venue -> still requires one-time v2 upgrade
+		// Legacy v2 truncated venue -> requires one-time v3 upgrade
 		expect(
 			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 1, lastFetchedAt: "2026-06-01T00:00:00Z" },
+				{ ...ase, syncVersion: 2, lastFetchedAt: "2026-06-01T00:00:00Z" },
 				[],
 			),
 		).toBe(false);
 
-		// Once v2 synced, opening Paper Collection never re-checks or re-fetches it
+		// Once v3 synced, opening Paper Collection never re-checks or re-fetches it
 		const loadedVenues = DEFAULT_COLLECTION_VENUES.map((v) => ({
 			...v,
 			syncVersion: CURRENT_VENUE_SYNC_VERSION,
@@ -368,5 +459,6 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		});
 		const stateAfterOpen = await refreshVenueCollection({ skipLoaded: true });
 		expect(stateAfterOpen.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
+		expect(isPreloadingCollection()).toBe(false);
 	});
 });

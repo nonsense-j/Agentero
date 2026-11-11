@@ -18,7 +18,6 @@ import {
 	type CollectionPaperItem,
 	type CollectionSourceType,
 	CURRENT_VENUE_SYNC_VERSION,
-	cleanDoi,
 	DBLP_2026_VENUE_SPECS,
 	type DblpVenueSpec,
 	derivePaperKeywords,
@@ -31,7 +30,6 @@ import {
 	formatPaperBibtex,
 	formatPaperCitationText,
 	inferVenueKind,
-	isFrontmatterTitle,
 	isPlaceholderAbstract,
 	loadItemsFromIndexedDb,
 	reconstructOpenAlexAbstract,
@@ -44,6 +42,7 @@ import {
 } from "@/lib/plaza/collection-enrichment";
 import {
 	createPoliteFetchJson,
+	fetchDblpSparqlVenuePapers,
 	fetchMultiChannelVenuePapers,
 	isConfirmedVenueAcceptance,
 	parseAcceptedVenueArxivXml,
@@ -66,6 +65,8 @@ export {
 	CURRENT_VENUE_SYNC_VERSION,
 	DBLP_2026_VENUE_SPECS,
 	derivePaperKeywords,
+	enrichDblpItemsBatch,
+	fetchDblpSparqlVenuePapers,
 	fetchMultiChannelVenuePapers,
 	fetchVenueStructuredPapers,
 	formatPaperBibtex,
@@ -187,10 +188,12 @@ export function matchesAnyArxivCategory(
 export function resetCollectionMemoryForTests(): void {
 	memoryState = null;
 	idbHydrated = false;
+	idbHydrationPromise = null;
 }
 
 let memoryState: CollectionState | null = null;
 let idbHydrated = false;
+let idbHydrationPromise: Promise<CollectionState> | null = null;
 
 function migrateCachedVenues(venues: VenueConfig[]): VenueConfig[] {
 	const migrated = venues.map((venue) => {
@@ -328,7 +331,35 @@ export function saveCollectionState(next: CollectionState): void {
 				}
 			: stamped;
 	writeJsonStorage(STORAGE_KEY, compactForLocalStorage);
-	void saveItemsToIndexedDb(stamped.items);
+
+	if (idbHydrated || typeof indexedDB === "undefined") {
+		void saveItemsToIndexedDb(stamped.items);
+	} else {
+		// Prevent overwriting IndexedDB's full paper pool with localStorage's 350-item slice
+		// if a save happens before `hydrateCollectionStateFromIdb()` has completed.
+		void (async () => {
+			const existingIdb = await loadItemsFromIndexedDb();
+			idbHydrated = true;
+			const latest = loadCollectionState();
+			if (!existingIdb || existingIdb.length === 0) {
+				await saveItemsToIndexedDb(latest.items);
+				return;
+			}
+			const sanitized = sanitizeCachedItems(existingIdb).filter((item) =>
+				matchesAnyArxivCategory(item, latest.categories),
+			);
+			const merged = mergeCollectionItems([latest.items, sanitized]);
+			await saveItemsToIndexedDb(merged);
+			if (merged.length > latest.items.length) {
+				const hydratedState: CollectionState = { ...latest, items: merged };
+				memoryState = hydratedState;
+				for (const listener of listeners) {
+					listener(hydratedState);
+				}
+			}
+		})();
+	}
+
 	for (const listener of listeners) {
 		listener(stamped);
 	}
@@ -340,22 +371,30 @@ export function saveCollectionState(next: CollectionState): void {
 export async function hydrateCollectionStateFromIdb(): Promise<CollectionState> {
 	const current = loadCollectionState();
 	if (idbHydrated) return current;
-	idbHydrated = true;
-	const idbItems = await loadItemsFromIndexedDb();
-	if (!idbItems || idbItems.length === 0) return current;
-	const latest = loadCollectionState();
-	const sanitized = sanitizeCachedItems(idbItems).filter((item) =>
-		matchesAnyArxivCategory(item, latest.categories),
-	);
-	if (sanitized.length === 0) return current;
-	const merged = mergeCollectionItems([latest.items, sanitized]);
-	if (merged.length <= latest.items.length) return latest;
-	const next: CollectionState = { ...latest, items: merged };
-	memoryState = next;
-	for (const listener of listeners) {
-		listener(next);
-	}
-	return next;
+	if (idbHydrationPromise) return idbHydrationPromise;
+
+	idbHydrationPromise = (async () => {
+		const idbItems = await loadItemsFromIndexedDb();
+		idbHydrated = true;
+		const latest = loadCollectionState();
+		if (!idbItems || idbItems.length === 0) return latest;
+		const sanitized = sanitizeCachedItems(idbItems).filter((item) =>
+			matchesAnyArxivCategory(item, latest.categories),
+		);
+		if (sanitized.length === 0) return latest;
+		const merged = mergeCollectionItems([latest.items, sanitized]);
+		if (merged.length <= latest.items.length) return latest;
+		const next: CollectionState = { ...latest, items: merged };
+		memoryState = next;
+		for (const listener of listeners) {
+			listener(next);
+		}
+		return next;
+	})().finally(() => {
+		idbHydrationPromise = null;
+	});
+
+	return idbHydrationPromise;
 }
 
 export function subscribeCollectionState(listener: Listener): () => void {
@@ -376,6 +415,7 @@ const CORS_OPEN_HOSTS = new Set([
 	"api.openalex.org",
 	"api.crossref.org",
 	"api.semanticscholar.org",
+	"sparql.dblp.org",
 ]);
 
 function isDblpHost(hostname: string): boolean {
@@ -538,7 +578,10 @@ export async function plazaFetchText(
 }
 
 export async function plazaFetchJson<T = unknown>(url: string): Promise<T> {
-	const text = await plazaFetchText(url, "application/json");
+	const accept = url.includes("sparql.dblp.org")
+		? "application/sparql-results+json, application/json;q=0.9"
+		: "application/json";
+	const text = await plazaFetchText(url, accept);
 	const trimmed = text.trimStart();
 	if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
 		if (/dblp\.(?:uni-trier\.de|org|dagstuhl\.de)/i.test(url)) {
@@ -1637,17 +1680,6 @@ export function parseResearchrHtml(
 	return results;
 }
 
-function resolveDblpStream(venue: VenueConfig): string | null {
-	const spec = VENUE_SPEC_BY_ID.get(venue.id);
-	if (spec?.dblpStream) return spec.dblpStream;
-	if (venue.dblpStream) return venue.dblpStream;
-	const urlMatch = /\/db\/(conf|journals)\/([^/?#]+)/i.exec(venue.url);
-	if (urlMatch?.[1] && urlMatch[2]) {
-		return `streams/${urlMatch[1].toLowerCase()}/${urlMatch[2].toLowerCase()}`;
-	}
-	return null;
-}
-
 function isDblpVenue(venue: VenueConfig): boolean {
 	return (
 		VENUE_SPEC_BY_ID.has(venue.id) ||
@@ -1655,21 +1687,6 @@ function isDblpVenue(venue: VenueConfig): boolean {
 		/dblp\.(?:uni-trier\.de|org|dagstuhl\.de)/i.test(venue.url)
 	);
 }
-
-type DblpHitInfo = {
-	title?: string;
-	venue?: string;
-	volume?: string;
-	number?: string;
-	pages?: string;
-	year?: string;
-	doi?: string;
-	ee?: string | string[];
-	url?: string;
-	authors?: {
-		author?: Array<{ text?: string } | string> | { text?: string } | string;
-	};
-};
 
 type VenueFetchBundle = {
 	items: CollectionPaperItem[];
@@ -1680,9 +1697,8 @@ type VenueFetchBundle = {
 /**
  * Multi-channel 2026 venue full fetcher combining:
  * 1. OpenAlex + Crossref (`cursor` paginated up to 1,200 papers),
- * 2. Semantic Scholar Bulk Search (`token` paginated up to 2,000 papers),
- * 3. arXiv Confirmed Accepted-Venue Metadata (`co:` / `jr:` multi-page),
- * 4. DBLP stream API (`&f=` paginated up to 1,000 hits when circuit breaker is closed).
+ * 2. Official DBLP SPARQL (`https://sparql.dblp.org/sparql`) + OpenAlex DOI/Title batch enrichment,
+ * 3. Semantic Scholar Bulk Search + arXiv Confirmed Accepted-Venue Metadata fallback.
  */
 async function fetchDblpForVenue(
 	venue: VenueConfig,
@@ -1690,11 +1706,10 @@ async function fetchDblpForVenue(
 		maxPages?: number;
 	},
 ): Promise<VenueFetchBundle> {
-	const spec = VENUE_SPEC_BY_ID.get(venue.id);
 	const yearMatch = /\b(20\d{2})\b/.exec(`${venue.name} ${venue.url}`);
 	const year = yearMatch ? Number(yearMatch[1]) : TARGET_YEAR;
 
-	const multiChannelPromise = fetchMultiChannelVenuePapers(
+	const multiChannel = await fetchMultiChannelVenuePapers(
 		venue,
 		year,
 		plazaFetchJson,
@@ -1702,164 +1717,20 @@ async function fetchDblpForVenue(
 		options,
 	);
 
-	// Only query DBLP when the circuit breaker is closed
-	const shouldTryDblp = Date.now() >= dblpCircuitOpenUntil;
-
-	const dblpHitsPromise = (async (): Promise<DblpHitInfo[]> => {
-		if (!shouldTryDblp) return [];
-		const stream = resolveDblpStream(venue);
-		const shortVenue =
-			venue.name
-				.replace(/\s*\(J\)\s*/gi, " ")
-				.replace(/\b20\d{2}\b/g, "")
-				.trim() || venue.name;
-		const dblpQuery = stream
-			? `stream:${stream}: year:${year}`
-			: `${shortVenue} ${year}`;
-
-		const collected: DblpHitInfo[] = [];
-		const pageSize = 250;
-		const maxDblpPages = 4;
-
-		for (let page = 0; page < maxDblpPages; page++) {
-			if (Date.now() < dblpCircuitOpenUntil) break;
-			const offset = page * pageSize;
-			const dblpUrl = `https://dblp.uni-trier.de/search/publ/api?q=${encodeURIComponent(dblpQuery)}&format=json&h=${pageSize}&f=${offset}&c=0`;
-			try {
-				const data = await plazaFetchJson<{
-					result?: {
-						hits?: {
-							"@total"?: string;
-							hit?: Array<{ info?: DblpHitInfo }> | { info?: DblpHitInfo };
-						};
-					};
-				}>(dblpUrl);
-				const rawHits = data.result?.hits?.hit;
-				const hits = Array.isArray(rawHits)
-					? rawHits
-					: rawHits
-						? [rawHits]
-						: [];
-				for (const h of hits) {
-					if (h.info) collected.push(h.info);
-				}
-				const totalReported = Number(data.result?.hits?.["@total"] ?? "0");
-				if (
-					hits.length < pageSize ||
-					(totalReported > 0 && offset + hits.length >= totalReported)
-				) {
-					break;
-				}
-			} catch {
-				break;
-			}
-		}
-		return collected;
-	})();
-
-	const [multiChannel, dblpInfos] = await Promise.all([
-		multiChannelPromise,
-		dblpHitsPromise,
-	]);
-
-	let enrichedDblpItems: CollectionPaperItem[] = [];
-	if (dblpInfos.length > 0) {
-		const alreadyCoveredTitles = new Set(
-			multiChannel.items.map((i) =>
-				i.title.toLowerCase().replace(/[^a-z0-9]+/g, ""),
-			),
-		);
-		const venueKind = spec?.kind ?? inferVenueKind(venue);
-		const venueDomain = spec?.domain ?? venue.domain;
-		const ccfRank = spec?.ccfRank ?? venue.ccfRank;
-		const rawDblpExclusive: CollectionPaperItem[] = [];
-
-		for (const info of dblpInfos) {
-			if (!info.title) continue;
-			const itemYear = info.year ? Number(info.year) : year;
-			if (itemYear < TARGET_YEAR) continue;
-			const title = cleanWhitespace(info.title.replace(/\.$/, ""));
-			if (isFrontmatterTitle(title)) continue;
-
-			const normTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, "");
-			if (normTitle && alreadyCoveredTitles.has(normTitle)) {
-				continue;
-			}
-
-			if (spec?.pacmIssue && info.number) {
-				const numUpper = info.number.trim().toUpperCase();
-				if (!numUpper.startsWith(spec.pacmIssue.toUpperCase())) continue;
-			}
-
-			const rawAuthor = info.authors?.author;
-			const authorList = Array.isArray(rawAuthor)
-				? rawAuthor
-				: rawAuthor
-					? [rawAuthor]
-					: [];
-			const authors = authorList
-				.map((a) => (typeof a === "string" ? a : (a.text ?? "")))
-				.map((s) => s.replace(/\s+\d{4}$/, "").trim())
-				.filter(Boolean);
-			if (authors.length === 0) continue;
-
-			const ee = Array.isArray(info.ee) ? info.ee[0] : info.ee;
-			const doi = cleanDoi(info.doi);
-			const url =
-				ee || (doi ? `https://doi.org/${doi}` : info.url || venue.url);
-			const categories = [
-				venue.name,
-				...(venueDomain ? [venueDomain] : []),
-				...(ccfRank ? [ccfRank] : []),
-			];
-
-			rawDblpExclusive.push({
-				id: buildVenuePaperId(venue.id, doi, undefined, title),
-				title,
-				authors,
-				abstract: "",
-				publishedAt: `${itemYear}-01-01T00:00:00Z`,
-				year: itemYear,
-				sourceType: "venue",
-				sourceLabel: venue.name,
-				categories,
-				url,
-				doi,
-				venueId: venue.id,
-				venueKind,
-				venueDomain,
-				ccfRank,
-				venueFull: info.venue?.trim() || venue.name,
-				volume: info.volume?.trim() || undefined,
-				issue: info.number?.trim() || undefined,
-				pages: info.pages?.trim() || undefined,
-			});
-		}
-
-		if (rawDblpExclusive.length > 0) {
-			enrichedDblpItems = await enrichDblpItemsBatch(
-				rawDblpExclusive,
-				venue,
-				politePlazaFetchJson,
-			);
-		}
-	}
-
-	const merged = mergeCollectionItems([
-		multiChannel.items,
-		enrichedDblpItems,
-	]).filter((item) => !isPlaceholderAbstract(item.abstract, venue.name));
+	const cleaned = multiChannel.items.filter(
+		(item) => !isPlaceholderAbstract(item.abstract, venue.name),
+	);
 
 	let latestPublishedAt = multiChannel.latestPublishedAt;
-	for (const item of merged) {
+	for (const item of cleaned) {
 		if (!latestPublishedAt || item.publishedAt > latestPublishedAt) {
 			latestPublishedAt = item.publishedAt;
 		}
 	}
 
 	return {
-		items: merged,
-		remoteTotalCount: Math.max(multiChannel.remoteTotalCount, merged.length),
+		items: cleaned,
+		remoteTotalCount: Math.max(multiChannel.remoteTotalCount, cleaned.length),
 		latestPublishedAt,
 	};
 }
@@ -2036,6 +1907,26 @@ export async function fetchSingleVenuePapers(
 	return bundle.items;
 }
 
+function applyFreshVenueItems(
+	pool: readonly CollectionPaperItem[],
+	venueId: string,
+	freshVenueItems: CollectionPaperItem[],
+): CollectionPaperItem[] {
+	if (freshVenueItems.length === 0) {
+		return [...pool];
+	}
+	const cachedForVenue = pool.filter(
+		(i) => i.sourceType === "venue" && i.venueId === venueId,
+	);
+	if (freshVenueItems.length >= cachedForVenue.length) {
+		const rest = pool.filter(
+			(i) => !(i.sourceType === "venue" && i.venueId === venueId),
+		);
+		return mergeCollectionItems([freshVenueItems, rest]);
+	}
+	return mergeCollectionItems([freshVenueItems, [...pool]]);
+}
+
 /**
  * Full multi-page, multi-channel update for a single Venue.
  */
@@ -2052,10 +1943,10 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 	const fullBundle = await fetchSingleVenueBundle(venue, false, {
 		maxPages: 6,
 	});
-	const combinedCount = mergeCollectionItems([
-		fullBundle.items,
-		cachedForVenue,
-	]).length;
+	const combinedCount =
+		fullBundle.items.length >= cachedForVenue.length
+			? fullBundle.items.length
+			: mergeCollectionItems([fullBundle.items, cachedForVenue]).length;
 
 	return {
 		venuePatch: {
@@ -2088,10 +1979,11 @@ export async function ensureVenueLoaded(
 
 		const result = await syncVenueFull(venue);
 		const latest = loadCollectionState();
-		const merged =
-			result.fullItems.length > 0
-				? mergeCollectionItems([result.fullItems, latest.items])
-				: latest.items;
+		const merged = applyFreshVenueItems(
+			latest.items,
+			venueId,
+			result.fullItems,
+		);
 		const updatedVenues = latest.venues.map((v) =>
 			v.id === venueId
 				? {
@@ -2259,54 +2151,49 @@ export async function refreshArxivCollection(options?: {
 		: existingState.categories;
 	const incremental = options?.incremental !== false;
 
-	setPreloadingFlag(true);
-	try {
-		let mergedItems = existingState.items;
-		let latestArxiv = existingState.latestArxiv;
-		let nextWatermarks = existingState.arxivWatermarks ?? {};
-		let coldStartCats: string[] = [];
+	let mergedItems = existingState.items;
+	let latestArxiv = existingState.latestArxiv;
+	let nextWatermarks = existingState.arxivWatermarks ?? {};
+	let coldStartCats: string[] = [];
 
-		const arxivSync = await syncArxivCategoriesIncremental(
-			targetCategories,
-			existingState.items,
-			nextWatermarks,
-			incremental,
-		);
-		nextWatermarks = arxivSync.nextWatermarks;
-		coldStartCats = arxivSync.coldStartCategories;
-		if (arxivSync.deltaItems.length > 0) {
-			mergedItems = mergeCollectionItems([
-				arxivSync.deltaItems,
-				loadCollectionState().items,
-			]);
-		} else {
-			mergedItems = loadCollectionState().items;
-		}
-		if (arxivSync.latest) {
-			latestArxiv = arxivSync.latest;
-		}
-
-		const latestSnap = loadCollectionState();
-		const nextState: CollectionState = {
-			...latestSnap,
-			categories: savedCategories,
-			items: mergedItems,
-			lastRefreshedAt: new Date().toISOString(),
-			latestArxiv,
-			arxivWatermarks: {
-				...(latestSnap.arxivWatermarks ?? {}),
-				...nextWatermarks,
-			},
-		};
-		saveCollectionState(nextState);
-
-		if (coldStartCats.length > 0) {
-			void preloadAll2026ArxivInBackground(coldStartCats, 6, 200);
-		}
-		return loadCollectionState();
-	} finally {
-		setPreloadingFlag(false);
+	const arxivSync = await syncArxivCategoriesIncremental(
+		targetCategories,
+		existingState.items,
+		nextWatermarks,
+		incremental,
+	);
+	nextWatermarks = arxivSync.nextWatermarks;
+	coldStartCats = arxivSync.coldStartCategories;
+	if (arxivSync.deltaItems.length > 0) {
+		mergedItems = mergeCollectionItems([
+			arxivSync.deltaItems,
+			loadCollectionState().items,
+		]);
+	} else {
+		mergedItems = loadCollectionState().items;
 	}
+	if (arxivSync.latest) {
+		latestArxiv = arxivSync.latest;
+	}
+
+	const latestSnap = loadCollectionState();
+	const nextState: CollectionState = {
+		...latestSnap,
+		categories: savedCategories,
+		items: mergedItems,
+		lastRefreshedAt: new Date().toISOString(),
+		latestArxiv,
+		arxivWatermarks: {
+			...(latestSnap.arxivWatermarks ?? {}),
+			...nextWatermarks,
+		},
+	};
+	saveCollectionState(nextState);
+
+	if (coldStartCats.length > 0) {
+		void preloadAll2026ArxivInBackground(coldStartCats, 6, 200);
+	}
+	return loadCollectionState();
 }
 
 /**
@@ -2319,6 +2206,7 @@ export async function refreshVenueCollection(options?: {
 	venues?: VenueConfig[];
 	venueIds?: string[];
 	skipLoaded?: boolean;
+	onVenueProgress?: (venue: VenueConfig, index: number, total: number) => void;
 }): Promise<CollectionState> {
 	const current = loadCollectionState();
 	const baseVenues = options?.venues ?? current.venues;
@@ -2338,61 +2226,38 @@ export async function refreshVenueCollection(options?: {
 		return current;
 	}
 
-	setPreloadingFlag(true);
-	try {
-		const CONCURRENCY = 2;
-		let cursor = 0;
+	const CONCURRENCY = 2;
+	let cursor = 0;
 
-		const worker = async () => {
-			while (cursor < targets.length) {
-				const idx = cursor++;
-				const target = targets[idx];
-				if (!target) continue;
-				const liveVenue =
-					loadCollectionState().venues.find((v) => v.id === target.id) ??
-					target;
-				try {
-					const res = await syncVenueFull(liveVenue);
-					if (
-						res.fullItems.length > 0 ||
-						Object.keys(res.venuePatch).length > 0
-					) {
-						const snap = loadCollectionState();
-						const mergedSnap =
-							res.fullItems.length > 0
-								? mergeCollectionItems([res.fullItems, snap.items])
-								: snap.items;
-						const snapVenues = snap.venues.map((v) =>
-							v.id === liveVenue.id ? { ...v, ...res.venuePatch } : v,
-						);
-						saveCollectionState({
-							...snap,
-							venues: snapVenues,
-							items: mergedSnap,
-						});
-					}
-				} catch {
-					// Continue remaining venues smoothly.
-				}
+	const worker = async () => {
+		while (cursor < targets.length) {
+			const idx = cursor++;
+			const target = targets[idx];
+			if (!target) continue;
+			const liveVenue =
+				loadCollectionState().venues.find((v) => v.id === target.id) ?? target;
+			options?.onVenueProgress?.(liveVenue, idx + 1, targets.length);
+			try {
+				await ensureVenueLoaded(liveVenue.id);
+			} catch {
+				// Continue remaining venues smoothly.
 			}
-		};
+		}
+	};
 
-		await Promise.all(
-			Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () =>
-				worker(),
-			),
-		);
+	await Promise.all(
+		Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () =>
+			worker(),
+		),
+	);
 
-		const finalState = loadCollectionState();
-		const nextState: CollectionState = {
-			...finalState,
-			lastRefreshedAt: new Date().toISOString(),
-		};
-		saveCollectionState(nextState);
-		return nextState;
-	} finally {
-		setPreloadingFlag(false);
-	}
+	const finalState = loadCollectionState();
+	const nextState: CollectionState = {
+		...finalState,
+		lastRefreshedAt: new Date().toISOString(),
+	};
+	saveCollectionState(nextState);
+	return nextState;
 }
 
 /**
