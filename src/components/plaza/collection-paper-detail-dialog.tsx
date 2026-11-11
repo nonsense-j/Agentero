@@ -22,6 +22,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { openExternalUrl } from "@/lib/core/open-external";
+import { cn } from "@/lib/core/utils";
 import {
 	type CollectionPaperItem,
 	derivePaperKeywords,
@@ -31,6 +32,12 @@ import {
 	isPlaceholderAbstract,
 } from "@/lib/plaza/collection";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
+
+export const COLLECTION_PRIMARY_BTN_CLASS =
+	"border-blue-600/30 bg-blue-600 text-white shadow-xs hover:bg-blue-500 hover:text-white active:bg-blue-700 dark:border-blue-400/50 dark:bg-blue-600 dark:text-white dark:shadow-[0_1px_3px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.22)] dark:hover:bg-blue-500 dark:active:bg-blue-700";
+
+export const COLLECTION_OUTLINE_BTN_CLASS =
+	"border-border bg-[var(--magpie-surface)] text-foreground shadow-2xs hover:bg-muted hover:text-foreground dark:border-white/20 dark:bg-white/[0.09] dark:text-zinc-100 dark:hover:bg-white/[0.16] dark:hover:text-white";
 
 export function CollectionPaperDetailDialog({
 	paper,
@@ -240,7 +247,10 @@ export function CollectionPaperDetailDialog({
 									variant="outline"
 									size="sm"
 									onClick={() => void copyText(citationText, "citation")}
-									className="h-6 gap-1 px-2 text-caption"
+									className={cn(
+										"h-6 gap-1 px-2 text-caption",
+										COLLECTION_OUTLINE_BTN_CLASS,
+									)}
 								>
 									{copiedKind === "citation" ? (
 										<Check className="size-3 text-brand" />
@@ -256,7 +266,10 @@ export function CollectionPaperDetailDialog({
 									variant="outline"
 									size="sm"
 									onClick={() => void copyText(bibtexText, "bibtex")}
-									className="h-6 gap-1 px-2 text-caption"
+									className={cn(
+										"h-6 gap-1 px-2 text-caption",
+										COLLECTION_OUTLINE_BTN_CLASS,
+									)}
 								>
 									{copiedKind === "bibtex" ? (
 										<Check className="size-3 text-brand" />
@@ -297,7 +310,7 @@ export function CollectionPaperDetailDialog({
 									});
 									onOpenChange(false);
 								}}
-								className="gap-1.5"
+								className={cn("gap-1.5", COLLECTION_OUTLINE_BTN_CLASS)}
 							>
 								<BookOpen className="size-3.5" />
 								{t("plaza.arxivRec.read")}
@@ -310,7 +323,7 @@ export function CollectionPaperDetailDialog({
 								variant="outline"
 								size="sm"
 								onClick={() => openExternalUrl(active.url)}
-								className="gap-1.5"
+								className={cn("gap-1.5", COLLECTION_OUTLINE_BTN_CLASS)}
 							>
 								<ArrowUpRight className="size-3.5" />
 								{t("plaza.feeds.openOriginal")}
@@ -322,7 +335,12 @@ export function CollectionPaperDetailDialog({
 							size="sm"
 							disabled={importing || imported}
 							onClick={() => void handleImportClick()}
-							className="gap-1.5"
+							className={cn(
+								"gap-1.5",
+								imported
+									? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 disabled:opacity-100 dark:border-emerald-400/35 dark:bg-emerald-500/20 dark:text-emerald-200"
+									: COLLECTION_PRIMARY_BTN_CLASS,
+							)}
 						>
 							{imported ? (
 								<>

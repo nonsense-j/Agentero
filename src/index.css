@@ -464,8 +464,12 @@
 	--magpie-surface: #ffffff;
 	--magpie-surface-hover: #fcfcfd;
 	--magpie-line: rgba(15, 15, 22, 0.085);
+	--magpie-hairline: var(--magpie-line);
 	--magpie-line-strong: rgba(15, 15, 22, 0.14);
-	--magpie-edge: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+	--magpie-edge: rgba(255, 255, 255, 0.9);
+	--magpie-button-pop:
+		0 1px 2px rgba(15, 15, 22, 0.06), 0 0 0 0.5px rgba(15, 15, 22, 0.14),
+		inset 0 1px 0 rgba(255, 255, 255, 0.9);
 	--magpie-seg-bg: rgba(15, 15, 24, 0.055);
 	--magpie-seg-thumb: #ffffff;
 	--magpie-seg-shadow:
@@ -531,8 +535,12 @@
 	--magpie-surface: #232327;
 	--magpie-surface-hover: #27272c;
 	--magpie-line: rgba(255, 255, 255, 0.08);
-	--magpie-line-strong: rgba(255, 255, 255, 0.14);
-	--magpie-edge: inset 0 1px 0 rgba(255, 255, 255, 0.065);
+	--magpie-hairline: rgba(255, 255, 255, 0.12);
+	--magpie-line-strong: rgba(255, 255, 255, 0.18);
+	--magpie-edge: rgba(255, 255, 255, 0.08);
+	--magpie-button-pop:
+		0 1px 3px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(255, 255, 255, 0.18),
+		inset 0 1px 0 rgba(255, 255, 255, 0.1);
 	--magpie-seg-bg: rgba(0, 0, 0, 0.28);
 	--magpie-seg-thumb: #2f2f35;
 	--magpie-seg-shadow:
@@ -1447,7 +1455,7 @@ html[data-offscreen-md-blocks] [data-slate-editor][data-selection-chat-origin="m
 }
 
 .magpie-card:hover {
-	box-shadow: var(--magpie-card-shadow-hover);
+	box-shadow: var(--magpie-card-hover-shadow);
 }
 
 .magpie-card-selected {
@@ -1497,7 +1505,7 @@ html[data-offscreen-md-blocks] [data-slate-editor][data-selection-chat-origin="m
 .magpie-seg-btn[data-active="true"] {
 	background-color: var(--magpie-surface);
 	color: var(--foreground);
-	box-shadow: var(--magpie-pill-shadow);
+	box-shadow: var(--magpie-seg-shadow);
 }
 
 .magpie-button-pop {

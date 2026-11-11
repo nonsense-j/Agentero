@@ -30,7 +30,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
-import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
+import {
+	COLLECTION_OUTLINE_BTN_CLASS,
+	COLLECTION_PRIMARY_BTN_CLASS,
+	CollectionPaperDetailDialog,
+} from "@/components/plaza/collection-paper-detail-dialog";
 import {
 	CollectionPortalHub,
 	type VenueKindFilter,
@@ -82,6 +86,12 @@ type DomainFilter = "all" | VenueDomain;
 
 const INITIAL_DISPLAY_COUNT = 100;
 const LOAD_MORE_STEP = 50;
+
+const COLLECTION_ICON_BTN_CLASS =
+	"text-foreground/80 hover:bg-black/[0.06] hover:text-foreground dark:bg-white/[0.08] dark:text-zinc-100 dark:ring-1 dark:ring-inset dark:ring-white/15 dark:hover:bg-white/[0.15] dark:hover:text-white";
+
+const COLLECTION_CARD_IMPORT_BTN_CLASS =
+	"bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/20 hover:bg-blue-600 hover:text-white dark:bg-blue-500/20 dark:text-blue-200 dark:ring-blue-400/35 dark:hover:bg-blue-500 dark:hover:text-white";
 
 export function PlazaCollectionView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
@@ -522,6 +532,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										disabled={busy}
 										onClick={() => void handleRefresh()}
 										aria-label={t("plaza.collection.refresh")}
+										className={COLLECTION_ICON_BTN_CLASS}
 									>
 										{busy ? (
 											<Loader2 className="size-3.5 animate-spin" />
@@ -563,6 +574,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										size="icon-sm"
 										onClick={() => setViewStage("hub")}
 										aria-label={t("plaza.collection.backToHub")}
+										className={COLLECTION_ICON_BTN_CLASS}
 									>
 										<ArrowLeft className="size-3.5" />
 									</Button>
@@ -666,7 +678,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										size="sm"
 										disabled={batchImporting}
 										onClick={() => void importPapers(selectedPapers)}
-										className="h-6 gap-1 rounded-md px-2.5 text-caption"
+										className={cn(
+											"h-6 gap-1 rounded-md px-2.5 text-caption",
+											COLLECTION_PRIMARY_BTN_CLASS,
+										)}
 									>
 										{batchImporting ? (
 											<Loader2 className="size-3 animate-spin" />
@@ -688,6 +703,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											onClick={toggleSelectAllDisplayed}
 											disabled={displayedPapers.length === 0}
 											aria-label={t("plaza.collection.toggleSelectAll")}
+											className={COLLECTION_ICON_BTN_CLASS}
 										>
 											{displayedPapers.length > 0 &&
 											displayedPapers.every((p) => selectedIds.has(p.id)) ? (
@@ -728,6 +744,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											disabled={busy}
 											onClick={() => void handleRefresh()}
 											aria-label={t("plaza.collection.refresh")}
+											className={COLLECTION_ICON_BTN_CLASS}
 										>
 											{busy ? (
 												<Loader2 className="size-3.5 animate-spin" />
@@ -840,13 +857,16 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										{updateHint.remoteLatestTitle})
 									</span>
 								</span>
-								<div className="flex shrink-0 items-center gap-1">
+								<div className="flex shrink-0 items-center gap-1.5">
 									<Button
 										type="button"
 										size="sm"
 										disabled={busy}
 										onClick={() => void handleRefresh()}
-										className="h-6 px-2 text-caption"
+										className={cn(
+											"h-6 rounded-md px-2.5 text-caption",
+											COLLECTION_PRIMARY_BTN_CLASS,
+										)}
 									>
 										{t("plaza.collection.refreshNow")}
 									</Button>
@@ -889,6 +909,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												)
 											: void handleRefresh()
 									}
+									className={COLLECTION_OUTLINE_BTN_CLASS}
 								>
 									<RefreshCw className="size-3.5" />
 									{t("plaza.collection.refresh")}
@@ -916,7 +937,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											variant="outline"
 											size="sm"
 											onClick={handleRevealNext50}
-											className="h-8 gap-1.5 px-4 text-xs"
+											className={cn(
+												"h-8 gap-1.5 px-4 text-xs",
+												COLLECTION_OUTLINE_BTN_CLASS,
+											)}
 										>
 											<ChevronDown className="size-3.5" />
 											<span>
@@ -940,11 +964,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											{activeSource === "arxiv" ? (
 												<Button
 													type="button"
-													variant="ghost"
+													variant="outline"
 													size="sm"
 													disabled={loadingMoreRemote || busy}
 													onClick={() => void handlePullDeeperRemoteArxiv()}
-													className="h-7 gap-1.5 text-xs"
+													className={cn(
+														"h-7 gap-1.5 text-xs",
+														COLLECTION_OUTLINE_BTN_CLASS,
+													)}
 												>
 													{loadingMoreRemote ? (
 														<>
@@ -1089,7 +1116,7 @@ function CollectionPaperCard({
 				) : null}
 			</button>
 
-			<div className="flex shrink-0 items-center gap-0.5">
+			<div className="flex shrink-0 items-center gap-1">
 				{paper.arxivId ? (
 					<Tooltip>
 						<TooltipTrigger asChild>
@@ -1098,6 +1125,7 @@ function CollectionPaperCard({
 								variant="ghost"
 								size="icon-sm"
 								aria-label={t("plaza.arxivRec.read")}
+								className={COLLECTION_ICON_BTN_CLASS}
 								onClick={() =>
 									openRemoteArxivPaper({
 										arxivId: paper.arxivId ?? "",
@@ -1123,6 +1151,7 @@ function CollectionPaperCard({
 								variant="ghost"
 								size="icon-sm"
 								aria-label={t("plaza.feeds.openOriginal")}
+								className={COLLECTION_ICON_BTN_CLASS}
 								onClick={() => openExternalUrl(paper.url)}
 							>
 								<ArrowUpRight className="size-3.5" />
@@ -1134,7 +1163,7 @@ function CollectionPaperCard({
 
 				{imported ? (
 					<span
-						className="inline-flex size-7 items-center justify-center text-brand"
+						className="inline-flex size-7 items-center justify-center rounded-[min(var(--radius-md),12px)] bg-emerald-500/12 text-emerald-600 ring-1 ring-emerald-500/25 ring-inset dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/35"
 						title={t("plaza.feeds.imported")}
 					>
 						<Check className="size-3.5" />
@@ -1148,6 +1177,7 @@ function CollectionPaperCard({
 								size="icon-sm"
 								disabled={busy}
 								aria-label={t("plaza.feeds.import")}
+								className={COLLECTION_CARD_IMPORT_BTN_CLASS}
 								onClick={() => void triggerImport()}
 							>
 								{busy ? (
@@ -1239,6 +1269,7 @@ function CollectionConfigPopover({
 							variant="ghost"
 							size="icon-sm"
 							aria-label={t("plaza.collection.configureSources")}
+							className={COLLECTION_ICON_BTN_CLASS}
 						>
 							<Settings2 className="size-3.5" />
 						</Button>
@@ -1373,7 +1404,10 @@ function CollectionConfigPopover({
 								size="sm"
 								onClick={addVenue}
 								disabled={!newVenueLabel.trim() || !newVenueUrl.trim()}
-								className="h-6 gap-1 px-2 text-caption"
+								className={cn(
+									"h-6 gap-1 px-2 text-caption",
+									COLLECTION_PRIMARY_BTN_CLASS,
+								)}
 							>
 								<Plus className="size-3" />
 								{t("lookup.add")}
