@@ -165,6 +165,7 @@
 			"typeLabel": "Gateway type",
 			"typeEzproxy": "EZProxy (login?url=)",
 			"typeWengine": "WebVPN (wengine)",
+			"typeCarsi": "CARSI (Publisher SSO)",
 			"test": "Test",
 			"testing": "Testing…",
 			"probeIdle": "Not tested",
@@ -173,6 +174,10 @@
 			"probeProbing": "Testing…",
 			"presetsLabel": "Common institutions",
 			"presets": {
+				"carsiAcm": "CARSI · ACM Digital Library",
+				"carsiIeee": "CARSI · IEEE Xplore",
+				"carsiSpringer": "CARSI · Springer Nature",
+				"carsiElsevier": "CARSI · ScienceDirect",
 				"zju": "Zhejiang University",
 				"ustc": "University of Science and Technology of China",
 				"xjtu": "Xi'an Jiaotong University",

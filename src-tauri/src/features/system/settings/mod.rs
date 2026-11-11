@@ -1015,20 +1015,15 @@ impl AppSettingsStore {
         String,
         String,
     )> {
+        use agentero_core::features::paper::import::download::InstitutionProxyKind;
         let guard = self.inner.lock().ok()?;
+        let kind = InstitutionProxyKind::from_setting(&guard.institution_proxy_type);
         let prefix = guard.institution_proxy_prefix.trim();
-        if prefix.is_empty() {
+        let cookie = guard.institution_proxy_cookie.trim();
+        if prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty()) {
             return None;
         }
-        let kind =
-            agentero_core::features::paper::import::download::InstitutionProxyKind::from_setting(
-                &guard.institution_proxy_type,
-            );
-        Some((
-            kind,
-            prefix.to_string(),
-            guard.institution_proxy_cookie.trim().to_string(),
-        ))
+        Some((kind, prefix.to_string(), cookie.to_string()))
     }
 
     /// Persist cookies captured after an interactive gateway login without
@@ -1272,6 +1267,8 @@ fn normalize(s: &mut AppSettings) {
     s.institution_proxy_cookie = s.institution_proxy_cookie.trim().to_string();
     s.institution_proxy_type = if s.institution_proxy_type.eq_ignore_ascii_case("wengine") {
         "wengine".to_string()
+    } else if s.institution_proxy_type.eq_ignore_ascii_case("carsi") {
+        "carsi".to_string()
     } else {
         "ezproxy".to_string()
     };

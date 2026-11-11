@@ -165,6 +165,7 @@
 			"typeLabel": "网关类型",
 			"typeEzproxy": "EZProxy（login?url=）",
 			"typeWengine": "WebVPN（wengine 路径式）",
+			"typeCarsi": "CARSI（高校联盟直连登录）",
 			"test": "测试",
 			"testing": "测试中…",
 			"probeIdle": "尚未检测",
@@ -173,6 +174,10 @@
 			"probeProbing": "检测中…",
 			"presetsLabel": "常见院校",
 			"presets": {
+				"carsiAcm": "CARSI · ACM Digital Library",
+				"carsiIeee": "CARSI · IEEE Xplore",
+				"carsiSpringer": "CARSI · Springer Nature",
+				"carsiElsevier": "CARSI · ScienceDirect",
 				"zju": "浙江大学",
 				"ustc": "中国科学技术大学",
 				"xjtu": "西安交通大学",

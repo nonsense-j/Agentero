@@ -43,12 +43,18 @@ pub enum InstitutionProxyKind {
     /// by several CN universities (ZJU etc.). Hosts are AES-128-CTR encrypted
     /// with the fixed public `wrdvpnisthebest!` key and prefixed with the IV.
     Wengine,
+    /// CARSI federated Shibboleth SSO directly on publisher domains
+    /// (`dl.acm.org`, `ieeexplore.ieee.org`, `link.springer.com`,
+    /// `www.sciencedirect.com`, `www.nature.com`, `onlinelibrary.wiley.com`).
+    Carsi,
 }
 
 impl InstitutionProxyKind {
     pub fn from_setting(s: &str) -> Self {
         if s.eq_ignore_ascii_case("wengine") {
             Self::Wengine
+        } else if s.eq_ignore_ascii_case("carsi") {
+            Self::Carsi
         } else {
             Self::EzProxy
         }
@@ -63,9 +69,9 @@ struct InstitutionProxyConf {
 }
 
 /// Update the process-wide institution proxy (kind + prefix + session cookie).
-/// An empty prefix disables the fallback layer. For EZProxy a bare origin
-/// (no query part) gets the `/login?url=` convention appended; for wengine the
-/// prefix stays the bare gateway origin.
+/// An empty prefix disables the fallback layer (except CARSI with non-empty
+/// publisher cookies). For EZProxy a bare origin (no query part) gets the
+/// `/login?url=` convention appended; for wengine/CARSI the prefix stays as-is.
 pub fn set_institution_proxy(kind: InstitutionProxyKind, prefix: &str, cookie: &str) {
     let mut prefix = prefix.trim().trim_end_matches('/').to_string();
     if kind == InstitutionProxyKind::EzProxy && !prefix.is_empty() && !prefix.contains('?') {
@@ -78,7 +84,9 @@ pub fn set_institution_proxy(kind: InstitutionProxyKind, prefix: &str, cookie: &
         .chars()
         .filter(|c| !matches!(c, '\r' | '\n' | '\t'))
         .collect();
-    let value = if prefix.is_empty() {
+    let disabled =
+        prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty());
+    let value = if disabled {
         None
     } else {
         Some(InstitutionProxyConf {
@@ -239,6 +247,319 @@ fn pdf_links_from_html(html: &str, proxy_origin: &str, gateway_origin: &str) -> 
     out
 }
 
+/// Merge newly captured publisher-domain cookies `(host, cookie_header)` into
+/// an existing `institutionProxyCookie` value. Supports both a JSON host→cookie
+/// map (`{"dl.acm.org":"...","ieeexplore.ieee.org":"..."}`) so signing into
+/// multiple CARSI publishers accumulates sessions without overwriting, and
+/// legacy plain cookie strings (preserved under `"*"`).
+pub fn merge_carsi_cookie_map(existing_raw: &str, host_cookies: &[(String, String)]) -> String {
+    use std::collections::BTreeMap;
+    let trimmed = existing_raw.trim();
+    let mut map: BTreeMap<String, String> = if trimmed.starts_with('{') {
+        serde_json::from_str(trimmed).unwrap_or_default()
+    } else {
+        let mut init = BTreeMap::new();
+        if !trimmed.is_empty() {
+            init.insert("*".to_string(), trimmed.to_string());
+        }
+        init
+    };
+    for (host, cookie) in host_cookies {
+        let h = host.trim().to_ascii_lowercase();
+        let c = cookie.trim();
+        if !h.is_empty() && !c.is_empty() {
+            map.insert(h, c.to_string());
+        }
+    }
+    serde_json::to_string(&map).unwrap_or_default()
+}
+
+/// Resolve the `Cookie` header to send for `target_url`.
+/// Plain strings are returned verbatim; JSON host→cookie maps match the exact
+/// hostname first, then parent domain suffix, then `"*"` fallback.
+pub fn cookie_for_url(cookie_raw: &str, target_url: &str) -> String {
+    let trimmed = cookie_raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if !trimmed.starts_with('{') {
+        return trimmed.to_string();
+    }
+    let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(trimmed)
+    else {
+        return String::new();
+    };
+    let host = reqwest::Url::parse(target_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default();
+    if !host.is_empty() {
+        if let Some(exact) = map.get(&host) {
+            return exact.clone();
+        }
+        for (k, v) in &map {
+            if k == "*" {
+                continue;
+            }
+            let kl = k.to_ascii_lowercase();
+            if host.ends_with(&format!(".{kl}")) || kl.ends_with(&format!(".{host}")) {
+                return v.clone();
+            }
+        }
+    }
+    map.get("*").cloned().unwrap_or_default()
+}
+
+/// Direct publisher PDF URLs derived from a DOI prefix so CARSI / campus
+/// requests hit the publisher host directly without a `doi.org` cross-origin
+/// redirect (which strips `Cookie` headers in HTTP clients).
+pub fn publisher_direct_pdf_targets(doi: &str) -> Vec<String> {
+    let d = doi.trim();
+    let lower = d.to_ascii_lowercase();
+    let mut out = Vec::new();
+    if lower.starts_with("10.1145/") {
+        out.push(format!("https://dl.acm.org/doi/pdf/{d}"));
+    } else if lower.starts_with("10.1007/") {
+        out.push(format!("https://link.springer.com/content/pdf/{d}.pdf"));
+    } else if let Some(suffix) = d.split_once("10.1038/").map(|(_, s)| s) {
+        if !suffix.is_empty() {
+            out.push(format!("https://www.nature.com/articles/{suffix}.pdf"));
+        }
+    } else if lower.starts_with("10.1002/") {
+        out.push(format!(
+            "https://onlinelibrary.wiley.com/doi/pdfdirect/{d}?download=true"
+        ));
+    }
+    out
+}
+
+/// Mine publisher-specific PDF download endpoints (e.g. IEEE `stampPDF/getPDF.jsp`
+/// `arnumber`, Elsevier `pdfft`, ACM `/doi/pdf/`) from a landed publisher URL + HTML.
+fn publisher_mined_pdf_targets(doi: &str, final_url: &str, html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower_url = final_url.to_ascii_lowercase();
+    if lower_url.contains("ieeexplore.ieee.org") {
+        let arnumber = final_url
+            .split("/document/")
+            .nth(1)
+            .and_then(|s| s.split(['/', '?', '#']).next())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_string)
+            .or_else(|| {
+                let needle = "\"articleNumber\":\"";
+                let start = html.find(needle)? + needle.len();
+                let rest = &html[start..];
+                let end = rest.find('"')?;
+                let cand = &rest[..end];
+                (!cand.is_empty() && cand.chars().all(|c| c.is_ascii_digit()))
+                    .then(|| cand.to_string())
+            });
+        if let Some(ar) = arnumber {
+            out.push(format!(
+                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={ar}&ref="
+            ));
+        }
+    } else if lower_url.contains("sciencedirect.com") {
+        if let Some(pii) = final_url
+            .split("/pii/")
+            .nth(1)
+            .and_then(|s| s.split(['/', '?', '#']).next())
+            .filter(|s| !s.is_empty())
+        {
+            out.push(format!(
+                "https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true"
+            ));
+        }
+    } else if lower_url.contains("dl.acm.org") && !doi.is_empty() {
+        out.push(format!("https://dl.acm.org/doi/pdf/{doi}"));
+    } else if lower_url.contains("link.springer.com") && !doi.is_empty() {
+        out.push(format!("https://link.springer.com/content/pdf/{doi}.pdf"));
+    }
+    out
+}
+
+fn strip_html_tags_plain(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for c in input.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    crate::features::paper::discovery::coolpapers::decode_entities(&out)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extract an article/chapter abstract from publisher HTML (Springer `#Abs1-content`,
+/// IEEE `xplGlobal.document.metadata.abstract`, ACM `abstractSection`, or Highwire/DC meta).
+pub fn extract_publisher_abstract_from_html(html: &str) -> Option<String> {
+    // 1. Springer `#Abs1-content`
+    for marker in ["id=\"Abs1-content\"", "id='Abs1-content'"] {
+        if let Some(idx) = html.find(marker) {
+            let after = &html[idx + marker.len()..];
+            if let Some(gt) = after.find('>') {
+                let inner = &after[gt + 1..];
+                if let Some(close) = inner.find("</div>") {
+                    let cleaned = strip_html_tags_plain(&inner[..close]);
+                    if cleaned.len() >= 40 {
+                        return Some(cleaned);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. IEEE Xplore `xplGlobal.document.metadata` `"abstract":"..."`
+    if let Some(meta_idx) = html.find("xplGlobal.document.metadata") {
+        let slice = &html[meta_idx..];
+        let needle = "\"abstract\":\"";
+        if let Some(abs_start) = slice.find(needle) {
+            let mut rest = &slice[abs_start + needle.len()..];
+            let mut raw_json_str = String::from("\"");
+            let mut escaped = false;
+            for ch in rest.chars() {
+                raw_json_str.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    break;
+                }
+            }
+            let _ = &mut rest;
+            if let Ok(unescaped) = serde_json::from_str::<String>(&raw_json_str) {
+                let cleaned = strip_html_tags_plain(&unescaped);
+                if cleaned.len() >= 40 && !cleaned.eq_ignore_ascii_case("true") {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+
+    // 3. ACM Digital Library `<div class="abstractSection abstractInFull">`
+    if let Some(idx) = html.find("abstractInFull") {
+        let after = &html[idx..];
+        if let Some(gt) = after.find('>') {
+            let inner = &after[gt + 1..];
+            if let Some(close) = inner.find("</div>") {
+                let cleaned = strip_html_tags_plain(&inner[..close]);
+                if cleaned.len() >= 40 {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+
+    // 4. Highwire / Dublin Core `<meta name="citation_abstract" content="...">` / `dc.description`
+    for name in ["citation_abstract", "dc.description", "DC.Description"] {
+        let needle = format!("name=\"{name}\"");
+        if let Some(pos) = html.find(&needle) {
+            let start_tag = html[..pos].rfind('<').unwrap_or(pos);
+            let end_tag = html[pos..].find('>').map(|e| pos + e).unwrap_or(html.len());
+            let tag = &html[start_tag..end_tag];
+            if let Some(c_pos) = tag.find("content=\"") {
+                let val_rest = &tag[c_pos + "content=\"".len()..];
+                if let Some(c_end) = val_rest.find('"') {
+                    let cleaned = strip_html_tags_plain(&val_rest[..c_end]);
+                    if cleaned.len() >= 40 {
+                        return Some(cleaned);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Best-effort abstract fallback for DOI imports when Crossref/Translator omit the abstract:
+/// - Publicly fetches `link.springer.com` for `10.1007/*` DOIs;
+/// - Uses configured institution proxy / CARSI cookies when available for ACM/IEEE/Elsevier.
+pub async fn fetch_publisher_abstract_fallback(doi: &str) -> Option<String> {
+    let d = doi.trim();
+    if d.is_empty() {
+        return None;
+    }
+    let lower = d.to_ascii_lowercase();
+    let conf = institution_proxy();
+
+    let mut urls: Vec<String> = Vec::new();
+    if lower.starts_with("10.1007/") {
+        if lower.starts_with("10.1007/978-") {
+            urls.push(format!("https://link.springer.com/chapter/{d}"));
+            urls.push(format!("https://link.springer.com/article/{d}"));
+        } else {
+            urls.push(format!("https://link.springer.com/article/{d}"));
+            urls.push(format!("https://link.springer.com/chapter/{d}"));
+        }
+    } else if conf.is_some() {
+        if lower.starts_with("10.1145/") {
+            urls.push(format!("https://dl.acm.org/doi/{d}"));
+        } else {
+            urls.push(format!("https://doi.org/{d}"));
+        }
+    } else {
+        return None;
+    }
+
+    for target in urls {
+        let (rewritten, cookie) = match &conf {
+            Some(c) => match c.kind {
+                InstitutionProxyKind::Direct | InstitutionProxyKind::Carsi => {
+                    (target.clone(), cookie_for_url(&c.cookie, &target))
+                }
+                InstitutionProxyKind::EzProxy => {
+                    (ezproxy_rewrite(&c.prefix, &target), c.cookie.clone())
+                }
+                InstitutionProxyKind::Wengine => {
+                    let origin = c.prefix.trim_end_matches('/');
+                    match wengine_rewrite(origin, &target) {
+                        Some(u) => (u, c.cookie.clone()),
+                        None => continue,
+                    }
+                }
+            },
+            None => (target.clone(), String::new()),
+        };
+
+        if let Ok((bytes, final_url)) = fetch_bytes_checked_with_url(&rewritten, &cookie).await {
+            if let Ok(html) = String::from_utf8(bytes) {
+                if let Some(abs) = extract_publisher_abstract_from_html(&html) {
+                    return Some(abs);
+                }
+                // Cross-origin `doi.org` -> publisher redirect stripped Cookie on hop 0:
+                // re-fetch `final_url` directly with its host cookie if CARSI has one.
+                if let Some(c) = &conf {
+                    if c.kind == InstitutionProxyKind::Carsi && final_url != rewritten {
+                        let host_cookie = cookie_for_url(&c.cookie, &final_url);
+                        if !host_cookie.is_empty() {
+                            if let Ok((b2, _)) =
+                                fetch_bytes_checked_with_url(&final_url, &host_cookie).await
+                            {
+                                if let Ok(h2) = String::from_utf8(b2) {
+                                    if let Some(abs) = extract_publisher_abstract_from_html(&h2) {
+                                        return Some(abs);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// One-shot probe of an institution proxy configuration: fetch a known
 /// paywalled DOI through the rewrite and check the response is a PDF.
 /// Returns the byte count on success. Backs the settings "test connection".
@@ -249,40 +570,75 @@ pub async fn probe_institution_proxy(
 ) -> Result<usize, String> {
     const PROBE_DOI: &str = "10.1038/nature12373";
     let prefix = prefix.trim().trim_end_matches('/');
-    if prefix.is_empty() {
+    if prefix.is_empty() && kind != InstitutionProxyKind::Carsi {
         return Err("proxy prefix is empty".into());
     }
     let target = "https://www.nature.com/articles/nature12373.pdf";
-    let rewritten = match kind {
+    let (rewritten, resolved_cookie) = match kind {
         InstitutionProxyKind::Direct => {
             return Err("direct mode has no gateway to probe".into());
         }
         InstitutionProxyKind::EzProxy => {
-            // The stored prefix may be a bare origin (normalize appends
-            // /login?url= only for the runtime config, not for probe args);
-            // without the query part the rewrite would concatenate the host
-            // and the encoded target into an unparseable URL.
             let mut ez = prefix.to_string();
             if !ez.contains('?') {
                 ez.push_str("/login?url=");
             }
-            ezproxy_rewrite(&ez, &format!("https://doi.org/{PROBE_DOI}"))
+            (
+                ezproxy_rewrite(&ez, &format!("https://doi.org/{PROBE_DOI}")),
+                cookie.trim().to_string(),
+            )
         }
-        InstitutionProxyKind::Wengine => {
-            wengine_rewrite(prefix, target).ok_or_else(|| "wengine rewrite failed".to_string())?
+        InstitutionProxyKind::Wengine => (
+            wengine_rewrite(prefix, target).ok_or_else(|| "wengine rewrite failed".to_string())?,
+            cookie.trim().to_string(),
+        ),
+        InstitutionProxyKind::Carsi => {
+            let lower_prefix = prefix.to_ascii_lowercase();
+            let carsi_target = if lower_prefix.contains("acm.org") {
+                "https://dl.acm.org/doi/pdf/10.1145/2786805.2786814"
+            } else if lower_prefix.contains("ieee.org") {
+                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=7194613&ref="
+            } else if lower_prefix.contains("springer.com") {
+                "https://link.springer.com/content/pdf/10.1007/BF01386390.pdf"
+            } else {
+                target
+            };
+            let host_cookie = cookie_for_url(cookie, carsi_target);
+            if host_cookie.is_empty() {
+                return Err(
+                    "authentication required: sign in via CARSI first so publisher cookies are captured".into(),
+                );
+            }
+            (carsi_target.to_string(), host_cookie)
         }
     };
-    let (bytes, final_url) = fetch_bytes_checked_with_url(&rewritten, cookie.trim()).await?;
+    let (bytes, final_url) = fetch_bytes_checked_with_url(&rewritten, &resolved_cookie).await?;
     if bytes.len() >= 4 && &bytes[..4] == b"%PDF" {
         return Ok(bytes.len());
+    }
+    if kind == InstitutionProxyKind::Carsi {
+        if let Ok(html) = std::str::from_utf8(&bytes) {
+            let link_base = reqwest::Url::parse(&final_url)
+                .ok()
+                .and_then(|u| Some(format!("{}://{}", u.scheme(), u.host_str()?)))
+                .unwrap_or_default();
+            for mined in pdf_links_from_html(html, &link_base, &link_base) {
+                let c = cookie_for_url(cookie, &mined);
+                if let Ok((b2, _)) = fetch_bytes_checked_with_url(&mined, &c).await {
+                    if b2.len() >= 4 && &b2[..4] == b"%PDF" {
+                        return Ok(b2.len());
+                    }
+                }
+            }
+        }
     }
     let login_redirect = reqwest::Url::parse(&final_url).is_ok_and(|url| {
         let path = url.path().to_ascii_lowercase();
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-        ["/login", "/auth", "/cas", "/sso"]
+        ["/login", "/auth", "/cas", "/sso", "/shibboleth", "/wayf"]
             .iter()
             .any(|part| path.contains(part))
-            || ["login.", "sso.", "cas.", "passport."]
+            || ["login.", "sso.", "cas.", "passport.", "idp.", "ds.carsi."]
                 .iter()
                 .any(|part| host.starts_with(part))
     });
@@ -886,24 +1242,23 @@ async fn fetch_pdf_assets(
             }
         }
     }
-    // Institution proxy fallback (EZProxy/WebVPN): rewrite the DOI target
-    // through the user's proxy prefix + session cookie. Only active when the
-    // host configured one; uses the user's own institution subscription.
+    // Institution proxy / CARSI fallback: rewrite the DOI target through the
+    // user's EZProxy/WebVPN gateway or send publisher CARSI session cookies.
     if !ok {
         if let Err(e) = super::check_task_not_cancelled(progress.task_id()) {
             out.messages.push(format!("pdf cancelled: {e}"));
             return out;
         }
         if let Some(doi) = doi.map(str::trim).filter(|s| !s.is_empty()) {
-            // Direct connection first: on campus networks the institution IP
-            // carries the subscription, so this needs zero configuration.
-            // Falls back to the configured gateway (if any) when it fails.
             let conf = institution_proxy().unwrap_or(InstitutionProxyConf {
                 kind: InstitutionProxyKind::Direct,
                 prefix: String::new(),
                 cookie: String::new(),
             });
             ok = try_institution_proxy_download(paper_dir, id, doi, &conf, &mut out).await;
+            if !ok {
+                ok = try_paper_search_cli_download(paper_dir, id, doi, &mut out).await;
+            }
         }
     }
     if !ok && candidates.is_empty() {
@@ -913,9 +1268,109 @@ async fn fetch_pdf_assets(
     out
 }
 
-/// Try to fetch a paywalled PDF through the EZProxy rewrite. The first hop
-/// often lands on the proxied publisher page rather than the PDF itself, so
-/// an HTML response is mined for direct PDF links and retried (bounded).
+fn find_paper_search_binary() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const NAMES: &[&str] = &["paper-search.exe", "paper-search.cmd", "paper-search.bat"];
+    #[cfg(not(windows))]
+    const NAMES: &[&str] = &["paper-search"];
+
+    if let Some(path_os) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_os) {
+            for name in NAMES {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    if let Some(home) = dirs::home_dir() {
+        let local_bin = home.join(".local/bin/paper-search");
+        if local_bin.is_file() {
+            return Some(local_bin);
+        }
+    }
+    None
+}
+
+/// Optional delegation to an externally user-installed `paper-search` CLI
+/// (`dr-dumpling/PaperSearch`) when OA + built-in Institution Proxy / CARSI
+/// could not retrieve a paywalled PDF. Silently no-ops if `paper-search` is
+/// not installed on `PATH`.
+async fn try_paper_search_cli_download(
+    paper_dir: &Path,
+    id: &str,
+    doi: &str,
+    out: &mut PdfAssetResult,
+) -> bool {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = (paper_dir, id, doi, out);
+        false
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let Some(bin) = find_paper_search_binary() else {
+            return false;
+        };
+        let staging = paper_dir.join(format!(".paper-search-{}", uuid::Uuid::new_v4().simple()));
+        if fs::create_dir_all(&staging).is_err() {
+            return false;
+        }
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.arg("download")
+            .arg(doi)
+            .arg("-o")
+            .arg(&staging)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let status_ok = matches!(
+            tokio::time::timeout(Duration::from_secs(90), cmd.output()).await,
+            Ok(Ok(output)) if output.status.success()
+        );
+
+        let mut adopted = false;
+        if let Ok(entries) = fs::read_dir(&staging) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                if let Ok(bytes) = fs::read(&p) {
+                    if bytes.len() >= 4 && &bytes[..4] == b"%PDF" {
+                        let dest = paper_dir.join(safe_filename(id, "pdf"));
+                        if fs::write(&dest, &bytes).is_ok() {
+                            out.messages
+                                .push("pdf ok via paper-search CLI fallback".into());
+                            adopted = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&staging);
+        if !adopted && !status_ok {
+            out.messages
+                .push("paper-search CLI fallback did not yield a PDF".into());
+        }
+        adopted
+    }
+}
+
+/// Try to fetch a paywalled PDF through EZProxy/WebVPN or direct publisher
+/// CARSI / campus subscriptions. The first hop often lands on the publisher
+/// article page rather than the PDF itself, so HTML responses are mined for
+/// publisher-specific PDF endpoints (`dl.acm.org/doi/pdf/...`, IEEE
+/// `stampPDF/getPDF.jsp`, Springer `/content/pdf/...`, Elsevier `pdfft`) and retried.
 async fn try_institution_proxy_download(
     paper_dir: &Path,
     id: &str,
@@ -929,28 +1384,40 @@ async fn try_institution_proxy_download(
         .next()
         .unwrap_or(&conf.prefix)
         .to_string();
-    let mut targets = vec![format!("https://doi.org/{doi}")];
+    let mut targets = match conf.kind {
+        InstitutionProxyKind::Direct | InstitutionProxyKind::Carsi => {
+            let mut direct = publisher_direct_pdf_targets(doi);
+            direct.push(format!("https://doi.org/{doi}"));
+            direct
+        }
+        InstitutionProxyKind::EzProxy | InstitutionProxyKind::Wengine => {
+            vec![format!("https://doi.org/{doi}")]
+        }
+    };
 
     for _hop in 0..2 {
         let mut next_targets: Vec<String> = Vec::new();
         for target in &targets {
-            let rewritten = match conf.kind {
-                InstitutionProxyKind::Direct => target.clone(),
-                InstitutionProxyKind::EzProxy => ezproxy_rewrite(&conf.prefix, target),
+            let (rewritten, req_cookie) = match conf.kind {
+                InstitutionProxyKind::Direct => (target.clone(), conf.cookie.clone()),
+                InstitutionProxyKind::Carsi => {
+                    (target.clone(), cookie_for_url(&conf.cookie, target))
+                }
+                InstitutionProxyKind::EzProxy => {
+                    (ezproxy_rewrite(&conf.prefix, target), conf.cookie.clone())
+                }
                 InstitutionProxyKind::Wengine => {
                     if target.starts_with(&proxy_origin) {
-                        // Already a gateway-shaped URL (mined from a landed
-                        // page); rewriting it again would re-encode the host.
-                        target.clone()
+                        (target.clone(), conf.cookie.clone())
                     } else {
                         match wengine_rewrite(&proxy_origin, target) {
-                            Some(url) => url,
+                            Some(url) => (url, conf.cookie.clone()),
                             None => continue,
                         }
                     }
                 }
             };
-            match fetch_bytes_checked_with_url(&rewritten, &conf.cookie).await {
+            match fetch_bytes_checked_with_url(&rewritten, &req_cookie).await {
                 Ok((bytes, final_url)) => {
                     if bytes.len() >= 4 && &bytes[..4] == b"%PDF" {
                         let name = safe_filename(id, "pdf");
@@ -968,26 +1435,14 @@ async fn try_institution_proxy_download(
                         // for wengine that is /https/{enc-host}/..., not the
                         // bare gateway origin.
                         let link_base = match conf.kind {
-                            InstitutionProxyKind::Direct => final_url
-                                .split("://")
-                                .take(2)
-                                .last()
-                                .and_then(|rest| rest.split('/').next())
-                                .map(|host| {
-                                    format!(
-                                        "://{}",
-                                        if final_url.starts_with("http://") {
-                                            format!("http://{host}")
-                                        } else {
-                                            format!("https://{host}")
-                                        }
-                                    )
-                                })
-                                .map(|full| {
-                                    full.replacen("://https", "https", 1)
-                                        .replacen("://http", "http", 1)
-                                })
-                                .unwrap_or_else(|| proxy_origin.clone()),
+                            InstitutionProxyKind::Direct | InstitutionProxyKind::Carsi => {
+                                reqwest::Url::parse(&final_url)
+                                    .ok()
+                                    .and_then(|u| {
+                                        Some(format!("{}://{}", u.scheme(), u.host_str()?))
+                                    })
+                                    .unwrap_or_else(|| proxy_origin.clone())
+                            }
                             InstitutionProxyKind::Wengine => {
                                 let mut base = final_url.clone();
                                 while base.ends_with('/') {
@@ -1000,9 +1455,12 @@ async fn try_institution_proxy_download(
                             }
                             InstitutionProxyKind::EzProxy => proxy_origin.clone(),
                         };
+                        for pub_link in publisher_mined_pdf_targets(doi, &final_url, &html) {
+                            if !next_targets.contains(&pub_link) {
+                                next_targets.push(pub_link);
+                            }
+                        }
                         let mut mined = pdf_links_from_html(&html, &link_base, &proxy_origin);
-                        // Prefer article-body PDFs (/articles/{id}.pdf) over
-                        // supplementary material (MediaObjects/ESM).
                         mined.sort_by_key(|l| !(l.contains("/articles/") && l.ends_with(".pdf")));
                         for link in mined {
                             if !next_targets.contains(&link) {
@@ -2194,5 +2652,77 @@ mod tests {
         assert!(written.exists());
         assert_eq!(fs::read(&written).unwrap(), eprint_pdf);
         fs::remove_dir_all(&paper).ok();
+    }
+
+    #[test]
+    fn carsi_cookie_map_merges_multiple_publishers_and_resolves_by_host() {
+        assert_eq!(
+            InstitutionProxyKind::from_setting("carsi"),
+            InstitutionProxyKind::Carsi
+        );
+        let m1 = merge_carsi_cookie_map(
+            "",
+            &[("dl.acm.org".into(), "cf_clearance=1; JSESSIONID=a".into())],
+        );
+        let m2 = merge_carsi_cookie_map(
+            &m1,
+            &[("ieeexplore.ieee.org".into(), "ERIGHTS=ieee_sess".into())],
+        );
+        assert_eq!(
+            cookie_for_url(&m2, "https://dl.acm.org/doi/pdf/10.1145/3832783.3832800"),
+            "cf_clearance=1; JSESSIONID=a"
+        );
+        assert_eq!(
+            cookie_for_url(
+                &m2,
+                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=10123456&ref="
+            ),
+            "ERIGHTS=ieee_sess"
+        );
+        assert_eq!(
+            cookie_for_url(&m2, "https://link.springer.com/article/10.1007/s10664"),
+            ""
+        );
+        // Plain cookie strings stay backward-compatible across all URLs.
+        assert_eq!(
+            cookie_for_url(
+                "wengine_vpn_ticket=abc",
+                "https://webvpn.zju.edu.cn/https/777264/"
+            ),
+            "wengine_vpn_ticket=abc"
+        );
+    }
+
+    #[test]
+    fn publisher_pdf_targets_and_abstract_extractors_cover_acm_ieee_springer() {
+        assert_eq!(
+            publisher_direct_pdf_targets("10.1145/3832783.3832801"),
+            vec!["https://dl.acm.org/doi/pdf/10.1145/3832783.3832801"]
+        );
+        assert_eq!(
+            publisher_direct_pdf_targets("10.1007/978-3-032-40374-2_5"),
+            vec!["https://link.springer.com/content/pdf/10.1007/978-3-032-40374-2_5.pdf"]
+        );
+        let ieee_mined = publisher_mined_pdf_targets(
+            "10.1109/SP63933.2026.00012",
+            "https://ieeexplore.ieee.org/document/10987654/",
+            "",
+        );
+        assert_eq!(
+            ieee_mined,
+            vec!["https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=10987654&ref="]
+        );
+
+        let springer_html = r#"<section data-title="Abstract"><div id="Abs1-content"><p>Static analysis scales to million-line programs via modular abstract interpretation.</p></div></section>"#;
+        assert_eq!(
+            extract_publisher_abstract_from_html(springer_html).as_deref(),
+            Some("Static analysis scales to million-line programs via modular abstract interpretation.")
+        );
+
+        let ieee_html = r#"<script>xplGlobal.document.metadata={"articleNumber":"10987654","abstract":"Automated program repair for concurrent Rust systems using ownership-guided synthesis."};</script>"#;
+        assert_eq!(
+            extract_publisher_abstract_from_html(ieee_html).as_deref(),
+            Some("Automated program repair for concurrent Rust systems using ownership-guided synthesis.")
+        );
     }
 }

@@ -86,24 +86,37 @@ export const DEFAULT_TRANSLATOR_BASE_URL =
 export const DEFAULT_NETWORK_PROXY_URL = "http://127.0.0.1:7890";
 
 /** Gateway flavour for the institution proxy (`institutionProxyType`). */
-export type InstitutionProxyKind = "ezproxy" | "wengine";
+export type InstitutionProxyKind = "ezproxy" | "wengine" | "carsi";
 
 export type InstitutionProxyPreset = {
 	id: string;
 	kind: InstitutionProxyKind;
-	/** Gateway origin only — the rewrite logic appends the path/query form. */
+	/** Gateway origin or CARSI publisher SSO entry URL. */
 	prefix: string;
 };
 
 /**
- * Built-in institution WebVPN gateways offered as quick-fill presets beside the
- * free-text prefix field. Only gateways confirmed to run the wengine
- * path-rewriting engine are listed: the AES key is engine-wide, so the origin
- * is all we need and both gateway kinds still accept a hand-typed prefix.
- * Covers the "preset school table" deferred from the first institution-proxy
- * PR (#677). Labels live at `general.institutionProxy.presets.{id}`.
+ * Built-in institution WebVPN gateways and CARSI publisher SSO portals offered
+ * as quick-fill presets beside the free-text prefix field. Labels live at
+ * `general.institutionProxy.presets.{id}`.
  */
 export const INSTITUTION_PROXY_PRESETS = [
+	{
+		id: "carsiAcm",
+		kind: "carsi",
+		prefix: "https://dl.acm.org/action/ssostart",
+	},
+	{ id: "carsiIeee", kind: "carsi", prefix: "https://ieeexplore.ieee.org" },
+	{
+		id: "carsiSpringer",
+		kind: "carsi",
+		prefix: "https://link.springer.com/institutional-login",
+	},
+	{
+		id: "carsiElsevier",
+		kind: "carsi",
+		prefix: "https://www.sciencedirect.com",
+	},
 	{ id: "zju", kind: "wengine", prefix: "https://webvpn.zju.edu.cn" },
 	{ id: "ustc", kind: "wengine", prefix: "https://webvpn.ustc.edu.cn" },
 	{ id: "xjtu", kind: "wengine", prefix: "https://webvpn.xjtu.edu.cn" },

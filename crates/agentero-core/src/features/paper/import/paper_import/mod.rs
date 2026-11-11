@@ -195,6 +195,19 @@ pub async fn paper_commit(
         meta.added_at = now.clone();
         meta.updated_at = now;
     }
+    if meta
+        .abstract_text
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        if let Some(doi) = meta.doi.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            if let Some(abs) =
+                crate::features::import::download::fetch_publisher_abstract_fallback(doi).await
+            {
+                meta.abstract_text = Some(abs);
+            }
+        }
+    }
     fs::create_dir_all(&paper_dir)?;
 
     // Copy → shell → catalog must succeed as a unit. The folder was just

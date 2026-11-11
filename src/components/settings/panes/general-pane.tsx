@@ -513,6 +513,9 @@ export function GeneralPane({
 							<SelectItem value="wengine" className="text-xs">
 								{t("general.institutionProxy.typeWengine")}
 							</SelectItem>
+							<SelectItem value="carsi" className="text-xs">
+								{t("general.institutionProxy.typeCarsi")}
+							</SelectItem>
 						</SelectContent>
 					</Select>
 				</SettingsRow>
@@ -522,9 +525,11 @@ export function GeneralPane({
 					prefix={institutionProxyPrefixDraft}
 					cookie={institutionProxyCookieDraft}
 					prefixPlaceholder={
-						settings.institutionProxyType === "wengine"
-							? "https://webvpn.example.edu"
-							: "https://webvpn.example.edu/login?url="
+						settings.institutionProxyType === "carsi"
+							? "https://dl.acm.org/action/ssostart"
+							: settings.institutionProxyType === "wengine"
+								? "https://webvpn.example.edu"
+								: "https://webvpn.example.edu/login?url="
 					}
 					cookiePlaceholder={t("general.institutionProxy.cookiePlaceholder")}
 					cookieLabel={t("general.institutionProxy.cookieLabel")}

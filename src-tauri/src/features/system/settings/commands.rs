@@ -53,8 +53,34 @@ pub async fn institution_proxy_login_open(app: AppHandle, prefix: String) -> Res
     Ok(monitor_institution_login(app, prefix.trim().to_string()).await)
 }
 
+const CARSI_PUBLISHER_ORIGINS: &[&str] = &[
+    "https://dl.acm.org",
+    "https://ieeexplore.ieee.org",
+    "https://link.springer.com",
+    "https://www.nature.com",
+    "https://www.sciencedirect.com",
+    "https://onlinelibrary.wiley.com",
+];
+
+fn has_institutional_auth_cookie(cookie_header: &str) -> bool {
+    let lower = cookie_header.to_ascii_lowercase();
+    [
+        "_shibsession_",
+        "shibstate",
+        "erights=",
+        "sim-inst-token=",
+        "athens",
+        "wengine_vpn_ticket",
+        "ezproxy",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
-    use agentero_core::features::paper::import::download::probe_institution_proxy;
+    use agentero_core::features::paper::import::download::{
+        merge_carsi_cookie_map, probe_institution_proxy, InstitutionProxyKind,
+    };
     use std::time::Duration;
 
     let gateway_url = match proxy_gateway_url(&prefix) {
@@ -66,14 +92,74 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
         .institution_proxy()
         .map(|(_, _, cookie)| cookie)
         .unwrap_or_default();
+    let mut persisted_any = false;
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
         interval.tick().await;
         let Some(window) = app.get_webview_window(PROXY_LOGIN_WINDOW) else {
-            return false;
+            return persisted_any;
         };
-        let url = gateway_url.clone();
-        let cookie =
+        let store = app.state::<AppSettingsStore>();
+        let Some((kind, saved_prefix, existing_cookie)) = store.institution_proxy() else {
+            continue;
+        };
+        if saved_prefix != prefix.trim_end_matches('/') && saved_prefix != prefix {
+            continue;
+        }
+
+        let candidate_cookie = if kind == InstitutionProxyKind::Carsi {
+            let mut origins: Vec<Url> = vec![gateway_url.clone()];
+            for raw in CARSI_PUBLISHER_ORIGINS {
+                if let Ok(u) = Url::parse(raw) {
+                    if !origins
+                        .iter()
+                        .any(|existing| existing.host_str() == u.host_str())
+                    {
+                        origins.push(u);
+                    }
+                }
+            }
+            let win = window.clone();
+            let collected = tauri::async_runtime::spawn_blocking(move || {
+                let mut pairs: Vec<(String, String)> = Vec::new();
+                for u in origins {
+                    let Some(host) = u.host_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if let Ok(cookies) = win.cookies_for_url(u) {
+                        let joined = cookies
+                            .into_iter()
+                            .map(|c| format!("{}={}", c.name(), c.value()))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !joined.is_empty() {
+                            pairs.push((host, joined));
+                        }
+                    }
+                }
+                pairs
+            })
+            .await
+            .unwrap_or_default();
+            if collected.is_empty() {
+                continue;
+            }
+            let merged = merge_carsi_cookie_map(&existing_cookie, &collected);
+            if collected
+                .iter()
+                .any(|(_, c)| has_institutional_auth_cookie(c))
+                && merged != existing_cookie
+            {
+                if let Ok(Some(settings)) =
+                    store.update_institution_proxy_cookie(&saved_prefix, merged.clone())
+                {
+                    let _ = app.emit("settings:changed", settings);
+                    persisted_any = true;
+                }
+            }
+            merged
+        } else {
+            let url = gateway_url.clone();
             match tauri::async_runtime::spawn_blocking(move || window.cookies_for_url(url)).await {
                 Ok(Ok(cookies)) => cookies
                     .into_iter()
@@ -81,25 +167,22 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
                     .collect::<Vec<_>>()
                     .join("; "),
                 _ => continue,
-            };
-        if cookie.is_empty() || cookie == last_cookie {
-            continue;
-        }
-        let store = app.state::<AppSettingsStore>();
-        let Some((kind, saved_prefix, _)) = store.institution_proxy() else {
-            continue;
+            }
         };
-        if saved_prefix != prefix {
+
+        if candidate_cookie.is_empty() || candidate_cookie == last_cookie {
             continue;
         }
-        last_cookie = cookie.clone();
-        if probe_institution_proxy(kind, &prefix, &cookie)
+        last_cookie = candidate_cookie.clone();
+        if probe_institution_proxy(kind, &saved_prefix, &candidate_cookie)
             .await
             .is_err()
         {
             continue;
         }
-        let Ok(Some(settings)) = store.update_institution_proxy_cookie(&prefix, cookie) else {
+        let Ok(Some(settings)) =
+            store.update_institution_proxy_cookie(&saved_prefix, candidate_cookie)
+        else {
             continue;
         };
         let _ = app.emit("settings:changed", settings);
