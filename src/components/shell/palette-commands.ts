@@ -14,7 +14,7 @@ import {
 	hasDevelopmentPlugins,
 	loadDevelopmentPlugin,
 	unloadDevelopmentPlugins,
-} from "@/lib/plugins/development";
+} from "@/lib/plugins/runtime";
 import { pluginsSurfaceEnabled } from "@/lib/plugins/visibility";
 import { registerBuiltinCommands } from "@/lib/shell/commands/registry";
 import type { AppCommand } from "@/lib/shell/commands/types";

@@ -31,13 +31,13 @@ export {
 } from "@/lib/settings/fonts";
 export {
 	ensureSettingsLoaded,
+	initSettingsSync,
 	loadSettings,
 	saveSettings,
 	saveSettingsAsync,
 	subscribeSettings,
 	useUiScale,
 } from "@/lib/settings/store";
-export { initSettingsSync } from "@/lib/settings/sync";
 export type {
 	AgentPermissionMode,
 	AiResponseLanguage,

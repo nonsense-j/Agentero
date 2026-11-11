@@ -66,7 +66,7 @@ import {
 	loadDevelopmentPlugin,
 	startDevelopmentPlugins,
 	unloadDevelopmentPlugins,
-} from "@/lib/plugins/development";
+} from "@/lib/plugins/runtime";
 import {
 	runMenuContribution,
 	visibleMenuContributions,

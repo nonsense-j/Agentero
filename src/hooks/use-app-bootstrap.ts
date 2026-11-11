@@ -28,7 +28,7 @@ import { registerImportTaskExecutor } from "@/lib/paper/import/import-tasks";
 import { startJobCompletionRefresh } from "@/lib/paper/job-refresh";
 import { refreshLibrary } from "@/lib/paper/library-store";
 import { registerLibraryTaskExecutors } from "@/lib/paper/library-tasks";
-import { startDevelopmentPlugins } from "@/lib/plugins/development";
+import { startDevelopmentPlugins } from "@/lib/plugins/runtime";
 import { pluginsSurfaceEnabled } from "@/lib/plugins/visibility";
 import { startPerfRun } from "@/lib/shell/perf-run";
 // Side-effect: register catalog title lookup for JobCenter task subjects.

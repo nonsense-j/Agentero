@@ -662,7 +662,7 @@ export function SettingsContent({
 							</Suspense>
 						</div>
 					)}
-					{visitedSections.includes("account") && (
+					{accountSurfaceEnabled && visitedSections.includes("account") && (
 						<div
 							data-settings-pane
 							data-active={activeSection === "account" ? "true" : "false"}
