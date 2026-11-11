@@ -201,49 +201,29 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 - 空态文案：订阅源、单集列表与播放将在后续版本提供。  
 - 侧栏子节点可点，进入占位页（避免「死链」）。
 
-### 3.4 arXiv Daily（已实现）
+### 3.4 Paper Recommend（`agentero:plaza/arxiv-rec`，已实现）
 
-**目标**：用 Vault 论文库当「兴趣语料」，对当天 arXiv 新论文排序，给出「今天该读什么」。思路对齐 [zotero-arxiv-daily](https://github.com/TideDra/zotero-arxiv-daily)，但语料是本地 catalog 而非 Zotero 云端。
+**目标**：基于本地 `Paper Collection` 论文池按用户显式选择的关键词做无重复批次推荐（每次推送 15 篇），无需历史冗余视图，推荐状态直接落在论文池元数据上。
 
-**管线**（`src-tauri/src/features/recommend/mod.rs`）
+**两阶段交互流**（`src/components/plaza/plaza-arxiv-rec-view.tsx` + `src/lib/plaza/recommend-pool.ts`）：
 
-| 步骤 | 做法 | 复用 |
-|---|---|---|
-| 候选 | 逐个分类 GET `https://rss.arxiv.org/rss/<cat>`，按 arXiv id 去重，丢弃空摘要 | `feeds::parse::parse_feed_bytes`（已 `clean_summary_text` + `extract_paper_url`） |
-| 语料 | catalog 中有 abstract 的论文，按 `added_at` 倒序，上限 2000 篇 | `papers::list_all_unique_by_id` |
-| 向量 | `POST {baseUrl}/embeddings`（batch，OpenAI 兼容），凭据取自设置 → Agent → Embedding：`source` 为 `builtin`（默认，需构建期注入了内置 provider key）时用内置网关三元组，为 `custom` 时用用户自填的 Base URL / API Key / Model | `core::http::client_builder`；请求形状抄 `translate_openai_compatible` |
-| 打分 | 归一化后 cosine；语料权重 `w_i = 1/(1+log10(i+1))` 归一化 → `score = Σ sim·w`，降序取 Top-20 | — |
+1. **Stage 1 — 居中双区关键词选择页（`stage = "select"`）**：打开面板默认停留在选择页（不自动触发推送）：
+   - **上半区 `Recent Keywords`**：胶囊芯片（`magpie-chip`）展示常用与近期推荐过的关键词；支持任意芯片自由点选/取消（包括取消最后一个选中项至 0 选中）、一键清空已选、`X` 删除任意芯片，以及行内 `+` 添加自定义关键词。
+   - **下半区 `All Keywords`（词云 + `Slider`）**：汇总本地 `Paper Collection` 全部论文的 `keywords`（缺失时回退 `derivePaperKeywords`），大小写不敏感归一并保留最佳展示大小写，默认展示 **Top 50** 高频词云（字号按词频 `rem` 比例缩放），点击任意词与上方芯片统一联动选中；词云下方提供 `Slider`（`src/components/ui/slider.tsx`，范围 `15–150`，步长 `5`）实时缩放词云规模。
+   - **主操作 `Recommend`**：选中至少 1 个关键词后可点击，从 `Paper Collection` 中排除已推荐（`recommendedAt`）与已入库论文，按关键词精确/短语/词元匹配与发表时间新近度综合打分，取出 **15 篇**进入结果页，并将临时选中的词云词合并进 `Recent Keywords`。
+2. **Stage 2 — 推荐结果页（`stage = "results"`，无历史列表）**：
+   - **吸顶头部（`data-plaza-header`）**：左侧返回关键词选择页按钮 + 顶部展示本次所选关键词胶囊；右侧提供勾选批量入库、全选、一键翻译当前摘要（`runTranslate`）及「换一批（Next 15）」继续抽取下 15 篇未推荐论文。
+   - **卡片流**：展示当前批次 15 篇论文，点击标题复用 `CollectionPaperDetailDialog` 查看完整摘要、关键词与 BibTeX，右侧支持应用内远程阅读 PDF（`openRemoteArxivPaper`）、打开原文及单条/批量入库（venue `coolPapersId` 走 `importPlazaPaper`，其余走 `lookupSubmit`）。
 
-**缓存进 `catalog.sqlite`**，不新建库：
+**元数据存储与性能优化**：
 
-| 表 | 作用 |
+| 维度 | 机制 |
 |---|---|
-| `embed_cache(text_hash, model, dim, vector)` | 摘要向量，key = sha256(title+abstract) + model；**语料只 embed 一次**，之后每天只为新增摘要付费。`vector` 是小端 f32 |
-| `discovery_runs(key, source, computed_at, params_json, results_json)` | **多行**运行结果，一行一个 `(source, model, categories, top_n)` 组合（schema v8）。`recommend_arxiv_last` 取 `computed_at` 最新一行；旧的单行 `arxiv_rec_state`（v6）保留给旧库、不再写入 |
+| 论文级元数据标记 | 已推荐状态直接记录在 `CollectionPaperItem.recommendedAt?: string`（ISO 时间戳），移除旧版 `RecommendPoolState.history` / `pushedIds` 列表膨胀；旧版 `v1` `pushedIds` 首次加载自动迁移至池内论文 `recommendedAt` 并清理 `localStorage`。论文池刷新/合并/详情补全时始终保留既有 `recommendedAt` |
+| IndexedDB 增量写回 | 每次推荐 15 篇时调用 `markCollectionPapersRecommended` → `patchItemsInIndexedDb`，在单个 `readwrite` 事务内仅 `store.put` 这 15 条记录，避免 `store.clear()` 全量重写数千篇论文；`saveCollectionState` 同步写入 `localStorage` 热备份时剥离派生的 `bibtex` 大字段并收敛条数，消除主线程 JSON 序列化卡顿 |
+| 内存词云与倒排索引 | `recommend-pool.ts` 按论文池快照缓存归一词频表（预排序，拖动 `Slider` 切片 Top-N 为 $O(1)$）与词元/关键词倒排索引，数千篇论文打分在数毫秒内完成 |
 
-**缓存键**：`key = sha256(source | model | top_n | 分类集合)`。换分类 / 换 embedding 模型 / 改 `top_n` 都是不同槽位，互不覆盖，也不会出现「请求 50 条返回缓存的 20 条」。
-
-**陈旧判定**：非 `force` 且命中该键、`computed_at` 是**当天**、结果非空 → 直接返回存量，完全不碰网络。跨天、键不符、或点刷新才重算。未配置 model 时（算不出键）回退读最新一行做当天短路，保证页面/预热在端点暂不可用时仍能渲染存量。
-
-**命令**：`recommend_arxiv`（算，含 stale 短路）、`recommend_arxiv_last`（只读存量）。`AppSettingsStore` 必须在 `.await` 之前读（managed state 不能跨 await）。
-
-> 这是 **profile 模式**（库画像 → 排序），依赖 catalog 与 embedding 端点。与之互补的 **query 模式**（关键词/分类/日期 → 确定性词法排序，无 Vault、无 key）已落在 `agentero-core` 的 `features::paper::discovery::discover`，经 `agentero discover arxiv` 暴露给 headless CLI / Agent（见 [../backend/cli.md](../backend/cli.md#discover)）。两者共用同一套 arXiv Atom 客户端（`scholar_api::sources::arxiv`），后续可收敛到统一的 `DiscoveryQuery` / source / ranker 抽象。
-
-**vault 打开自动刷新**：`src/lib/lifecycle/register.ts` 的 `vault:opened` handler 里 fire-and-forget 调 `recommendArxiv`，仅本地 vault。因为命令自身 stale-only + 未配置早退，这里不做任何判断——作用是**预热当天结果**，让面板下次秒开。
-
-**页面**（`src/components/plaza/plaza-arxiv-rec-view.tsx`）
-
-- **header**：分类 chip 多选（默认 `ARXIV_FEED_CHIPS`，与订阅共用常量）+ 上次计算时间 + 刷新按钮。**不进 app settings** —— 分类就是页面状态，持久化在 `discovery_runs.params_json`。
-- **body**：卡片列表（标题 / arXiv id / 分数 / 摘要三行截断），右上角**阅读**（在应用内打开远程 PDF，不写盘）+ 外链 + 一键入库（走 `lookupSubmit`，与订阅同一条魔棒路线）。
-- **空态分三种**并给对应出路：未配置 embedding（构建没有内置 key，且用户也没填自定义端点）→ 「打开 Agent 设置」按钮；库里没摘要 → 引导先导入论文；分类下无新论文 → 提示换分类。
-
-**取舍**
-
-- 首次或大库的整库 embedding 会慢一次（上千篇），之后靠 `embed_cache` 只增量；候选每天仅数十篇。接受首启一次性成本，换掉「每次都重算」。
-- 分类/Top-N 不做设置项：Top-20 是常量，分类留在 header。少一层配置面板。
-- `embed_cache` 主键是 `(text_hash, model)`，所以换 embedding 模型是缓存 miss、整库重 embed 一次（不是维度混用）；打分处的维度不匹配记 0 分只是防御性兜底。
-- **运行结果按 model / top_n / 分类建键**（v8 `discovery_runs`）：切换 embedding 来源或改 `top_n` 后当天首次运行就是 miss、正常重算，不再复用旧结果（旧单行 `arxiv_rec_state` 的已知问题已修）。
-- **隐私**：摘要会发给当前 embedding 来源的端点。`source: "custom"` 时是用户自己配置的 BYOK 端点；`source: "builtin"`（构建注入了内置 provider key 时的默认）时是产品方自己的网关 `https://api.qiyuanchen.top/v1`——也就是说**新装用户在默认配置下就会把库内摘要发到该网关**，要避开必须显式切到 custom 并留空（功能随之禁用）。构建没有内置 key 时行为回到从前：未配置则整个功能静默不跑。详见 [`../backend/builtin-provider.md`](../backend/builtin-provider.md)。
+> **附：后台 arXiv Daily 向量管线（供 `@` 引用预热）**：Host 侧 `src-tauri/src/features/recommend/mod.rs`（`recommend_arxiv` / `recommend_arxiv_last`，缓存表 `catalog.sqlite` `embed_cache` + `discovery_runs`）仍保留给 `vault:opened` 后台当日预热及 Agent `@` 引用广场条目使用；与命令行的无状态词法发现 `agentero discover arxiv`（见 [../backend/cli.md](../backend/cli.md#discover)）互不干扰。
 
 ### 3.5 ModelScope 论文（已实现）
 
@@ -427,5 +407,5 @@ DocTab：`kind: "plaza"`（或 `file` + mode `plaza` + path 虚拟 URI——实�
 - **四大核心模块（`PLAZA_SOURCES`）**：
   1. **Paper Collection (`agentero:plaza/collection`)**：本地优先的 2026 论文池（`src/lib/plaza/collection.ts` + `src/lib/plaza/collection-enrichment.ts` + `src/components/plaza/plaza-collection-view.tsx`）。首页分为 **`arXiv` 入口卡**（各 `cs.XX` 分区独立子入口，后台自动预加载 `2026-Now` 论文至 IndexedDB 池）与 **`Venue` 入口卡**（区分 `Conference` 与 `Journal` 两大类，覆盖 PL/SE CCF-A/B 会议与期刊、CR CCF-A 会议、AI CCF-A 会议共 28 个 2026 DBLP 来源，全部从 DBLP 读取并结合 OpenAlex/Crossref 补全完整摘要、被引数、关键词与格式化引用/BibTeX）；进入列表后顶部导航切换来源与子项，`arXiv` 专属提供 `2026-Now` / `30d` / `7d` 时间筛选，列表默认首屏渲染 100 篇、每次点击从已预加载池追加展示 50 篇，点击任意卡片弹出完整摘要、被引数量、关键词与引用/BibTeX 详情弹窗。
   2. **Paper Discover (`agentero:plaza/discover`)**：移植 `dr-dumpling/PaperSearch` 的多源纯元数据检索器（`DBLP`、`ACM`、`USENIX`、`OpenReview`、`IACR ePrint`、`arXiv`、`Semantic Scholar`、`OpenAlex`，检索阶段零 PDF 下载），提供「快速检索」与「Grill-Me 式交互式 Agent 深度检索」（动态拆分检索词芯片 + 逐个澄清问题 + 随时一键「立即开始检索 / 不再追问」）。
-  3. **Paper Recommend (`agentero:plaza/arxiv-rec`)**：基于可配置推荐关键词芯片从 `Paper Collection` 匹配推送，记录 `pushedIds` 保证历史已推送论文永不重复推送，支持切换 `Recent`（最新推送）与 `Full`（全部历史）视图。
+  3. **Paper Recommend (`agentero:plaza/arxiv-rec`)**：两阶段无重复推荐面板（见 §3.4）。首屏居中展示 `Recent Keywords` 胶囊芯片（可自由点选/取消至 0 选中、自定义增删）与汇总池内全部论文关键词的 `All Keywords` 词云（默认 Top 50，下方 `Slider` 支持 15–150 动态调节）；点击 `Recommend` 进入结果页，顶部展示已选关键词并推送 15 篇未推荐论文，已推荐状态直接记录在论文池元数据 `CollectionPaperItem.recommendedAt` 并以 IndexedDB 单事务增量落盘（不维护冗余历史列表）。
   4. **CCF Deadline (`agentero:plaza/ccf-deadlines`)**：从 `ccfddl` 同步截稿日程，原生列表默认联动 `Paper Collection` 仅展示所关注会议的截稿倒计时，支持与内嵌 `https://ccfddl.com/` 网页视图一键切换。
