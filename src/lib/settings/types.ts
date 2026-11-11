@@ -373,21 +373,28 @@ export type AppSettings = {
 	 */
 	dismissedReminders: ConfigReminderId[];
 	/**
-	 * Decision-layer provider (System One: TypeSafe jEV / Cloudflare Clef /
-	 * compatible). `provider` selects a preset; base URL + model are editable so
-	 * the OpenAI Decisions API is available via the `openai` preset.
+	 * Decision-layer provider (System One: TypeSafe jEV / System Duo vLLM-SR /
+	 * Cloudflare Clef / compatible). `provider` selects a preset; base URL +
+	 * model are editable so the OpenAI Decisions API is available via `openai`.
 	 */
 	decision: DecisionSettings;
 };
 
 /**
  * Decision-layer provider ids. `custom` accepts any System One endpoint.
+ * `vllm-sr` targets System Duo (`https://app.vllm-sr.ai/v1/systemone`).
  * `openai` targets the public OpenAI Decisions API (`/v1/decisions`).
  */
-export type DecisionProviderId = "jev" | "clef" | "openai" | "custom";
+export type DecisionProviderId =
+	| "jev"
+	| "vllm-sr"
+	| "clef"
+	| "openai"
+	| "custom";
 
 export const DECISION_PROVIDER_IDS: readonly DecisionProviderId[] = [
 	"jev",
+	"vllm-sr",
 	"clef",
 	"openai",
 	"custom",

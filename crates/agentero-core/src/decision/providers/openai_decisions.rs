@@ -20,6 +20,11 @@ pub fn is_openai_decisions_endpoint(base_url: &str) -> bool {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
+    // System Duo (`app.vllm-sr.ai`) exposes `/v1/decisions` as a System One
+    // alias (`state` + `questions` map), not OpenAI's `input` + `questions[]`.
+    if lower.contains("vllm-sr.ai") {
+        return false;
+    }
     lower.ends_with("/decisions")
         || lower.contains("api.openai.com")
         || lower.contains("openai.azure.com")
@@ -356,6 +361,9 @@ mod tests {
         assert!(is_openai_decisions_endpoint("https://api.openai.com"));
         assert!(!is_openai_decisions_endpoint(
             "https://api.typesafe.ai/v1/systemone"
+        ));
+        assert!(!is_openai_decisions_endpoint(
+            "https://app.vllm-sr.ai/v1/decisions"
         ));
     }
 

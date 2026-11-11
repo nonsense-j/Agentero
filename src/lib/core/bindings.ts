@@ -2927,7 +2927,7 @@ export type CustomProperty_Serialize = {
  *  fields; the transport adapts request/response shapes to `/v1/decisions`.
  */
 export type DecisionSettings = {
-	/**  `jev` | `clef` | `openai` | `custom` (empty = `jev`). */
+	/**  `jev` | `vllm-sr` | `clef` | `openai` | `custom` (empty = `jev`). */
 	provider?: string,
 	apiKey?: string,
 	baseUrl?: string,

@@ -102,10 +102,10 @@ pub trait DecisionProvider: Send + Sync {
 
 | 字段 | 说明 |
 |---|---|
-| `provider` | 预设：`jev` / `clef` / `openai` / `custom`。 |
-| `baseUrl` | 端点。jEV/Clef/custom 走 System One；OpenAI 预设默认 `https://api.openai.com/v1/decisions`（也可填 `/v1`，传输层会补 `/decisions`）。Clef 填 Cloudflare Worker 运行地址（含 accountId）。 |
+| `provider` | 预设：`jev` / `vllm-sr` / `clef` / `openai` / `custom`。 |
+| `baseUrl` | 端点。jEV/vLLM-SR（System Duo）/Clef/custom 走 System One（`https://app.vllm-sr.ai` 或 `/v1` 会自动归一为 `/v1/systemone`）；OpenAI 预设默认 `https://api.openai.com/v1/decisions`。Clef 填 Cloudflare Worker 运行地址（含 accountId）。 |
 | `apiKey` | Bearer key（读回时打码）。 |
-| `model` | 请求注入的模型 id（如 `jev-latest` / `clef` / `clef-flash`）。 |
+| `model` | 请求注入的模型 id（如 `jev-latest` / `vllm-sr/d3-ultra` / `vllm-sr/d3-flash` / `clef`）。 |
 | `smartHighlight` | 实验性 PDF 智能高亮开关。 |
 
 预设只在设置界面切换时预填 baseUrl/model；`openai` 预填 Decisions 端点与 `gpt-6-luna`。

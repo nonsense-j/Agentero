@@ -86,7 +86,7 @@ impl SystemOneProvider {
         let endpoint = if openai {
             super::openai_decisions::normalize_openai_decisions_url(&creds.base_url)
         } else {
-            creds.base_url.trim().to_string()
+            normalize_system_one_url(&creds.base_url)
         };
 
         if openai {
@@ -284,6 +284,32 @@ fn explicit_confidence(object: &serde_json::Map<String, Value>) -> Option<f64> {
         .or_else(|| object.get("probability").and_then(Value::as_f64))
 }
 
+/// Normalize a user-supplied System One base URL.
+///
+/// Users frequently paste the bare origin from provider docs (e.g.
+/// `https://app.vllm-sr.ai` or `https://app.vllm-sr.ai/v1`); append the
+/// canonical `/v1/systemone` path for `/v1` roots and known System One hosts,
+/// while leaving full paths and Cloudflare Worker URLs untouched.
+pub fn normalize_system_one_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with("/v1") {
+        return format!("{trimmed}/systemone");
+    }
+    let after_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let has_path = after_scheme.contains('/');
+    if !has_path && (after_scheme.contains("vllm-sr.ai") || after_scheme.contains("typesafe.ai")) {
+        return format!("{trimmed}/v1/systemone");
+    }
+    trimmed.to_string()
+}
+
 fn max_probability(probabilities: Option<&Value>) -> Option<f64> {
     probabilities?
         .as_object()?
@@ -397,5 +423,29 @@ mod tests {
             answer(&json!({ "answers": { "q": { "choice": "a", "confidence": "0.9" } } }))
                 .expect("answer");
         assert_eq!(stringy.confidence, None);
+    }
+
+    #[test]
+    fn normalizes_system_one_urls() {
+        assert_eq!(
+            normalize_system_one_url("https://app.vllm-sr.ai"),
+            "https://app.vllm-sr.ai/v1/systemone"
+        );
+        assert_eq!(
+            normalize_system_one_url("https://app.vllm-sr.ai/"),
+            "https://app.vllm-sr.ai/v1/systemone"
+        );
+        assert_eq!(
+            normalize_system_one_url("https://app.vllm-sr.ai/v1"),
+            "https://app.vllm-sr.ai/v1/systemone"
+        );
+        assert_eq!(
+            normalize_system_one_url("https://app.vllm-sr.ai/v1/systemone"),
+            "https://app.vllm-sr.ai/v1/systemone"
+        );
+        assert_eq!(
+            normalize_system_one_url("https://clef.example.workers.dev"),
+            "https://clef.example.workers.dev"
+        );
     }
 }

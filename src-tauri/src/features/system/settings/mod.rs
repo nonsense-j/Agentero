@@ -272,7 +272,7 @@ pub struct PaperReaderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionSettings {
-    /// `jev` | `clef` | `openai` | `custom` (empty = `jev`).
+    /// `jev` | `vllm-sr` | `clef` | `openai` | `custom` (empty = `jev`).
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
@@ -1278,16 +1278,20 @@ fn normalize(s: &mut AppSettings) {
         provider
     };
     let decision_url = s.decision.base_url.trim().trim_end_matches('/');
-    // Only the default jEV preset backfills the endpoint; Clef/OpenAI/custom
+    // Public System One presets backfill their canonical endpoint; Clef/OpenAI/custom
     // keep whatever the user typed (empty = not configured yet).
     s.decision.base_url = if decision_url.is_empty() && s.decision.provider == "jev" {
         default_decision_base_url()
+    } else if decision_url.is_empty() && s.decision.provider == "vllm-sr" {
+        "https://app.vllm-sr.ai/v1/systemone".to_string()
     } else {
         decision_url.to_string()
     };
     s.decision.model = s.decision.model.trim().to_string();
     if s.decision.model.is_empty() && s.decision.provider == "jev" {
         s.decision.model = default_decision_model();
+    } else if s.decision.model.is_empty() && s.decision.provider == "vllm-sr" {
+        s.decision.model = "vllm-sr/d3-ultra".to_string();
     }
     if s.batch_import_concurrency < 1 || s.batch_import_concurrency > 10 {
         s.batch_import_concurrency = default_batch_import_concurrency();

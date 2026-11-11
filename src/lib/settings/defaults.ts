@@ -40,6 +40,10 @@ export const DEFAULT_DECISION_SETTINGS: DecisionSettings = {
 	smartHighlight: false,
 };
 
+/** Default System Duo (vLLM-SR) System One endpoint + model. */
+export const DEFAULT_VLLM_SR_BASE_URL = "https://app.vllm-sr.ai/v1/systemone";
+export const DEFAULT_VLLM_SR_MODEL = "vllm-sr/d3-ultra";
+
 /** Default OpenAI Decisions endpoint + model. */
 export const DEFAULT_OPENAI_DECISIONS_BASE_URL =
 	"https://api.openai.com/v1/decisions";
@@ -47,8 +51,8 @@ export const DEFAULT_OPENAI_DECISIONS_MODEL = "gpt-6-luna";
 
 /**
  * Per-provider defaults applied when the user switches the decision provider.
- * Clef still needs a user-supplied Cloudflare Worker URL (account id). OpenAI
- * Decisions is public: preset fills `/v1/decisions` + `gpt-6-luna`.
+ * Clef still needs a user-supplied Cloudflare Worker URL (account id). System
+ * Duo (`vllm-sr`) and OpenAI Decisions fill their public endpoints directly.
  */
 export const DECISION_PROVIDER_PRESETS: Record<
 	DecisionProviderId,
@@ -59,6 +63,12 @@ export const DECISION_PROVIDER_PRESETS: Record<
 		model: DEFAULT_DECISION_MODEL,
 		keyUrl: "https://console.typesafe.ai/keys",
 		consoleUrl: "",
+	},
+	"vllm-sr": {
+		baseUrl: DEFAULT_VLLM_SR_BASE_URL,
+		model: DEFAULT_VLLM_SR_MODEL,
+		keyUrl: "https://app.vllm-sr.ai",
+		consoleUrl: "https://app.vllm-sr.ai/docs",
 	},
 	clef: {
 		baseUrl: "",

@@ -16,8 +16,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const BATCH_SIZE: usize = 32;
-const JEV_CONCURRENCY: usize = 16;
+// Keep `BATCH_SIZE * DIMS.len()` (8 * 5 = 40) within the 64-question and
+// 131k-token request caps enforced by System One hosts such as System Duo
+// (`app.vllm-sr.ai`), and concurrency within its 16-slot per-key limit.
+const BATCH_SIZE: usize = 8;
+const JEV_CONCURRENCY: usize = 12;
 const MIN_SENTENCE_LEN: usize = 40;
 const MAX_SENTENCE_LEN: usize = 250;
 const SCORE_THRESHOLD: f64 = 2.0;

@@ -717,6 +717,7 @@
 			"provider": {
 				"label": "Provider",
 				"jev": "TypeSafe Jev",
+				"vllm-sr": "System Duo (vLLM-SR)",
 				"clef": "Cloudflare Clef",
 				"openai": "OpenAI (config)",
 				"custom": "Custom"

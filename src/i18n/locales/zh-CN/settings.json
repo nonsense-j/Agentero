@@ -717,6 +717,7 @@
 			"provider": {
 				"label": "提供方",
 				"jev": "TypeSafe Jev",
+				"vllm-sr": "System Duo (vLLM-SR)",
 				"clef": "Cloudflare Clef",
 				"openai": "OpenAI（待公布）",
 				"custom": "自定义"
