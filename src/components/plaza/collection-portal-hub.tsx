@@ -1,14 +1,31 @@
-import { BookMarked, ChevronRight, Layers, Sparkles } from "lucide-react";
+import {
+	BookMarked,
+	ChevronRight,
+	Layers,
+	Loader2,
+	RefreshCw,
+	Sparkles,
+} from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
+import { Button } from "@/components/ui/button";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
 	ARXIV_CATEGORY_SUBTITLES,
 	type CollectionPaperItem,
 	inferVenueKind,
+	matchesAnyArxivCategory,
 	type VenueConfig,
 	type VenueKind,
 } from "@/lib/plaza/collection";
+
+const HUB_ICON_BTN_CLASS =
+	"text-foreground/80 hover:bg-black/[0.06] hover:text-foreground dark:bg-white/[0.08] dark:text-zinc-100 dark:ring-1 dark:ring-inset dark:ring-white/15 dark:hover:bg-white/[0.15] dark:hover:text-white";
 
 export type VenueKindFilter = "all" | VenueKind;
 
@@ -73,12 +90,20 @@ export function CollectionPortalHub({
 	categories,
 	venues,
 	items,
+	refreshingArxiv = false,
+	refreshingVenue = false,
+	onRefreshArxiv,
+	onRefreshVenue,
 	onEnterArxiv,
 	onEnterVenue,
 }: {
 	categories: string[];
 	venues: VenueConfig[];
 	items: CollectionPaperItem[];
+	refreshingArxiv?: boolean;
+	refreshingVenue?: boolean;
+	onRefreshArxiv: () => void;
+	onRefreshVenue: () => void;
 	onEnterArxiv: (category: string | null) => void;
 	onEnterVenue: (kind: VenueKindFilter, venueId: string | null) => void;
 }) {
@@ -106,6 +131,7 @@ export function CollectionPortalHub({
 
 		for (const p of items) {
 			if (p.sourceType === "arxiv") {
+				if (!matchesAnyArxivCategory(p, categories)) continue;
 				aCount += 1;
 				for (const cat of categories) {
 					if (p.sourceLabel === cat || p.categories.includes(cat)) {
@@ -141,12 +167,12 @@ export function CollectionPortalHub({
 		<div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4">
 			{/* Card 1: arXiv Entry Portal */}
 			<section className="magpie-card flex flex-col gap-3.5 p-4">
-				<button
-					type="button"
-					onClick={() => onEnterArxiv(null)}
-					className="group flex w-full items-start justify-between gap-3 rounded-lg text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
-				>
-					<div className="min-w-0 space-y-1">
+				<div className="flex items-start justify-between gap-2">
+					<button
+						type="button"
+						onClick={() => onEnterArxiv(null)}
+						className="group min-w-0 flex-1 space-y-1 rounded-lg text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
+					>
 						<div className="flex flex-wrap items-center gap-2">
 							<PlazaSourceBadge source="arxiv" label="arXiv" />
 							<span className="rounded-md bg-brand/10 px-1.5 py-0.5 font-medium font-mono text-[11px] text-brand">
@@ -159,13 +185,48 @@ export function CollectionPortalHub({
 						<p className="text-muted-foreground text-xs leading-relaxed">
 							{t("plaza.collection.arxivDesc")}
 						</p>
+					</button>
+					<div className="mt-0.5 flex shrink-0 items-center gap-1.5">
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									disabled={refreshingArxiv}
+									onClick={onRefreshArxiv}
+									aria-label={`${t("plaza.collection.refresh")} · arXiv`}
+									className={HUB_ICON_BTN_CLASS}
+								>
+									{refreshingArxiv ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<RefreshCw className="size-3.5" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>
+								{t("plaza.collection.refresh")} · arXiv
+							</TooltipContent>
+						</Tooltip>
+						<button
+							type="button"
+							onClick={() => onEnterArxiv(null)}
+							aria-label="arXiv"
+							className="inline-flex size-7 items-center justify-center rounded-md bg-[var(--magpie-surface)] text-muted-foreground transition-transform duration-150 hover:translate-x-0.5 hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
+						>
+							<ChevronRight className="size-4" />
+						</button>
 					</div>
-					<span className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-[var(--magpie-surface)] text-muted-foreground transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-foreground">
-						<ChevronRight className="size-4" />
-					</span>
-				</button>
+				</div>
 
-				<div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+				<div
+					className={
+						categories.length === 3
+							? "grid gap-2 sm:grid-cols-3"
+							: "grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
+					}
+				>
 					{categories.map((cat) => {
 						const count = catCounts.get(cat) ?? 0;
 						const subtitle = ARXIV_CATEGORY_SUBTITLES[cat];
@@ -200,12 +261,12 @@ export function CollectionPortalHub({
 
 			{/* Card 2: Venue Entry Portal (Conference + Journal via DBLP 2026) */}
 			<section className="magpie-card flex flex-col gap-3.5 p-4">
-				<button
-					type="button"
-					onClick={() => onEnterVenue("all", null)}
-					className="group flex w-full items-start justify-between gap-3 rounded-lg text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
-				>
-					<div className="min-w-0 space-y-1">
+				<div className="flex items-start justify-between gap-2">
+					<button
+						type="button"
+						onClick={() => onEnterVenue("all", null)}
+						className="group min-w-0 flex-1 space-y-1 rounded-lg text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
+					>
 						<div className="flex flex-wrap items-center gap-2">
 							<PlazaSourceBadge
 								source="venue"
@@ -221,11 +282,41 @@ export function CollectionPortalHub({
 						<p className="text-muted-foreground text-xs leading-relaxed">
 							{t("plaza.collection.venueDesc")}
 						</p>
+					</button>
+					<div className="mt-0.5 flex shrink-0 items-center gap-1.5">
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									disabled={refreshingVenue}
+									onClick={onRefreshVenue}
+									aria-label={`${t("plaza.collection.refresh")} · ${t("plaza.collection.source.venue")}`}
+									className={HUB_ICON_BTN_CLASS}
+								>
+									{refreshingVenue ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<RefreshCw className="size-3.5" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>
+								{t("plaza.collection.refresh")} ·{" "}
+								{t("plaza.collection.source.venue")}
+							</TooltipContent>
+						</Tooltip>
+						<button
+							type="button"
+							onClick={() => onEnterVenue("all", null)}
+							aria-label={t("plaza.collection.source.venue")}
+							className="inline-flex size-7 items-center justify-center rounded-md bg-[var(--magpie-surface)] text-muted-foreground transition-transform duration-150 hover:translate-x-0.5 hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60"
+						>
+							<ChevronRight className="size-4" />
+						</button>
 					</div>
-					<span className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-[var(--magpie-surface)] text-muted-foreground transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-foreground">
-						<ChevronRight className="size-4" />
-					</span>
-				</button>
+				</div>
 
 				{/* Category A: Conference */}
 				<div className="space-y-2 rounded-lg bg-[var(--magpie-surface)] p-3 shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]">
