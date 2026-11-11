@@ -8,12 +8,8 @@ use super::{
 };
 use crate::core::blocking::run_blocking;
 use crate::core::error::ApiResult;
-use crate::core::remote::parse_remote_handle;
-use crate::features::paper::import::RemoteImportOps;
 use crate::features::paper::import::{PaperImportArgs, PaperImportResult};
-use std::sync::Arc;
 use tauri::ipc::Channel;
-use tauri::State;
 
 /// Read-only preview of a Zotero data directory (item + local-PDF counts).
 #[tauri::command]
@@ -87,21 +83,12 @@ pub async fn paper_export(args: PaperExportArgs) -> ApiResult<PaperExportResult>
 #[specta::specta]
 pub async fn paper_import(
     app: tauri::AppHandle,
-    remote: State<'_, Arc<dyn RemoteImportOps>>,
     args: PaperImportArgs,
 ) -> Result<ApiResult<PaperImportResult>, String> {
     use crate::core::log_util::OpTimer;
 
     let op = OpTimer::start("paper_import");
     let note_mode = crate::features::paper::import::note_mode_from_app(&app);
-    if let Some(session_id) = parse_remote_handle(&args.vault_path).map(str::to_owned) {
-        return Ok(op.finish_result_ok_extra(
-            remote
-                .import_catalog_remote(&session_id, args, note_mode)
-                .await,
-            |r| format!("imported={} skipped={}", r.imported, r.skipped),
-        ));
-    }
     let host_app = crate::features::host_hooks::wrap(&app);
     Ok(op.finish_result_ok_extra(
         import_catalog_with_mode(args, Some(&host_app), note_mode).await,

@@ -1,16 +1,6 @@
 import { readFile, readTextFile } from "@tauri-apps/plugin-fs";
 import i18n from "@/i18n";
 import { isTauri } from "@/lib/core/tauri";
-import {
-	parseRemoteJoinedPath,
-	remoteCacheFile,
-	remoteList,
-	remoteMkdir,
-	remoteReadText,
-	remoteRemove,
-	remoteWriteBytes,
-	remoteWriteText,
-} from "@/lib/vault/remote/remote-vault";
 
 export { isMarkdownPath, isTextOpenable } from "./path-kinds";
 
@@ -19,17 +9,11 @@ export async function readVaultFile(path: string): Promise<string> {
 		throw new Error(i18n.t("app:vault.readDesktopOnly"));
 	}
 
-	const remoteRead = parseRemoteJoinedPath(path);
-	if (remoteRead) {
-		if (!remoteRead.rel) throw new Error("invalid remote path");
-		return remoteReadText(remoteRead.sessionId, remoteRead.rel);
-	}
-
 	return readTextFile(path);
 }
 
 /**
- * Read a local or remote Vault file into an owned byte array.
+ * Read a Vault file into an owned byte array.
  *
  * No defensive copy: plugin-fs `readFile` already returns a `Uint8Array`
  * owning a fresh, exactly-sized ArrayBuffer per call. Duplicating it doubled
@@ -41,15 +25,6 @@ export async function readVaultBytes(path: string): Promise<Uint8Array> {
 		throw new Error(i18n.t("app:vault.readDesktopOnly"));
 	}
 
-	const remoteRead = parseRemoteJoinedPath(path);
-	if (remoteRead) {
-		if (!remoteRead.rel) throw new Error("invalid remote path");
-		const localPath = await remoteCacheFile(
-			remoteRead.sessionId,
-			remoteRead.rel,
-		);
-		return readFile(localPath);
-	}
 	return readFile(path);
 }
 
@@ -60,13 +35,6 @@ export async function writeVaultFile(
 ): Promise<void> {
 	if (!isTauri()) {
 		throw new Error(i18n.t("app:vault.writeDesktopOnly"));
-	}
-
-	const remoteWrite = parseRemoteJoinedPath(path);
-	if (remoteWrite) {
-		if (!remoteWrite.rel) throw new Error("invalid remote path");
-		await remoteWriteText(remoteWrite.sessionId, remoteWrite.rel, content);
-		return;
 	}
 
 	const { mkdir, writeTextFile } = await import("@tauri-apps/plugin-fs");
@@ -88,13 +56,6 @@ export async function writeVaultBytes(
 ): Promise<void> {
 	if (!isTauri()) {
 		throw new Error(i18n.t("app:vault.writeDesktopOnly"));
-	}
-
-	const remote = parseRemoteJoinedPath(path);
-	if (remote) {
-		if (!remote.rel) throw new Error("invalid remote path");
-		await remoteWriteBytes(remote.sessionId, remote.rel, bytes);
-		return;
 	}
 
 	const { mkdir, writeFile } = await import("@tauri-apps/plugin-fs");
@@ -126,30 +87,10 @@ export function splitVaultRel(
 	};
 }
 
-/**
- * Whether a local or remote vault path exists.
- *
- * Remote paths (`remote:<sessionId>/…`) must not use `@tauri-apps/plugin-fs`
- * `exists` — those are pseudo-handles outside the local FS scope and would
- * fail (or throw), blocking create on remote vaults (issue #152).
- */
+/** Whether a vault path exists. */
 export async function vaultPathExists(path: string): Promise<boolean> {
 	if (!isTauri()) {
 		throw new Error(i18n.t("app:vault.readDesktopOnly"));
-	}
-
-	const remote = parseRemoteJoinedPath(path);
-	if (remote) {
-		// Open session root always "exists".
-		const parts = splitVaultRel(remote.rel);
-		if (!parts) return true;
-		try {
-			const entries = await remoteList(remote.sessionId, parts.parent);
-			return entries.some((e) => e.name === parts.name);
-		} catch {
-			// Missing parent → path does not exist.
-			return false;
-		}
 	}
 
 	const { exists } = await import("@tauri-apps/plugin-fs");
@@ -162,13 +103,6 @@ export async function createVaultDirectory(path: string): Promise<void> {
 		throw new Error(i18n.t("app:vault.writeDesktopOnly"));
 	}
 
-	const remote = parseRemoteJoinedPath(path);
-	if (remote) {
-		if (!remote.rel) throw new Error("invalid remote path");
-		await remoteMkdir(remote.sessionId, remote.rel);
-		return;
-	}
-
 	const { mkdir } = await import("@tauri-apps/plugin-fs");
 	await mkdir(path, { recursive: true });
 }
@@ -176,7 +110,6 @@ export async function createVaultDirectory(path: string): Promise<void> {
 /**
  * Remove a file or directory under the vault.
  * Directories are removed recursively (including non-empty).
- * Remote vaults use SFTP remove (no recycle bin in MVP).
  */
 export async function removeVaultPath(path: string): Promise<void> {
 	if (!isTauri()) {
@@ -185,12 +118,6 @@ export async function removeVaultPath(path: string): Promise<void> {
 	const trimmed = path.trim();
 	if (!trimmed || trimmed.startsWith("agentero:")) {
 		throw new Error(i18n.t("sidebar:fileTree.deleteInvalid"));
-	}
-	const remote = parseRemoteJoinedPath(trimmed);
-	if (remote) {
-		if (!remote.rel) throw new Error("invalid remote path");
-		await remoteRemove(remote.sessionId, remote.rel, true);
-		return;
 	}
 	const { remove } = await import("@tauri-apps/plugin-fs");
 	await remove(trimmed, { recursive: true });

@@ -1,18 +1,7 @@
-import {
-	HighlightStyle,
-	syntaxHighlighting,
-	syntaxTree,
-} from "@codemirror/language";
-import { type Extension, Prec, type Range } from "@codemirror/state";
-import {
-	Decoration,
-	type DecorationSet,
-	EditorView,
-	ViewPlugin,
-	type ViewUpdate,
-} from "@codemirror/view";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { type Extension, Prec } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { texTokenClass } from "@/lib/tex/highlight";
 
 /**
  * Editor surface follows the app theme. Selectors start with `&` so they
@@ -150,9 +139,7 @@ const command = tone([0.4, 0.86], 0.145);
 const heading = tone([0.38, 0.88], 0.15, "calc(h + 18)");
 const format = tone([0.42, 0.86], 0.13, "calc(h - 16)");
 const reference = tone([0.4, 0.86], 0.14, "calc(h + 78)");
-const environment = tone([0.4, 0.86], 0.13, "calc(h + 42)");
 const structure = tone([0.4, 0.86], 0.12, "calc(h - 48)");
-const math = tone([0.44, 0.84], 0.12, "calc(h + 62)");
 const name = tone([0.42, 0.84], 0.12, "calc(h + 26)");
 const literal = tone([0.45, 0.83], 0.115, "calc(h + 54)");
 const value = tone([0.43, 0.84], 0.12, "calc(h - 28)");
@@ -174,7 +161,6 @@ const editorHighlightStyle = HighlightStyle.define([
 		color: command,
 	},
 	{ tag: tags.definitionKeyword, color: structure },
-	// `\cite` is quote and `\ref` / `\label` are label names in the grammar.
 	{ tag: [tags.quote, tags.labelName], color: reference },
 	{ tag: tags.heading, color: heading, fontWeight: "600" },
 	{ tag: tags.strong, color: format, fontWeight: "600" },
@@ -221,72 +207,7 @@ const editorHighlightStyle = HighlightStyle.define([
 	{ tag: tags.strikethrough, textDecoration: "line-through" },
 ]);
 
-// The grammar tags most commands as one keyword. These marks split the
-// visible ones into heading, format, reference, environment, and math.
-const tokenMarks = new Map<string, Decoration>();
-
-function tokenMark(className: string): Decoration {
-	let mark = tokenMarks.get(className);
-	if (!mark) {
-		mark = Decoration.mark({ class: className });
-		tokenMarks.set(className, mark);
-	}
-	return mark;
-}
-
-function texTokenMarks(view: EditorView): DecorationSet {
-	const marks: Range<Decoration>[] = [];
-	const tree = syntaxTree(view.state);
-	for (const { from, to } of view.visibleRanges) {
-		tree.iterate({
-			from,
-			to,
-			enter(node) {
-				if (node.from === node.to) return;
-				const className = texTokenClass(node.name);
-				if (!className) return;
-				marks.push(tokenMark(className).range(node.from, node.to));
-			},
-		});
-	}
-	return Decoration.set(marks, true);
-}
-
-const texCommandHighlight = ViewPlugin.fromClass(
-	class {
-		decorations: DecorationSet;
-		constructor(view: EditorView) {
-			this.decorations = texTokenMarks(view);
-		}
-		update(update: ViewUpdate) {
-			if (
-				update.docChanged ||
-				update.viewportChanged ||
-				syntaxTree(update.state) !== syntaxTree(update.startState)
-			) {
-				this.decorations = texTokenMarks(update.view);
-			}
-		}
-	},
-	{ decorations: (plugin) => plugin.decorations },
-);
-
 export const editorSyntaxHighlight = syntaxHighlighting(editorHighlightStyle);
 
 /** Syntax colors derived from the app theme. Always on; `basicSetup`'s highlighter is only a fallback. */
-export const editorHighlight: Extension = [
-	editorSyntaxHighlight,
-	texCommandHighlight,
-	EditorView.theme({
-		"& .cm-tex-cmd": { color: command },
-		"& .cm-tex-heading": { color: heading, fontWeight: "600" },
-		"& .cm-tex-format": { color: format },
-		"& .cm-tex-format-bold": { fontWeight: "600" },
-		"& .cm-tex-format-italic": { fontStyle: "italic" },
-		"& .cm-tex-ref": { color: reference },
-		"& .cm-tex-env": { color: environment },
-		"& .cm-tex-structure": { color: structure },
-		"& .cm-tex-math": { color: math },
-		"& .cm-tex-link": { color: command, textDecoration: "underline" },
-	}),
-];
+export const editorHighlight: Extension = editorSyntaxHighlight;

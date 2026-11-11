@@ -41,15 +41,11 @@ desktop = [
   "dep:tauri-plugin-process",
   "dep:tauri-plugin-single-instance",
   "dep:tauri-plugin-window-state",
-	"dep:tauri-plugin-better-auth",
   "dep:tauri-specta",
   "dep:specta-typescript",
-  "dep:posthog-rs",
   "dep:rmcp",
   "dep:agentero-mcp",
   "dep:schemars",
-  "dep:rtex-core",
-  "dep:agentero-plugin-host",
 ]
 
 [build-dependencies]
@@ -60,12 +56,11 @@ tauri-build = { version = "2", features = [] }
 ctor = "0.8"
 # In-memory MCP protocol tests; no listener or permanent service.
 rmcp = { version = "3.1", default-features = false, features = ["client", "transport-io"] }
+tempfile = { workspace = true }
 # `start_paused` virtual clock for stream coalescer / throttle unit tests.
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [dependencies]
-# RAII temporary SQLite snapshots for remote Catalog publication.
-tempfile = { workspace = true }
 # Tauri-independent foundations (errors, fs, http, paths, sqlite, usage log),
 # re-exported as `crate::core::*`. Must stay free of tauri/wry/tao.
 agentero-core = { path = "../crates/agentero-core" }
@@ -94,8 +89,6 @@ rusqlite = { workspace = true }
 reqwest = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 flate2 = "1.1.9"
-# Read Dsh's existing compressed transcripts when its ACP bridge cannot replay them.
-zstd = { version = "0.14.3", default-features = false }
 tar = "0.4.46"
 # 9.0.5+ fixes the zip-cloaking and symlink extraction advisories (GHSA-m665-v7pm-7grj).
 zip = { version = "9.1", default-features = false, features = ["deflate"] }
@@ -112,48 +105,24 @@ base64 = "0.22"
 encoding_rs = "0.8"
 urlencoding = "2"
 url = "2"
-os_info = "3"
-crypto_box = "0.9"
-ed25519-dalek = "2"
-# Used by lookup batch import (all platforms); also needed by Unix remote vault.
+# Used by lookup batch import (all platforms).
 futures-util = { workspace = true }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tauri-specta = { version = "2.0.0-rc.25", features = ["derive", "typescript"], optional = true }
 specta = { workspace = true }
 specta-typescript = { version = "0.0.12", optional = true }
-# Align with hayagriva's fontdb 0.22 so fontdb and ttf-parser compile once.
+# System font enumeration for editor font settings.
 fontdb = "0.22"
-# Local CSL formatting for the Word integration; permissively licensed engine.
-hayagriva = { version = "0.10.1", default-features = false, features = ["archive", "csl-json"] }
 
-# Updates and process relaunch are desktop-only. Mobile distribution is owned by
-# its app stores, not the in-app updater.
+# Updates and process relaunch are desktop-only.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-better-auth = { version = "=0.1.2", optional = true }
-agentero-plugin-host = { path = "../crates/agentero-plugin-host", optional = true }
-# Real-time LuaLaTeX preview. In-process (no sidecar): the desktop host owns
-# one session per project root; mobile has no local lualatex and gates it off.
-rtex-core = { git = "https://github.com/HenryXiaoYang/realtime-tex", tag = "v0.0.6", optional = true }
 tauri-plugin-updater = { version = "2.14.1", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
 tauri-plugin-window-state = { version = "2", optional = true }
-# Blocking client: telemetry flush happens in the synchronous RunEvent::Exit callback.
-posthog-rs = { version = "0.23", default-features = false, optional = true }
-
-[target.'cfg(target_os = "ios")'.dependencies]
-security-framework = "3.7"
-security-framework-sys = "2.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWindow"] }
-
-# openssh / sendfd are Unix-only (ControlMaster fd passing). Remote vault SFTP
-# is therefore unavailable on Windows until a portable backend lands.
-[target.'cfg(unix)'.dependencies]
-openssh = { version = "0.11.6", features = ["native-mux"] }
-openssh-sftp-client = { version = "0.15.7", features = ["openssh"] }
 
 # Windows CLI install: add the shim dir to the user PATH (HKCU\Environment) so
 # new terminals can run `agentero-cli` without manual setup.
@@ -163,7 +132,6 @@ roxmltree = "0.20"
 # Match the WebView2 interface versions used by Tauri/Wry.
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Foundation"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [[example]]
 name = "export_bindings"

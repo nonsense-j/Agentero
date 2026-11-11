@@ -1,28 +1,10 @@
-import {
-	FolderOpen,
-	FolderPlus,
-	Server,
-	Trash2,
-	UserRound,
-} from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { FolderOpen, FolderPlus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { SiZotero } from "react-icons/si";
-import {
-	type OpenRemoteVaultArgs,
-	RemoteVaultDialog,
-} from "@/components/dialogs/remote-vault-dialog";
 import { Button } from "@/components/ui/button";
-import { accountSurfaceEnabled } from "@/features/account/visibility";
 import { displayPath } from "@/lib/core/path";
 import { cn } from "@/lib/core/utils";
-import { openSettingsWindow } from "@/lib/shell/settings-window";
 import { vaultDisplayName } from "@/lib/vault";
-import {
-	getRecentRemoteVaults,
-	type RecentRemoteVault,
-	removeRecentRemoteVault,
-} from "@/lib/vault/remote/remote-vault";
 
 function RecentRow({
 	title,
@@ -31,8 +13,6 @@ function RecentRow({
 	onOpen,
 	onRemove,
 	removeAria,
-	leading,
-	badge,
 }: {
 	title: string;
 	subtitle: string;
@@ -40,8 +20,6 @@ function RecentRow({
 	onOpen: () => void;
 	onRemove: () => void;
 	removeAria: string;
-	leading?: ReactNode;
-	badge?: ReactNode;
 }) {
 	return (
 		<li className="group flex items-stretch">
@@ -52,9 +30,7 @@ function RecentRow({
 				className="flex min-w-0 flex-1 flex-col items-start gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/60 disabled:opacity-50"
 			>
 				<span className="flex w-full items-center gap-1.5 truncate font-medium text-sm">
-					{leading}
 					<span className="truncate">{title}</span>
-					{badge}
 				</span>
 				<span
 					className="w-full truncate text-caption text-muted-foreground"
@@ -84,7 +60,6 @@ export function VaultWelcome({
 	recentVaults,
 	busy,
 	onOpenVault,
-	onOpenRemoteVault,
 	onCreateVault,
 	onMigrateZotero,
 	onOpenRecent,
@@ -94,30 +69,13 @@ export function VaultWelcome({
 	recentVaults: string[];
 	busy?: boolean;
 	onOpenVault: () => void;
-	/** Connect via SSH/SFTP (host, optional user, remote path). */
-	onOpenRemoteVault: (args: OpenRemoteVaultArgs) => void | Promise<void>;
 	onCreateVault: () => void;
 	onMigrateZotero: () => void;
 	onOpenRecent: (path: string) => void;
 	onRemoveRecent: (path: string) => void;
 	className?: string;
 }) {
-	const { t } = useTranslation(["app", "sidebar", "settings"]);
-	const [remoteOpen, setRemoteOpen] = useState(false);
-	const [connecting, setConnecting] = useState(false);
-	const [recentRemotes, setRecentRemotes] = useState<RecentRemoteVault[]>(() =>
-		getRecentRemoteVaults(),
-	);
-
-	const runRemoteConnect = async (args: OpenRemoteVaultArgs) => {
-		setConnecting(true);
-		try {
-			await onOpenRemoteVault(args);
-			setRecentRemotes(getRecentRemoteVaults());
-		} finally {
-			setConnecting(false);
-		}
-	};
+	const { t } = useTranslation(["app", "sidebar"]);
 
 	return (
 		<div
@@ -127,16 +85,6 @@ export function VaultWelcome({
 			)}
 		>
 			<div className="flex w-full max-w-lg flex-col gap-6">
-				{accountSurfaceEnabled ? (
-					<Button
-						variant="ghost"
-						className="self-center"
-						onClick={() => openSettingsWindow("account")}
-					>
-						<UserRound className="size-4" />
-						{t("settings:nav.account")}
-					</Button>
-				) : null}
 				<div className="mx-auto flex size-12 items-center justify-center rounded-xl border bg-background shadow-raised">
 					<FolderOpen className="size-6 text-muted-foreground" />
 				</div>
@@ -167,16 +115,6 @@ export function VaultWelcome({
 						variant="outline"
 						size="sm"
 						disabled={busy}
-						onClick={() => setRemoteOpen(true)}
-					>
-						<Server className="size-3.5" />
-						{t("app:vault.openRemoteVaultButton")}
-					</Button>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						disabled={busy}
 						onClick={onMigrateZotero}
 					>
 						<SiZotero className="size-3.5 text-[#CC2936]" />
@@ -184,7 +122,7 @@ export function VaultWelcome({
 					</Button>
 				</div>
 
-				{recentVaults.length > 0 || recentRemotes.length > 0 ? (
+				{recentVaults.length > 0 ? (
 					<div className="overflow-hidden rounded-lg border bg-background shadow-raised">
 						<div className="border-b px-3 py-2">
 							<p className="font-medium text-muted-foreground text-xs">
@@ -192,40 +130,6 @@ export function VaultWelcome({
 							</p>
 						</div>
 						<ul className="max-h-56 divide-y overflow-y-auto">
-							{recentRemotes.map((entry) => {
-								const key = `${entry.host}\0${entry.user ?? ""}\0${entry.remotePath}`;
-								const name = entry.label || entry.remotePath;
-								return (
-									<RecentRow
-										key={key}
-										disabled={busy || connecting}
-										title={name}
-										leading={
-											<Server className="size-3 shrink-0 text-muted-foreground" />
-										}
-										badge={
-											<span className="shrink-0 rounded bg-muted px-1 py-0.5 text-caption text-muted-foreground">
-												{t("app:vault.remoteBadge")}
-											</span>
-										}
-										subtitle={`${entry.host}:${entry.remotePath}`}
-										onOpen={() =>
-											void runRemoteConnect({
-												host:
-													entry.user && !entry.host.includes("@")
-														? `${entry.user}@${entry.host}`
-														: entry.host,
-												remotePath: entry.remotePath,
-											})
-										}
-										onRemove={() => {
-											removeRecentRemoteVault(entry);
-											setRecentRemotes(getRecentRemoteVaults());
-										}}
-										removeAria={t("vault.removeRecent", { name })}
-									/>
-								);
-							})}
 							{recentVaults.map((path) => {
 								const name = vaultDisplayName(path);
 								return (
@@ -248,13 +152,6 @@ export function VaultWelcome({
 					</p>
 				)}
 			</div>
-
-			<RemoteVaultDialog
-				open={remoteOpen}
-				onOpenChange={setRemoteOpen}
-				busy={busy || connecting}
-				onConnect={runRemoteConnect}
-			/>
 		</div>
 	);
 }

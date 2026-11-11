@@ -5,19 +5,11 @@ import {
 	SettingsSectionLabel,
 } from "@/components/settings/settings-layout";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { clearUsage } from "@/lib/activity";
 import { errorText } from "@/lib/core/error";
 import { notifyError, notifySuccess } from "@/lib/core/notify";
-import type { AppSettings } from "@/lib/settings";
 
-export function PrivacySettingsBlock({
-	settings,
-	patch,
-}: {
-	settings: AppSettings;
-	patch: (p: Partial<AppSettings>) => void;
-}) {
+export function PrivacySettingsBlock() {
 	const { t } = useTranslation("settings");
 	return (
 		<>
@@ -25,16 +17,6 @@ export function PrivacySettingsBlock({
 				{t("general.privacy.section")}
 			</SettingsSectionLabel>
 			<SettingsGroup>
-				<SettingsRow
-					label={t("general.privacy.telemetry.label")}
-					htmlFor="telemetry-enabled"
-				>
-					<Switch
-						id="telemetry-enabled"
-						checked={settings.telemetryEnabled}
-						onCheckedChange={(v) => patch({ telemetryEnabled: v })}
-					/>
-				</SettingsRow>
 				<SettingsRow label={t("general.privacy.clearUsage.label")}>
 					<Button
 						type="button"

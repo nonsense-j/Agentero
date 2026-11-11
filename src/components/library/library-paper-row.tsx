@@ -40,49 +40,8 @@ import { downloadLibraryPaper } from "@/lib/paper/library-actions";
 import { setEditMetaDraft } from "@/lib/paper/library-store";
 import type { ReadingHeatmap } from "@/lib/paper/reading-heatmap";
 import type { LibraryColumnPref } from "@/lib/settings";
-import type { MenuContext } from "@/lib/shell/commands/menu-contributions";
-import {
-	activateMenuContribution,
-	visibleMenuContributions,
-} from "@/lib/shell/commands/menu-contributions";
 import { trashPathsAndNotify } from "@/lib/vault/actions";
 import { revealInFileManager, revealInOsLabelKey } from "@/lib/vault/reveal";
-
-/**
- * Reads the contribution list when the menu content mounts, not when the
- * memoized row last rendered. An empty list renders nothing, including no
- * separator.
- */
-function LibraryRowMenuContributions({
-	vaultPath,
-	relPath,
-	paperId,
-}: {
-	vaultPath: string | null;
-	relPath: string | undefined;
-	paperId: string | undefined;
-}) {
-	const menuContext: MenuContext = { vaultPath };
-	if (relPath) menuContext.relPath = relPath;
-	if (paperId) menuContext.paperId = paperId;
-	const items = visibleMenuContributions("library.row", menuContext);
-	if (items.length === 0) return null;
-	return (
-		<>
-			<ContextMenuSeparator />
-			{items.map((item) => (
-				<ContextMenuItem
-					key={item.id}
-					onSelect={() => {
-						activateMenuContribution(item, menuContext);
-					}}
-				>
-					{item.title}
-				</ContextMenuItem>
-			))}
-		</>
-	);
-}
 
 type LibraryPaperRowProps = {
 	/** Virtualizer index (`data-index` for measureElement). */
@@ -93,8 +52,6 @@ type LibraryPaperRowProps = {
 	/** Stable `t` + `onCellCopy` pair shared by all rows (memo friendly). */
 	ctx: Pick<CellCtx, "t" | "onCellCopy">;
 	paperAbsPath: string | null;
-	/** Vault root the library view already has. Null when it does not. */
-	vaultPath?: string | null;
 	canEditMeta: boolean;
 	onOpenPaper: (paper: PaperMetadata) => void;
 	onRowClick: (
@@ -116,7 +73,6 @@ export const LibraryPaperRow = memo(function LibraryPaperRow({
 	visibleColumns,
 	ctx,
 	paperAbsPath,
-	vaultPath = null,
 	canEditMeta,
 	onOpenPaper,
 	onRowClick,
@@ -209,11 +165,6 @@ export const LibraryPaperRow = memo(function LibraryPaperRow({
 						</ContextMenuItem>
 					</>
 				) : null}
-				<LibraryRowMenuContributions
-					vaultPath={vaultPath}
-					relPath={p.path || undefined}
-					paperId={p.id || undefined}
-				/>
 			</ContextMenuContent>
 		</ContextMenu>
 	);

@@ -25,7 +25,7 @@ import {
 import { useSettings, useVaultStore } from "@/hooks/use-app-stores";
 import { useHostNodeStatus } from "@/hooks/use-host-node-status";
 import { perfActive } from "@/lib/core/perf";
-import { isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isTauri } from "@/lib/core/tauri";
 import { cn } from "@/lib/core/utils";
 import { listenOnboardingRequest } from "@/lib/onboarding/api";
 import { patchSettings } from "@/lib/settings/react-store";
@@ -114,7 +114,6 @@ export function OnboardingRoot() {
 	const shouldAutoShow = useMemo(
 		() =>
 			isTauri() &&
-			!isMobileApp() &&
 			!perfActive() &&
 			!settings.onboardingDone &&
 			!vaultPath &&

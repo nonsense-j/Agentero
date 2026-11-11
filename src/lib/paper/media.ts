@@ -6,10 +6,6 @@ import { isTauri } from "@/lib/core/tauri";
 import { arxivUrls } from "@/lib/paper/arxiv";
 import type { PaperMetadata } from "@/lib/paper/types";
 import { readVaultBytes, vaultPathExists } from "@/lib/vault";
-import {
-	parseRemoteJoinedPath,
-	remoteList,
-} from "@/lib/vault/remote/remote-vault";
 
 const PDF_NAME_RE = /\.pdf$/i;
 
@@ -154,23 +150,6 @@ export async function findLocalPdfPath(
 ): Promise<string | null> {
 	if (!isTauri() || !paperDir?.trim()) return null;
 	const root = paperDir.replace(/[/\\]+$/, "");
-	// Remote joined path: list via Host SFTP
-	const parsed = parseRemoteJoinedPath(root);
-	if (parsed) {
-		const { sessionId, rel } = parsed;
-		const handle = `remote:${sessionId}`;
-		try {
-			const entries = await remoteList(sessionId, rel);
-			const pdfs = entries
-				.filter((e) => e.isFile && PDF_NAME_RE.test(e.name))
-				.map((e) => `${handle}/${e.path}`)
-				.sort((a, b) => a.localeCompare(b));
-			const canonical = canonicalPaperPdfPath(root);
-			return pdfs.find((path) => path === canonical) ?? pdfs[0] ?? null;
-		} catch {
-			return null;
-		}
-	}
 	try {
 		const entries = await readDir(root);
 		const rootPdfs: string[] = [];

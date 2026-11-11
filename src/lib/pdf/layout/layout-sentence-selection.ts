@@ -1,8 +1,3 @@
-import {
-	type Character,
-	type Paragraph,
-	reflowDisplayText,
-} from "@/lib/pdf/reflow/types";
 /**
  * Resolve a translation-overlay selection to English sentence quotes and the
  * PDF text-layer boxes that should carry the annotation.
@@ -15,7 +10,6 @@ import type { Rect } from "@embedpdf/models";
 import {
 	joinTranslatedDisplays,
 	normalizeSentenceKey,
-	splitLayoutSentences,
 } from "@/lib/pdf/layout/layout-sentences";
 import {
 	orderByReadingLine,
@@ -24,7 +18,6 @@ import {
 import type { LayoutTranslateSentence } from "@/lib/pdf/layout/types";
 
 export type TranslationBlockRef = {
-	reflow?: Paragraph;
 	id: string;
 	pageIndex: number;
 	bbox: { x: number; y: number; w: number; h: number };
@@ -42,7 +35,6 @@ export type TranslationSpanHit = {
 };
 
 export type TranslationPagePick = {
-	glyphRects?: Rect[];
 	pageIndex: number;
 	bbox: TranslationBlockRef["bbox"];
 	/** Text-layer slice to search on this page. */
@@ -97,7 +89,7 @@ function memberLocateText(
 }
 
 function blockSource(item: TranslationBlockRef): string {
-	return normalizeSentenceKey(item.raw || item.reflow?.source || item.source);
+	return normalizeSentenceKey(item.raw || item.source);
 }
 
 function hitKey(hit: TranslationSpanHit): string {
@@ -118,14 +110,13 @@ function completeSplitHits(
 		if (hit.sentenceIndex === null || chains.has(hitKey(hit))) continue;
 		const item = byId.get(hit.itemId);
 		const sentence = item?.sentences?.[hit.sentenceIndex];
-		if (!item || item.reflow || !sentence) continue;
+		if (!item || !sentence) continue;
 		const quote = normalizeSentenceKey(sentence.quote);
 		if (!sentence.display && blockSource(item).includes(quote)) continue;
 		const members = items
 			.flatMap((item) =>
 				(item.sentences ?? []).flatMap((pair, sentenceIndex) => {
 					if (
-						item.reflow ||
 						pair.quote !== sentence.quote ||
 						pair.translated !== sentence.translated
 					)
@@ -179,16 +170,6 @@ function completeSplitHits(
 		),
 		chains,
 		complete,
-	};
-}
-
-function characterGlyph({
-	text,
-	visualBox: { x, y, w, h },
-}: Character): TextPiece {
-	return {
-		text,
-		rect: { origin: { x, y }, size: { width: w, height: h } },
 	};
 }
 
@@ -270,7 +251,7 @@ export function translationSelectionFromHits(
 	if (!hits.length || !copyText.trim()) return null;
 	const byId = new Map(items.map((item) => [item.id, item]));
 	const split = completeSplitHits(hits, items, byId);
-	let canLocate = split.complete;
+	const canLocate = split.complete;
 	const groups: {
 		itemId: string;
 		indexes: (number | null)[];
@@ -304,15 +285,6 @@ export function translationSelectionFromHits(
 					return sentence?.quote ? [{ index, sentence }] : [];
 				});
 		if (!wholeBlock && !chosen.length) continue;
-		if (
-			item.reflow &&
-			(wholeBlock || item.sentences?.length === 1) &&
-			splitLayoutSentences(item.reflow.source).filter((quote) =>
-				/[\p{L}\p{N}]/u.test(quote),
-			).length > 1 &&
-			!group.wholeBlockSelected
-		)
-			canLocate = false;
 		const pairs = chosen.length
 			? chosen.map(({ sentence, index }) => ({
 					...sentence,
@@ -322,7 +294,7 @@ export function translationSelectionFromHits(
 				}))
 			: [
 					{
-						quote: item.reflow?.source ?? item.source,
+						quote: item.source,
 						translated: item.translated ?? "",
 						chain: undefined,
 					},
@@ -334,9 +306,7 @@ export function translationSelectionFromHits(
 				seenSplitSentences.add(chain);
 			}
 			sentenceQuotes.push(quote);
-			const text = (
-				item.reflow ? reflowDisplayText(item.reflow, translated) : translated
-			).trim();
+			const text = translated.trim();
 			if (text) pairedParts.push(text);
 		}
 		const blockText = blockSource(item);
@@ -350,11 +320,6 @@ export function translationSelectionFromHits(
 					),
 				)
 			: [];
-		const reflowGlyphs = item.reflow?.characters.map(characterGlyph);
-		const sentenceRects =
-			reflowGlyphs && picks.length
-				? glyphRectsForParts(reflowGlyphs, blockText, picks)
-				: [];
 		for (const index of chosen.length
 			? chosen.map(({ index }) => index)
 			: [null]) {
@@ -373,12 +338,6 @@ export function translationSelectionFromHits(
 					index === null ||
 					normalizeSentenceKey(item.sentences?.[index]?.quote ?? "") ===
 						blockText,
-				glyphRects:
-					index === null
-						? reflowGlyphs
-								?.filter((glyph) => glyph.text.trim())
-								.map((glyph) => glyph.rect)
-						: sentenceRects[index],
 			});
 		}
 	}

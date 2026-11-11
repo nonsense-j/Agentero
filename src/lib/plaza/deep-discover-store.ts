@@ -699,9 +699,7 @@ export async function initDeepDiscoverAgents(): Promise<void> {
 	ensureAgentListenersAttached();
 	try {
 		const res = await listAgents();
-		const available = res.agents.filter(
-			(a) => a.available && a.template !== "zhihu",
-		);
+		const available = res.agents.filter((a) => a.available);
 		const chosenAgentId =
 			(storeState.selectedAgentId &&
 			available.some((a) => a.id === storeState.selectedAgentId)

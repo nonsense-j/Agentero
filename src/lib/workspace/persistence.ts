@@ -14,7 +14,6 @@ import { isTauri } from "@/lib/core/tauri";
 import { localFileToArrayBuffer } from "@/lib/paper";
 import { isRecentBookmarkWrite } from "@/lib/pdf/bookmark-echo";
 import { isResearchTablePath } from "@/lib/research-table/model";
-import { onTexFileSaved } from "@/lib/tex/auto-build";
 import {
 	isMarkdownPath,
 	readVaultFile,
@@ -97,7 +96,6 @@ const persistOutcomes: Record<
 	},
 	text: (path, content) => {
 		setTabs((prev) => seedTabs(prev, path, content, "text"));
-		onTexFileSaved(path);
 	},
 };
 

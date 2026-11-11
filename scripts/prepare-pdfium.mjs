@@ -78,20 +78,6 @@ function hostTriple() {
 }
 
 const triple = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
-const tauriPlatform = process.env.TAURI_ENV_PLATFORM || "";
-
-// Mobile parses PDFs on the paired desktop Host; src-tauri/Cargo.toml gates
-// liteparse out of iOS/Android builds entirely.
-if (
-	tauriPlatform === "android" ||
-	tauriPlatform === "ios" ||
-	/-android|-ios\b/.test(triple)
-) {
-	console.log(
-		`[prepare-pdfium] mobile (${tauriPlatform || triple}): nothing to stage`,
-	);
-	process.exit(0);
-}
 
 /** Mirrors `pdfium_asset_stem` in liteparse-pdfium-sys/build.rs. */
 const ASSETS = {

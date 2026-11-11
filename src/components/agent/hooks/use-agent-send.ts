@@ -28,10 +28,8 @@ import { formatLocaleTimestamp } from "@/i18n";
 import {
 	type AgentListResponse,
 	type AgentModeChoice,
-	agentTemplateById,
 	cancelAgentRun,
 	ensureCatalogAgent,
-	isChatOnlyAgentTemplate,
 	loadModelPref,
 	loadReasoningEffortPref,
 	type PromptImage,
@@ -95,7 +93,6 @@ import {
 	visualDraftsForSession,
 } from "@/lib/agent/visual-context-store";
 import { isTauri } from "@/lib/core/tauri";
-import type { PaperMetadata } from "@/lib/paper";
 import {
 	bindVisualTracesForTurn,
 	isVisualTraceHistoryId,
@@ -187,8 +184,6 @@ export type UseAgentSendOptions = {
 	setHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	setSelectedAgentId: Dispatch<SetStateAction<string | null>>;
 	selectedVaultPath: string | null;
-	/** Catalog metadata for the focused paper (chat-only agent context). */
-	selectedPaperMeta: PaperMetadata | null;
 	contextPaths: string[];
 	/** Live composer state plus the session-scoped persistence API. */
 	composer: SessionComposerStateApi;
@@ -252,7 +247,6 @@ export function useAgentSend({
 	setHistoryOpen,
 	setSelectedAgentId,
 	selectedVaultPath,
-	selectedPaperMeta,
 	contextPaths,
 	composer: {
 		snapshot: snapshotComposerState,
@@ -718,19 +712,8 @@ export function useAgentSend({
 				activeConversationRef.current = null;
 			}
 			const target = resolveResumeTarget(options, forceNewSession);
-			// Chat-only built-in agents (e.g. the Zhihu agent) cannot read Vault
-			// files; injecting the read-instruction block would leak local paths to
-			// a third-party service, so drop the auto-added context entirely and
-			// send only public paper metadata instead.
-			const chatOnly = isChatOnlyAgentTemplate(
-				agentTemplateById(registry, agent.agentId),
-			);
-			const turnContextPaths = chatOnly ? [] : resolvedContextPaths;
-			// Chat-only agents get the focused paper's public metadata (never a
-			// local path) so they can answer about "this paper".
-			const turnPaper = chatOnly ? (selectedPaperMeta ?? null) : null;
 			const plazaScratchByPath = await preparePlazaScratchFor(
-				turnContextPaths,
+				resolvedContextPaths,
 				isAcpCommand,
 			);
 			const { prompt, images, visualAnnotations, historyTitle } =
@@ -738,8 +721,7 @@ export function useAgentSend({
 					// ACP command chips already collapsed into `turnText`; keep the raw
 					// draft for mention / visual markers on normal turns.
 					text: isAcpCommand ? turnText : textRaw,
-					contextPaths: turnContextPaths,
-					paper: turnPaper,
+					contextPaths: resolvedContextPaths,
 					visualDrafts: resolvedVisualDrafts,
 					attachedImages,
 					isAcpCommand,
@@ -794,14 +776,14 @@ export function useAgentSend({
 				isAcpCommand,
 				images,
 				workflow,
-				workflowTarget: resolveWorkflowTarget(turnContextPaths, workflow),
+				workflowTarget: resolveWorkflowTarget(resolvedContextPaths, workflow),
 				modelId: agent.modelId,
 				preferredEffort: agent.preferredEffort,
 				skillIds: resolvedSkillIds,
 				context: isAcpCommand
 					? null
 					: sidebarContextRequest({
-							contextPaths: turnContextPaths,
+							contextPaths: resolvedContextPaths,
 							selections: resolvedSelections,
 							selectionAnnotations: new Map(
 								annotationRefs.flatMap((ref) =>

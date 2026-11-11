@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/resizable";
 import { resolveActivePdfHandle } from "@/components/viewer";
 import { WorkspaceHost } from "@/components/workspace/workspace-host";
-import { WritingDialogs } from "@/components/writing/writing-dialogs";
 import { useAgentCatalogPrefetch } from "@/hooks/use-agent-catalog-prefetch";
 import { useAppBootstrap } from "@/hooks/use-app-bootstrap";
 import { useAppShortcuts } from "@/hooks/use-app-shortcuts";
@@ -36,7 +35,6 @@ import { useConnectorSync } from "@/hooks/use-connector-sync";
 import { useExternalFileDrop } from "@/hooks/use-external-file-drop";
 import { useFeatureTour } from "@/hooks/use-feature-tour";
 import { useFlushMarkdownOnClose } from "@/hooks/use-flush-markdown-on-close";
-import { useLayoutModelPrefetch } from "@/hooks/use-layout-model-prefetch";
 import { useMcpSync } from "@/hooks/use-mcp-sync";
 import { useNativeMenuEvents } from "@/hooks/use-native-menu-events";
 import { useAnyModalOverlayOpen } from "@/hooks/use-overlay-registration";
@@ -102,14 +100,12 @@ import {
 	migrateZoteroFromWelcome,
 	newWindow,
 	openRecentVault,
-	openRemoteVault,
 	openSelectedInTerminal,
 	openVault,
 	refreshAll,
 	removeRecent,
 	revealSelectedInFinder,
 } from "@/lib/vault/actions";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { vaultStore } from "@/lib/vault/store";
 import { renameMayAffectWikiTargets } from "@/lib/wiki";
 import { handleExternalRename } from "@/lib/wiki/actions";
@@ -210,7 +206,6 @@ function WelcomeCenter() {
 			recentVaults={recentVaults}
 			busy={busy}
 			onOpenVault={() => void openVault()}
-			onOpenRemoteVault={(args) => void openRemoteVault(args)}
 			onCreateVault={() => void createNewVault()}
 			onMigrateZotero={() => void migrateZoteroFromWelcome()}
 			onOpenRecent={(path) => void openRecentVault(path)}
@@ -224,14 +219,13 @@ export default function App() {
 	useAppBootstrap();
 	useConnectorSync();
 	useMcpSync();
-	useLayoutModelPrefetch();
 	// Soft-probe catalog ACP agents at open (sidebar panel is lazy-mounted).
 	useAgentCatalogPrefetch();
 	// Cancel WebView navigation and route unclaimed external PDF drops globally.
 	useExternalFileDrop();
 	// First-vault highlight tour (driver.js) + Settings replay listener.
 	useFeatureTour();
-	// Low-frequency config reminders (#658): startup layout-model hint.
+	// Low-frequency config reminders (#658).
 	useConfigReminders();
 	// Vault backfill prompt: lib decides when, this window renders the toast.
 	usePaperBackfillPrompt();
@@ -277,7 +271,7 @@ export default function App() {
 		let lastPayload = "";
 		const sync = () => {
 			const root = vaultStore.getState().vaultPath;
-			if (!root || isRemoteVaultHandle(root)) return;
+			if (!root) return;
 			const paths = dirtyVaultPaths(root).sort();
 			const payload = JSON.stringify([root, paths]);
 			if (payload === lastPayload) return;
@@ -578,7 +572,6 @@ export default function App() {
 								) : (
 									<div className="relative h-full min-h-0 flex-1 overflow-hidden">
 										<WorkspaceHost />
-										<WritingDialogs />
 									</div>
 								)}
 							</div>

@@ -39,7 +39,6 @@
 		"exportDesktopOnly": "导出功能仅在桌面端可用",
 		"layout": {
 			"unavailable": "版面分析尚未就绪。",
-			"preparingModel": "正在准备版面模型…",
 			"failed": "版面分析失败",
 			"openSettings": "打开解析设置"
 		},
@@ -56,16 +55,12 @@
 			"needLayout": "请先运行版面分析（Figures 面板）。",
 			"noText": "没有可提取文字的版面区域可翻译。",
 			"failed": "全文翻译失败",
-			"exportDualPdf": "导出双语 PDF",
-			"exportPdf": "导出翻译 PDF",
-			"reflowFailed": "PDF 排版失败",
 			"invalidTokens": "译文改动了受保护的公式或链接，已保留原文。",
 			"openSettings": "打开翻译设置",
 			"waiting": "取消翻译准备",
 			"phaseLayout": "准备版面",
 			"phaseExtract": "提取文本",
 			"phaseTranslate": "正在翻译",
-			"phaseTypeset": "生成页面",
 			"phaseDone": "已完成",
 			"progress": "{{percent}}%",
 			"parseFailedWhileWaiting": "版面解析失败，翻译已取消",
@@ -308,9 +303,6 @@
 		"altFallback": "图片预览"
 	},
 	"textEditor": {
-		"errorCount": "{{count}} 个错误",
-		"warningCount": "{{count}} 个警告",
-		"infoCount": "{{count}} 个提示",
 		"openInScholar": "前往谷歌学术"
 	}
 }

@@ -33,7 +33,7 @@ function translationSelectionCovering(): boolean {
 	}
 	const node = selection.getRangeAt(0).startContainer;
 	const el = node instanceof Element ? node : node.parentElement;
-	return Boolean(el?.closest("[data-layout-item], [data-reflow-selection]"));
+	return Boolean(el?.closest("[data-layout-item]"));
 }
 
 function subscribeTranslationCover(onChange: () => void): () => void {

@@ -1,6 +1,8 @@
-import type { LayoutAnalysisScope } from "@embedpdf/plugin-layout-analysis";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runDocumentLayoutAnalysis } from "@/lib/pdf/layout/run-analysis";
+import {
+	type LayoutTextSource,
+	runDocumentLayoutAnalysis,
+} from "@/lib/pdf/layout/run-analysis";
 
 const mocks = vi.hoisted(() => ({
 	read: vi.fn(),
@@ -17,7 +19,6 @@ vi.mock("@/lib/pdf/layout/store", () => ({
 	setLayoutAnalysisUi: vi.fn(),
 	setLayoutDocumentResult: mocks.store,
 }));
-vi.mock("@/lib/pdf/layout/model", () => ({ ensureLayoutModel: vi.fn() }));
 vi.mock("@/lib/paper", () => ({}));
 vi.mock("@/lib/settings/store", () => ({ loadSettings: vi.fn() }));
 
@@ -35,25 +36,22 @@ describe("cached MinerU caption text walk", () => {
 		});
 	});
 	it("reads a caption-only page with no detected boxes using its actual PDF size", async () => {
-		const getPageTextRuns = vi.fn(() => ({
-			wait: (ok: (value: unknown) => void) =>
-				ok({
-					runs: [
-						{
-							text: "Fig. 1 | Caption on a page without model detections.",
-							rect: {
-								origin: { x: 40, y: 600 },
-								size: { width: 240, height: 8 },
-							},
-						},
-					],
-				}),
+		const getPageTextRuns = vi.fn(async () => ({
+			runs: [
+				{
+					text: "Fig. 1 | Caption on a page without model detections.",
+					rect: {
+						origin: { x: 40, y: 600 },
+						size: { width: 240, height: 8 },
+					},
+				},
+			],
 		}));
-		const scope = {
-			getPageLayout: () => null,
+		const textSource = {
+			getPageSize: () => null,
 			getPageTextRuns,
-		} as unknown as LayoutAnalysisScope;
-		await runDocumentLayoutAnalysis(scope, "doc", {
+		} as unknown as LayoutTextSource;
+		await runDocumentLayoutAnalysis(textSource, "doc", {
 			paperAbsPath: "E:/paper",
 			totalPages: 1,
 			pageSizeAt: () => ({ width: 600, height: 800 }),
@@ -69,11 +67,11 @@ describe("cached MinerU caption text walk", () => {
 		]);
 	});
 	it("does not mark extraction complete when an empty page's size is unavailable", async () => {
-		const scope = {
-			getPageLayout: () => null,
-			getPageTextRuns: vi.fn(),
-		} as unknown as LayoutAnalysisScope;
-		await runDocumentLayoutAnalysis(scope, "doc", {
+		const textSource: LayoutTextSource = {
+			getPageSize: () => null,
+			getPageTextRuns: vi.fn(async () => ({ runs: [] })),
+		};
+		await runDocumentLayoutAnalysis(textSource, "doc", {
 			paperAbsPath: "E:/paper",
 			totalPages: 1,
 		});

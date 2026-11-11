@@ -88,17 +88,6 @@ export function initWorkspaceStore(): void {
 				};
 			}
 			const tab = createPlaceholderTab(pt.path, pt.mode, pt.id);
-			if (pt.texRoot) tab.texRoot = pt.texRoot;
-			// Realtime TeX panes have no file seed to hydrate; restore them
-			// loaded so the viewer remounts instead of showing a skeleton.
-			if (pt.texLive) {
-				return {
-					...tab,
-					loaded: true,
-					texLive: true,
-					texRoot: pt.texRoot,
-				};
-			}
 			// Real-path placeholders default to the folder basename; prefer the
 			// persisted title so strips show paper names before hydration.
 			if (pt.title && tab.kind === "file") {

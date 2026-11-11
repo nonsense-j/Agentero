@@ -13,7 +13,6 @@ import { refreshLibrary } from "@/lib/paper/library-store";
 import { getSettings } from "@/lib/settings/react-store";
 import { joinVaultPath, vaultRelativePath } from "@/lib/vault";
 import type { VaultFileChangedPayload } from "@/lib/vault/fs-watch";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { getVaultPath, refreshTree } from "@/lib/vault/store";
 import {
 	applyExternalRenameRepair,
@@ -48,7 +47,7 @@ export async function renameWikiHeadingAction(
 ): Promise<void> {
 	const root = getVaultPath();
 	const path = root ? vaultRelativePath(root, absPath) : null;
-	if (!root || !path || isRemoteVaultHandle(root)) {
+	if (!root || !path) {
 		const error = new Error(i18n.t("editor:headingRename.errors.localOnly"));
 		notifyError(error.message);
 		throw error;
@@ -121,7 +120,7 @@ export async function applyPendingExternalRenameRepair(
 	preview: WikiExternalRenamePreview,
 	root: string,
 ): Promise<void> {
-	if (getVaultPath() !== root || isRemoteVaultHandle(root)) {
+	if (getVaultPath() !== root) {
 		throw new Error(i18n.t("app:vault.externalRename.vaultChanged"));
 	}
 	setExternalRenameRepairing(true);
@@ -153,7 +152,7 @@ export async function handleExternalRename(
 	rename: NonNullable<VaultFileChangedPayload["rename"]>,
 ): Promise<void> {
 	const root = getVaultPath();
-	if (!root || isRemoteVaultHandle(root)) return;
+	if (!root) return;
 	const fromRel = vaultRelativePath(root, rename.from);
 	const toRel = vaultRelativePath(root, rename.to);
 	if (!fromRel || !toRel || fromRel === toRel) {

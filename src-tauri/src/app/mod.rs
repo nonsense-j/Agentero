@@ -2,12 +2,10 @@
 
 #[cfg(any(test, feature = "bindings-export"))]
 pub(crate) mod bindings_test;
+pub(crate) mod command_util;
 // `pub(crate)`: the mirror-shape anti-drift tests live in the owning modules
 // of the private payload structs and reference the mirrors from here. Test
 // builds only — the module does not exist otherwise.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod account;
-pub(crate) mod command_util;
 #[cfg(any(test, feature = "bindings-export"))]
 pub(crate) mod events_contract;
 mod handlers;
@@ -15,35 +13,22 @@ mod logging;
 pub mod menu;
 pub mod vault_session;
 
-#[cfg(not(target_os = "ios"))]
 pub mod finder_service;
 pub use crate::features::open_request;
-#[cfg(not(target_os = "ios"))]
 pub mod terminal;
-#[cfg(not(target_os = "ios"))]
 pub mod window;
 
 use crate::features::agent::{AgentRegistry, AgentRunController};
 use crate::features::markdown::wiki::WikiIndexState;
 use crate::features::system::settings::AppSettingsStore;
 use crate::features::vault::rename::ExternalRenameRepairStore;
-#[cfg(not(target_os = "ios"))]
 use crate::features::vault::watcher::FsWatchController;
-#[cfg(not(target_os = "ios"))]
 use crate::integration::connector::ConnectorController;
-#[cfg(not(target_os = "ios"))]
-use crate::integration::mcp::tunnel::McpTunnelController;
-#[cfg(not(target_os = "ios"))]
 use crate::integration::mcp::McpController;
-#[cfg(not(target_os = "ios"))]
-use crate::integration::remote::RemoteRegistry;
-// Used on every platform: the exit handler shuts down the agent warm pool.
 use std::sync::Arc;
-#[cfg(not(target_os = "ios"))]
 use tauri::Emitter;
 use tauri::Manager;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Both ring and aws-lc-rs backends exist in the dependency tree; rustls
     // panics at connect time unless a process-wide default is installed.
@@ -57,7 +42,6 @@ pub fn run() {
     // links on Windows/Linux) is forwarded before other plugins run.
     // Perf runs skip it so a measurement process does not attach to the
     // already-open app.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if !agentero_core::perf::enabled() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             crate::app::open_request::handle_argv_urls(app, &argv);
@@ -77,11 +61,6 @@ pub fn run() {
     builder = builder
         .register_asynchronous_uri_scheme_protocol("agentero-arxiv", |_ctx, request, responder| {
             crate::features::paper::discovery::proxy::arxiv::handle(request, responder);
-        })
-        .register_asynchronous_uri_scheme_protocol("agentero-model", |_ctx, request, responder| {
-            crate::features::paper::analyze::layout::model_assets::handle_model_uri(
-                request, responder,
-            );
         })
         .register_asynchronous_uri_scheme_protocol(
             "agentero-coolpapers",
@@ -112,27 +91,21 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(logging::build_log_plugin().build());
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        builder = builder
-            .plugin(account::plugin())
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_process::init())
-            // Only the main window remembers geometry; settings / feature /
-            // doc popouts keep their own fixed sizes.
-            .plugin(
-                tauri_plugin_window_state::Builder::default()
-                    .with_state_flags(
-                        tauri_plugin_window_state::StateFlags::SIZE
-                            | tauri_plugin_window_state::StateFlags::POSITION
-                            | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                    )
-                    .with_filter(|label| label == "main")
-                    .build(),
-            );
-    }
+        .plugin(logging::build_log_plugin().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        // Only the main window remembers geometry; settings / feature /
+        // doc popouts keep their own fixed sizes.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .with_filter(|label| label == "main")
+                .build(),
+        );
 
     let settings_store = AppSettingsStore::load();
     let layout_backend = settings_store.layout_backend();
@@ -149,7 +122,6 @@ pub fn run() {
         .manage(crate::features::agent::ElicitationGate::new())
         .manage(crate::features::agent::AskUserGate::new())
         .manage(crate::features::agent::delegate::DelegateBridge::new())
-        .manage(crate::integration::bridge::BridgeController::new())
         .manage(
             crate::features::jobs::JobCenter::with_layout_backend(&layout_backend)
                 .with_import_concurrency(import_concurrency),
@@ -162,67 +134,26 @@ pub fn run() {
         .manage(crate::integration::sync::SyncService::default())
         .manage(crate::app::open_request::PendingVaultOpen::new())
         .manage(crate::app::open_request::PendingUiRequest::new())
-        .manage(crate::features::web::html_preview::HtmlPreviewGrants::default());
-
-    #[cfg(target_os = "ios")]
-    {
-        builder = builder.manage(crate::integration::bridge::BridgeClientController::new());
-    }
-
-    #[cfg(not(target_os = "ios"))]
-    {
-        // Remote vault sessions are consumed by features (agent / import /
-        // trash) through inversion traits defined in the features themselves;
-        // register the registry both concretely (integration commands) and as
-        // each trait object (feature commands).
-        let remote_registry = Arc::new(RemoteRegistry::new());
-        builder = builder
-            .manage(FsWatchController::new())
-            .manage(crate::features::paper::ingest::IngestQueue::default())
-            .manage(Arc::new(ConnectorController::new()))
-            .manage(crate::integration::word::WordController::default())
-            .manage(Arc::new(McpController::new()))
-            .manage(Arc::new(McpTunnelController::new()))
-            .manage(remote_registry.clone())
-            .manage(remote_registry.clone() as Arc<dyn crate::features::agent::RemoteAgentHosts>)
-            .manage(
-                remote_registry.clone() as Arc<dyn crate::features::paper::import::RemoteImportOps>
-            )
-            .manage(
-                remote_registry
-                    as Arc<dyn crate::features::vault::trash::remote_ops::RemoteTrashOps>,
-            );
-    }
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        builder = builder
-            .manage(Arc::new(crate::core::telemetry::Telemetry::new()))
-            .manage(crate::features::rtex::RtexSessions::new());
-    }
+        .manage(crate::features::web::html_preview::HtmlPreviewGrants::default())
+        .manage(FsWatchController::new())
+        .manage(crate::features::paper::ingest::IngestQueue::default())
+        .manage(Arc::new(ConnectorController::new()))
+        .manage(Arc::new(McpController::new()));
 
     builder = handlers::attach_handlers(builder);
 
-    #[cfg(not(target_os = "ios"))]
-    {
-        builder = builder.on_page_load(|webview, payload| {
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                // The HTML boot shell is ready now; reveal it while React hydrates.
-                // On Linux/GTK, calling show() on an already-visible window can
-                // corrupt the native titlebar hit-test (buttons become dead until
-                // a resize/double-click). Only show if currently hidden.
-                let win = webview.window();
-                if !win.is_visible().unwrap_or(false) && !win.label().starts_with("carsi-fetch-") {
-                    let _ = win.show();
-                }
+    builder = builder.on_page_load(|webview, payload| {
+        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+            // The HTML boot shell is ready now; reveal it while React hydrates.
+            // On Linux/GTK, calling show() on an already-visible window can
+            // corrupt the native titlebar hit-test (buttons become dead until
+            // a resize/double-click). Only show if currently hidden.
+            let win = webview.window();
+            if !win.is_visible().unwrap_or(false) && !win.label().starts_with("carsi-fetch-") {
+                let _ = win.show();
             }
-        });
-    }
-
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
-        builder = builder.manage(crate::integration::plugins::PluginManager::default());
-    }
+        }
+    });
 
     builder = builder.setup(|app| {
         // Bundled ACP adapter tier (offline fallback): record the packaged
@@ -238,9 +169,6 @@ pub fn run() {
             let center = app.state::<crate::features::jobs::JobCenter>();
             crate::features::paper::analyze::refs::register_job_runners(&center);
             crate::features::paper::import::job_runners::register_job_runners(&center);
-            crate::features::paper::analyze::layout::model_assets::register_job_runners(&center);
-            crate::features::compile::register_job_runners(&center);
-            #[cfg(not(any(target_os = "ios", target_os = "android")))]
             crate::features::jev::register_job_runners(&center);
             let handle = app.handle().clone();
             center.set_layout_backend_source(move || {
@@ -297,7 +225,6 @@ pub fn run() {
                     .state::<AgentRegistry>()
                     .set_proxy(s.network_proxy_enabled, s.network_proxy_url.clone());
             });
-            #[cfg(not(any(target_os = "ios", target_os = "android")))]
             {
                 let handle = app.handle().clone();
                 settings_store.subscribe(move |_s| {
@@ -306,7 +233,6 @@ pub fn run() {
                     );
                 });
             }
-            #[cfg(not(target_os = "ios"))]
             {
                 let handle = app.handle().clone();
                 settings_store.subscribe(move |s| {
@@ -320,7 +246,6 @@ pub fn run() {
                     });
                 });
             }
-            #[cfg(not(target_os = "ios"))]
             {
                 let handle = app.handle().clone();
                 settings_store.subscribe(move |s| {
@@ -332,25 +257,12 @@ pub fn run() {
                     ctrl.set_translator_url(Some(translator));
                     ctrl.set_paper_note_mode(note_mode);
                     // `set_port` stops and restarts the listener even when the
-                    // port is unchanged; doing that on every settings change
-                    // (e.g. editing the tunnel ID) would briefly hide the MCP
-                    // status dot and disable the tunnel Start button.
+                    // port is unchanged; skip rebinding unless the port changed.
                     if port != ctrl.port() {
                         tauri::async_runtime::spawn(async move {
                             let _ = ctrl.set_port(port).await;
                         });
                     }
-                });
-            }
-            #[cfg(not(target_os = "ios"))]
-            {
-                let handle = app.handle().clone();
-                settings_store.subscribe(move |s| {
-                    let tunnel = Arc::clone(handle.state::<Arc<McpTunnelController>>().inner());
-                    let mcp_url = format!("http://127.0.0.1:{}/mcp", s.mcp_port);
-                    tauri::async_runtime::spawn(async move {
-                        let _ = tunnel.mcp_url_changed(mcp_url).await;
-                    });
                 });
             }
             {
@@ -375,20 +287,11 @@ pub fn run() {
             settings.network_proxy_enabled,
             &settings.network_proxy_url,
         )?;
-        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         crate::features::paper::import::refresh_parser_config(&settings_store);
         let _ = agents.set_proxy(
             settings.network_proxy_enabled,
             settings.network_proxy_url.clone(),
         );
-        // Prefetch PP-DocLayoutV3 into XDG as a JobCenter `modelDownload` job;
-        // the tasks-panel projection shows progress, concurrent triggers dedupe.
-        // Perf runs skip it so a startup measurement is not mixed with a download.
-        if !agentero_core::perf::enabled() {
-            crate::features::paper::analyze::layout::model_assets::spawn_background_download(
-                app.handle().clone(),
-            );
-        }
         // Native menu is macOS-only; the renderer re-syncs the locale on mount.
         #[cfg(target_os = "macos")]
         {
@@ -402,14 +305,10 @@ pub fn run() {
         let _ = app.state::<WikiIndexState>();
         let _ = app.state::<crate::features::vault::doctor::DoctorDirtyPathsState>();
         let _ = app.state::<ExternalRenameRepairStore>();
-        #[cfg(not(target_os = "ios"))]
         {
             let connector = app.state::<Arc<ConnectorController>>();
             connector.set_app_handle(app.handle().clone());
-            let remote = app.state::<Arc<RemoteRegistry>>();
-            connector.set_remote_registry(Arc::clone(&remote));
         }
-        #[cfg(not(target_os = "ios"))]
         {
             let mcp = app.state::<Arc<McpController>>();
             crate::integration::mcp::attach_app(&mcp, app.handle().clone());
@@ -418,41 +317,13 @@ pub fn run() {
             ));
             mcp.set_paper_note_mode(settings.paper_note_mode.clone());
         }
-        #[cfg(not(target_os = "ios"))]
-        {
-            let tunnel = app.state::<Arc<McpTunnelController>>();
-            tunnel.set_app_handle(app.handle().clone());
-            tunnel.schedule_startup_sweep();
-        }
         log::info!(
             target: "agentero::op",
             "op start app_ready debug={}",
             cfg!(debug_assertions)
         );
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        if !agentero_core::perf::enabled() {
-            let telemetry = Arc::clone(
-                app.state::<Arc<crate::core::telemetry::Telemetry>>()
-                    .inner(),
-            );
-            // Registry-only read (no PATH probing), safe on the setup path.
-            let agent_summary = agents.telemetry_summary();
-            // Assemble the start context here so core::telemetry stays free
-            // of upward edges into features (settings / agent).
-            let start_ctx = crate::core::telemetry::TelemetryStartContext {
-                telemetry_enabled: settings.telemetry_enabled,
-                locale: settings.locale.clone(),
-                installed_agents: agent_summary.templates,
-                custom_agent_count: agent_summary.custom_count,
-            };
-            tauri::async_runtime::spawn_blocking(move || {
-                telemetry.start(start_ctx);
-            });
-        }
-
         // Desktop deep links: cold start + runtime open URLs.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             use tauri_plugin_deep_link::DeepLinkExt;
             // Linux / Windows dev: associate schemes with the current executable.
@@ -501,93 +372,83 @@ pub fn run() {
         Ok(())
     });
 
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
-        builder = builder.on_menu_event(|app, event| {
-            let id = event.id().as_ref();
-            if id == "close_tab_or_window" {
-                // Cmd+W is app-global on macOS. When Settings is focused, close
-                // that native window instead of forwarding the command to the
-                // main renderer, where it would close the active document tab.
-                if let Some(settings) =
-                    app.get_webview_window(crate::app::window::commands::SETTINGS_WINDOW_LABEL)
-                {
-                    if settings.is_focused().unwrap_or(false) {
-                        let _ = settings.close();
-                        return;
-                    }
+    builder = builder.on_menu_event(|app, event| {
+        let id = event.id().as_ref();
+        if id == "close_tab_or_window" {
+            // Cmd+W is app-global on macOS. When Settings is focused, close
+            // that native window instead of forwarding the command to the
+            // main renderer, where it would close the active document tab.
+            if let Some(settings) =
+                app.get_webview_window(crate::app::window::commands::SETTINGS_WINDOW_LABEL)
+            {
+                if settings.is_focused().unwrap_or(false) {
+                    let _ = settings.close();
+                    return;
                 }
             }
-            if id == "new_window" {
-                // `window_new` is async so webview creation never runs inside this
-                // main-thread menu callback (see its doc comment).
-                let app = app.clone();
+        }
+        if id == "new_window" {
+            // `window_new` is async so webview creation never runs inside this
+            // main-thread menu callback (see its doc comment).
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::app::window::commands::window_new(app).await {
+                    log::error!(target: "agentero::op", "op end window_new ok=false error={e}");
+                }
+            });
+            return;
+        }
+        // Remaining menu ids are renderer actions: broadcast one
+        // `menu:invoked` event with the action id (naming per
+        // docs/development/lifecycle-events.md).
+        let _ = app.emit(
+            crate::app::menu::MENU_INVOKED_EVENT,
+            serde_json::json!({ "action": id }),
+        );
+    });
+
+    builder = builder.on_window_event(|window, event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            #[cfg(target_os = "macos")]
+            menu::release_window(window.app_handle(), window.label());
+            window.state::<FsWatchController>().stop(window.label());
+            // The window is gone, so it must not keep pinning any vault's
+            // Host resources (see `VaultHolders`). The global release
+            // sequence is async; spawn it so this synchronous event
+            // callback never blocks the event loop.
+            let drained = window
+                .state::<vault_session::VaultHolders>()
+                .drain_window(window.label());
+            if !drained.is_empty() {
+                let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = crate::app::window::commands::window_new(app).await {
-                        log::error!(target: "agentero::op", "op end window_new ok=false error={e}");
+                    for vault in drained {
+                        vault_session::lifecycle::release_vault_resources(
+                            &app,
+                            std::path::Path::new(&vault),
+                        )
+                        .await;
                     }
                 });
-                return;
             }
-            // Remaining menu ids are renderer actions: broadcast one
-            // `menu:invoked` event with the action id (naming per
-            // docs/development/lifecycle-events.md).
-            let _ = app.emit(
-                crate::app::menu::MENU_INVOKED_EVENT,
-                serde_json::json!({ "action": id }),
-            );
-        });
-    }
-
-    #[cfg(not(target_os = "ios"))]
-    {
-        builder = builder.on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                #[cfg(target_os = "macos")]
-                menu::release_window(window.app_handle(), window.label());
-                window.state::<FsWatchController>().stop(window.label());
-                // The window is gone, so it must not keep pinning any vault's
-                // Host resources (see `VaultHolders`). The global release
-                // sequence is async; spawn it so this synchronous event
-                // callback never blocks the event loop.
-                let drained = window
-                    .state::<vault_session::VaultHolders>()
-                    .drain_window(window.label());
-                #[cfg(not(any(target_os = "ios", target_os = "android")))]
-                window
-                    .state::<crate::integration::plugins::PluginManager>()
-                    .unload(window.label(), None, None);
-                if !drained.is_empty() {
-                    let app = window.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        for vault in drained {
-                            vault_session::lifecycle::release_vault_resources(
-                                &app,
-                                std::path::Path::new(&vault),
-                            )
-                            .await;
-                        }
-                    });
-                }
-                if window.label() == crate::app::window::commands::SETTINGS_WINDOW_LABEL {
-                    crate::app::window::commands::emit_window_closed(
-                        window.app_handle(),
-                        "settings",
-                        None,
-                    );
-                }
-                if let Some(view) =
-                    crate::app::window::commands::feature_view_from_label(window.label())
-                {
-                    crate::app::window::commands::emit_window_closed(
-                        window.app_handle(),
-                        "feature",
-                        Some(view),
-                    );
-                }
+            if window.label() == crate::app::window::commands::SETTINGS_WINDOW_LABEL {
+                crate::app::window::commands::emit_window_closed(
+                    window.app_handle(),
+                    "settings",
+                    None,
+                );
             }
-        });
-    }
+            if let Some(view) =
+                crate::app::window::commands::feature_view_from_label(window.label())
+            {
+                crate::app::window::commands::emit_window_closed(
+                    window.app_handle(),
+                    "feature",
+                    Some(view),
+                );
+            }
+        }
+    });
 
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut context = tauri::generate_context!();
@@ -612,28 +473,9 @@ pub fn run() {
                     .shutdown();
                 app.state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
                     .shutdown();
-                #[cfg(not(target_os = "ios"))]
                 app.state::<Arc<ConnectorController>>().stop();
-                // The MCP HTTP listener and the ChatGPT tunnel child are both
-                // desktop-only; stop them here so port 8765/8080 are released
-                // when the app quits. This matches Connector/Bridge behavior.
-                #[cfg(not(target_os = "ios"))]
-                {
-                    app.state::<Arc<McpController>>().stop_server();
-                    app.state::<Arc<McpTunnelController>>().stop();
-                }
-                // Close the mobile relay rather than letting the socket die with
-                // the process, so paired clients see a clean shutdown. `stop`
-                // takes the runtime, so the second call in this arm is a no-op.
-                let _ = app
-                    .state::<crate::integration::bridge::BridgeController>()
-                    .stop();
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                app.state::<Arc<crate::core::telemetry::Telemetry>>()
-                    .shutdown();
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                app.state::<crate::features::rtex::RtexSessions>()
-                    .stop_all();
+                // Stop the MCP HTTP listener so port 8765 is released when the app quits.
+                app.state::<Arc<McpController>>().stop_server();
             }
             // Best-effort final push (bounded); only on Exit so it runs once.
             if matches!(event, tauri::RunEvent::Exit) {

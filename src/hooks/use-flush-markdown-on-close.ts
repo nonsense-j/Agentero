@@ -1,12 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
 import { logger } from "@/lib/core/logger";
-import { isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isTauri } from "@/lib/core/tauri";
 import { flushMarkdownSources } from "@/lib/workspace/viewer/markdown-editor-registry";
 
 export function useFlushMarkdownOnClose() {
 	useEffect(() => {
-		if (!isTauri() || isMobileApp()) return;
+		if (!isTauri()) return;
 		const listener = getCurrentWindow().onCloseRequested(async (event) => {
 			try {
 				if (await flushMarkdownSources()) return;

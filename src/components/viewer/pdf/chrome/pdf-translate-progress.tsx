@@ -8,7 +8,6 @@ import { cn } from "@/lib/core/utils";
 
 type PdfTranslateProgressChipProps = {
 	layoutTranslateRunning: boolean;
-	layoutTranslatePreparing?: boolean;
 	layoutTranslateWaiting?: boolean;
 	layoutTranslateProgress?: number | null;
 	onStop: () => void;
@@ -21,7 +20,6 @@ type PdfTranslateProgressChipProps = {
  */
 export function PdfTranslateProgressChip({
 	layoutTranslateRunning,
-	layoutTranslatePreparing = false,
 	layoutTranslateWaiting = false,
 	layoutTranslateProgress = null,
 	onStop,
@@ -30,7 +28,6 @@ export function PdfTranslateProgressChip({
 	const { open, indeterminate, ratio, percent, stage, width, lingerFull } =
 		useTranslateMeter({
 			layoutTranslateRunning,
-			layoutTranslatePreparing,
 			layoutTranslateWaiting,
 			layoutTranslateProgress,
 		});

@@ -56,20 +56,6 @@ macro_rules! try_vault_ok {
     };
 }
 
-/// Look up a remote-vault session or early-return the IPC error object
-/// (`Result<ApiResult<T>, String>` commands).
-macro_rules! try_session {
-    ($registry:expr, $id:expr $(, $op:expr)?) => {
-        match $registry.get($id).await {
-            Ok(session) => session,
-            Err(err) => {
-                $($op.finish_err(&err);)?
-                return Ok($crate::core::error::map_err(err));
-            }
-        }
-    };
-}
-
 /// Lock the global wiki index or early-return the `ApiResult` error object.
 /// Expands to the `MutexGuard` itself, so it must form the `let` initializer —
 /// a helper fn cannot hand out the guard without re-introducing a `match`.
@@ -108,6 +94,5 @@ macro_rules! lock_wiki_index {
 }
 
 pub(crate) use lock_wiki_index;
-pub(crate) use try_session;
 pub(crate) use try_vault;
 pub(crate) use try_vault_ok;

@@ -47,20 +47,8 @@ pub enum AgentTemplate {
     /// Tencent CodeBuddy Code CLI with native ACP (`codebuddy --acp`).
     /// Docs: https://www.codebuddy.ai/docs/cli/acp · npm package `@tencent-ai/codebuddy-code`
     Codebuddy,
-    /// 内置「知乎」Agent：Host 内建，不 spawn 外部进程，直连知乎开放平台
-    /// （直答 + 标题检索）。凭证来自 App settings。
-    Zhihu,
     Custom,
 }
-
-/// 内建 Agent（Host 内建适配器，无外部 ACP 进程）。前端聊天气泡、Settings
-/// 卡片等按此区分：这些 Agent 不经 ACP spawn / probe / session list。
-pub fn is_builtin_template(template: &AgentTemplate) -> bool {
-    matches!(template, AgentTemplate::Zhihu)
-}
-
-/// 内置「知乎」Agent 的稳定 registry id。
-pub const ZHIHU_AGENT_ID: &str = "builtin-zhihu";
 
 impl<'de> serde::Deserialize<'de> for AgentTemplate {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -88,7 +76,6 @@ impl<'de> serde::Deserialize<'de> for AgentTemplate {
             "minimax-code" => Self::MinimaxCode,
             "mimo-code" => Self::MimoCode,
             "codebuddy" => Self::Codebuddy,
-            "zhihu" => Self::Zhihu,
             "custom" => Self::Custom,
             other => {
                 return Err(serde::de::Error::custom(format!(
@@ -118,7 +105,6 @@ impl AgentTemplate {
             Self::MinimaxCode => "minimax-code",
             Self::MimoCode => "mimo-code",
             Self::Codebuddy => "codebuddy",
-            Self::Zhihu => "zhihu",
             Self::Custom => "custom",
         }
     }
@@ -148,15 +134,6 @@ pub struct AgentDescriptor {
     pub last_probe_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_probed_at: Option<String>,
-}
-
-/// Anonymous, telemetry-safe summary of registered agents: kebab-case
-/// template ids for catalog agents and a bare count for custom ones. Never
-/// carries agent names, commands, args, or env.
-#[derive(Debug, Clone, Default)]
-pub struct AgentTelemetrySummary {
-    pub templates: Vec<String>,
-    pub custom_count: usize,
 }
 
 pub const DEFAULT_AGENT_PROXY_URL: &str = "http://127.0.0.1:7890";

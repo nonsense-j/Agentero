@@ -38,9 +38,6 @@ vi.mock("@/lib/vault/shell-activity", () => ({
 	watchRefreshDelayMs: () => 400,
 }));
 vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
-vi.mock("@/lib/vault/remote/remote-vault", () => ({
-	isRemoteVaultHandle: () => false,
-}));
 vi.mock("@/lib/wiki/api", () => ({
 	applyWikiPaths: vi.fn(async () => ({ indexedFiles: 1, edges: 0, nodes: 1 })),
 }));

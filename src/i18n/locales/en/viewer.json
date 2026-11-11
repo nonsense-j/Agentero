@@ -39,7 +39,6 @@
 		"exportDesktopOnly": "Export is only available in the desktop app",
 		"layout": {
 			"unavailable": "Layout analysis is not ready yet.",
-			"preparingModel": "Preparing layout model…",
 			"failed": "Layout analysis failed",
 			"openSettings": "Open analysis settings"
 		},
@@ -56,16 +55,12 @@
 			"needLayout": "Run layout analysis first (Figures panel).",
 			"noText": "No extractable text regions to translate.",
 			"failed": "Full-text translate failed",
-			"exportDualPdf": "Export bilingual PDF",
-			"exportPdf": "Export translated PDF",
-			"reflowFailed": "PDF typesetting failed",
 			"invalidTokens": "The translation changed protected formulas or links. The original text has been kept.",
 			"openSettings": "Open translation settings",
 			"waiting": "Cancel translation preparation",
 			"phaseLayout": "Preparing layout",
 			"phaseExtract": "Reading text",
 			"phaseTranslate": "Translating",
-			"phaseTypeset": "Typesetting",
 			"phaseDone": "Complete",
 			"progress": "{{percent}}%",
 			"parseFailedWhileWaiting": "Layout analysis failed; translation cancelled",
@@ -309,9 +304,6 @@
 		"altFallback": "Image preview"
 	},
 	"textEditor": {
-		"errorCount": "{{count}} errors",
-		"warningCount": "{{count}} warnings",
-		"infoCount": "{{count}} info",
 		"openInScholar": "Google Scholar"
 	}
 }

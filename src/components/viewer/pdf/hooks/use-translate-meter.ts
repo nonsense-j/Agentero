@@ -12,11 +12,9 @@ const TRANSLATE_METER_LINGER_MS = 700;
 
 type TranslateMeterOptions = {
 	layoutTranslateRunning: boolean;
-	/** Final corrected preview is still building after items settled. */
-	layoutTranslatePreparing?: boolean;
 	/** Queued behind layout analysis; a click cancels the wait. */
 	layoutTranslateWaiting?: boolean;
-	/** 0–1 fill. Stays under full while the reflow preview is still blank. */
+	/** 0–1 fill. Null before the job has any blocks. */
 	layoutTranslateProgress?: number | null;
 };
 
@@ -28,15 +26,11 @@ type TranslateMeterOptions = {
  */
 export function useTranslateMeter({
 	layoutTranslateRunning,
-	layoutTranslatePreparing = false,
 	layoutTranslateWaiting = false,
 	layoutTranslateProgress = null,
 }: TranslateMeterOptions) {
 	const { t } = useTranslation("viewer");
-	const busy =
-		layoutTranslateRunning ||
-		layoutTranslatePreparing ||
-		layoutTranslateWaiting;
+	const busy = layoutTranslateRunning || layoutTranslateWaiting;
 	const complete = layoutTranslateProgress === 1;
 	const [lingerFull, setLingerFull] = useState(false);
 	const wasTranslateBusyRef = useRef(false);
@@ -86,11 +80,9 @@ export function useTranslateMeter({
 		? t("pdf.layoutTranslate.phaseDone")
 		: layoutTranslateWaiting
 			? t("pdf.layoutTranslate.phaseLayout")
-			: layoutTranslatePreparing
-				? t("pdf.layoutTranslate.phaseTypeset")
-				: indeterminate
-					? t("pdf.layoutTranslate.phaseExtract")
-					: t("pdf.layoutTranslate.phaseTranslate");
+			: indeterminate
+				? t("pdf.layoutTranslate.phaseExtract")
+				: t("pdf.layoutTranslate.phaseTranslate");
 
 	return {
 		busy,

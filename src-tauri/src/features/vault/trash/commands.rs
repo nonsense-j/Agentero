@@ -1,14 +1,11 @@
-//! Recycle-bin commands: undoable delete + restore (local + remote).
+//! Recycle-bin commands: undoable delete + restore.
 
 use crate::core::error::{map_err, ApiResult};
 use crate::core::log_util::{trunc, OpTimer};
-use crate::core::remote::parse_remote_handle;
 use crate::features::jobs::{emit_job_changed, JobCenter};
 use crate::features::vault::trash;
-use crate::features::vault::trash::remote_ops::RemoteTrashOps;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tauri::State;
 
 #[derive(Debug, Deserialize, specta::Type)]
@@ -24,36 +21,45 @@ pub struct PathTrashArgs {
 #[specta::specta]
 pub async fn path_trash(
     app: tauri::AppHandle,
-    remote: State<'_, Arc<dyn RemoteTrashOps>>,
     center: State<'_, JobCenter>,
     args: PathTrashArgs,
 ) -> Result<ApiResult<trash::TrashResult>, String> {
     let n = args.rels.len();
     let op = OpTimer::start_with("path_trash", format!("count={n}"));
-    if let Some(sid) = parse_remote_handle(args.vault_path.trim()) {
-        match remote.trash_paths_remote(sid, &args.rels).await {
-            Ok(res) => {
-                op.finish_ok_extra(format!(
-                    "batch_id={} count={}",
-                    trunc(&res.batch_id, 40),
-                    res.count
-                ));
-                Ok(ApiResult::ok(res))
+    let vault = PathBuf::from(args.vault_path.trim());
+    match trash::trash_paths(&vault, &args.rels) {
+        Ok(res) => {
+            // A deleted paper must not keep running/scheduling background
+            // work (parse, download, layout, …): cancel its jobs now.
+            let mut cancelled = 0usize;
+            for rel in &res.rels {
+                for snapshot in center.cancel_for_paper(&vault, rel).await {
+                    emit_job_changed(&app, snapshot);
+                    cancelled += 1;
+                }
             }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
+            if cancelled > 0 {
+                center.drain_and_spawn(&app).await;
             }
+            op.finish_ok_extra(format!(
+                "batch_id={} count={} jobs_cancelled={cancelled}",
+                trunc(&res.batch_id, 40),
+                res.count
+            ));
+            Ok(ApiResult::ok(res))
         }
-    } else {
-        let vault = PathBuf::from(args.vault_path.trim());
-        match trash::trash_paths(&vault, &args.rels) {
-            Ok(res) => {
-                // A deleted paper must not keep running/scheduling background
-                // work (parse, download, layout, …): cancel its jobs now.
+        Err(e) => {
+            // Files are already in the batch when catalog update fails.
+            // Cancel jobs for paths that actually left the vault; a rename
+            // that did not happen still exists on disk and keeps its jobs.
+            if e.code() == "trash_catalog" {
                 let mut cancelled = 0usize;
-                for rel in &res.rels {
-                    for snapshot in center.cancel_for_paper(&vault, rel).await {
+                for raw in &args.rels {
+                    let rel = crate::core::fs::normalize_rel_separators(raw);
+                    if vault.join(&rel).exists() {
+                        continue;
+                    }
+                    for snapshot in center.cancel_for_paper(&vault, &rel).await {
                         emit_job_changed(&app, snapshot);
                         cancelled += 1;
                     }
@@ -61,36 +67,9 @@ pub async fn path_trash(
                 if cancelled > 0 {
                     center.drain_and_spawn(&app).await;
                 }
-                op.finish_ok_extra(format!(
-                    "batch_id={} count={} jobs_cancelled={cancelled}",
-                    trunc(&res.batch_id, 40),
-                    res.count
-                ));
-                Ok(ApiResult::ok(res))
             }
-            Err(e) => {
-                // Files are already in the batch when catalog update fails.
-                // Cancel jobs for paths that actually left the vault; a rename
-                // that did not happen still exists on disk and keeps its jobs.
-                if e.code() == "trash_catalog" {
-                    let mut cancelled = 0usize;
-                    for raw in &args.rels {
-                        let rel = crate::core::fs::normalize_rel_separators(raw);
-                        if vault.join(&rel).exists() {
-                            continue;
-                        }
-                        for snapshot in center.cancel_for_paper(&vault, &rel).await {
-                            emit_job_changed(&app, snapshot);
-                            cancelled += 1;
-                        }
-                    }
-                    if cancelled > 0 {
-                        center.drain_and_spawn(&app).await;
-                    }
-                }
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+            op.finish_err(&e);
+            Ok(map_err(e))
         }
     }
 }
@@ -105,53 +84,29 @@ pub struct TrashVaultArgs {
 #[tauri::command]
 #[specta::specta]
 pub async fn path_list_trash(
-    remote: State<'_, Arc<dyn RemoteTrashOps>>,
     args: TrashVaultArgs,
 ) -> Result<ApiResult<Vec<trash::TrashEntry>>, String> {
-    if let Some(sid) = parse_remote_handle(args.vault_path.trim()) {
-        match remote.list_trash_remote(sid).await {
-            Ok(items) => Ok(ApiResult::ok(items)),
-            Err(e) => Ok(map_err(e)),
-        }
-    } else {
-        let vault = PathBuf::from(args.vault_path.trim());
-        match trash::list_trash(&vault) {
-            Ok(items) => Ok(ApiResult::ok(items)),
-            Err(e) => Ok(map_err(e)),
-        }
+    let vault = PathBuf::from(args.vault_path.trim());
+    match trash::list_trash(&vault) {
+        Ok(items) => Ok(ApiResult::ok(items)),
+        Err(e) => Ok(map_err(e)),
     }
 }
 
 /// Empty the entire recycle bin (permanent).
 #[tauri::command]
 #[specta::specta]
-pub async fn path_purge_trash(
-    remote: State<'_, Arc<dyn RemoteTrashOps>>,
-    args: TrashVaultArgs,
-) -> Result<ApiResult<()>, String> {
+pub async fn path_purge_trash(args: TrashVaultArgs) -> Result<ApiResult<()>, String> {
     let op = OpTimer::start("path_purge_trash");
-    if let Some(sid) = parse_remote_handle(args.vault_path.trim()) {
-        match remote.purge_all_remote(sid).await {
-            Ok(()) => {
-                op.finish_ok();
-                Ok(ApiResult::ok(()))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+    let vault = PathBuf::from(args.vault_path.trim());
+    match trash::purge_all(&vault) {
+        Ok(()) => {
+            op.finish_ok();
+            Ok(ApiResult::ok(()))
         }
-    } else {
-        let vault = PathBuf::from(args.vault_path.trim());
-        match trash::purge_all(&vault) {
-            Ok(()) => {
-                op.finish_ok();
-                Ok(ApiResult::ok(()))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+        Err(e) => {
+            op.finish_err(&e);
+            Ok(map_err(e))
         }
     }
 }
@@ -176,7 +131,6 @@ pub struct PathRestoreItemResult {
 #[tauri::command]
 #[specta::specta]
 pub async fn path_restore_item(
-    remote: State<'_, Arc<dyn RemoteTrashOps>>,
     args: TrashItemArgs,
 ) -> Result<ApiResult<PathRestoreItemResult>, String> {
     let op = OpTimer::start_with(
@@ -187,31 +141,15 @@ pub async fn path_restore_item(
             trunc(&args.stored, 80)
         ),
     );
-    if let Some(sid) = parse_remote_handle(args.vault_path.trim()) {
-        match remote
-            .restore_item_remote(sid, &args.batch_id, &args.stored)
-            .await
-        {
-            Ok(rel) => {
-                op.finish_ok_extra(format!("rel={}", trunc(&rel, 120)));
-                Ok(ApiResult::ok(PathRestoreItemResult { rel }))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+    let vault = PathBuf::from(args.vault_path.trim());
+    match trash::restore_item(&vault, &args.batch_id, &args.stored) {
+        Ok(rel) => {
+            op.finish_ok_extra(format!("rel={}", trunc(&rel, 120)));
+            Ok(ApiResult::ok(PathRestoreItemResult { rel }))
         }
-    } else {
-        let vault = PathBuf::from(args.vault_path.trim());
-        match trash::restore_item(&vault, &args.batch_id, &args.stored) {
-            Ok(rel) => {
-                op.finish_ok_extra(format!("rel={}", trunc(&rel, 120)));
-                Ok(ApiResult::ok(PathRestoreItemResult { rel }))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+        Err(e) => {
+            op.finish_err(&e);
+            Ok(map_err(e))
         }
     }
 }
@@ -219,10 +157,7 @@ pub async fn path_restore_item(
 /// Permanently delete a single recycle-bin item.
 #[tauri::command]
 #[specta::specta]
-pub async fn path_purge_item(
-    remote: State<'_, Arc<dyn RemoteTrashOps>>,
-    args: TrashItemArgs,
-) -> Result<ApiResult<()>, String> {
+pub async fn path_purge_item(args: TrashItemArgs) -> Result<ApiResult<()>, String> {
     let op = OpTimer::start_with(
         "path_purge_item",
         format!(
@@ -231,31 +166,15 @@ pub async fn path_purge_item(
             trunc(&args.stored, 80)
         ),
     );
-    if let Some(sid) = parse_remote_handle(args.vault_path.trim()) {
-        match remote
-            .purge_item_remote(sid, &args.batch_id, &args.stored)
-            .await
-        {
-            Ok(()) => {
-                op.finish_ok();
-                Ok(ApiResult::ok(()))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+    let vault = PathBuf::from(args.vault_path.trim());
+    match trash::purge_item(&vault, &args.batch_id, &args.stored) {
+        Ok(()) => {
+            op.finish_ok();
+            Ok(ApiResult::ok(()))
         }
-    } else {
-        let vault = PathBuf::from(args.vault_path.trim());
-        match trash::purge_item(&vault, &args.batch_id, &args.stored) {
-            Ok(()) => {
-                op.finish_ok();
-                Ok(ApiResult::ok(()))
-            }
-            Err(e) => {
-                op.finish_err(&e);
-                Ok(map_err(e))
-            }
+        Err(e) => {
+            op.finish_err(&e);
+            Ok(map_err(e))
         }
     }
 }

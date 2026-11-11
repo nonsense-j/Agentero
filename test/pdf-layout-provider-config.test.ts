@@ -23,28 +23,28 @@ function layoutWith(
 }
 
 describe("layoutBackendsAfterClearingProvider", () => {
-	it("falls layout backend back to local when it pointed at the cleared provider", () => {
+	it("falls layout backend back to default when it pointed at the cleared provider", () => {
 		const next = layoutBackendsAfterClearingProvider(
-			layoutWith({ backend: "paddle", parserBackend: "local" }),
-			"paddle",
+			layoutWith({ backend: "mineru", parserBackend: "local" }),
+			"mineru",
 		);
-		expect(next).toEqual({ backend: "local", parserBackend: "local" });
+		expect(next).toEqual({ backend: "paddle", parserBackend: "local" });
 	});
 
 	it("falls parser backend back to local when it pointed at the cleared provider", () => {
 		const next = layoutBackendsAfterClearingProvider(
-			layoutWith({ backend: "local", parserBackend: "mineru" }),
+			layoutWith({ backend: "paddle", parserBackend: "mineru" }),
 			"mineru",
 		);
-		expect(next).toEqual({ backend: "local", parserBackend: "local" });
+		expect(next).toEqual({ backend: "paddle", parserBackend: "local" });
 	});
 
 	it("falls both backends when both pointed at the cleared provider", () => {
 		const next = layoutBackendsAfterClearingProvider(
-			layoutWith({ backend: "paddle", parserBackend: "paddle" }),
-			"paddle",
+			layoutWith({ backend: "mineru", parserBackend: "mineru" }),
+			"mineru",
 		);
-		expect(next).toEqual({ backend: "local", parserBackend: "local" });
+		expect(next).toEqual({ backend: "paddle", parserBackend: "local" });
 	});
 
 	it("leaves unrelated backends unchanged", () => {

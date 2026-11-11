@@ -1,8 +1,6 @@
 //! Service facade for the Agent feature.
 //!
-//! Shared by the thin `commands` shells (Tauri IPC) and the desktop bridge
-//! RPC (`integration::bridge::host`), so the bridge consumes service-level
-//! APIs instead of command shells. Command paths stay
+//! Consumed by the thin `commands` shells (Tauri IPC). Command paths stay
 //! `features::agent::commands::*` for `app/handlers.rs`.
 
 use crate::core::error::AppError;
@@ -14,7 +12,6 @@ use crate::features::agent::models::{
     ElicitationResponseRequest, PermissionResponded, PermissionResponseRequest, ProbeResult,
     RunOnceAccepted, RunOnceRequest,
 };
-use crate::features::agent::remote_host::RemoteAgentHosts;
 use crate::features::agent::runtime::gates::{
     AskUserAnswer, AskUserGate, ElicitationAnswer, ElicitationGate, PermissionGate,
 };
@@ -86,7 +83,7 @@ pub async fn probe_catalog(
         emit_registry_changed(app);
         return Ok(result);
     }
-    let result = probe_agent(&desc, None).await;
+    let result = probe_agent(&desc).await;
     let _ = registry.apply_probe_result(&desc.id, &result);
     emit_registry_changed(app);
     Ok(result)
@@ -146,7 +143,6 @@ pub async fn accept_run_once(
     gate: &PermissionGate,
     elicitation_gate: &ElicitationGate,
     ask_user_gate: &AskUserGate,
-    remote_hosts: &dyn RemoteAgentHosts,
     request: RunOnceRequest,
 ) -> Result<RunOnceAccepted, AppError> {
     let op = OpTimer::start_with(
@@ -172,24 +168,6 @@ pub async fn accept_run_once(
         }
     };
 
-    // Built-in agents are Host-internal (no external ACP process, no remote
-    // host). Skip remote resolution entirely so a local-only agent never fails
-    // on a remote-vault target.
-    let builtin = crate::features::agent::models::is_builtin_template(&desc.template);
-    let remote_target_early = if builtin {
-        None
-    } else {
-        match remote_hosts
-            .resolve_target(request.vault_path.as_deref())
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                op.finish_err(&e);
-                return Err(e);
-            }
-        }
-    };
     let (session_id, message_id) = new_ids();
     let accepted = RunOnceAccepted {
         session_id: session_id.clone(),
@@ -213,47 +191,6 @@ pub async fn accept_run_once(
         "agent:status",
         AgentStatusEvent::starting(session_id.as_str()),
     );
-    // Built-in agents bypass the ACP spawn/stream chain entirely: the Host
-    // runs them itself and emits the same `agent:*` events the panel consumes.
-    if builtin {
-        let app_handle = window.app_handle().clone();
-        let secret = window
-            .app_handle()
-            .state::<crate::features::system::settings::AppSettingsStore>()
-            .zhihu_access_secret();
-        let log_session_id = session_id.clone();
-        let log_agent_id = desc.id.clone();
-        let finish_id = session_id.clone();
-        let session_for_log = log_session_id.clone();
-        let agent_for_log = log_agent_id.clone();
-        tauri::async_runtime::spawn(async move {
-            crate::features::zhihu::run_once(crate::features::zhihu::ZhihuRunOnce {
-                app: events,
-                session_id,
-                message_id,
-                agent_id: desc.id,
-                prompt: request.prompt,
-                resume_session_id: request.session_id,
-                model_id: request.model_id,
-                secret,
-                cancellation,
-            })
-            .await;
-            let _ = app_handle.state::<AgentRunController>().finish(&finish_id);
-            log::info!(
-                target: "agentero::op",
-                "op end agent_run_session session_id={} agent_id={}",
-                trunc(&session_for_log, 48),
-                trunc(&agent_for_log, 48)
-            );
-        });
-        op.finish_ok_extra(format!(
-            "session_id={} agent_id={} accepted=true builtin=true",
-            trunc(&log_session_id, 48),
-            trunc(&log_agent_id, 48)
-        ));
-        return Ok(accepted);
-    }
 
     let permission_gate = gate.clone();
     let elicitation_gate = elicitation_gate.clone();
@@ -271,9 +208,7 @@ pub async fn accept_run_once(
     let log_session_id = session_id.clone();
     let log_agent_id = desc.id.clone();
     let session_agent_id = log_agent_id.clone();
-    let remote_for_spawn = remote_target_early;
-    let attach_delegate =
-        remote_for_spawn.is_none() && request.workflow.as_deref() != Some("translate");
+    let attach_delegate = request.workflow.as_deref() != Some("translate");
     let delegate_mcp = if attach_delegate {
         window
             .app_handle()
@@ -283,11 +218,6 @@ pub async fn accept_run_once(
             .collect()
     } else {
         Vec::new()
-    };
-    let delegate_hint = if attach_delegate {
-        local_delegate_hint(remote_hosts, registry).await
-    } else {
-        None
     };
     tauri::async_runtime::spawn(async move {
         let run_result = run_once(RunOnceParams {
@@ -314,13 +244,12 @@ pub async fn accept_run_once(
             response_language: request.response_language,
             personal_prompt: request.personal_prompt,
             cancellation,
-            remote: remote_for_spawn,
             resume_session_id: request.session_id.clone(),
             warm_pool: Some(warm_pool),
             context: request.context,
             resume_transcript: request.resume_transcript,
             delegate_mcp,
-            delegate_hint,
+            delegate_hint: None,
             suppress_transcript: false,
             permission_host: None,
             progress: None,
@@ -350,7 +279,6 @@ pub async fn accept_run_once(
 /// Service for `agent_list_sessions`: list ACP sessions via `session/list`.
 pub async fn list_sessions(
     registry: &AgentRegistry,
-    remote_hosts: &dyn RemoteAgentHosts,
     warm_gate: &AgentWarmGate,
     pool: &AgentWarmPool,
     agent_id: Option<String>,
@@ -368,35 +296,19 @@ pub async fn list_sessions(
             return Err(error);
         }
     };
-    // Built-in agents keep no server-side session list.
-    if crate::features::agent::models::is_builtin_template(&desc.template) {
-        op.finish_ok_extra(format!("agent_id={} builtin=true sessions=0", desc.id));
-        return Ok(AcpListSessionsResult {
-            sessions: Vec::new(),
-            next_cursor: None,
-            supported: false,
-        });
-    }
     if let Some(error) = warm_gate.blocked(&desc.id) {
         let error = AppError::message(error);
         op.finish_err(&error);
         return Err(error);
     }
-    let remote_target = match remote_hosts.resolve_target(vault_path.as_deref()).await {
-        Ok(t) => t,
-        Err(e) => {
-            op.finish_err(&e);
-            return Err(e);
-        }
-    };
-    let cwd = match agent_spawn_cwd(remote_target.as_deref(), vault_path.as_deref()) {
+    let cwd = match agent_spawn_cwd(vault_path.as_deref()) {
         Ok(cwd) => cwd,
         Err(error) => {
             op.finish_err(&error);
             return Err(error);
         }
     };
-    match list_acp_sessions(&desc, cwd, cursor, remote_target.as_deref()).await {
+    match list_acp_sessions(&desc, cwd, cursor).await {
         Ok(mut result) => {
             let hidden = pool.unprompted_ids();
             let dismissed = pool.dismissed_ids();
@@ -428,23 +340,13 @@ pub async fn list_sessions(
 /// `session/load`.
 pub async fn load_session(
     registry: &AgentRegistry,
-    remote_hosts: &dyn RemoteAgentHosts,
     agent_id: Option<String>,
     session_id: String,
     vault_path: Option<String>,
 ) -> Result<AcpLoadSessionResult, AppError> {
     let desc = registry.resolve_default(agent_id.as_deref())?;
-    // Built-in agents have no ACP history to replay.
-    if crate::features::agent::models::is_builtin_template(&desc.template) {
-        return Ok(AcpLoadSessionResult {
-            session_id,
-            title: None,
-            lines: Vec::new(),
-        });
-    }
-    let remote_target = remote_hosts.resolve_target(vault_path.as_deref()).await?;
-    let cwd = agent_spawn_cwd(remote_target.as_deref(), vault_path.as_deref())?;
-    load_acp_session(&desc, session_id, cwd, remote_target.as_deref()).await
+    let cwd = agent_spawn_cwd(vault_path.as_deref())?;
+    load_acp_session(&desc, session_id, cwd).await
 }
 
 /// Service for `agent_delete_session`.
@@ -455,7 +357,6 @@ pub async fn load_session(
 /// continue a conversation the user just removed.
 pub async fn delete_session(
     registry: &AgentRegistry,
-    remote_hosts: &dyn RemoteAgentHosts,
     pool: &AgentWarmPool,
     agent_id: Option<String>,
     session_id: String,
@@ -469,17 +370,8 @@ pub async fn delete_session(
     pool.dismiss_session(&session_id);
     pool.drop_session(&desc.id, &session_id);
 
-    if crate::features::agent::models::is_builtin_template(&desc.template) {
-        return Ok(AcpDeleteSessionResult {
-            session_id,
-            deleted_on_agent: false,
-            agent_error: None,
-        });
-    }
-
-    let remote_target = remote_hosts.resolve_target(vault_path.as_deref()).await?;
-    let cwd = agent_spawn_cwd(remote_target.as_deref(), vault_path.as_deref())?;
-    match delete_acp_session(&desc, &session_id, cwd, remote_target.as_deref()).await {
+    let cwd = agent_spawn_cwd(vault_path.as_deref())?;
+    match delete_acp_session(&desc, &session_id, cwd).await {
         Ok(true) => Ok(AcpDeleteSessionResult {
             session_id,
             deleted_on_agent: true,
@@ -496,36 +388,4 @@ pub async fn delete_session(
             agent_error: Some(error.to_string()),
         }),
     }
-}
-
-async fn local_delegate_hint(
-    hosts: &dyn RemoteAgentHosts,
-    registry: &AgentRegistry,
-) -> Option<String> {
-    use crate::features::agent::delegate::policy::{self, AgentChoice, TargetChoice};
-    use crate::features::agent::models::is_builtin_template;
-
-    let listed = hosts.list_targets().await.ok()?;
-    let targets = listed
-        .into_iter()
-        .map(|target| TargetChoice {
-            handle: format!("remote:{}", target.session_id),
-            session_id: target.session_id,
-            destination: target.destination,
-            remote_path: target.remote_path,
-            local_sim: target.local_sim,
-        })
-        .collect::<Vec<_>>();
-    let state = registry.snapshot().ok()?;
-    let mut agents = state
-        .agents
-        .into_iter()
-        .filter(|agent| !is_builtin_template(&agent.template) && !agent.command.trim().is_empty())
-        .map(|agent| AgentChoice {
-            id: agent.id,
-            name: agent.name,
-        })
-        .collect::<Vec<_>>();
-    agents.sort_by(|left, right| left.id.cmp(&right.id));
-    policy::delegate_hint(&targets, &agents)
 }

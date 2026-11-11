@@ -18,7 +18,6 @@ import {
 	mcpSetParentDir,
 	mcpSetVault,
 } from "@/lib/mcp/status";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { getVaultPath } from "@/lib/vault/store";
 
 export function useMcpSync(): void {
@@ -29,9 +28,7 @@ export function useMcpSync(): void {
 
 	useEffect(() => {
 		if (!isTauri()) return;
-		const local =
-			vaultPath && !isRemoteVaultHandle(vaultPath) ? vaultPath : null;
-		void mcpSetVault(local).catch((e) => {
+		void mcpSetVault(vaultPath ?? null).catch((e) => {
 			console.warn("[mcp] setVault failed", e);
 		});
 	}, [vaultPath]);
@@ -65,7 +62,7 @@ export function useMcpSync(): void {
 					notifyError(st.lastError);
 				}
 				const path = getVaultPath();
-				if (mcpEnabled && path && !isRemoteVaultHandle(path)) {
+				if (mcpEnabled && path) {
 					try {
 						await mcpSetVault(path);
 					} catch (e) {

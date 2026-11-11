@@ -4,7 +4,7 @@ import { commands } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { callApi } from "@/lib/core/ipc";
 import { logger } from "@/lib/core/logger";
-import { isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isTauri } from "@/lib/core/tauri";
 
 let fontFallbackPromise: Promise<FontFallbackConfig | null> | null = null;
 
@@ -26,7 +26,7 @@ function decodeBase64(base64: string): Uint8Array {
  * PDFium engines can fetch without a network request.
  */
 export function loadSystemCjkFontFallback(): Promise<FontFallbackConfig | null> {
-	if (!isTauri() || isMobileApp()) return Promise.resolve(null);
+	if (!isTauri()) return Promise.resolve(null);
 	if (fontFallbackPromise) return fontFallbackPromise;
 
 	fontFallbackPromise = callApi(() => commands.exportSystemCjkFont(), {

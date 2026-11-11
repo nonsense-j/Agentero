@@ -11,7 +11,6 @@ import { useTranslation } from "react-i18next";
 import {
 	FloatingMenu,
 	FloatingMenuItem,
-	FloatingMenuSeparator,
 	FloatingMenuShortcut,
 } from "@/components/ui/floating-menu";
 import { cn } from "@/lib/core/utils";
@@ -21,39 +20,13 @@ import {
 	type PlazaSource,
 	plazaSourceLabel,
 } from "@/lib/plaza";
-import type { MenuContext } from "@/lib/shell/commands/menu-contributions";
-import {
-	activateMenuContribution,
-	visibleMenuContributions,
-} from "@/lib/shell/commands/menu-contributions";
 import { formatShortcutById } from "@/lib/shell/shortcuts";
-import { vaultRelativePath } from "@/lib/vault";
 import { revealInOsLabelKey } from "@/lib/vault/reveal";
 import type { TreeContextMenu } from "./types";
-
-function fileTreeItemContext(
-	vaultPath: string | null,
-	path: string,
-	paperId: string | undefined,
-): MenuContext {
-	const rel = vaultPath ? vaultRelativePath(vaultPath, path) : null;
-	return {
-		vaultPath,
-		...(rel != null ? { relPath: rel } : {}),
-		...(paperId ? { paperId } : {}),
-	};
-}
 
 export type TreeContextMenuPortalProps = {
 	menu: TreeContextMenu;
 	menuRef: RefObject<HTMLDivElement | null>;
-	/** Vault root the tree already has. Null when no vault is open. */
-	vaultPath: string | null;
-	/**
-	 * Catalog id when this row is a paper directory and metadata is loaded.
-	 * Omitted for files, folders, and papers with no id.
-	 */
-	paperId?: string;
 	menuCount: number;
 	menuNodeName?: string;
 	isPaperMenu: boolean;
@@ -77,8 +50,6 @@ export type TreeContextMenuPortalProps = {
 	onDownloadAllMissing?: () => void;
 	onEmptyTrash?: () => void;
 	onOpenNotes?: () => void;
-	/** .tex row: open (or compile then open) the compiled PDF beside it. */
-	onOpenTexPdf?: () => void;
 	/** Paper row: open the catalog metadata editor. */
 	onEditMeta?: () => void;
 	/** Add the right-clicked file/paper to the Agent chat as a context chip. */
@@ -100,8 +71,6 @@ export type TreeContextMenuPortalProps = {
 export function TreeContextMenuPortal({
 	menu,
 	menuRef,
-	vaultPath,
-	paperId,
 	menuCount,
 	menuNodeName,
 	isPaperMenu,
@@ -119,7 +88,6 @@ export function TreeContextMenuPortal({
 	onDownloadAllMissing,
 	onEmptyTrash,
 	onOpenNotes,
-	onOpenTexPdf,
 	onEditMeta,
 	onAddToChat,
 	onNewFile,
@@ -167,19 +135,6 @@ export function TreeContextMenuPortal({
 
 	const isTrashMenu = menu.path === TRASH_VIRTUAL_PATH;
 	const isPlazaMenu = menu.path === PLAZA_VIRTUAL_PATH;
-	// Recycle / Plaza roots are different menus. Contributions attach only to
-	// the item menu that already has path-based actions.
-	const isItemMenu = !isTrashMenu && !isPlazaMenu;
-	const itemContributions = isItemMenu
-		? visibleMenuContributions(
-				"fileTree.item",
-				fileTreeItemContext(
-					vaultPath,
-					menu.path,
-					isPaperMenu ? paperId : undefined,
-				),
-			)
-		: [];
 
 	const revealLabel = t(revealInOsLabelKey());
 	const revealShortcut = formatShortcutById("revealInFinder");
@@ -302,12 +257,6 @@ export function TreeContextMenuPortal({
 							<FloatingMenuShortcut>{splitPaneShortcut}</FloatingMenuShortcut>
 						</FloatingMenuItem>
 					) : null}
-					{menuCount === 1 && onOpenTexPdf ? (
-						<FloatingMenuItem onClick={onOpenTexPdf}>
-							<span>{t("fileTree.openTexPdf")}</span>
-							<FloatingMenuShortcut>{splitPaneShortcut}</FloatingMenuShortcut>
-						</FloatingMenuItem>
-					) : null}
 					{menuCount === 1 && isPaperMenu && onEditMeta ? (
 						<FloatingMenuItem onClick={onEditMeta}>
 							<span>{t("papersLibrary.rowEditMeta")}</span>
@@ -416,29 +365,6 @@ export function TreeContextMenuPortal({
 								</FloatingMenuShortcut>
 							) : null}
 						</FloatingMenuItem>
-					) : null}
-					{itemContributions.length > 0 ? (
-						<>
-							<FloatingMenuSeparator />
-							{itemContributions.map((item) => (
-								<FloatingMenuItem
-									key={item.id}
-									onClick={() => {
-										onClose();
-										activateMenuContribution(
-											item,
-											fileTreeItemContext(
-												vaultPath,
-												menu.path,
-												isPaperMenu ? paperId : undefined,
-											),
-										);
-									}}
-								>
-									<span>{item.title}</span>
-								</FloatingMenuItem>
-							))}
-						</>
 					) : null}
 				</>
 			)}

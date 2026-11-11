@@ -54,34 +54,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const outDir = path.join(root, "src-tauri", "adapters");
 
-function hostTriple() {
-	try {
-		return execFileSync("rustc", ["--print", "host-tuple"], {
-			encoding: "utf8",
-		}).trim();
-	} catch {
-		const out = execFileSync("rustc", ["-Vv"], { encoding: "utf8" });
-		const line = out.split("\n").find((l) => l.startsWith("host:"));
-		if (!line) throw new Error("could not determine host triple");
-		return line.split(/\s+/)[1];
-	}
-}
-
-const triple = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
-const tauriPlatform = process.env.TAURI_ENV_PLATFORM || "";
-
-// Mobile never runs local ACP agents; the trees are desktop-only resources.
-if (
-	tauriPlatform === "android" ||
-	tauriPlatform === "ios" ||
-	/-android|-ios\b/.test(triple)
-) {
-	console.log(
-		`[prepare-adapters] mobile (${tauriPlatform || triple}): nothing to stage`,
-	);
-	process.exit(0);
-}
-
 function manifestPath() {
 	return path.join(outDir, "manifest.json");
 }

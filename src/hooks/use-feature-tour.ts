@@ -14,7 +14,7 @@ import { useStore } from "zustand";
 import { onboardingStore } from "@/components/onboarding/onboarding-store";
 import { useSettings, useVaultStore } from "@/hooks/use-app-stores";
 import { perfActive } from "@/lib/core/perf";
-import { isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isTauri } from "@/lib/core/tauri";
 import { listenTourRequest } from "@/lib/onboarding/api";
 import { patchSettings } from "@/lib/settings/react-store";
 import { formatShortcutById } from "@/lib/shell/shortcuts";
@@ -137,7 +137,7 @@ export function useFeatureTour(): void {
 	// highlight tour from racing with the onboarding overlay.
 	useEffect(() => {
 		if (perfActive()) return;
-		if (!isTauri() || isMobileApp()) return;
+		if (!isTauri()) return;
 		if (!vaultPath || featureTourDone || startedRef.current || onboardingOpen)
 			return;
 		startedRef.current = true;

@@ -57,15 +57,6 @@ import {
 	writeVaultFile,
 } from "@/lib/vault";
 import { normalizePathKey as pathKey } from "@/lib/vault/path";
-import {
-	clearRemoteSessionMeta,
-	isRemoteVaultHandle,
-	rememberRecentRemoteVault,
-	remoteConnect,
-	remoteDisconnect,
-	remoteSessionIdFromHandle,
-	saveRemoteSessionMeta,
-} from "@/lib/vault/remote/remote-vault";
 import { openInTerminal, revealInFileManager } from "@/lib/vault/reveal";
 import type { TreeCreateKind } from "@/lib/vault/store";
 import {
@@ -104,15 +95,6 @@ import { basenameOf } from "@/lib/workspace/tabs";
 import { isExcalidrawPath } from "@/lib/workspace/viewer";
 
 export async function activateVault(path: string): Promise<void> {
-	// Tear down previous remote session so work catalogs are flushed.
-	const prev = getVaultPath();
-	if (prev && isRemoteVaultHandle(prev) && prev !== path) {
-		const prevId = remoteSessionIdFromHandle(prev);
-		if (prevId) {
-			await remoteDisconnect(prevId);
-		}
-		clearRemoteSessionMeta();
-	}
 	bumpTreeGeneration();
 	setTree([]);
 	setTreeLoading(true);
@@ -132,10 +114,7 @@ export async function activateVault(path: string): Promise<void> {
 	clearVisualDrafts();
 	clearSelections();
 	refreshRecentVaults();
-	// Wiki rebuild needs local fs watcher semantics; remote is best-effort.
-	if (!isRemoteVaultHandle(path)) {
-		await rebuildWikiAndNotify(path);
-	}
+	await rebuildWikiAndNotify(path);
 }
 
 export async function openVault(): Promise<void> {
@@ -150,41 +129,6 @@ export async function openVault(): Promise<void> {
 		await activateVault(path);
 	} catch (e) {
 		notifyError(errorText(e));
-	} finally {
-		setVaultBusy(false);
-	}
-}
-
-export async function openRemoteVault(args: {
-	host: string;
-	user?: string;
-	remotePath: string;
-}): Promise<void> {
-	try {
-		if (!isTauri()) {
-			notifyError(i18n.t("app:errors.openVaultDesktopOnly"));
-			return;
-		}
-		setVaultBusy(true);
-		const info = await remoteConnect(args);
-		try {
-			await activateVault(info.vaultHandle);
-		} catch (error) {
-			await remoteDisconnect(info.sessionId);
-			throw error;
-		}
-		saveRemoteSessionMeta(info);
-		rememberRecentRemoteVault({
-			kind: "remote",
-			host: args.host,
-			user: args.user,
-			remotePath: args.remotePath,
-			label: info.displayName,
-		});
-	} catch (e) {
-		notifyError(
-			e instanceof Error ? e.message : i18n.t("app:vault.remoteConnectFailed"),
-		);
 	} finally {
 		setVaultBusy(false);
 	}
@@ -259,10 +203,7 @@ export function refreshAll(): void {
 	if (!vaultPath) return;
 	void (async () => {
 		await refreshTree(vaultPath);
-		// Wiki rebuild needs local fs semantics; a remote handle always fails.
-		if (!isRemoteVaultHandle(vaultPath)) {
-			await rebuildWikiAndNotify(vaultPath);
-		}
+		await rebuildWikiAndNotify(vaultPath);
 		await refreshLibrary();
 	})();
 }
@@ -278,10 +219,8 @@ export function seedVaultSkills(path: string): void {
 		try {
 			// A restored vault may have been moved/deleted since the path was
 			// persisted; never seed (and thus scaffold) a missing local path.
-			if (!isRemoteVaultHandle(path)) {
-				const { exists } = await import("@tauri-apps/plugin-fs");
-				if (!(await exists(path))) return;
-			}
+			const { exists } = await import("@tauri-apps/plugin-fs");
+			if (!(await exists(path))) return;
 			const result = await ensureVault(path, i18n.language);
 			const installed = seededSkillIdsFromCreated(result.created);
 			const updated = seededSkillIdsFromCreated(result.updated);
@@ -314,13 +253,8 @@ export function seedVaultSkills(path: string): void {
 
 /** ⌥⌘R — reveal selected vault path in Finder / Explorer. */
 export function revealSelectedInFinder(): void {
-	const { treeSelectedPath, vaultPath } = vaultStore.getState();
-	const path = treeSelectedPath;
+	const { treeSelectedPath: path } = vaultStore.getState();
 	if (!path || isLibraryVirtualPath(path) || isTrashVirtualPath(path)) return;
-	if (isRemoteVaultHandle(vaultPath) || isRemoteVaultHandle(path)) {
-		notifyWarning(i18n.t("app:vault.remoteNoFinder"));
-		return;
-	}
 	if (!isTauri()) {
 		notifyError(i18n.t("sidebar:fileTree.revealDesktopOnly"));
 		return;
@@ -336,13 +270,8 @@ export function revealSelectedInFinder(): void {
 
 /** ⌥⌘T — open system terminal at selected path (dir = self, file = parent). */
 export function openSelectedInTerminal(): void {
-	const { treeSelectedPath, vaultPath } = vaultStore.getState();
-	const path = treeSelectedPath;
+	const { treeSelectedPath: path } = vaultStore.getState();
 	if (!path || isLibraryVirtualPath(path) || isTrashVirtualPath(path)) return;
-	if (isRemoteVaultHandle(vaultPath) || isRemoteVaultHandle(path)) {
-		notifyWarning(i18n.t("app:vault.remoteNoTerminal"));
-		return;
-	}
 	if (!isTauri()) {
 		notifyError(i18n.t("sidebar:fileTree.openInTerminalDesktopOnly"));
 		return;
@@ -402,9 +331,7 @@ export async function trashPathsAndNotify(absPaths: string[]): Promise<void> {
 			setTreeSelectedPath(null);
 		}
 		await refreshTree(vaultPath);
-		if (!isRemoteVaultHandle(vaultPath)) {
-			await rebuildWikiAndNotify(vaultPath);
-		}
+		await rebuildWikiAndNotify(vaultPath);
 		await refreshLibrary();
 	} catch (e) {
 		notifyError(
@@ -431,10 +358,7 @@ export async function handleTrashChanged(): Promise<void> {
 	if (!vaultPath) return;
 	setTreeSelectedPath(null);
 	await refreshTree(vaultPath);
-	// Wiki rebuild needs local fs semantics; a remote handle always fails.
-	if (!isRemoteVaultHandle(vaultPath)) {
-		await rebuildWikiAndNotify(vaultPath);
-	}
+	await rebuildWikiAndNotify(vaultPath);
 	await refreshLibrary();
 }
 
@@ -552,10 +476,6 @@ export function cutSelectedPaths(rawPaths: string[]): void {
 	}
 	if (!isTauri()) {
 		notifyError(i18n.t("sidebar:fileTree.cutDesktopOnly"));
-		return;
-	}
-	if (isRemoteVaultHandle(vaultPath)) {
-		notifyWarning(i18n.t("sidebar:fileTree.remoteCutPasteDisabled"));
 		return;
 	}
 	const rootKey = pathKey(vaultPath);
@@ -755,10 +675,6 @@ export async function pasteCutPaths(
 		notifyError(i18n.t("sidebar:fileTree.pasteDesktopOnly"));
 		return [];
 	}
-	if (isRemoteVaultHandle(vaultPath)) {
-		notifyWarning(i18n.t("sidebar:fileTree.remoteCutPasteDisabled"));
-		return [];
-	}
 
 	const { cutPaths } = vaultStore.getState();
 	if (cutPaths.length === 0) return [];
@@ -785,9 +701,7 @@ export async function pasteCutPaths(
 		setCutPaths([...failed, ...blocked]);
 		await refreshTree(vaultPath);
 		await refreshLibrary();
-		if (!isRemoteVaultHandle(vaultPath)) {
-			await rebuildWikiAndNotify(vaultPath);
-		}
+		await rebuildWikiAndNotify(vaultPath);
 		if (failed.length > 0 || blocked.length > 0) {
 			notifyWarning(
 				i18n.t("sidebar:fileTree.pastedWithErrors", {
@@ -819,10 +733,6 @@ export async function dropMovePaths(
 		notifyError(i18n.t("sidebar:fileTree.moveDesktopOnly"));
 		return;
 	}
-	if (isRemoteVaultHandle(vaultPath)) {
-		notifyWarning(i18n.t("sidebar:fileTree.remoteCutPasteDisabled"));
-		return;
-	}
 
 	const { tree } = vaultStore.getState();
 	const dest = resolvePasteDestination(vaultPath, tree, targetPath);
@@ -841,9 +751,7 @@ export async function dropMovePaths(
 		);
 		await refreshTree(vaultPath);
 		await refreshLibrary();
-		if (!isRemoteVaultHandle(vaultPath)) {
-			await rebuildWikiAndNotify(vaultPath);
-		}
+		await rebuildWikiAndNotify(vaultPath);
 		if (failed.length > 0 || blocked.length > 0) {
 			notifyWarning(
 				i18n.t("sidebar:fileTree.movedWithErrors", {
@@ -863,10 +771,7 @@ export async function dropMovePaths(
 /** Start inline rename for a tree path. */
 export function startRenamePath(path: string): void {
 	const vaultPath = getVaultPath();
-	if (!vaultPath || isRemoteVaultHandle(vaultPath)) {
-		notifyWarning(i18n.t("app:vault.remoteNoAutoLinkRepair"));
-		return;
-	}
+	if (!vaultPath) return;
 	const fromRel = vaultRelativePath(vaultPath, path);
 	if (!fromRel) return;
 	setRenameDraft({ path, currentName: basenameOf(path) });
@@ -1192,7 +1097,7 @@ export async function migrateZoteroFromWelcome(): Promise<void> {
  */
 export function validateRestoredVault(): Promise<void> {
 	const restoredPath = getVaultPath();
-	if (!isTauri() || !restoredPath || isRemoteVaultHandle(restoredPath)) {
+	if (!isTauri() || !restoredPath) {
 		return Promise.resolve();
 	}
 	return ensureLocalFsScope(restoredPath)

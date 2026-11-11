@@ -5,7 +5,6 @@ import {
 	SettingsRow,
 } from "@/components/settings/settings-layout";
 import { StatusDot } from "@/components/settings/status-dot";
-import { WordSettings } from "@/components/settings/word-settings";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
@@ -126,7 +125,6 @@ export function ConnectorSettingsBlock({
 					disabled={busy}
 				/>
 			</SettingsRow>
-			<WordSettings />
 		</SettingsGroup>
 	);
 }

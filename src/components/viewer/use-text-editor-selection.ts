@@ -3,7 +3,6 @@
 import type { Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { type RefObject, useCallback, useEffect, useMemo, useRef } from "react";
-import type { WritingSelectionGroup } from "@/components/writing/writing-selection-group";
 import type { SelectionDraftScreen } from "@/lib/agent/selection-chat-store";
 import {
 	closeSelectionSource,
@@ -79,7 +78,6 @@ export function useTextEditorSelection({
 	viewRef,
 	path,
 	active,
-	selectionGroup,
 }: {
 	/** CodeMirror view owned by TextEditor's mount effect. */
 	viewRef: RefObject<EditorView | null>;
@@ -87,8 +85,6 @@ export function useTextEditorSelection({
 	path: string;
 	/** Only the active tab may arm the toolbar (inactive panes stay mounted). */
 	active: boolean;
-	/** Writing split: keep source and PDF selections mutually exclusive. */
-	selectionGroup?: WritingSelectionGroup | null;
 }) {
 	const menuRef = useRef<TextEditorSelectionMenu | null>(null);
 	const ownedId = useRef<string | null>(null);
@@ -141,7 +137,6 @@ export function useTextEditorSelection({
 		);
 		ownedId.current = selectionChatStore.getState().draft?.selection.id ?? null;
 		publishedRef.current = true;
-		selectionGroup?.announce("source");
 		publishSelection({
 			text,
 			sourcePath: pathRef.current,
@@ -165,19 +160,6 @@ export function useTextEditorSelection({
 			}),
 		[],
 	);
-
-	// PDF selection took over the writing split: drop the source range, but do
-	// not move the cursor or steal focus.
-	useEffect(() => {
-		if (!selectionGroup) return;
-		return selectionGroup.subscribe((origin) => {
-			if (origin !== "pdf") return;
-			const view = viewRef.current;
-			const selection = view?.state.selection.main;
-			if (!view || !selection || selection.empty) return;
-			view.dispatch({ selection: { anchor: selection.head } });
-		});
-	}, [selectionGroup, viewRef]);
 
 	// Drag arm point + collapse dismissal: mousedown/mouseup pairs anywhere
 	// (capture), arming only when the release lands inside this editor.

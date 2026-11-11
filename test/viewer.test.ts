@@ -57,7 +57,7 @@ describe("viewer path helpers", () => {
 		expect(textLanguageIdForPath("/a/config.json")).toBe("json");
 		expect(textLanguageIdForPath("/a/ci.YML")).toBe("yaml");
 		expect(textLanguageIdForPath("/a/main.py")).toBe("python");
-		expect(textLanguageIdForPath("/a/main.tex")).toBe("tex");
+		expect(textLanguageIdForPath("/a/main.tex")).toBe(null);
 		expect(textLanguageIdForPath("/a/ref.bib")).toBe("bib");
 		expect(textLanguageIdForPath("/a/notes.txt")).toBe(null);
 		expect(textLanguageIdForPath("/a/README")).toBe(null);

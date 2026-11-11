@@ -72,9 +72,6 @@ pub struct AppSettings {
     /// EasyScholar key for journal ranking and impact-factor lookups.
     #[serde(default)]
     pub easy_scholar_key: String,
-    /// 知乎开放平台 Access Secret（内置「知乎」Agent 的直答 / 检索凭证）。
-    #[serde(default)]
-    pub zhihu_access_secret: String,
     #[serde(default)]
     pub network_proxy_enabled: bool,
     #[serde(default = "default_network_proxy_url")]
@@ -139,14 +136,6 @@ pub struct AppSettings {
     /// server. Default off — external clients only see metadata and NOTES.
     #[serde(default)]
     pub mcp_expose_paper_text: bool,
-    /// OpenAI Secure MCP Tunnel id (`tunnel_` + 32 hex) for the built-in
-    /// `tunnel-client` supervisor. Empty = never configured.
-    #[serde(default)]
-    pub mcp_tunnel_id: String,
-    /// Runtime (Restricted) control-plane API key. Masked on read like the
-    /// other commercial keys; the WebView never sees the plaintext.
-    #[serde(default)]
-    pub mcp_tunnel_api_key: String,
     #[serde(default = "default_batch_import_concurrency")]
     pub batch_import_concurrency: u32,
     #[serde(default = "default_theme")]
@@ -206,9 +195,6 @@ pub struct AppSettings {
     pub translate: TranslateSettings,
     #[serde(default)]
     pub layout: LayoutSettings,
-    /// PostHog product analytics opt-out (applies from the next launch).
-    #[serde(default = "default_true")]
-    pub telemetry_enabled: bool,
     /// Plaza discovery sources in the sidebar. Default on.
     #[serde(default = "default_true")]
     pub plaza_enabled: bool,
@@ -222,7 +208,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub feature_tour_done: bool,
     /// Config reminders the user dismissed with "don't remind me again"
-    /// (`layout-local-model` | `network-proxy`). Unknown ids are dropped on save.
+    /// (`network-proxy`). Unknown ids are dropped on save.
     #[serde(default)]
     pub dismissed_reminders: Vec<String>,
 }
@@ -408,8 +394,8 @@ pub struct TranslateProviderConfig {
 }
 
 /// PDF layout-analysis backend selection.
-/// - `local`: on-device PP-DocLayoutV3 (ONNX in the renderer).
 /// - `paddle`: remote PP-StructureV3 async job API (`POST {base}/api/v2/ocr/jobs`).
+/// - `mineru`: remote MinerU layout API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
@@ -463,7 +449,6 @@ impl Default for AppSettings {
         Self {
             shortcut_overrides: HashMap::new(),
             easy_scholar_key: String::new(),
-            zhihu_access_secret: String::new(),
             network_proxy_enabled: false,
             network_proxy_url: default_network_proxy_url(),
             institution_proxy_prefix: String::new(),
@@ -485,8 +470,6 @@ impl Default for AppSettings {
             mcp_enabled: false,
             mcp_expose_paper_text: false,
             mcp_port: default_mcp_port(),
-            mcp_tunnel_id: String::new(),
-            mcp_tunnel_api_key: String::new(),
             batch_import_concurrency: default_batch_import_concurrency(),
             theme: default_theme(),
             ui_theme: default_ui_theme(),
@@ -511,7 +494,6 @@ impl Default for AppSettings {
             embedding: EmbeddingSettings::default(),
             translate: TranslateSettings::default(),
             layout: LayoutSettings::default(),
-            telemetry_enabled: default_true(),
             plaza_enabled: default_true(),
             plaza_hidden_sources: Vec::new(),
             onboarding_done: false,
@@ -647,11 +629,11 @@ fn default_translate_display_mode() -> String {
 fn default_translate_dual_pane_source() -> String {
     "pdf".into()
 }
-/// Layout analysis stays on the bundled offline PP-DocLayoutV3 model: it is
-/// free, local, and a cloud backend would bill every PDF for no gain. The
-/// built-in provider is a *parser* (body-text) backend only.
+/// Default remote layout-analysis backend (`paddle`). Requires the user's own
+/// API key before any network call is made; the built-in provider is a
+/// *parser* (body-text) backend only.
 fn default_layout_backend() -> String {
-    "local".into()
+    "paddle".into()
 }
 fn default_parser_backend() -> String {
     "local".into()
@@ -993,19 +975,6 @@ impl AppSettingsStore {
         })
     }
 
-    /// Raw `(tunnel_id, api_key)` for the built-in ChatGPT tunnel supervisor.
-    /// Returns None unless both are set; a UI mask counts as unset so a
-    /// `settings_get` → `settings_set` round-trip never leaks or wipes the key.
-    pub fn mcp_tunnel_config(&self) -> Option<(String, String)> {
-        let guard = self.inner.lock().ok()?;
-        let id = guard.mcp_tunnel_id.trim().to_string();
-        let key = guard.mcp_tunnel_api_key.trim();
-        if id.is_empty() || key.is_empty() || is_translate_api_key_mask(key) {
-            return None;
-        }
-        Some((id, key.to_string()))
-    }
-
     /// Resolve the configured institution proxy (prefix, cookie). None when
     /// the prefix is unset.
     pub fn institution_proxy(
@@ -1104,17 +1073,6 @@ impl AppSettingsStore {
             Some(key.to_string())
         }
     }
-
-    /// 解析已配置的知乎 Access Secret。未配置或仍是 UI 掩码时返回 None。
-    pub fn zhihu_access_secret(&self) -> Option<String> {
-        let guard = self.inner.lock().ok()?;
-        let key = guard.zhihu_access_secret.trim();
-        if key.is_empty() || is_translate_api_key_mask(key) {
-            None
-        } else {
-            Some(key.to_string())
-        }
-    }
 }
 
 fn read_file(path: &PathBuf) -> (AppSettings, bool) {
@@ -1193,14 +1151,8 @@ fn redact_secrets(mut settings: AppSettings) -> AppSettings {
     if !settings.embedding.api_key.trim().is_empty() {
         settings.embedding.api_key = mask_translate_api_key(&settings.embedding.api_key);
     }
-    if !settings.mcp_tunnel_api_key.trim().is_empty() {
-        settings.mcp_tunnel_api_key = mask_translate_api_key(&settings.mcp_tunnel_api_key);
-    }
     if !settings.easy_scholar_key.trim().is_empty() {
         settings.easy_scholar_key = mask_translate_api_key(&settings.easy_scholar_key);
-    }
-    if !settings.zhihu_access_secret.trim().is_empty() {
-        settings.zhihu_access_secret = mask_translate_api_key(&settings.zhihu_access_secret);
     }
     if !settings.decision.api_key.trim().is_empty() {
         settings.decision.api_key = mask_translate_api_key(&settings.decision.api_key);
@@ -1232,14 +1184,8 @@ fn merge_secrets(incoming: &mut AppSettings, previous: &AppSettings) {
     if is_translate_api_key_mask(&incoming.embedding.api_key) {
         incoming.embedding.api_key = previous.embedding.api_key.clone();
     }
-    if is_translate_api_key_mask(&incoming.mcp_tunnel_api_key) {
-        incoming.mcp_tunnel_api_key = previous.mcp_tunnel_api_key.clone();
-    }
     if is_translate_api_key_mask(&incoming.easy_scholar_key) {
         incoming.easy_scholar_key = previous.easy_scholar_key.clone();
-    }
-    if is_translate_api_key_mask(&incoming.zhihu_access_secret) {
-        incoming.zhihu_access_secret = previous.zhihu_access_secret.clone();
     }
     if is_translate_api_key_mask(&incoming.decision.api_key) {
         incoming.decision.api_key = previous.decision.api_key.clone();
@@ -1262,14 +1208,7 @@ fn normalize(s: &mut AppSettings) {
     if s.mcp_port == 0 {
         s.mcp_port = default_mcp_port();
     }
-    s.mcp_tunnel_id = s
-        .mcp_tunnel_id
-        .split_whitespace()
-        .collect::<String>()
-        .to_ascii_lowercase();
-    s.mcp_tunnel_api_key = s.mcp_tunnel_api_key.trim().to_string();
     s.easy_scholar_key = s.easy_scholar_key.trim().to_string();
-    s.zhihu_access_secret = s.zhihu_access_secret.trim().to_string();
     s.decision.api_key = s.decision.api_key.trim().to_string();
     let provider = s.decision.provider.trim().to_ascii_lowercase();
     s.decision.provider = if provider.is_empty() {
@@ -1494,7 +1433,7 @@ fn normalize(s: &mut AppSettings) {
     s.translate.custom_system = cap_translate_template(&s.translate.custom_system);
     s.translate.custom_user = cap_translate_template(&s.translate.custom_user);
 
-    const LAYOUT_BACKENDS: &[&str] = &["local", "paddle", "mineru"];
+    const LAYOUT_BACKENDS: &[&str] = &["paddle", "mineru"];
     if !LAYOUT_BACKENDS.contains(&s.layout.backend.as_str()) {
         s.layout.backend = default_layout_backend();
     }
@@ -1517,7 +1456,7 @@ fn normalize(s: &mut AppSettings) {
 
 /// Known config-reminder ids; anything else is dropped so a hand-edited file
 /// cannot smuggle stale ids into the frontend.
-const DISMISSED_REMINDER_IDS: &[&str] = &["layout-local-model", "network-proxy"];
+const DISMISSED_REMINDER_IDS: &[&str] = &["network-proxy"];
 
 fn normalize_dismissed_reminders(raw: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -1753,16 +1692,13 @@ mod tests {
             dismissed_reminders: vec![
                 "layout-local-model".into(),
                 "unknown".into(),
-                "layout-local-model".into(),
+                "network-proxy".into(),
                 "  network-proxy ".into(),
             ],
             ..AppSettings::default()
         };
         normalize(&mut s);
-        assert_eq!(
-            s.dismissed_reminders,
-            vec!["layout-local-model", "network-proxy"]
-        );
+        assert_eq!(s.dismissed_reminders, vec!["network-proxy"]);
     }
 
     #[test]
@@ -1816,24 +1752,6 @@ mod tests {
                 .map(|c| c.api_key.as_str()),
             Some("")
         );
-
-        // MCP tunnel runtime key follows the same mask round-trip.
-        let mut with_tunnel = AppSettings {
-            mcp_tunnel_id: " Tunnel_ABC ".into(),
-            mcp_tunnel_api_key: "  sk-tunnel-secret ".into(),
-            ..AppSettings::default()
-        };
-        normalize(&mut with_tunnel);
-        assert_eq!(with_tunnel.mcp_tunnel_id, "tunnel_abc");
-        assert_eq!(with_tunnel.mcp_tunnel_api_key, "sk-tunnel-secret");
-
-        let redacted_tunnel = redact_secrets(with_tunnel.clone());
-        assert!(is_translate_api_key_mask(
-            &redacted_tunnel.mcp_tunnel_api_key
-        ));
-        let mut echoed = redacted_tunnel;
-        merge_secrets(&mut echoed, &with_tunnel);
-        assert_eq!(echoed.mcp_tunnel_api_key, "sk-tunnel-secret");
     }
 
     #[test]
@@ -2231,18 +2149,22 @@ mod tests {
         fs::remove_file(&store.path).expect("remove test settings");
     }
 
-    /// `agentero` is a parser (body-text) backend only. Layout analysis stays on
-    /// the bundled offline PP-DocLayoutV3 model, so `LAYOUT_BACKENDS` must not
-    /// grow the built-in id and `default_layout_backend` must not consult it.
+    /// `agentero` is a parser (body-text) backend only. Layout analysis uses
+    /// remote layout providers (`paddle` / `mineru`), so `LAYOUT_BACKENDS` must
+    /// not grow the built-in id and `default_layout_backend` must not consult it.
     #[test]
     fn layout_backend_never_becomes_builtin() {
-        assert_eq!(default_layout_backend(), "local");
-        assert_eq!(AppSettings::default().layout.backend, "local");
+        assert_eq!(default_layout_backend(), "paddle");
+        assert_eq!(AppSettings::default().layout.backend, "paddle");
 
         let mut s = AppSettings::default();
         s.layout.backend = BUILTIN_PROVIDER_ID.into();
         normalize(&mut s);
-        assert_eq!(s.layout.backend, "local");
+        assert_eq!(s.layout.backend, "paddle");
+
+        s.layout.backend = "local".into();
+        normalize(&mut s);
+        assert_eq!(s.layout.backend, "paddle");
     }
 
     #[test]
@@ -2458,7 +2380,7 @@ mod tests {
         assert!(!existed);
         assert_eq!(s.translate.provider, "tencenttransmart");
         assert_eq!(s.layout.parser_backend, "local");
-        assert_eq!(s.layout.backend, "local");
+        assert_eq!(s.layout.backend, "paddle");
 
         persist(&path, &s).expect("write");
         let (reloaded, existed) = read_file(&path);
@@ -2471,8 +2393,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         for (json, layout_backend) in [
-            (r#"{}"#, "local"),
+            (r#"{}"#, "paddle"),
+            (r#"{"layout":{"backend":"local"}}"#, "paddle"),
             (r#"{"layout":{"backend":"paddle"}}"#, "paddle"),
+            (r#"{"layout":{"backend":"mineru"}}"#, "mineru"),
         ] {
             fs::write(&path, json).unwrap();
             let (loaded, existed) = read_file(&path);

@@ -15,7 +15,6 @@ import { ensurePaperRows, listPapers } from "@/lib/paper/api";
 import { libraryStore, setLibraryPapers } from "@/lib/paper/library-store";
 import type { PaperLibraryRow } from "@/lib/paper/types";
 import { normalizePathKey } from "@/lib/vault/path";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { watchRefreshDelayMs } from "@/lib/vault/shell-activity";
 import {
 	getVaultPath,
@@ -314,7 +313,7 @@ async function flushExternal(): Promise<void> {
 
 async function flushBucket(bucket: Bucket): Promise<void> {
 	const vault = getVaultPath();
-	if (!vault || !isTauri() || isRemoteVaultHandle(vault)) return;
+	if (!vault || !isTauri()) return;
 	if (bucket.treeRemove.size > 0) {
 		removeTreePaths([...bucket.treeRemove]);
 	}

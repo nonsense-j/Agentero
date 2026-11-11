@@ -8,7 +8,7 @@
  * Layout provider ids with remote credentials (shared with the body parser).
  * `agentero` is the built-in parser: the Host injects its compiled-in
  * credential, so it has no user-facing config card. It is a PARSER backend
- * only — layout analysis stays on the local ONNX model (`LAYOUT_BACKENDS`).
+ * only — never a layout-analysis backend (`LAYOUT_BACKENDS`).
  */
 export const LAYOUT_PROVIDER_IDS = [
 	"agentero",
@@ -19,11 +19,10 @@ export const LAYOUT_PROVIDER_IDS = [
 export type LayoutProviderId = (typeof LAYOUT_PROVIDER_IDS)[number];
 
 /**
- * - `local`: on-device PP-DocLayoutV3 (ONNX in the renderer).
  * - `paddle`: remote PP-StructureV3 async job API (`/api/v2/ocr/jobs`).
  * - `mineru`: remote MinerU batch extract API (`/api/v4/file-urls/batch`).
  */
-export const LAYOUT_BACKENDS = ["local", "paddle", "mineru"] as const;
+export const LAYOUT_BACKENDS = ["paddle", "mineru"] as const;
 export type LayoutBackend = (typeof LAYOUT_BACKENDS)[number];
 
 /**
@@ -99,7 +98,7 @@ export type LayoutSettings = {
 };
 
 export const DEFAULT_LAYOUT_SETTINGS: LayoutSettings = {
-	backend: "local",
+	backend: "paddle",
 	parserBackend: "local",
 	providerConfigs: {},
 };

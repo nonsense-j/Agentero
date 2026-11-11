@@ -1,11 +1,6 @@
 {
 	"title": "设置",
-	"host": {
-		"remote": "远端",
-		"remoteContextHint": "当前 Vault 在 {{host}}（{{path}}）。外观等仍为本机偏好；打开 Agent 分区时会对远端主机做探测。"
-	},
 	"nav": {
-		"account": "账号与团队",
 		"general": "通用",
 		"appearance": "外观",
 		"agent": "Agent",
@@ -14,58 +9,10 @@
 		"experimental": "实验功能",
 		"doctor": "问题诊断",
 		"keyboard": "快捷键",
-		"remote-access": "移动端访问",
 		"about": "关于",
 		"quickSetup": "快速配置向导",
 		"featureTour": "功能导引",
-		"sync": "同步",
-		"plugins": "插件"
-	},
-	"writing": {
-		"uploadMode": "何时上传",
-		"uploadManual": "手动",
-		"uploadOnCompile": "每次编译后",
-		"uploadInterval": "定时",
-		"uploadEvery": "间隔",
-		"uploadMinutes": "{{count}} 分钟",
-		"save": "保存",
-		"saved": "已保存"
-	},
-	"remoteAccess": {
-		"title": "移动端访问",
-		"localVaultRequired": "请打开本地 Vault 后再提供移动端访问。",
-		"hostName": {
-			"label": "电脑名称"
-		},
-		"status": {
-			"online": "在线",
-			"offline": "离线"
-		},
-		"start": "开启移动端访问",
-		"stop": "关闭移动端访问",
-		"qrAlt": "配对二维码",
-		"pairing": {
-			"title": "配对 iPhone 或 iPad"
-		},
-		"copyLink": "复制配对链接",
-		"copied": "已复制配对链接",
-		"copyFailed": "无法复制配对链接",
-		"request": {
-			"title": "配对 {{device}}",
-			"code": "确认码：{{code}}"
-		},
-		"approve": "允许",
-		"deny": "拒绝",
-		"devices": {
-			"revoke": "撤销 {{device}}"
-		},
-		"cache": {
-			"section": "远程 Vault 缓存",
-			"label": "PDF 预览缓存",
-			"clear": "清除远程缓存",
-			"clearing": "清除中…",
-			"clearFailed": "清除远程缓存失败"
-		}
+		"sync": "同步"
 	},
 	"general": {
 		"title": "通用",
@@ -222,31 +169,10 @@
 			"portLabel": "MCP 端口",
 			"invalidPort": "端口必须在 1 到 65535 之间。",
 			"copyUrl": "复制 MCP 地址",
-			"copied": "已复制",
-			"tunnel": {
-				"tunnelIdLabel": "隧道 ID",
-				"apiKeyLabel": "Runtime API Key",
-				"invalidTunnelId": "隧道 ID 形如 tunnel_ 加 32 位十六进制。",
-				"label": "ChatGPT 隧道",
-				"start": "启动",
-				"stop": "停止",
-				"starting": "启动中…",
-				"ready": "已连接",
-				"error": "未连接",
-				"stopped": "已停止",
-				"binaryMissing": "未找到 tunnel-client",
-				"installHint": "安装后会自动检测到，无需重启：",
-				"copyCommand": "复制安装命令",
-				"copied": "已复制",
-				"openTunnels": "打开隧道列表",
-				"openApiKeys": "打开 API Key 页面"
-			}
+			"copied": "已复制"
 		},
 		"privacy": {
 			"section": "隐私",
-			"telemetry": {
-				"label": "共享匿名使用数据"
-			},
 			"clearUsage": {
 				"label": "清除使用记录",
 				"action": "清除",
@@ -322,17 +248,6 @@
 	},
 	"agent": {
 		"title": "Agent",
-		"zhihu": {
-			"section": "知乎",
-			"keyLabel": "Access Secret",
-			"placeholder": "粘贴知乎开放平台 Access Secret",
-			"confirm": "保存",
-			"openKeyPage": "打开知乎开放平台个人中心",
-			"probeIdle": "未配置",
-			"probeProbing": "检测中…",
-			"probeOk": "可用",
-			"probeFail": "不可用"
-		},
 		"userAgent": {
 			"section": "中转站兼容",
 			"label": "User-Agent",
@@ -501,15 +416,6 @@
 			"registryOnly": "仅移除 Agentero 注册项，磁盘上的文件保留。",
 			"customConfirm": "从 Agentero 中移除此自定义 Agent？",
 			"confirm": "卸载"
-		},
-		"remote": {
-			"banner": "正在探测 {{host}} 上的 ACP Agent。二进制需在服务器安装并完成登录（login shell PATH）。",
-			"commonAgents": "远端主机上的 Agent",
-			"probeTitle": "重新扫描并探测远端 Agent",
-			"empty": "没有目录结果。请检查 SSH 会话与远端 PATH。",
-			"hint": "刷新会经 SSH 执行 command -v 与 ACP initialize。若 Claude 显示「ACP adapter missing」，点「Install ACP」（打开终端 → Enter → 经 SSH 在服务器安装）。密钥留在远端（BYOA）。若探测超时，可开启 Agent 代理（代理需从服务器可达）。",
-			"installAdapterAria": "在终端中经 SSH 为 {{name}} 安装远端 ACP 适配器",
-			"installAdapterTitle": "打开终端，SSH 到 {{host}} 并执行：{{command}}（按 Enter 确认）"
 		}
 	},
 	"translate": {
@@ -549,19 +455,6 @@
 			"label": "翻译显示模式",
 			"overlay": "在原 PDF 上覆盖",
 			"dualPane": "双栏对照"
-		},
-		"cache": {
-			"section": "缓存",
-			"ir": {
-				"label": "缓存重排 IR",
-				"description": "保存抽取出的字符几何，再次打开时无需重新抽取。"
-			},
-			"final": {
-				"label": "缓存译文 PDF",
-				"description": "保存构建完成的译文 PDF，每篇约 25 MB。"
-			},
-			"tip": "关闭开关只停止写入新文件，已有缓存仍会复用。",
-			"reset": "还原默认"
 		},
 		"providerConfig": {
 			"section": "API 服务",
@@ -623,7 +516,6 @@
 		"title": "版面解析",
 		"backend": {
 			"label": "解析方式",
-			"local": "本地推理",
 			"paddle": "Paddle",
 			"mineru": "MinerU"
 		},
@@ -746,7 +638,6 @@
 	"doctor": {
 		"title": "问题诊断",
 		"refresh": "重新运行诊断",
-		"remoteUnavailable": "当前版本仅支持诊断本地 Vault。",
 		"openVault": "请打开本地 Vault 后运行诊断。",
 		"sections": {
 			"host": "主机运行环境",
@@ -938,16 +829,6 @@
 			"clearDone": "缓存已清除",
 			"clearFailed": "清除论文全文缓存失败。"
 		},
-		"reflowCache": {
-			"label": "翻译缓存",
-			"summary": "{{size}}",
-			"open": "打开缓存文件夹",
-			"openFailed": "打开缓存文件夹失败。",
-			"clear": "清除缓存",
-			"clearDone": "翻译缓存已清除",
-			"clearFailed": "清除翻译缓存失败。",
-			"tip": "缓存全文翻译的中间结果，同一篇论文再次翻译时直接复用，无需重新提取与构建。关闭开关只停止写入新缓存，已有缓存仍会复用；可在「设置 → 翻译 → 缓存」中分别控制。"
-		},
 		"downloadNetworkError": {
 			"title": "从 GitHub 下载时发生网络错误",
 			"openSettings": "打开网络设置"
@@ -995,25 +876,6 @@
 			"statusFailed": "无法读取 CLI 状态",
 			"openReleaseFailed": "无法打开发布页",
 			"syncFailed": "已安装的 CLI 未能自动同步到当前版本，请到 设置 → 关于 手动更新"
-		},
-		"feedback": {
-			"label": "反馈",
-			"description": "把问题或想法发给开发团队",
-			"open": "填写",
-			"title": "反馈",
-			"hint": "会附带应用版本和系统信息。文库、文件名和论文内容留在这台设备上。",
-			"kindBug": "遇到问题",
-			"kindIdea": "想法",
-			"message": "描述",
-			"messagePlaceholder": "发生了什么，或者你希望怎样",
-			"contact": "邮箱",
-			"contactPlaceholder": "选填，方便我们回复",
-			"send": "发送",
-			"sending": "发送中",
-			"sent": "已发送",
-			"unavailable": "当前版本无法发送反馈",
-			"invalid": "请先写一段描述",
-			"failed": "发送失败，请重试"
 		}
 	},
 	"sync": {
@@ -1021,7 +883,6 @@
 		"advanced": "高级",
 		"localVaultOnly": "云同步仅支持本地 Vault。",
 		"backend": "同步方式",
-		"backendAgentero": "当前账号",
 		"backendS3": "对象存储",
 		"backendWebdav": "WebDAV",
 		"backendGit": "Git",
@@ -1061,11 +922,6 @@
 			"finalize": "正在收尾…"
 		},
 		"connect": "连接",
-		"useAccount": "使用当前账号同步",
-		"space": "同步到",
-		"spacePersonal": "个人空间",
-		"spaceTeam": "当前团队",
-		"noTeam": "先在账号里进入一个团队，才能同步到团队空间。",
 		"save": "保存",
 		"autoSync": "自动同步",
 		"interval": "同步间隔",
@@ -1076,78 +932,5 @@
 		"scopePdf": "PDF 文件",
 		"scopeSource": "LaTeX 源码",
 		"scopeAttachments": "支撑材料"
-	},
-	"cloudSync": {
-		"title": "云同步",
-		"usedOf": "已用 {{used}} / {{limit}}",
-		"unlimited": "不限",
-		"signInRequired": "登录后可查看云同步容量。",
-		"notIncluded": "当前套餐不包含云同步。"
-	},
-	"plugins": {
-		"install": "从文件夹安装…",
-		"localOnly": "打开本地 Vault 后可管理插件。",
-		"empty": "尚未安装插件。",
-		"failed": "插件操作失败",
-		"configure": "配置 {{name}}",
-		"remove": "卸载 {{name}}",
-		"enable": "启用 {{name}}",
-		"saveEnable": "保存并启用",
-		"permissions": {
-			"vault:read": "读取 Vault 文件与论文",
-			"catalog:write": "修改论文标签和已读状态",
-			"vault:notes:write": "写入论文笔记",
-			"vault:write": "写入 Vault 文本及移动论文"
-		},
-		"cancel": "取消"
-	},
-	"word": {
-		"damagedField": "引文字段结果为空或已损坏。请恢复文档，或在副本中重新插入引文。",
-		"label": "Zotero Word 插件",
-		"search": "搜索论文",
-		"pages": "页码（应用于所选文献）",
-		"style": "引用样式",
-		"styles": {
-			"apa": "APA 7",
-			"ieee": "IEEE",
-			"chicago": "Chicago 作者—年份"
-		},
-		"cancel": "取消",
-		"apply": "应用",
-		"working": "正在更新 Word…",
-		"noResults": "未找到论文",
-		"actions": {
-			"addEditCitation": "添加 / 编辑引文",
-			"addEditBibliography": "添加 / 更新参考文献",
-			"setDocPrefs": "文档偏好设置",
-			"refresh": "刷新引文"
-		},
-		"noDocument": "请先在 Word 中打开文档。",
-		"readOnly": "Word 文档为只读。",
-		"trackChanges": "使用此原型前请关闭修订模式。",
-		"notesUnsupported": "此原型仅支持正文引文，暂不处理含脚注或尾注的文档。",
-		"documentChanged": "文档已变更，请重新执行 Word 命令。",
-		"selectionChanged": "光标已移动，请重新执行 Word 命令。",
-		"insertFailed": "Word 无法插入引文字段。",
-		"invalidPath": "Word 驱动路径无效。",
-		"driverFailed": "Word 自动化失败。",
-		"timeout": "Word 响应超时，请检查文档后重试。",
-		"platformUnsupported": "此原型目前仅支持 macOS 与 Windows。",
-		"foreignFields": "文档包含 Zotero 或不支持的引文字段，请使用新文档测试此原型。",
-		"unknownStyle": "不支持此引用样式。",
-		"connectorRequired": "请先开启 Zotero Connector，再开启 Word 集成。",
-		"localVaultRequired": "请先打开本地 Vault。",
-		"zoteroRunning": "开启 Word 集成前请退出 Zotero 桌面端。",
-		"busy": "已有 Word 操作正在进行。",
-		"expired": "Word 请求已过期，请重新执行命令。",
-		"disabled": "Word 集成尚未开启。",
-		"commandUnsupported": "此原型暂不支持该 Word 命令。",
-		"collapseSelection": "请将光标放在插入位置，不要选中文本。",
-		"cursorInCitation": "插入参考文献前请将光标移到引文之外。",
-		"vaultChanged": "当前 Vault 已切换，请重新执行 Word 命令。",
-		"invalidSelection": "请选择 1–50 篇有效文献。",
-		"noCitations": "请先插入引文，再添加参考文献。",
-		"permission": "请在 macOS 系统设置 → 隐私与安全性 → 自动化中，允许 Agentero 控制 Microsoft Word。",
-		"failed": "Word 集成失败：{{detail}}"
 	}
 }

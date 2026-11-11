@@ -63,7 +63,7 @@ pub fn open_in_terminal(path: &Path, preferred: &str) -> Result<PathBuf, AppErro
 /// Copy and temp-script identity shared by terminal launches (banner title for
 /// confirm-to-run flows, post-run hint and temp script name prefix).
 struct ConfirmCopy {
-    /// Temp script file prefix ("install" / "login").
+    /// Temp script file prefix ("login" / "agent-cli").
     stem: &'static str,
     /// Banner title printed above the command.
     title: &'static str,
@@ -72,24 +72,10 @@ struct ConfirmCopy {
 }
 
 #[cfg(windows)]
-const CONFIRM_INSTALL: ConfirmCopy = ConfirmCopy {
-    stem: "install",
-    title: "Agentero - install helper",
-    done_hint: "Done. Return to Agentero Settings - Agent and click Refresh.",
-};
-
-#[cfg(windows)]
 const CONFIRM_LOGIN: ConfirmCopy = ConfirmCopy {
     stem: "login",
     title: "Agentero - agent login",
     done_hint: "Done. Agentero will re-check the login status automatically.",
-};
-
-#[cfg(not(windows))]
-const CONFIRM_INSTALL: ConfirmCopy = ConfirmCopy {
-    stem: "install",
-    title: "Agentero — install helper",
-    done_hint: "Done. Return to Agentero → Settings → Agent and click Refresh.",
 };
 
 #[cfg(not(windows))]
@@ -121,16 +107,8 @@ enum RunMode {
     Direct,
 }
 
-/// Open a system terminal that prints `command`, waits for Enter (or Ctrl+C), then runs it.
-///
-/// Used for guided installs (e.g. Claude ACP adapter). The shell never auto-runs without
-/// confirmation. Only trusted Host-side callers should pass commands.
-pub fn open_terminal_confirm_command(command: &str) -> Result<(), AppError> {
-    run_terminal_script(command, &CONFIRM_INSTALL, RunMode::Confirm)
-}
-
-/// Same confirm-to-run terminal as [`open_terminal_confirm_command`], worded for
-/// agent CLI OAuth login flows (e.g. `codex login`, `claude auth login`).
+/// Open a system terminal that prints `command`, waits for Enter (or Ctrl+C),
+/// then runs it for agent CLI OAuth login flows (e.g. `codex login`, `claude auth login`).
 pub fn open_terminal_confirm_login(command: &str) -> Result<(), AppError> {
     run_terminal_script(command, &CONFIRM_LOGIN, RunMode::Confirm)
 }
@@ -162,163 +140,6 @@ fn run_terminal_script(command: &str, copy: &ConfirmCopy, mode: RunMode) -> Resu
     {
         open_terminal_command_unix(command, copy, mode)
     }
-}
-
-/// Guided install on a remote host via interactive SSH (same Enter-to-confirm UX).
-///
-/// Opens the system terminal; after Enter runs:
-/// `ssh -t <destination> -- bash -lc '<install_command>'`
-/// so npm/global installs land on the **server** PATH (login shell).
-pub fn open_terminal_confirm_remote_install(
-    destination: &str,
-    install_command: &str,
-) -> Result<(), AppError> {
-    let destination = destination.trim();
-    let install_command = install_command.trim();
-    if destination.is_empty() {
-        return Err(AppError::message("SSH destination is required"));
-    }
-    if install_command.is_empty() {
-        return Err(AppError::message("install command is required"));
-    }
-    if destination.contains('\n')
-        || destination.contains('\r')
-        || destination.contains(';')
-        || destination.contains(' ')
-    {
-        return Err(AppError::message(
-            "SSH destination contains disallowed characters",
-        ));
-    }
-    if install_command.contains('\n')
-        || install_command.contains('\r')
-        || install_command.contains(';')
-    {
-        return Err(AppError::message(
-            "install command contains disallowed characters",
-        ));
-    }
-
-    #[cfg(windows)]
-    {
-        // Single remote command string so the whole npm line is the -c payload.
-        let command = format!("ssh -t {destination} -- \"bash -lc {install_command:?}\"");
-        open_terminal_command_windows(&command, &CONFIRM_INSTALL, RunMode::Confirm)
-    }
-    #[cfg(not(windows))]
-    {
-        open_terminal_confirm_remote_install_unix(destination, install_command)
-    }
-}
-
-#[cfg(not(windows))]
-fn open_terminal_confirm_remote_install_unix(
-    destination: &str,
-    install_command: &str,
-) -> Result<(), AppError> {
-    let dir = std::env::temp_dir().join("agentero-install");
-    fs::create_dir_all(&dir)
-        .map_err(|e| AppError::message(format!("failed to create temp dir: {e}")))?;
-    let path = dir.join(format!("remote-install-{}.sh", std::process::id()));
-    let dest_q = destination.replace('\'', "'\\''");
-    let cmd_q = install_command.replace('\'', "'\\''");
-    // Important: `ssh host bash -lc "$CMD"` is wrong — OpenSSH joins remote args and the
-    // remote shell re-splits, so only `npm` runs and `i -g …` is lost. Pass a *single*
-    // remote command string with the -c payload properly quoted via printf %q.
-    let body = format!(
-        r#"#!/usr/bin/env bash
-set +e
-DEST='{dest_q}'
-CMD='{cmd_q}'
-echo ""
-echo "Agentero — remote install helper"
-echo "Host:  $DEST"
-echo "Command (on remote login shell):"
-echo "  $CMD"
-echo ""
-printf '%s' "Press Enter to SSH and run, or Ctrl+C to cancel… "
-read -r _
-echo ""
-echo "Connecting…"
-# -t: allocate PTY so npm can prompt; bash -lc loads nvm / ~/.local/bin PATH.
-# Local expansion builds one remote command; %q keeps spaces in the -c script.
-# (Do NOT use: ssh host bash -lc "$CMD" — remote re-splits and only runs `npm`.)
-ssh -t "$DEST" "bash -lc $(printf '%q' "$CMD")"
-status=$?
-echo ""
-if [ "$status" -eq 0 ]; then
-  echo "Done. Verifying on remote…"
-  ssh -T "$DEST" "bash -lc $(printf '%q' 'command -v claude-agent-acp || command -v opencode || command -v hermes || true; ls -la \"$HOME/.local/bin\" 2>/dev/null | head -20')" || true
-  echo ""
-  echo "Return to Agentero → Settings → Agent and click Refresh."
-else
-  echo "Command exited with status $status."
-  echo "Tip: if npm needs a writable prefix, use:"
-  echo "  npm i -g @agentclientprotocol/claude-agent-acp --prefix \"\$HOME/.local\""
-fi
-echo "You can close this window."
-"#
-    );
-    fs::write(&path, body)
-        .map_err(|e| AppError::message(format!("failed to write install script: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)
-            .map_err(|e| AppError::message(format!("failed to stat install script: {e}")))?
-            .permissions();
-        perms.set_mode(0o700);
-        fs::set_permissions(&path, perms)
-            .map_err(|e| AppError::message(format!("failed to chmod install script: {e}")))?;
-    }
-
-    let script = path.to_string_lossy().replace('\'', "'\\''");
-    #[cfg(target_os = "macos")]
-    {
-        let apple = format!("tell application \"Terminal\" to do script \"bash '{script}'\"");
-        let status = Command::new("osascript")
-            .arg("-e")
-            .arg(&apple)
-            .status()
-            .map_err(|e| AppError::message(format!("failed to open Terminal: {e}")))?;
-        if !status.success() {
-            return Err(AppError::message(format!(
-                "failed to open Terminal (exit {status})"
-            )));
-        }
-        let _ = Command::new("osascript")
-            .args(["-e", "tell application \"Terminal\" to activate"])
-            .status();
-        return Ok(());
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let bash_cmd = format!("bash '{script}'; exec bash");
-        if Command::new("xdg-terminal-exec")
-            .args(["bash", "-lc", &bash_cmd])
-            .spawn()
-            .is_ok()
-        {
-            return Ok(());
-        }
-        if let Ok(term) = std::env::var("TERMINAL") {
-            if !term.is_empty()
-                && Command::new(&term)
-                    .args(["-e", "bash", "-lc", &bash_cmd])
-                    .spawn()
-                    .is_ok()
-            {
-                return Ok(());
-            }
-        }
-        return Err(AppError::message(
-            "no terminal emulator found (install xdg-terminal-exec or set $TERMINAL)",
-        ));
-    }
-
-    #[allow(unreachable_code)]
-    Ok(())
 }
 
 #[cfg(not(windows))]

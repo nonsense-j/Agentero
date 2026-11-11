@@ -8,7 +8,6 @@ import i18n from "@/i18n";
 import {
 	commands,
 	type PaperMetaPatch as PaperMetaPatchWire,
-	type PaperRecord_Serialize as PaperRecordWire,
 	type PaperTag as PaperTagWire,
 	type TrashEntry,
 	type TrashResult,
@@ -127,19 +126,6 @@ export async function listPapers(
 ): Promise<PaperLibraryRow[]> {
 	if (!isTauri()) return [];
 	return perfOp("paper_list", async () => {
-		const { isRemoteVaultHandle, remotePaperList, remoteSessionIdFromHandle } =
-			await import("@/lib/vault/remote/remote-vault");
-		if (isRemoteVaultHandle(vaultPath)) {
-			const sessionId = remoteSessionIdFromHandle(vaultPath);
-			if (!sessionId) return [];
-			// Remote listings are bare records: nothing probes the remote host for
-			// a local PDF, so the row says "unknown" rather than "missing".
-			const rows = (await remotePaperList(sessionId)) as PaperRecordWire[];
-			return rows.map((row) => ({
-				...paperFromWire(row),
-				has_pdf: undefined,
-			}));
-		}
 		const rows = await callApiResult(() => commands.paperList({ vaultPath }), {
 			fallback: "paper_list failed",
 		});
@@ -150,14 +136,6 @@ export async function listPapers(
 /** Rebuild catalog rows from papers/ on disk (recover disk-only papers). */
 export async function rescanPapers(vaultPath: string): Promise<number> {
 	if (!isTauri()) return 0;
-	const { isRemoteVaultHandle, remotePaperRescan, remoteSessionIdFromHandle } =
-		await import("@/lib/vault/remote/remote-vault");
-	if (isRemoteVaultHandle(vaultPath)) {
-		const sessionId = remoteSessionIdFromHandle(vaultPath);
-		if (!sessionId) return 0;
-		const r = await remotePaperRescan(sessionId);
-		return r.count;
-	}
 	const r = await callApi(() => commands.paperRescan({ vaultPath }), {
 		fallback: i18n.t("sidebar:papersLibrary.rescanFailed"),
 	});
@@ -187,10 +165,6 @@ export async function listPaperPageCounts(
 	vaultPath: string,
 ): Promise<Map<string, number>> {
 	if (!isTauri()) return new Map();
-	const { isRemoteVaultHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
-	if (isRemoteVaultHandle(vaultPath)) return new Map();
 	try {
 		const counts = await callApi(
 			() => commands.paperPageCounts({ vaultPath }),
@@ -208,10 +182,6 @@ export async function savePaperPageCounts(
 	counts: ReadonlyMap<string, number>,
 ): Promise<void> {
 	if (!isTauri() || counts.size === 0) return;
-	const { isRemoteVaultHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
-	if (isRemoteVaultHandle(vaultPath)) return;
 	try {
 		await callApi(
 			() =>
@@ -321,23 +291,6 @@ export async function setPaperIsRead(
 	if (!isTauri()) {
 		throw new Error(i18n.t("sidebar:fileTree.readDesktopOnly"));
 	}
-	const { isRemoteVaultHandle, remoteSessionIdFromHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
-	if (isRemoteVaultHandle(vaultPath)) {
-		const sessionId = remoteSessionIdFromHandle(vaultPath);
-		if (!sessionId) {
-			throw new Error(i18n.t("sidebar:fileTree.readMarkFailed"));
-		}
-		const paper = await callApiResult(
-			() => commands.remotePaperSetIsRead({ sessionId, path, isRead }),
-			{ fallback: i18n.t("sidebar:fileTree.readMarkFailed") },
-		);
-		void import("@/lib/activity").then(({ track }) => {
-			track("paper.read", { path, extra: { isRead } });
-		});
-		return paperFromWire(paper);
-	}
 	const paper = await callApi(
 		() => commands.paperSetIsRead({ vaultPath, path, isRead }),
 		{ fallback: i18n.t("sidebar:fileTree.readMarkFailed") },
@@ -360,9 +313,6 @@ export async function setPaperTags(
 	if (!isTauri()) {
 		throw new Error(i18n.t("sidebar:paperInfo.tagsDesktopOnly"));
 	}
-	const { isRemoteVaultHandle, remoteSessionIdFromHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
 	// The Rust deserializer accepts bare strings and `{name,color?}` objects;
 	// the generated wire type is the normalized `{name, color}` struct.
 	const wireTags: PaperTagWire[] = tags.map((tag) =>
@@ -370,17 +320,6 @@ export async function setPaperTags(
 			? { name: tag, color: null }
 			: { name: tag.name, color: tag.color ?? null },
 	);
-	if (isRemoteVaultHandle(vaultPath)) {
-		const sessionId = remoteSessionIdFromHandle(vaultPath);
-		if (!sessionId) {
-			throw new Error(i18n.t("sidebar:paperInfo.tagsSaveFailed"));
-		}
-		const paper = await callApiResult(
-			() => commands.remotePaperSetTags({ sessionId, path, tags: wireTags }),
-			{ fallback: i18n.t("sidebar:paperInfo.tagsSaveFailed") },
-		);
-		return paperFromWire(paper);
-	}
 	const paper = await callApi(
 		() => commands.paperSetTags({ vaultPath, path, tags: wireTags }),
 		{ fallback: i18n.t("sidebar:paperInfo.tagsSaveFailed") },
@@ -441,7 +380,6 @@ export type PaperMetaPatch = {
 
 /**
  * Manually edit paper metadata in catalog (patch semantics).
- * Remote vaults are not supported yet.
  */
 export async function updatePaperMeta(
 	vaultPath: string,
@@ -450,12 +388,6 @@ export async function updatePaperMeta(
 ): Promise<PaperMetadata> {
 	if (!isTauri()) {
 		throw new Error(i18n.t("sidebar:paperInfo.editMeta.desktopOnly"));
-	}
-	const { isRemoteVaultHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
-	if (isRemoteVaultHandle(vaultPath)) {
-		throw new Error(i18n.t("sidebar:paperInfo.editMeta.remoteUnsupported"));
 	}
 	// Wire patch fields are all required and nullable; `null` (Rust `None`)
 	// keeps the current value, matching the domain patch's absent fields.

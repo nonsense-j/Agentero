@@ -30,7 +30,6 @@ import {
 } from "@/components/sidebar/file-tree/file-tree-primitives";
 import { TreeRowActionButton } from "@/components/sidebar/tree-row-action-button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { NewProjectButton } from "@/components/writing/new-project-button";
 import { contextPathIcon } from "@/lib/agent/context-path-icon";
 import { cn } from "@/lib/core/utils";
 import { isPapersRoot } from "@/lib/paper";
@@ -48,8 +47,6 @@ import {
 	skillDescriptionTooltip,
 } from "@/lib/vault/agent-tree";
 import { normalizePathKey } from "@/lib/vault/path";
-import { isWritingPath } from "@/lib/writing/project-target";
-import type { TexCompileActions as TexCompileHookActions } from "./hooks/use-tex-compile";
 import {
 	DOWNLOAD_REASON_KEYS,
 	fileTreeDisplayName,
@@ -214,7 +211,6 @@ type NodeTreeRowProps = {
 	isCut: boolean;
 	pendingLoad: boolean;
 	expanded: boolean;
-	texCompile?: TexCompileHookActions;
 	vaultPath?: string | null;
 	skillLabels?: ReadonlyMap<string, SkillTreeLabel>;
 };
@@ -265,9 +261,6 @@ export function NodeTreeRow({
 				{...(rootFace ? { "data-vault-root": rootFace } : {})}
 			>
 				<FileTreeFolderRow
-					openOnLabel={Boolean(
-						vaultPath && isWritingPath(vaultPath, node.path),
-					)}
 					path={node.path}
 					style={treeRowIndentStyle(depth)}
 					name={
@@ -276,11 +269,7 @@ export function NodeTreeRow({
 							: isAgentRoot
 								? t("fileTree.vaultRoot.agents")
 								: rootFace
-									? t(
-											rootFace === "thesis"
-												? "writing.write"
-												: VAULT_ROOT_LABEL_KEY[rootFace],
-										)
+									? t(VAULT_ROOT_LABEL_KEY[rootFace])
 									: node.name
 					}
 					icon={
@@ -290,11 +279,6 @@ export function NodeTreeRow({
 							<Bot className="size-4 text-muted-foreground" aria-hidden />
 						) : rootFace ? (
 							<VaultRootIcon face={rootFace} />
-						) : undefined
-					}
-					actions={
-						rootFace === "thesis" && vaultPath ? (
-							<NewProjectButton vaultPath={vaultPath} />
 						) : undefined
 					}
 				/>

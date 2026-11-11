@@ -5,7 +5,6 @@ import { markdownEditorFor } from "@/lib/workspace/viewer/markdown-editor-regist
 
 import i18n from "@/i18n";
 import { notePaperFocus, track } from "@/lib/activity";
-import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { closeTopOverlay } from "@/lib/core/overlay-stack";
 import { isTauri } from "@/lib/core/tauri";
@@ -66,10 +65,6 @@ import {
 	takeClosedTab,
 	updateTab,
 } from "@/lib/workspace/store";
-import {
-	isWritingPath,
-	resolveWritingTarget,
-} from "@/lib/writing/project-target";
 import { applyDiskChange } from "./persistence";
 import {
 	basenameOf,
@@ -827,10 +822,7 @@ export function hydratePlaceholderTabs(tabIds: readonly string[]): void {
 	}
 	for (const id of new Set(tabIds)) {
 		const tab = getTabs().find((candidate) => candidate.id === id);
-		// texCompiling panes are owned by the compile flow (openTexPdf fills
-		// them itself); hydrating here would race the compile and swap the
-		// shimmer for a cannotPreview error within milliseconds.
-		if (!tab || tab.loaded || tab.texCompiling || placeholderLoads.has(id)) {
+		if (!tab || tab.loaded || placeholderLoads.has(id)) {
 			continue;
 		}
 		// Paper ownership needs the tree: dotted folder names (e.g. arXiv IDs)
@@ -984,57 +976,7 @@ registerDecision<{ node: FileNode }>({
 });
 
 /** File-tree click dispatch: Library / Trash / Plaza / paper dir / org dir / file. */
-const recentWritingFiles = new Map<string, string>();
-let writingSelectionRequest = 0;
-export function rememberWritingSource(path: string, root: string): void {
-	if (/\.tex$/i.test(path)) recentWritingFiles.set(root, path);
-}
-
-export function openWritingFile(
-	path: string,
-	root: string,
-	restoreSource = false,
-): void {
-	const target = restoreSource ? (recentWritingFiles.get(root) ?? root) : path;
-	rememberWritingSource(target, root);
-	openTab(target);
-	updateTab(tabIdForPath(target), { writingRoot: root });
-}
-
 export function selectFileNode(node: FileNode): void {
-	const request = ++writingSelectionRequest;
-	const vault = getVaultPath();
-	if (
-		vault &&
-		normalizeTabPath(node.path) ===
-			normalizeTabPath(joinVaultPath(vault, "thesis"))
-	) {
-		setTreeSelectedPath(node.path);
-		return;
-	}
-	if (vault && isWritingPath(vault, node.path)) {
-		setTreeSelectedPath(node.path);
-		void resolveWritingTarget(vault, node.path, node.kind === "directory")
-			.then((project) => {
-				if (request !== writingSelectionRequest || vault !== getVaultPath())
-					return;
-				if (project)
-					openWritingFile(
-						node.path,
-						project.root,
-						node.kind === "directory" || project.compiledPdf,
-					);
-				else selectFileNodeNormally(node);
-			})
-			.catch((error) => {
-				if (request === writingSelectionRequest) notifyError(errorText(error));
-			});
-		return;
-	}
-	selectFileNodeNormally(node);
-}
-
-function selectFileNodeNormally(node: FileNode): void {
 	switch (decideSync<{ node: FileNode }>("file-tree.click", { node })) {
 		case "select-library":
 			selectLibrary();

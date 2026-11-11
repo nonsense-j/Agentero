@@ -21,7 +21,6 @@ import { FREE_MT_PROVIDER_IDS } from "@/lib/translate/types";
 vi.mock("@/lib/core/tauri", () => ({
 	isTauri: () => false,
 	isMacOS: () => false,
-	isMobileApp: () => false,
 	getPlatformOS: () => "other",
 }));
 
@@ -45,7 +44,7 @@ describe("built-in provider id", () => {
 		expect(LAYOUT_PROVIDER_IDS).toContain("agentero");
 	});
 
-	it("is never a layout-analysis backend (stays on local ONNX)", () => {
+	it("is never a layout-analysis backend (only remote providers)", () => {
 		expect(LAYOUT_BACKENDS).not.toContain("agentero");
 	});
 
@@ -78,7 +77,7 @@ describe("built-in provider id", () => {
 describe("defaults (browser-dev, no Host key)", () => {
 	it("keeps translate provider and parser backend off the built-in", () => {
 		expect(DEFAULT_TRANSLATE_SETTINGS.provider).toBe("tencenttransmart");
-		expect(DEFAULT_LAYOUT_SETTINGS.backend).toBe("local");
+		expect(DEFAULT_LAYOUT_SETTINGS.backend).toBe("paddle");
 		expect(DEFAULT_LAYOUT_SETTINGS.parserBackend).toBe("local");
 	});
 

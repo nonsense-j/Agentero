@@ -1,7 +1,4 @@
-import {
-	commands,
-	type PaperRecord_Serialize as PaperRecordWire,
-} from "@/lib/core/bindings";
+import { commands } from "@/lib/core/bindings";
 import { callApi, callApiResult } from "@/lib/core/ipc";
 import { toVaultRelative } from "@/lib/core/path";
 import { isTauri } from "@/lib/core/tauri";
@@ -46,7 +43,6 @@ export type PaperOpenBundle = {
 
 /**
  * Bundle local paper-open data from Host in one round trip.
- * Remote vaults intentionally fall back to existing remote helpers.
  */
 export async function loadPaperOpenBundle(
 	paperDir: string,
@@ -55,10 +51,6 @@ export async function loadPaperOpenBundle(
 	const path = paperCatalogPath(paperDir, vaultRoot);
 	if (!isTauri() || !vaultRoot || !path) return null;
 	try {
-		const { isRemoteVaultHandle } = await import(
-			"@/lib/vault/remote/remote-vault"
-		);
-		if (isRemoteVaultHandle(vaultRoot)) return null;
 		void callApiResult(() =>
 			commands.jobFocusPaper({ vaultPath: vaultRoot, path }),
 		).catch(() => undefined);
@@ -96,23 +88,10 @@ export async function loadPaperMetadata(
 	const path = paperCatalogPath(paperDir, vaultRoot);
 	if (!isTauri() || !vaultRoot || !path) return null;
 
-	// Primary: SQLite catalog (local vault path or remote work mirror)
 	try {
-		const { isRemoteVaultHandle, remotePaperGet, remoteSessionIdFromHandle } =
-			await import("@/lib/vault/remote/remote-vault");
-		let record: PaperRecordWire | null = null;
-		if (isRemoteVaultHandle(vaultRoot)) {
-			const sessionId = remoteSessionIdFromHandle(vaultRoot);
-			if (sessionId) {
-				record = (await remotePaperGet(sessionId, {
-					path,
-				})) as PaperRecordWire;
-			}
-		} else {
-			record = await callApi(() =>
-				commands.paperGet({ vaultPath: vaultRoot, path }),
-			);
-		}
+		const record = await callApi(() =>
+			commands.paperGet({ vaultPath: vaultRoot, path }),
+		);
 		if (record?.id) {
 			return enrichArxivUrls(paperFromWire(record));
 		}

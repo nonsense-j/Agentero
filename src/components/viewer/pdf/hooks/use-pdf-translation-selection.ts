@@ -136,7 +136,7 @@ async function locatePages(
 		const size = page?.size;
 		if (!page || !size || size.width <= 0 || size.height <= 0) return [];
 		let glyphs: { text: string; rect: Rect }[] = [];
-		if (engine && doc && picks.some((pick) => !pick.glyphRects?.length)) {
+		if (engine && doc) {
 			try {
 				const raw = await engine.getPageGlyphs(doc, page).toPromise();
 				if (!generation()) return null;
@@ -164,7 +164,6 @@ async function locatePages(
 		}
 		if (!generation()) return null;
 		const locatePick = (pick: TranslationPagePick): Rect[] => {
-			if (pick.glyphRects?.length) return pick.glyphRects;
 			const located = locateSelectionGlyphs(
 				pick,
 				glyphs,

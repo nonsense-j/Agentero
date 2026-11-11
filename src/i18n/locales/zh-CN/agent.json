@@ -47,11 +47,7 @@
 		"summarizePaper": "总结当前论文",
 		"askLibrary": "就我的文献库提问",
 		"listClaims": "列出关键论点与证据",
-		"draftRelatedWork": "撰写相关工作（Related Work）",
-		"continueManuscript": "从稿件停下的地方续写，保持现在的 LaTeX 和语气。",
-		"tightenProse": "把我正在改的这一节写得更紧。论点和引用保留。",
-		"pressArgument": "指出论证里站不住的地方，并说明源文件该怎么改。",
-		"citeFromLibrary": "根据我文库里的论文，起草下一段并写上引用。"
+		"draftRelatedWork": "撰写相关工作（Related Work）"
 	},
 	"history": {
 		"aria": "打开对话历史",
@@ -85,14 +81,6 @@
 		"placeholder": "今天想做些什么？",
 		"queueLabel": "等待发送",
 		"queueRemove": "从队列移除",
-		"paperContext": {
-			"heading": "当前论文（供参考）：",
-			"title": "标题",
-			"authors": "作者",
-			"venue": "期刊/来源",
-			"year": "年份",
-			"abstract": "摘要"
-		},
 		"plazaContextInstruction": "以下是通过 @ 引用的广场条目（尚未入库）：",
 		"plazaEntryUnavailable": "条目元数据不可用（已不在广场缓存中），可请用户从广场重新引用。",
 		"plazaScratchInstruction": "全文已提供为 Vault 之外的只读临时副本，请直接读取上述文件；除非用户明确要求入库，不要下载论文或向 Vault 写入任何内容。",
@@ -148,20 +136,7 @@
 	"empty": {
 		"title": "与你的知识库对话",
 		"description": "消息将发送给你的 ACP Agent。点击上方的 Agent 名称可切换后端。",
-		"writingDescription": "当前稿件已经附上。在源码或 PDF 里选中一段，就可以针对它提问。",
 		"waiting": "正在等待 Agent……"
-	},
-	"zhihuDiscussions": {
-		"noPaper": "打开一篇论文后，这里会显示知乎上的相关讨论。",
-		"noSecret": "尚未配置知乎 Access Secret，请在 设置 → Agent → 知乎 中填入。",
-		"loading": "正在检索知乎……",
-		"empty": "知乎上暂无与本文相关的讨论。",
-		"note": "按论文标题检索知乎，结果可能与本文无关。",
-		"retry": "重试",
-		"refresh": "换一批",
-		"answer": "回答",
-		"article": "文章",
-		"votes": "{{votes}} 赞同"
 	},
 	"thinking": "思考中……",
 	"working": "执行中……",

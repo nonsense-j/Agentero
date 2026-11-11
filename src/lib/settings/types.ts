@@ -155,8 +155,6 @@ export type AppSettings = {
 	// General
 	/** EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey: string;
-	/** 知乎开放平台 Access Secret（内置「知乎」Agent 的直答 / 检索凭证）。 */
-	zhihuAccessSecret: string;
 	/** EZProxy/WebVPN prefix for paywalled PDF fallback ("" disables). */
 	institutionProxyPrefix: string;
 	/** Session cookie for institution proxy requests. */
@@ -235,14 +233,6 @@ export type AppSettings = {
 	/** Opt-in: expose paper full text via MCP paper_text_get. */
 	mcpExposePaperText: boolean;
 	/**
-	 * OpenAI Secure MCP Tunnel id (`tunnel_` + 32 hex). Empty = not configured.
-	 */
-	mcpTunnelId: string;
-	/**
-	 * OpenAI control-plane Runtime API key. Masked on read like other keys.
-	 */
-	mcpTunnelApiKey: string;
-	/**
 	 * Zotero data directory (contains `zotero.sqlite` + `storage/`) used by
 	 * bidirectional sync. Empty = auto-detect `~/Zotero` or pick in the dialog.
 	 */
@@ -253,11 +243,6 @@ export type AppSettings = {
 	 * increase rate-limit risk.
 	 */
 	batchImportConcurrency: number;
-	/**
-	 * Anonymous product analytics (app version + device info) via PostHog.
-	 * Default **on**; takes effect from the next launch.
-	 */
-	telemetryEnabled: boolean;
 	/**
 	 * Plaza discovery sources (Cool Papers, feeds, Skill picks) in the sidebar.
 	 * Default **on**. Off hides the node and does not mount Plaza panels.
@@ -365,7 +350,7 @@ export type AppSettings = {
 	embedding: EmbeddingSettings;
 	/** Application-level translation service (free MT + BYOA Agent). */
 	translate: TranslateSettings;
-	/** PDF layout-analysis backend (local ONNX or remote PP-StructureV3). */
+	/** PDF layout-analysis backend (built-in or BYOK remote provider). */
 	layout: LayoutSettings;
 	/**
 	 * Config reminders dismissed with "don't remind me again". Ids come from
@@ -424,13 +409,9 @@ export type DecisionSettings = {
 /**
  * Config reminders the app may surface once per session; "don't remind again"
  * persists the id in {@link AppSettings.dismissedReminders}.
- * - `layout-local-model`: local ONNX layout analysis costs memory / CPU.
  * - `network-proxy`: a network request failed while no proxy is configured.
  */
-export const CONFIG_REMINDER_IDS = [
-	"layout-local-model",
-	"network-proxy",
-] as const;
+export const CONFIG_REMINDER_IDS = ["network-proxy"] as const;
 export type ConfigReminderId = (typeof CONFIG_REMINDER_IDS)[number];
 
 export function isConfigReminderId(value: unknown): value is ConfigReminderId {

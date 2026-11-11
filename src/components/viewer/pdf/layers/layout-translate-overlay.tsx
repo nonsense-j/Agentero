@@ -1,4 +1,3 @@
-import { ReflowPageOverlay } from "./reflow-page-overlay";
 /**
  * Progressive translation overlays for layout body-text regions.
  * Full bbox stays covered (hides source PDF text); font size tracks paper
@@ -50,12 +49,6 @@ import {
 type LayoutTranslateOverlayProps = {
 	/** Items already bucketed for this one page (groupLayoutTranslateItemsByPage). */
 	items: readonly LayoutTranslateItem[];
-	/** 0-based page index in the translated PDF (same order as the source). */
-	pageIndex: number;
-	/** Finished translated PDF document id for the shared render path. */
-	reflowDocumentId?: string | null;
-	/** Current viewer zoom, forwarded to the shared render layer. */
-	zoom: number;
 	/** Page pixel size (for font-size heuristic). */
 	pageWidthPx: number;
 	pageHeightPx: number;
@@ -738,9 +731,6 @@ export const LayoutTranslateParagraph = memo(function LayoutTranslateParagraph({
  */
 export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 	items,
-	pageIndex,
-	reflowDocumentId,
-	zoom,
 	pageWidthPx,
 	pageHeightPx,
 	tone = "white",
@@ -756,7 +746,6 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 		const painted = items
 			.filter(
 				(item) =>
-					!item.reflow &&
 					!/⟪(?:F|\/?S)\d+⟫/u.test(item.source) &&
 					isLayoutTranslateItemPainted(item),
 			)
@@ -825,25 +814,6 @@ export const LayoutTranslateOverlay = memo(function LayoutTranslateOverlay({
 		() => claimTranslateLinks(onPage, links ?? []),
 		[links, onPage],
 	);
-	const preview = items.find((item) => item.reflowPreview)?.reflowPreview;
-	if (preview || reflowDocumentId)
-		return (
-			<ReflowPageOverlay
-				tints={tintByItem}
-				links={links}
-				glyphRuns={glyphRuns}
-				onOpenLink={onOpenLink}
-				onHoverLink={onHoverLink}
-				tone={tone}
-				items={items}
-				preview={preview ?? ""}
-				pageIndex={pageIndex}
-				renderDocumentId={reflowDocumentId}
-				zoom={zoom}
-				width={pageWidthPx}
-				height={pageHeightPx}
-			/>
-		);
 
 	if (onPage.length === 0) return null;
 	return (

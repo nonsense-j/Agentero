@@ -6,7 +6,6 @@ import type { AppSettings } from "@/lib/settings/types";
 vi.mock("@/lib/core/tauri", () => ({
 	isTauri: () => false,
 	isMacOS: () => false,
-	isMobileApp: () => false,
 	getPlatformOS: () => "other",
 }));
 
@@ -25,12 +24,9 @@ describe("dismissed config reminders", () => {
 	});
 
 	it("keeps known ids, drops unknown ones and duplicates", () => {
-		expect(normalize(["layout-local-model", "network-proxy"])).toEqual([
-			"layout-local-model",
-			"network-proxy",
-		]);
+		expect(normalize(["network-proxy"])).toEqual(["network-proxy"]);
 		expect(
-			normalize(["layout-local-model", "layout-local-model", "unknown", 42]),
-		).toEqual(["layout-local-model"]);
+			normalize(["network-proxy", "network-proxy", "unknown", 42]),
+		).toEqual(["network-proxy"]);
 	});
 });

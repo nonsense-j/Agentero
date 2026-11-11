@@ -180,21 +180,6 @@ function connectorJob(
 	};
 }
 
-function modelJob(
-	overrides: Partial<JobChangedSnapshot> = {},
-): JobChangedSnapshot {
-	return {
-		id: "job-model-1",
-		kind: "modelDownload",
-		state: "running",
-		vaultPath: "",
-		paperPath: "",
-		progress: null,
-		phase: null,
-		...overrides,
-	};
-}
-
 function libraryJob(
 	overrides: Partial<JobChangedSnapshot> = {},
 ): JobChangedSnapshot {
@@ -480,21 +465,6 @@ describe("job task projection", () => {
 		);
 		expect(task("job-connector-3")?.status).toBe("failed");
 		expect(task("job-connector-3")?.error).toBe("Browser PDF save failed");
-	});
-
-	it("projects the model download as the legacy layout-model row", () => {
-		projectJobToBackgroundTask(modelJob({ state: "queued", phase: "queued" }));
-		expect(task("job-model-1")?.kind).toBe("modelDownload");
-		expect(task("job-model-1")?.title).toBe("Download layout model");
-		expect(task("job-model-1")?.detail).toBe(
-			"ModelScope → HuggingFace · PP-DocLayoutV3",
-		);
-
-		projectJobToBackgroundTask(
-			modelJob({ state: "succeeded", phase: "modelscope · 130 bytes" }),
-		);
-		expect(task("job-model-1")?.status).toBe("completed");
-		expect(task("job-model-1")?.detail).toBe("modelscope · 130 bytes");
 	});
 
 	it("projects the library-scope kinds onto their legacy rows", () => {

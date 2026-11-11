@@ -14,9 +14,6 @@ use crate::features::agent::models::{
     AcpSessionInfo, AgentDescriptor, AgentPlanEntry,
 };
 
-#[path = "dsh_history.rs"]
-mod dsh_history;
-
 use agent_client_protocol::schema::v1::{
     DeleteSessionRequest, ListSessionsRequest, LoadSessionRequest, RequestPermissionRequest,
     SessionId, SessionNotification, SessionUpdate,
@@ -60,9 +57,8 @@ pub async fn list_acp_sessions(
     desc: &AgentDescriptor,
     cwd: PathBuf,
     cursor: Option<String>,
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
 ) -> Result<AcpListSessionsResult, AppError> {
-    let acp = to_acp_agent(desc, Some(&cwd), remote)?;
+    let acp = to_acp_agent(desc, Some(&cwd))?;
     let terminals = acp_terminals(Some(cwd.clone()));
 
     let result = agentero_acp_builder!(terminals)
@@ -172,9 +168,8 @@ pub async fn delete_acp_session(
     desc: &AgentDescriptor,
     session_id: &str,
     cwd: PathBuf,
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
 ) -> Result<bool, AppError> {
-    let acp = to_acp_agent(desc, Some(&cwd), remote)?;
+    let acp = to_acp_agent(desc, Some(&cwd))?;
     let terminals = acp_terminals(Some(cwd));
     let session_id = session_id.to_string();
 
@@ -443,19 +438,8 @@ pub async fn load_acp_session(
     desc: &AgentDescriptor,
     session_id: String,
     cwd: PathBuf,
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
 ) -> Result<AcpLoadSessionResult, AppError> {
-    let acp = to_acp_agent(desc, Some(&cwd), remote)?;
-    let dsh_home = if remote.is_none()
-        && desc.template == crate::features::agent::models::AgentTemplate::Dsh
-    {
-        Some(dsh_history::home(
-            &crate::features::agent::acp::client::effective_local_agent_env(desc),
-            &cwd,
-        ))
-    } else {
-        None
-    };
+    let acp = to_acp_agent(desc, Some(&cwd))?;
 
     let builder: Arc<Mutex<ReplayBuilder>> = Arc::new(Mutex::new(ReplayBuilder::default()));
     let builder_for_notif = builder.clone();
@@ -547,18 +531,6 @@ pub async fn load_acp_session(
                 .await?;
 
                 if !init.agent_capabilities.load_session {
-                    // resume restores model context, but does not replay a transcript.
-                    // Dsh currently only implements resume; recover its local durable log.
-                    if let Some(home) = dsh_home {
-                        let home = home.map_err(agent_client_protocol::util::internal_error)?;
-                        return tokio::task::spawn_blocking(move || {
-                            dsh_history::load(&home, &sid, &cwd)
-                        })
-                        .await
-                        .map_err(agent_client_protocol::util::internal_error)?
-                        .map(Some)
-                        .map_err(agent_client_protocol::util::internal_error);
-                    }
                     return Err(agent_client_protocol::util::internal_error(
                         "This agent does not support history replay (session/load)".to_string(),
                     ));
@@ -579,14 +551,13 @@ pub async fn load_acp_session(
                 // ACP replies only after replaying the history. The SDK dispatches
                 // notifications in order and completes each handler before the next
                 // message, so the load response is the replay completion boundary.
-                Ok(None)
+                Ok(())
             }
         })
         .await;
 
     match result {
-        Ok(Some(history)) => Ok(history),
-        Ok(None) => {
+        Ok(()) => {
             let taken = builder
                 .lock()
                 .map(|mut g| std::mem::take(&mut *g))

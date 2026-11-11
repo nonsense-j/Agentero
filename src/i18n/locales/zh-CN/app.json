@@ -52,9 +52,7 @@
 		"tabNext": "下一标签",
 		"tabPrev": "上一标签",
 		"exportAnnotatedPdf": "导出带批注的 PDF",
-		"wandOpen": "魔棒（按标识符入库）",
-		"pluginsLoadDevelopment": "加载开发插件…",
-		"pluginsUnloadDevelopment": "卸载开发插件"
+		"wandOpen": "魔棒（按标识符入库）"
 	},
 	"titlebar": {
 		"showLeftSidebar": "显示左侧边栏",
@@ -96,8 +94,6 @@
 		"close": "关闭 {{title}}",
 		"showHtml": "显示 HTML 版本",
 		"showPdf": "显示 PDF 版本",
-		"openTexPdf": "打开 PDF",
-		"texCompiling": "正在编译…",
 		"contextCopyPath": "复制路径",
 		"copiedPath": "已复制路径",
 		"copyPathFailed": "复制路径失败",
@@ -148,7 +144,6 @@
 	},
 	"vault": {
 		"openDesktopOnly": "打开知识库仅在 Tauri 应用中可用。",
-		"remoteNoAutoLinkRepair": "远程 Vault 暂不支持自动修复双链。",
 		"externalRename": {
 			"title": "修复外部改名后的双链？",
 			"reviewTitle": "检查外部改名修复",
@@ -185,20 +180,7 @@
 		"restoredVaultMissing": "上次的知识库已不存在，请重新打开：{{path}}",
 		"switchVault": "切换知识库",
 		"openVaultButton": "打开知识库…",
-		"openRemoteVaultButton": "打开远程…",
 		"createVaultButton": "创建知识库",
-		"remoteDialogTitle": "打开远程知识库（SSH）",
-		"remoteHostLabel": "SSH 主机",
-		"remoteHostPlaceholder": "gpu01 或 user@host",
-		"remotePathLabel": "远端 Vault 路径",
-		"remotePathPlaceholder": "/home/you/research-vault",
-		"remoteConnect": "连接",
-		"remoteCancel": "取消",
-		"remoteConnecting": "连接中…",
-		"remoteConnectFailed": "打开远程知识库失败",
-		"remoteBadge": "远程",
-		"remoteNoFinder": "远程知识库无法在访达中显示。",
-		"remoteNoTerminal": "远程知识库无法在终端中打开。",
 		"runTauriPrefix": "运行",
 		"runTauriSuffix": "以打开知识库。",
 		"skillsSeeded": "已安装 {{count}} 个新技能：{{names}}",
@@ -240,14 +222,10 @@
 		"downloadPhaseAssets": "下载",
 		"downloadPhaseParse": "正在解析 PDF",
 		"downloadPhaseAsset": "资源",
-		"downloadPhaseLayoutModel": "版面模型",
-		"layoutModelDownload": "下载版面模型",
-		"layoutModelDetail": "魔搭 → HuggingFace · PP-DocLayoutV3",
 		"layoutAnalysis": "解析插图、表格、文字",
 		"pdfParse": "解析 PDF 正文",
 		"parseRefs": "解析参考文献",
 		"openLayoutSettings": "打开解析设置",
-		"latexCompile": "编译 LaTeX",
 		"jevSmartHighlights": "jEV 智能高亮",
 		"downloadBytes": "{{phase}} · {{downloaded}} / {{total}}",
 		"downloadBytesUnknown": "{{phase}} · {{downloaded}}",
@@ -275,22 +253,10 @@
 	},
 	"reminders": {
 		"dismiss": "不再提醒",
-		"layoutLocalModel": {
-			"title": "版面分析使用本地模型",
-			"description": "插图、表格、公式由本机模型检测，会额外占用内存与 CPU，内存较小的机器可能变慢。可在设置中改用云端服务商。",
-			"openSettings": "打开版面解析设置"
-		},
 		"networkProxy": {
 			"title": "网络请求失败",
 			"description": "如果访问受限，可在设置中配置代理后重试。",
 			"openSettings": "打开网络设置"
 		}
-	},
-	"plugins": {
-		"chooseDirectory": "加载插件 — 允许读取当前 Vault",
-		"failed": "插件操作失败",
-		"loaded": "开发插件已加载",
-		"commandTitle": "{{title}}",
-		"suspended": "{{name}} 连续失败，已停止运行。可在设置中重新启用。"
 	}
 }

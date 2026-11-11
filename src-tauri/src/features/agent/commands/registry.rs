@@ -5,10 +5,8 @@ use crate::core::error::{map_err, ApiResult, AppError};
 use crate::features::agent::models::{
     AgentListResponse, AgentOnly, AgentSkill, CatalogScanResponse, ProbeResult, UpsertAgentRequest,
 };
-use crate::features::agent::remote_host::RemoteAgentHosts;
 use crate::features::agent::service::{self, emit_registry_changed};
 use crate::features::agent::{list_agent_skills, probe_agent, AgentRegistry};
-use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -23,23 +21,8 @@ pub fn agent_list_agents(registry: State<'_, AgentRegistry>) -> ApiResult<AgentL
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_list_skills(
-    remote_registry: State<'_, Arc<dyn RemoteAgentHosts>>,
     vault_path: Option<String>,
 ) -> Result<ApiResult<Vec<AgentSkill>>, String> {
-    let remote_target = match remote_registry.resolve_target(vault_path.as_deref()).await {
-        Ok(target) => target,
-        Err(e) => return Ok(map_err(e)),
-    };
-    if let Some(remote) = remote_target {
-        if let Err(e) = remote.ensure_vault_skills(None).await {
-            return Ok(map_err(e));
-        }
-        if let Err(e) = remote.materialize_skills().await {
-            return Ok(map_err(e));
-        }
-        let work_root = remote.work_root().to_string_lossy().to_string();
-        return Ok(ApiResult::ok(list_agent_skills(Some(&work_root))));
-    }
     Ok(ApiResult::ok(list_agent_skills(vault_path.as_deref())))
 }
 
@@ -167,20 +150,6 @@ pub async fn agent_probe(
         Ok(d) => d,
         Err(e) => return Ok(map_err(e)),
     };
-    // Built-in agents have no ACP process to probe; report them ready.
-    if crate::features::agent::models::is_builtin_template(&desc.template) {
-        let result = ProbeResult {
-            agent_id: id.clone(),
-            available: true,
-            agent_name: Some(desc.name.clone()),
-            protocol_version: None,
-            error: None,
-            session_capabilities: None,
-        };
-        let _ = registry.apply_probe_result(&id, &result);
-        emit_registry_changed(&app);
-        return Ok(ApiResult::ok(result));
-    }
     if !desc.available {
         let result = ProbeResult {
             agent_id: id.clone(),
@@ -196,7 +165,7 @@ pub async fn agent_probe(
         emit_registry_changed(&app);
         return Ok(ApiResult::ok(result));
     }
-    let result = probe_agent(&desc, None).await;
+    let result = probe_agent(&desc).await;
     let _ = registry.apply_probe_result(&id, &result);
     emit_registry_changed(&app);
     Ok(ApiResult::ok(result))

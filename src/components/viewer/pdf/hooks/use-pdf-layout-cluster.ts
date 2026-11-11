@@ -3,17 +3,15 @@
  * run, the Figures-panel handlers, the region-crop screen anchor and the
  * bulk-translate job.
  *
- * Grouped because they form one capability around `layoutAnalysisStore` +
- * the layout-analysis plugin: the run feeds the store, the store feeds the
- * buckets / Figures rail, and bulk translate walks the run's raw regions.
- * Capability scopes (scroll / layout / doc manager) are passed in as refs —
- * EmbedPDF returns a fresh scope object every render, so they must never
- * become effect deps inside this cluster.
+ * Grouped because they form one capability around `layoutAnalysisStore`:
+ * the run feeds the store, the store feeds the buckets / Figures rail, and
+ * bulk translate walks the run's raw regions. Capability scopes (scroll / doc
+ * manager) are passed in as refs — EmbedPDF returns a fresh scope object every
+ * render, so they must never become effect deps inside this cluster.
  */
 
 import type { PdfEngine } from "@embedpdf/models";
 import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
-import type { useLayoutAnalysisCapability } from "@embedpdf/plugin-layout-analysis/react";
 import type { useScroll } from "@embedpdf/plugin-scroll/react";
 import { type RefObject, useCallback } from "react";
 import type { PdfLayoutRegions } from "@/components/viewer/pdf/hooks/use-pdf-layout-regions";
@@ -24,10 +22,6 @@ import { usePdfVisualDraft } from "@/components/viewer/pdf/hooks/use-pdf-visual-
 import { renderPdfRegionPromptImage } from "@/components/viewer/pdf/region-crop";
 import type { PromptImage } from "@/lib/agent/api";
 import { type PdfLayoutRegion, setFocusedLayoutRegion } from "@/lib/pdf/layout";
-
-type LayoutCapability = ReturnType<
-	typeof useLayoutAnalysisCapability
->["provides"];
 
 type DocumentManagerCapability = ReturnType<
 	typeof useDocumentManagerCapability
@@ -49,15 +43,11 @@ export type UsePdfLayoutClusterOptions = {
 	paperKey: string | null;
 	/** Vault root passed to the Agent as its cwd. */
 	vaultPath: string | null;
-	/** Viewer PDF bytes; hashed into the reflow IR cache key. */
-	pdfBytes?: ArrayBuffer | null;
-	/** Layout capability value gates the auto-run effect; the ref is never a dep. */
-	layoutCap: LayoutCapability;
-	layoutCapRef: RefObject<LayoutCapability>;
 	/** Document manager scope + ref (fresh scope each render, never a dep). */
 	docCap: DocumentManagerCapability;
 	docCapRef: RefObject<DocumentManagerCapability>;
-	/** Shared PDFium engine mirror, for region-crop thumbnails. */
+	/** Shared PDFium engine + mirror, for text runs and region-crop thumbnails. */
+	engine: PdfEngine | null;
 	engineRef: RefObject<PdfEngine | null>;
 	/** Scroll scope mirror, for region jumps. */
 	scrollRef: RefObject<ScrollCapability>;
@@ -92,11 +82,9 @@ export function usePdfLayoutCluster({
 	paperRelPath,
 	paperKey,
 	vaultPath,
-	pdfBytes,
-	layoutCap,
-	layoutCapRef,
 	docCap,
 	docCapRef,
+	engine,
 	engineRef,
 	scrollRef,
 	hostRef,
@@ -118,8 +106,8 @@ export function usePdfLayoutCluster({
 		paperRelPath,
 		isActive,
 		totalPages,
-		layoutCap,
-		layoutCapRef,
+		engine,
+		engineRef,
 		docCap,
 		docCapRef,
 		isRemotePaper,
@@ -181,14 +169,9 @@ export function usePdfLayoutCluster({
 	const { screenPointForRegion } = usePdfVisualDraft({ hostRef });
 
 	const {
-		reflowBusy,
-		reflowReady,
-		reflowOutput,
-		exportTranslatedPdf,
 		layoutTranslateItemsByPage,
 		layoutTranslatePageStateByPage,
 		layoutTranslateRunning,
-		layoutTranslatePreparing,
 		layoutTranslateWaiting,
 		layoutTranslateActive,
 		layoutTranslateLabel,
@@ -200,11 +183,6 @@ export function usePdfLayoutCluster({
 		toggleLayoutTranslate,
 		togglePageLayoutTranslate,
 	} = usePdfLayoutTranslate({
-		reflowContext: () => {
-			const engine = engineRef.current,
-				document = docCapRef.current?.getDocument(docId);
-			return engine && document ? { engine, document } : null;
-		},
 		docId,
 		layoutRawRegions,
 		translationPane,
@@ -212,14 +190,9 @@ export function usePdfLayoutCluster({
 		paperRelPath,
 		paperKey,
 		vaultPath,
-		pdfBytes,
 	});
 
 	return {
-		reflowBusy,
-		reflowReady,
-		reflowOutput,
-		exportTranslatedPdf,
 		layoutOverlayVisible,
 		layoutRawRegions,
 		hoverableRegionsByPage,
@@ -233,7 +206,6 @@ export function usePdfLayoutCluster({
 		layoutTranslateItemsByPage,
 		layoutTranslatePageStateByPage,
 		layoutTranslateRunning,
-		layoutTranslatePreparing,
 		layoutTranslateWaiting,
 		layoutTranslateActive,
 		layoutTranslateLabel,

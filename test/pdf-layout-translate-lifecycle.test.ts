@@ -171,8 +171,6 @@ function createHarness() {
 	let dirty = true;
 	let effects: (() => void)[] = [];
 	let stateWrites = 0;
-	let reflowInput: Item[] = [];
-	let reflowReady = false;
 	let view: View;
 	let options: Options = {
 		docId: "paper-a",
@@ -313,20 +311,7 @@ function createHarness() {
 			});
 		},
 	};
-	const prepareReflow = async (items: Item[]) => items;
 	const modules: Record<string, unknown> = {
-		"./use-pdf-reflow": {
-			usePdfReflow: (_context: unknown, _regions: unknown, items: Item[]) => {
-				reflowInput = items;
-				return {
-					reflowItems: items,
-					prepare: prepareReflow,
-					reflowBusy: false,
-					reflowReady,
-					exportTranslatedPdf: async () => {},
-				};
-			},
-		},
 		react,
 		"react-i18next": { useTranslation: () => ({ t: (key: string) => key }) },
 		sonner: {
@@ -422,10 +407,6 @@ function createHarness() {
 		dismissedPartialKeys,
 		enqueues,
 		publishedLayouts,
-		setReflowReady(ready: boolean) {
-			reflowReady = ready;
-			dirty = true;
-		},
 		setTranslateSidecar(items: CachedTranslate[]) {
 			translateSidecar = { items };
 		},
@@ -451,9 +432,6 @@ function createHarness() {
 		},
 		get stateWrites() {
 			return stateWrites;
-		},
-		get reflowInput() {
-			return reflowInput;
 		},
 		async flush() {
 			for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -552,8 +530,6 @@ it("ignores the partial hint without removing the entry", async () => {
 	]);
 	h.view.toggleLayoutTranslate();
 	await h.flush();
-	h.setReflowReady(true);
-	h.render();
 	assert.equal(h.view.layoutTranslatePartial.open, true);
 	h.view.layoutTranslatePartial.onDismiss();
 	h.render();
@@ -573,8 +549,6 @@ it("completes only pending blocks and rewrites the sidecar", async () => {
 	]);
 	h.view.toggleLayoutTranslate();
 	await h.flush();
-	h.setReflowReady(true);
-	h.render();
 	const writes = h.writes.length;
 	h.view.layoutTranslatePartial.onCompleteMissing();
 	await h.flush();
@@ -613,8 +587,6 @@ it("keeps the partial entry after a failed completion without reopening", async 
 	]);
 	h.view.toggleLayoutTranslate();
 	await h.flush();
-	h.setReflowReady(true);
-	h.render();
 	h.view.layoutTranslatePartial.onCompleteMissing();
 	await h.flush();
 	h.runs[0].resolve([
@@ -638,8 +610,6 @@ it("retranslates everything and restores old text for failed blocks", async () =
 	]);
 	h.view.toggleLayoutTranslate();
 	await h.flush();
-	h.setReflowReady(true);
-	h.render();
 	h.view.layoutTranslatePartial.onRetranslateAll();
 	await h.flush();
 	assert.equal(h.runs.length, 1);
@@ -920,12 +890,10 @@ for (const entry of ["toolbar", "page"]) {
 		h.runs[0].resolve(completed(h.runs[0], "Saved page"));
 		await h.flush();
 		const writes = h.writes.length;
-		const reflowInput = h.reflowInput;
 		h.view.togglePageLayoutTranslate(0); // hide
 		h.render();
 		assert.equal(h.view.layoutTranslateItemsByPage.size, 0);
 		assert.equal(h.view.layoutTranslateLabel, "pdf.layoutTranslate.show");
-		assert.equal(h.reflowInput, reflowInput);
 		if (entry === "toolbar") h.view.toggleLayoutTranslate();
 		else h.view.togglePageLayoutTranslate(0);
 		await h.flush();
@@ -937,7 +905,6 @@ for (const entry of ["toolbar", "page"]) {
 		assert.equal(h.view.layoutTranslateLabel, "pdf.layoutTranslate.hide");
 		assert.equal(h.runs.length, 1);
 		assert.equal(h.writes.length, writes);
-		assert.equal(h.reflowInput, reflowInput);
 	});
 }
 

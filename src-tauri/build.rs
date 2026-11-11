@@ -29,11 +29,6 @@ fn main() {
 
 /// Variables baked into the binary at compile time and read via `option_env!`.
 const BUILD_ENV_KEYS: &[&str] = &[
-    "AGENTERO_POSTHOG_KEY",
-    "AGENTERO_POSTHOG_SURVEY_ID",
-    "AGENTERO_POSTHOG_SURVEY_KIND_ID",
-    "AGENTERO_POSTHOG_SURVEY_MESSAGE_ID",
-    "AGENTERO_POSTHOG_SURVEY_CONTACT_ID",
     "AGENTERO_BUILTIN_BASE_URL",
     "AGENTERO_BUILTIN_API_KEY",
     "AGENTERO_BUILTIN_TRANSLATE_MODEL",
@@ -43,8 +38,7 @@ const BUILD_ENV_KEYS: &[&str] = &[
 
 /// Forward the build-time variables to `rustc`. An explicit env var wins;
 /// otherwise fall back to the repo-root `.env` (gitignored). Absent both, the
-/// consumer compiles out: telemetry is disabled and the built-in provider
-/// reports itself unavailable.
+/// built-in provider reports itself unavailable.
 ///
 /// `rerun-if-env-changed` is what makes this correct — cargo does not otherwise
 /// observe env changes, so a rotated key would silently keep the stale binary.

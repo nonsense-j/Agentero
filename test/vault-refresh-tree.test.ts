@@ -4,9 +4,8 @@ import { loadVaultTree } from "@/lib/vault";
 import { refreshTree, vaultStore } from "@/lib/vault/store";
 
 vi.mock("@/lib/core/tauri", () => ({
-	isTauri: () => false,
+	isTauri: () => true,
 	isMacOS: () => false,
-	isMobileApp: () => false,
 	getPlatformOS: () => "other",
 }));
 

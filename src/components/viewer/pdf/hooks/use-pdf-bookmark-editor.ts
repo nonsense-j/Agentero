@@ -8,7 +8,6 @@ import { errorText } from "@/lib/core/error";
 import { callApi } from "@/lib/core/ipc";
 import { logger } from "@/lib/core/logger";
 import { notifyError } from "@/lib/core/notify";
-import { isMobileApp } from "@/lib/core/tauri";
 import { findLocalPdfPath } from "@/lib/paper/media";
 import { noteBookmarkWrite } from "@/lib/pdf/bookmark-echo";
 import {
@@ -81,11 +80,7 @@ export function usePdfBookmarkEditor({
 	const { t } = useTranslation("viewer");
 	const draft = useStore(drafts, (state) => (path ? state[path] : undefined));
 	const available = Boolean(
-		!isMobileApp() &&
-			path &&
-			bytes &&
-			ready &&
-			!/^(remote:|https?:|agentero:)/i.test(path),
+		path && bytes && ready && !/^(https?:|agentero:)/i.test(path),
 	);
 	const [markers, setMarkers] = useState<{
 		bytes: ArrayBuffer;

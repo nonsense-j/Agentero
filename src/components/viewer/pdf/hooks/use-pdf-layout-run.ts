@@ -1,16 +1,14 @@
 /**
- * Running PP-DocLayoutV3 for one document — or, far more often, loading the
- * `source/layout.json` sidecar a headless run already produced.
+ * Running remote layout analysis for one document — or, far more often,
+ * loading the `source/layout.json` sidecar a headless run already produced.
  *
  * Separate from hover and from the bulk-translate job because it owns a
  * different lifecycle: at most one abortable task per document, a headless queue
  * entry per open paper, and a sidecar file event that wakes the active viewer.
- * EmbedPDF's layout scope is re-created every render, so `layoutCapRef` stays in
- * `PdfViewerInner` and is injected.
  */
 
+import type { PdfEngine } from "@embedpdf/models";
 import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
-import type { useLayoutAnalysisCapability } from "@embedpdf/plugin-layout-analysis/react";
 import { type RefObject, useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
@@ -23,6 +21,7 @@ import { notifyError } from "@/lib/core/notify";
 import { runLocalActivity } from "@/lib/core/tasks";
 import { isTauri } from "@/lib/core/tauri";
 import {
+	createPdfEngineLayoutTextSource,
 	enqueuePaperLayoutAnalysis,
 	getLayoutDocumentResult,
 	layoutAnalysisStore,
@@ -47,14 +46,14 @@ import { normalizePathKey } from "@/lib/vault/path";
  */
 const appliedLayoutSidecarAt = new Map<string, string>();
 
-/** In-flight EmbedPDF layout task (abortable, at most one per document). */
+/** In-flight layout task (abortable, at most one per document). */
 export type LayoutAnalysisTask = Awaited<
 	ReturnType<typeof runDocumentLayoutAnalysis>
 >;
 
 /** Options for the manual Figures button, the handle, and the silent auto-run. */
 export type StartLayoutAnalysisOptions = {
-	/** Re-run PP-DocLayoutV3 (PDF→JSON) even when `source/layout.json` exists. */
+	/** Re-run remote layout analysis even when `source/layout.json` exists. */
 	force?: boolean;
 	openFigures?: boolean;
 	showOverlay?: boolean;
@@ -64,9 +63,6 @@ export type StartLayoutAnalysisOptions = {
 	notifyOnError?: boolean;
 };
 
-type LayoutCapability = ReturnType<
-	typeof useLayoutAnalysisCapability
->["provides"];
 type DocumentManagerCapability = ReturnType<
 	typeof useDocumentManagerCapability
 >["provides"];
@@ -83,16 +79,14 @@ export type UsePdfLayoutRunOptions = {
 	 */
 	isActive: boolean;
 	totalPages: number;
-	/** The value gates the auto-run effect; the ref must never become a dep. */
-	layoutCap: LayoutCapability;
-	layoutCapRef: RefObject<LayoutCapability>;
+	engine: PdfEngine | null;
+	engineRef: RefObject<PdfEngine | null>;
 	docCap: DocumentManagerCapability;
 	docCapRef: RefObject<DocumentManagerCapability>;
 	/** True for remote papers with no local sidecar; disables layout analysis. */
 	isRemotePaper?: boolean;
 	/**
-	 * True for PDFs outside papers/ (plain viewer): no layout analysis at all,
-	 * including the in-viewer auto-run loose PDFs otherwise get.
+	 * True for PDFs outside papers/ (plain viewer): no layout analysis at all.
 	 */
 	plainViewer?: boolean;
 	/**
@@ -117,8 +111,8 @@ export function usePdfLayoutRun({
 	paperRelPath,
 	isActive,
 	totalPages,
-	layoutCap,
-	layoutCapRef,
+	engine,
+	engineRef,
 	docCap,
 	docCapRef,
 	isRemotePaper = false,
@@ -146,7 +140,7 @@ export function usePdfLayoutRun({
 
 	/**
 	 * Run layout analysis for this document.
-	 * - force: re-run PP-DocLayoutV3 (PDF→JSON) even when source/layout.json exists
+	 * - force: re-run remote layout analysis even when source/layout.json exists
 	 * - without force: prefer layout.json → merge → sidebar when paper has a sidecar
 	 * - openFigures / showOverlay: UI side-effects for the manual Figures button
 	 * - asBackgroundTask: surface progress in the IDE background-tasks panel
@@ -161,8 +155,8 @@ export function usePdfLayoutRun({
 				}
 				return;
 			}
-			const la = layoutCapRef.current?.forDocument(docId);
-			if (!la) {
+			const eng = engineRef.current ?? engine;
+			if (!eng) {
 				if (opts?.notifyOnError !== false) {
 					notifyError(t("pdf.layout.unavailable"));
 				}
@@ -175,6 +169,9 @@ export function usePdfLayoutRun({
 			const pages = totalPagesRef.current;
 			const paperLabel =
 				paperRelPath || paperAbsPath?.split(/[/\\]/).pop() || docId;
+			const textSource = createPdfEngineLayoutTextSource(eng, () =>
+				(docCapRef.current ?? docCap)?.getDocument(docId),
+			);
 
 			const runCore = (hooks?: { signal?: AbortSignal }) =>
 				new Promise<void>((resolve, reject) => {
@@ -206,7 +203,7 @@ export function usePdfLayoutRun({
 						return size && size.width > 0 && size.height > 0 ? size : null;
 					};
 
-					void runDocumentLayoutAnalysis(la, docId, {
+					void runDocumentLayoutAnalysis(textSource, docId, {
 						paperAbsPath,
 						totalPages: pages > 0 ? pages : null,
 						force: opts?.force === true,
@@ -295,7 +292,7 @@ export function usePdfLayoutRun({
 						};
 
 						setProgress(0);
-						setDetail(t("pdf.layout.preparingModel"));
+						setDetail(t("figures.analyzing"));
 						const unsub = layoutAnalysisStore.subscribe(syncFromLayoutUi);
 						syncFromLayoutUi();
 						try {
@@ -325,7 +322,8 @@ export function usePdfLayoutRun({
 			paperRelPath,
 			t,
 			notifyLayoutFailure,
-			layoutCapRef,
+			engine,
+			engineRef,
 			docCap,
 			docCapRef,
 			isRemotePaper,
@@ -336,9 +334,8 @@ export function usePdfLayoutRun({
 	startLayoutAnalysisRef.current = startLayoutAnalysis;
 
 	// Any open paper (active or not) → headless queue so multi-tab can all
-	// land in the background-tasks panel. Local ONNX stays serial (cap 1);
-	// the Paddle API backend is uncapped at JobCenter. Translation companions
-	// inherit layout from the source pane / store copy — do not re-queue.
+	// land in the background-tasks panel. Translation companions inherit layout
+	// from the source pane / store copy — do not re-queue.
 	useEffect(() => {
 		if (translationPane || isRemotePaper || !paperAbsPath) return;
 		enqueuePaperLayoutAnalysis({ paperAbsPath });
@@ -348,25 +345,20 @@ export function usePdfLayoutRun({
 	// again whenever that file's parse is replaced. A force re-run writes the
 	// new sidecar from a headless document id, then drops it; without this
 	// reload the figures rail keeps the previous in-memory result until restart.
-	// Loose PDFs (no paper folder) still analyze in-viewer.
-	const layoutAutoStartedForDocRef = useRef<string | null>(null);
 	useEffect(() => {
-		if (translationPane || isRemotePaper || plainViewer) return;
+		if (translationPane || isRemotePaper || plainViewer || !paperAbsPath)
+			return;
 		if (!isActive) return;
-		if (!layoutCap || totalPages <= 0) return;
+		if (!engine || totalPages <= 0) return;
 		if (!docCap?.isDocumentOpen(docId)) return;
-		if (!layoutCap.forDocument(docId)) return;
 
 		let cancelled = false;
 		let unlisten: (() => void) | null = null;
 		let pullTicket = 0;
-		const sidecarKey = paperAbsPath
-			? normalizePathKey(layoutSidecarPath(paperAbsPath))
-			: null;
+		const sidecarKey = normalizePathKey(layoutSidecarPath(paperAbsPath));
 		const appliedKey = layoutDocumentKey(docId);
 
 		const eventHitsSidecar = (payload: VaultFileChangedPayload) => {
-			if (!sidecarKey) return false;
 			const paths = [...payload.paths];
 			if (payload.rename) {
 				paths.push(payload.rename.from, payload.rename.to);
@@ -375,7 +367,7 @@ export function usePdfLayoutRun({
 		};
 
 		const pullSidecar = async () => {
-			if (!paperAbsPath || cancelled) return;
+			if (cancelled) return;
 			const ticket = ++pullTicket;
 			const sidecar = await readLayoutSidecar(paperAbsPath);
 			if (cancelled || ticket !== pullTicket) return;
@@ -406,57 +398,24 @@ export function usePdfLayoutRun({
 			});
 		};
 
-		const tryLoad = async () => {
-			if (cancelled) return;
-
-			try {
-				if (paperAbsPath) {
-					// Also when memory already has a result: the sidecar may have
-					// been replaced while this tab was inactive and not listening.
-					await pullSidecar();
-					return;
-				}
-				if (getLayoutDocumentResult(docId)) return;
-
-				// No paper folder (loose PDF): only the active tab can run in-viewer.
-				if (layoutAutoStartedForDocRef.current === docId) return;
-				layoutAutoStartedForDocRef.current = docId;
-				startLayoutAnalysis({
-					force: false,
-					openFigures: false,
-					showOverlay: false,
-					asBackgroundTask: true,
-					notifyOnError: false,
-				});
-			} catch {
-				if (layoutAutoStartedForDocRef.current === docId) {
-					layoutAutoStartedForDocRef.current = null;
-				}
-			}
-		};
-
-		if (paperAbsPath && isTauri()) {
+		if (isTauri()) {
 			unlisten = listenVaultFileChangedGated((payload) => {
 				if (cancelled || !eventHitsSidecar(payload)) return;
 				void pullSidecar();
 			});
 		}
-		void tryLoad();
+		void pullSidecar();
 
 		return () => {
 			cancelled = true;
 			unlisten?.();
-			// Strict-mode remount / leave tab before result: allow retry on re-activate.
-			if (!getLayoutDocumentResult(docId)) {
-				layoutAutoStartedForDocRef.current = null;
-			}
 		};
 	}, [
 		translationPane,
 		isRemotePaper,
 		plainViewer,
 		isActive,
-		layoutCap,
+		engine,
 		docCap,
 		docId,
 		totalPages,

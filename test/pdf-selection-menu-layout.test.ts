@@ -10,12 +10,10 @@ import {
 } from "@/components/viewer/pdf/cards/highlight-color-stack";
 import { SelectionMenu } from "@/components/viewer/pdf/cards/selection-menu";
 import { settingsStore } from "@/lib/settings/react-store";
-import type { MenuContribution } from "@/lib/shell/commands/menu-contributions";
 import { formatShortcut } from "@/lib/shell/shortcuts";
 
 const originalOverrides = settingsStore.getState().shortcutOverrides;
 let english = false;
-let contributions: MenuContribution[] = [];
 
 vi.mock("react-i18next", () => ({
 	initReactI18next: { type: "3rdParty", init: () => undefined },
@@ -28,11 +26,6 @@ vi.mock("react-i18next", () => ({
 			return key;
 		},
 	}),
-}));
-
-vi.mock("@/lib/shell/commands/menu-contributions", () => ({
-	visibleMenuContributions: () => contributions,
-	activateMenuContribution: vi.fn(),
 }));
 
 let container: HTMLDivElement;
@@ -106,7 +99,6 @@ function dividerCenter(menu: HTMLElement): number {
 beforeEach(() => {
 	settingsStore.setState({ shortcutOverrides: originalOverrides });
 	english = false;
-	contributions = [];
 	colorWidth = HIGHLIGHT_COLOR_STACK_COLLAPSED_W;
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	vi.stubGlobal("innerWidth", 1200);
@@ -139,7 +131,7 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 });
 
-it("anchors the divider after optional actions, locale, and plugin widths change", async () => {
+it("anchors the divider after optional actions and locale widths change", async () => {
 	const menu = await render({
 		showTranslate: false,
 		onCopy: undefined,
@@ -147,18 +139,9 @@ it("anchors the divider after optional actions, locale, and plugin widths change
 	});
 	expect(dividerCenter(menu)).toBe(500);
 	english = true;
-	contributions = [
-		{
-			id: "test",
-			menu: "pdf.selection",
-			commandId: "test",
-			title: "A long plugin action",
-		},
-	];
-	await render({ contributionContext: { vaultPath: null } });
+	await render({ onBookmark: vi.fn() });
 	await act(() => notifyResize());
 	expect(dividerCenter(menu)).toBe(500);
-	expect(menu.textContent).toContain("A long plugin action");
 	expect(
 		menu.querySelector('[aria-label="selection.translate"]'),
 	).not.toBeNull();

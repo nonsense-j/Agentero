@@ -26,7 +26,6 @@ import type { FileNode } from "@/lib/vault";
 import { useMovePicker } from "./hooks/use-move-picker";
 import { usePaperRowActions } from "./hooks/use-paper-row-actions";
 import { useSkillLabels } from "./hooks/use-skill-labels";
-import { useTexCompile } from "./hooks/use-tex-compile";
 import { useTreeContextMenu } from "./hooks/use-tree-context-menu";
 import { useTreeDragDrop } from "./hooks/use-tree-drag-drop";
 import { useTreeExpansion } from "./hooks/use-tree-expansion";
@@ -326,8 +325,6 @@ export const FileTree = memo(
 			onReadPaper,
 		});
 
-		const texCompile = useTexCompile();
-
 		const movePicker = useMovePicker({
 			containerRef,
 			onMoveTo,
@@ -343,7 +340,6 @@ export const FileTree = memo(
 			useTreeContextMenu({
 				nodes,
 				vaultPath,
-				paperMetaByRelPath,
 				byPath,
 				cutPaths,
 				cutPathKeys,
@@ -513,7 +509,6 @@ export const FileTree = memo(
 									paperMetaByRelPath={paperMetaByRelPath}
 									paperTreeLabelMode={paperTreeLabelMode}
 									paperActions={paperActions}
-									texCompile={texCompile}
 									vaultPath={vaultPath}
 									skillLabels={skillLabels}
 								/>

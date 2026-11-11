@@ -170,7 +170,7 @@ export type JobChangedSnapshot = JobSnapshot;
  * here (pageCount / wikiReindex / layoutTranslate) stay silent to avoid
  * idle-lane noise.
  */
-const PROJECTED_JOB_KINDS: ReadonlySet<JobKind> = new Set([
+const PROJECTED_JOB_KINDS: ReadonlySet<string> = new Set([
 	"layoutAnalyze",
 	"parseRefs",
 	"parseBody",
@@ -178,11 +178,9 @@ const PROJECTED_JOB_KINDS: ReadonlySet<JobKind> = new Set([
 	"recognizeMetadata",
 	"import",
 	"connectorSync",
-	"modelDownload",
 	"citingScan",
 	"libraryIo",
 	"metadataRefresh",
-	"latexCompile",
 	"jevSmartHighlights",
 ]);
 
@@ -254,8 +252,6 @@ function jobPanelTitle(job: JobChangedSnapshot): string {
 			return i18n.t("app:tasks.downloadPaper");
 		case "recognizeMetadata":
 			return i18n.t("app:tasks.recognizeMeta");
-		case "modelDownload":
-			return i18n.t("app:tasks.layoutModelDownload");
 		case "citingScan":
 			return i18n.t("app:tasks.citingScan");
 		case "metadataRefresh":
@@ -264,8 +260,6 @@ function jobPanelTitle(job: JobChangedSnapshot): string {
 			return jobParams(job.params).op === "export"
 				? i18n.t("app:tasks.libraryExport")
 				: i18n.t("app:tasks.libraryImport");
-		case "latexCompile":
-			return i18n.t("app:tasks.latexCompile");
 		case "jevSmartHighlights":
 			return i18n.t("app:tasks.jevSmartHighlights");
 		default:
@@ -288,7 +282,6 @@ type JobParams = {
 	entries?: Array<{ filePath?: string }>;
 	op?: string;
 	papers?: unknown[];
-	texPath?: string;
 };
 
 function jobParams(params: unknown): JobParams {
@@ -392,9 +385,6 @@ function jobPanelDetail(job: JobChangedSnapshot): string | undefined {
 	if (job.kind === "connectorSync") {
 		return jobParams(job.params).detail?.slice(0, 80) || undefined;
 	}
-	if (job.kind === "modelDownload") {
-		return i18n.t("app:tasks.layoutModelDetail");
-	}
 	if (job.kind === "metadataRefresh") {
 		// Covers only the queued window: the executor reports real counts as soon as it starts.
 		return i18n.t("sidebar:papersLibrary.refreshMetadataTaskDetail", {
@@ -407,11 +397,6 @@ function jobPanelDetail(job: JobChangedSnapshot): string | undefined {
 	}
 	// Vault-scope kinds carry no paper target.
 	if (job.kind === "citingScan" || job.kind === "libraryIo") return undefined;
-	// LaTeX rows show the source file name (the tex lives anywhere, not under
-	// papers/, so there is no catalog title to resolve).
-	if (job.kind === "latexCompile") {
-		return jobParams(job.params).texPath?.split(/[\\/]/).pop();
-	}
 	return paperTaskLabel(job.paperPath);
 }
 
@@ -425,7 +410,6 @@ function jobPanelSubject(job: JobChangedSnapshot): string | undefined {
 		job.kind === "connectorSync" ||
 		job.kind === "citingScan" ||
 		job.kind === "libraryIo" ||
-		job.kind === "modelDownload" ||
 		job.kind === "metadataRefresh"
 	) {
 		return undefined;

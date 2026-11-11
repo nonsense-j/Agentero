@@ -1,4 +1,4 @@
-import { ChevronDown, Quote } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -17,19 +17,13 @@ import { cn } from "@/lib/core/utils";
 interface TextEditorToolbarProps {
 	fontSize: TextEditorFontSize;
 	onFontSizeChange: (size: TextEditorFontSize) => void;
-	/** TeX-only actions; null hides the citation entry. */
-	texTools?: {
-		onCitation: () => void;
-	} | null;
 }
 
 export function TextEditorToolbar({
 	fontSize,
 	onFontSizeChange,
-	texTools,
 }: TextEditorToolbarProps) {
 	const { t } = useTranslation("settings");
-	const { t: tx } = useTranslation("latexLanguage");
 	const [open, setOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -50,18 +44,6 @@ export function TextEditorToolbar({
 					PDF_CHROME_CHIP,
 				)}
 			>
-				{texTools ? (
-					<Button
-						type="button"
-						size="xs"
-						variant="ghost"
-						className="shrink-0 self-center whitespace-nowrap"
-						onClick={texTools.onCitation}
-					>
-						<Quote className="size-3.5" aria-hidden />
-						{tx("insertCitation")}
-					</Button>
-				) : null}
 				<Popover open={open} onOpenChange={setOpen}>
 					<PopoverTrigger asChild>
 						<Button

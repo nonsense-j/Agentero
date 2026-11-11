@@ -22,7 +22,6 @@ import type { PdfVisualSessionTrace } from "@/lib/pdf/agent-trace";
 import type { PdfAskThread } from "@/lib/pdf/ask";
 import type { HighlightColor } from "@/lib/pdf/highlight/palette";
 import type { PdfTranslateRecord } from "@/lib/pdf/translate/types";
-import type { MenuContext } from "@/lib/shell/commands/menu-contributions";
 
 type PdfCardStackProps = {
 	selectionMenu: {
@@ -37,8 +36,6 @@ type PdfCardStackProps = {
 		/** Hide highlight / translate (no marks/ to persist into); keep Ask. */
 		showHighlight?: boolean;
 		showTranslate?: boolean;
-		/** Passed through to the PDF toolbar. Omitted by other SelectionMenu callers. */
-		contributionContext?: MenuContext;
 	};
 	citationPreview: {
 		state: CitationPreviewState | null;
@@ -157,7 +154,6 @@ export const PdfCardStack = memo(function PdfCardStack({
 					onNote={selectionMenu.onNote}
 					showHighlight={selectionMenu.showHighlight}
 					showTranslate={selectionMenu.showTranslate}
-					contributionContext={selectionMenu.contributionContext}
 				/>
 			) : null}
 

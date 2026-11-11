@@ -23,7 +23,6 @@ import {
 } from "@/lib/vault/agent-tree";
 import { TREE_ROW_INDENT_STEP_PX } from "./file-tree-primitives";
 import type { PaperRowActions } from "./hooks/use-paper-row-actions";
-import type { TexCompileActions } from "./hooks/use-tex-compile";
 import { pathKey } from "./tree-helpers";
 import { TreeRenameInput } from "./tree-inputs";
 import {
@@ -44,7 +43,6 @@ type RowContext = {
 	paperMetaByRelPath?: ReadonlyMap<string, PaperMetadata>;
 	paperTreeLabelMode: PaperTreeLabelMode;
 	paperActions: PaperRowActions;
-	texCompile?: TexCompileActions;
 	vaultPath?: string | null;
 	skillLabels?: ReadonlyMap<string, SkillTreeLabel>;
 	renameDraft?: TreeRenameDraft | null;
@@ -183,7 +181,6 @@ function renderRow(
 				props.loadingDirs.has(row.node.path)
 			}
 			expanded={props.expanded.has(row.node.path)}
-			texCompile={props.texCompile}
 			vaultPath={props.vaultPath}
 			skillLabels={props.skillLabels}
 		/>

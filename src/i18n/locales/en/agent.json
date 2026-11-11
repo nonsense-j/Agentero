@@ -47,11 +47,7 @@
 		"summarizePaper": "Summarize the open paper",
 		"askLibrary": "Ask a question across my library",
 		"listClaims": "List key claims and evidence",
-		"draftRelatedWork": "Draft a Related Work section",
-		"continueManuscript": "Continue this manuscript from where it stops. Match its LaTeX and voice.",
-		"tightenProse": "Tighten the prose of the section I am editing. Keep the claims and the citations.",
-		"pressArgument": "Point out the weak spots in the argument and say what to change in the source.",
-		"citeFromLibrary": "Draft the next paragraph from papers in my library, and cite them."
+		"draftRelatedWork": "Draft a Related Work section"
 	},
 	"history": {
 		"aria": "Open chat history",
@@ -85,14 +81,6 @@
 		"placeholder": "How can I help you today?",
 		"queueLabel": "Queued",
 		"queueRemove": "Remove from queue",
-		"paperContext": {
-			"heading": "Current paper (for reference):",
-			"title": "Title",
-			"authors": "Authors",
-			"venue": "Venue",
-			"year": "Year",
-			"abstract": "Abstract"
-		},
 		"plazaContextInstruction": "Plaza entries referenced with @ (not yet in the Vault):",
 		"plazaEntryUnavailable": "Entry metadata is unavailable (no longer in the Plaza cache). Ask the user to re-reference it from the Plaza tab.",
 		"plazaScratchInstruction": "Full texts are provided as read-only scratch copies outside the Vault. Read the listed files directly; do not download papers or write anything into the Vault unless the user explicitly asks to import a paper.",
@@ -148,20 +136,7 @@
 	"empty": {
 		"title": "Chat with your vault",
 		"description": "Messages go to your ACP agent. Click the agent name above to switch backends.",
-		"writingDescription": "The open manuscript is attached. Select a passage in the source or the PDF to ask about it.",
 		"waiting": "Waiting for agent…"
-	},
-	"zhihuDiscussions": {
-		"noPaper": "Open a paper to see what Zhihu is saying about it.",
-		"noSecret": "No Zhihu Access Secret yet. Add one in Settings → Agent → Zhihu.",
-		"loading": "Searching Zhihu…",
-		"empty": "No related discussions found on Zhihu.",
-		"note": "Title search on Zhihu — results may be unrelated.",
-		"retry": "Retry",
-		"refresh": "Refresh",
-		"answer": "Answer",
-		"article": "Article",
-		"votes": "{{votes}} upvotes"
 	},
 	"thinking": "Thinking…",
 	"working": "Working…",

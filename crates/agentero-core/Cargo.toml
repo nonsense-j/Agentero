@@ -65,7 +65,7 @@ uuid = { version = "1", features = ["v4"] }
 # paired desktop Host for PDF parsing instead of packaging PDFium in the app.
 # Keep in lockstep with the `agentero` crate's target gate.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-liteparse = "2.17"
+liteparse = { version = "2.17", default-features = false }
 # The PDFium binding liteparse itself sits on (shared dylib, one global loader).
 # `features::pdf_locate` uses the text engine directly for quote → page rects,
 # bypassing liteparse's layout pass.

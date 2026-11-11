@@ -1,6 +1,6 @@
 //! Agentero Host library (`agentero_lib`).
 //!
-//! - [`run`] — Tauri app entry (desktop / mobile).
+//! - [`run`] — Tauri desktop app entry.
 //! - [`core`] / [`features`] — bridge the tauri-free `agentero-core` crate
 //!   (which the headless CLI consumes directly) and keep the desktop shells
 //!   (`#[tauri::command]` surfaces, JobCenter, watcher, integrations).
@@ -15,7 +15,7 @@ pub mod core;
 /// Service bodies live in `agentero_core::features::*`; this crate keeps the
 /// desktop-only shells. `features::agent` (BYOA) is desktop-only.
 pub mod features;
-/// External integrations (bridge, MCP, remote vault, cloud sync).
+/// External integrations (Connector, MCP, cloud sync).
 /// Desktop-only; CLI must not depend on these.
 pub mod integration;
 #[cfg(feature = "desktop")]

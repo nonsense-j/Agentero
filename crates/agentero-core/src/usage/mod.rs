@@ -8,7 +8,6 @@
 //! desktop shell (`agentero_lib::core::usage::commands`); everything here is
 //! tauri-free.
 
-mod projection;
 mod query;
 mod record;
 mod schema;
@@ -16,7 +15,6 @@ mod schema;
 use crate::error::AppError;
 
 pub use crate::paths::usage_db_path;
-pub use projection::{telemetry_projection, ActivityProjection};
 pub use query::{
     clear_all, clear_vault, list_events, rename_path, summarize, ListFilter, UsageEvent,
     UsageKindCount,

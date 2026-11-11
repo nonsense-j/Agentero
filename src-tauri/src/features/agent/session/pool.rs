@@ -10,7 +10,6 @@
 
 use crate::features::agent::acp::terminal::AcpTerminalManager;
 use crate::features::agent::models::AgentModelsEvent;
-use crate::features::agent::remote_host::RemoteAgentLaunch;
 use crate::features::agent::session::handlers::TurnRegistry;
 use agent_client_protocol::schema::v1::{SessionConfigOption, SessionId};
 use agent_client_protocol::{Agent, ConnectionTo};
@@ -35,13 +34,12 @@ const POOL_TAKE_WAIT: Duration = Duration::from_secs(5);
 /// Cached chat-UI payload a healthy slot can answer `agent_warm` with.
 pub(crate) type WarmSnapshot = (Option<AgentModelsEvent>, Option<(u64, u64)>);
 
-/// Identity of a pooled connection: same agent, working directory, remote
-/// host and startup variant are interchangeable for reuse purposes.
+/// Identity of a pooled connection: same agent, working directory, and startup
+/// variant are interchangeable for reuse purposes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PoolKey {
     pub agent_id: String,
     pub cwd: PathBuf,
-    pub remote_tag: Option<String>,
     /// State an agent only reads when its process starts, such as the Pi
     /// project-trust decision. A connection created under another variant
     /// must never be reused: its process would keep the old startup state.
@@ -49,17 +47,10 @@ pub(crate) struct PoolKey {
 }
 
 /// Build the pool key for a run / warm request.
-pub(crate) fn pool_key(
-    agent_id: &str,
-    cwd: PathBuf,
-    remote: Option<&Arc<dyn RemoteAgentLaunch>>,
-    variant: Option<String>,
-) -> PoolKey {
+pub(crate) fn pool_key(agent_id: &str, cwd: PathBuf, variant: Option<String>) -> PoolKey {
     PoolKey {
         agent_id: agent_id.to_string(),
         cwd,
-        remote_tag: remote
-            .map(|r| format!("{}{}", if r.is_local_sim() { "sim:" } else { "" }, r.host())),
         variant,
     }
 }
@@ -483,10 +474,9 @@ impl AgentWarmPool {
         if let Some((key, old)) = displaced {
             log::debug!(
                 target: "agentero::agent",
-                "agent={} warm pool replaced slot cwd={} remote={:?}",
+                "agent={} warm pool replaced slot cwd={}",
                 key.agent_id,
-                key.cwd.display(),
-                key.remote_tag
+                key.cwd.display()
             );
             old.stop();
         }
@@ -581,14 +571,13 @@ impl AgentWarmPool {
 
 #[cfg(test)]
 mod slot_map_tests {
-    use super::{pool_key, SlotMap};
+    use super::SlotMap;
     use std::path::PathBuf;
 
     fn key(agent: &str, cwd: &str) -> super::PoolKey {
         super::PoolKey {
             agent_id: agent.to_string(),
             cwd: PathBuf::from(cwd),
-            remote_tag: None,
             variant: None,
         }
     }
@@ -643,16 +632,6 @@ mod slot_map_tests {
         map.insert(key("codex", "/vault"), 7);
         assert_eq!(map.get_matching(&key("codex", "/vault")), Some(&7));
         assert_eq!(map.get_matching(&key("grok", "/vault")), None);
-    }
-
-    #[test]
-    fn remote_tag_distinguishes_keys() {
-        let mut local = pool_key("codex", PathBuf::from("/vault"), None, None);
-        assert!(local.remote_tag.is_none());
-        local.remote_tag = Some("sim:host".to_string());
-        let mut other = pool_key("codex", PathBuf::from("/vault"), None, None);
-        other.remote_tag = Some("host".to_string());
-        assert_ne!(local, other);
     }
 
     #[test]

@@ -73,12 +73,11 @@ pub async fn warm_agent(
     vault_path: Option<String>,
     preferred_model_id: Option<String>,
     preferred_collaboration_mode_id: Option<String>,
-    remote: Option<Arc<dyn crate::features::agent::remote_host::RemoteAgentLaunch>>,
     pool: Arc<AgentWarmPool>,
 ) -> WarmResult {
     let agent_id = desc.id.clone();
     let session_id = Uuid::new_v4().to_string();
-    let cwd = match agent_spawn_cwd(remote.as_deref(), vault_path.as_deref()) {
+    let cwd = match agent_spawn_cwd(vault_path.as_deref()) {
         Ok(cwd) => cwd,
         Err(e) => {
             return WarmResult {
@@ -93,12 +92,8 @@ pub async fn warm_agent(
     };
     // Pi reads its project-trust decision only at process start. Including it
     // in the key retires a warm connection created under another decision.
-    let variant = if remote.is_none() {
-        crate::features::agent::pi_trust::pool_variant(&desc, &cwd)
-    } else {
-        None
-    };
-    let key: PoolKey = pool_key(&agent_id, cwd.clone(), remote.as_ref(), variant);
+    let variant = crate::features::agent::pi_trust::pool_variant(&desc, &cwd);
+    let key: PoolKey = pool_key(&agent_id, cwd.clone(), variant);
     pool.retire_idle(&key);
 
     // Healthy pooled slot from an earlier warm: reuse its cached models /
@@ -120,7 +115,7 @@ pub async fn warm_agent(
         };
     }
 
-    let acp = match to_acp_agent(&desc, Some(&cwd), remote.as_deref()) {
+    let acp = match to_acp_agent(&desc, Some(&cwd)) {
         Ok(a) => a,
         Err(e) => {
             return WarmResult {
@@ -146,15 +141,12 @@ pub async fn warm_agent(
     };
     let registry = new_registry();
     let terminals = acp_terminals(Some(cwd.clone()));
-    let mcp_servers = if remote.is_none() {
-        app.app_handle()
-            .try_state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
-            .and_then(|bridge| bridge.mcp_server(&session_id, app.window_label()))
-            .into_iter()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mcp_servers = app
+        .app_handle()
+        .try_state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
+        .and_then(|bridge| bridge.mcp_server(&session_id, app.window_label()))
+        .into_iter()
+        .collect();
     let (setup_tx, setup_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let task = pool.start_warm(&key);
     let cancellation = task.cancellation.clone();

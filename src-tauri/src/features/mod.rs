@@ -12,8 +12,6 @@ pub mod agent;
 #[path = "agent/install/mod.rs"]
 pub mod cli_install;
 #[cfg(feature = "desktop")]
-pub mod compile;
-#[cfg(feature = "desktop")]
 pub mod decision;
 #[cfg(feature = "desktop")]
 pub mod host_hooks;
@@ -35,17 +33,8 @@ pub mod jev;
 pub mod markdown;
 pub mod paper;
 pub mod pdf;
-#[cfg(all(
-    feature = "desktop",
-    not(any(target_os = "ios", target_os = "android"))
-))]
-pub mod rtex;
 pub mod system;
 pub mod translate;
 pub mod vault;
 #[cfg(feature = "desktop")]
 pub mod web;
-#[cfg(feature = "desktop")]
-pub mod writing;
-#[cfg(feature = "desktop")]
-pub mod zhihu;

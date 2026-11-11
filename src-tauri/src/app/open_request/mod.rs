@@ -61,14 +61,9 @@ pub fn handle_ui_request<R: Runtime>(
     let payload = validate_ui_request(req)?;
 
     if payload.action == UI_ACTION_OPEN_WINDOW {
-        // `app::window` is compiled out on iOS; named window targets only
-        // exist on desktop/Android builds.
-        #[cfg(not(target_os = "ios"))]
-        {
-            let window = payload.window.as_deref().unwrap_or("");
-            if !crate::app::window::commands::is_known_window(window) {
-                return Err(AppError::message(format!("unknown window: {window}")));
-            }
+        let window = payload.window.as_deref().unwrap_or("");
+        if !crate::app::window::commands::is_known_window(window) {
+            return Err(AppError::message(format!("unknown window: {window}")));
         }
     } else if let Some(vault) = payload.vault_path.as_deref() {
         if let Err(e) = app
@@ -128,20 +123,6 @@ fn emit_open_error<R: Runtime>(app: &AppHandle<R>, message: &str) {
 #[cfg(feature = "desktop")]
 pub fn handle_deep_link_urls<R: Runtime>(app: &AppHandle<R>, urls: &[String]) {
     for raw in urls {
-        // Auth callbacks belong to the identity plugin. Never log their one-use
-        // authorization code through the generic open/UI diagnostics.
-        if let Ok(url) = url::Url::parse(raw) {
-            if url.scheme() == "agentero"
-                && ((url.host_str() == Some("auth") && url.path() == "/callback")
-                    || (url.host_str().is_none() && url.path() == "/auth/callback"))
-            {
-                continue;
-            }
-        }
-        if raw.contains("://pair") || raw.contains(":pair") {
-            // Mobile pairing — leave to the mobile UI / other handlers.
-            continue;
-        }
         // `agentero://ui?action=…` — workspace UI action (open paper/path/window).
         if let Ok(req) = parse_ui_url(raw) {
             if let Err(e) = handle_ui_request(app, req) {
@@ -201,8 +182,6 @@ pub fn handle_argv_urls<R: Runtime>(app: &AppHandle<R>, argv: &[String]) {
 fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
-        // unminimize is desktop-only in Tauri (no window manager chrome on mobile).
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let _ = win.unminimize();
         let _ = win.set_focus();
     }

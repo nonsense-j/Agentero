@@ -40,7 +40,6 @@ import {
 } from "@/lib/shell/ui-store";
 import { seedVaultSkills } from "@/lib/vault/actions";
 import { joinVaultPath } from "@/lib/vault/path";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import {
 	getVaultPath,
 	refreshTree,
@@ -75,26 +74,21 @@ export function registerLifecycleHandlers(): () => void {
 			]);
 			perfFollow(opened);
 			if (!perfActive()) seedVaultSkills(vaultId);
-			if (isTauri() && !isRemoteVaultHandle(vaultId)) {
-				// Establish the Host scope before later handlers activate plugins.
+			if (isTauri()) {
 				await callApi(() => commands.vaultHold(vaultId), {
 					fallback: "vault hold failed",
 				}).catch((e: unknown) => {
 					logger.warn("vault hold failed", { error: errorText(e) });
 				});
 			}
-			if (isTauri() && !perfActive() && !isRemoteVaultHandle(vaultId)) {
+			if (isTauri() && !perfActive()) {
 				void maybeShowPaperBackfill(vaultId);
-			}
-			if (isTauri() && !perfActive() && !isRemoteVaultHandle(vaultId)) {
 				// Auto-ingest: adopt bare papers/ folders created while the app
 				// was closed; the FS watcher only covers the live session.
 				void callApiResult(
 					() => commands.paperIngestReconcile({ vaultPath: vaultId }),
 					{ fallback: "paper ingest reconcile failed" },
 				).catch(() => undefined);
-			}
-			if (isTauri() && !perfActive() && !isRemoteVaultHandle(vaultId)) {
 				// Warm today's arXiv ranking so the Plaza panel opens instantly. The
 				// Host returns its stored same-day run untouched and exits early when
 				// no embedding endpoint is configured, so this is usually free.
@@ -112,7 +106,7 @@ export function registerLifecycleHandlers(): () => void {
 				clearAnnotationsVaultState();
 				clearLayoutVaultState();
 				clearUiVaultState();
-				if (isTauri() && !isRemoteVaultHandle(vaultId)) {
+				if (isTauri()) {
 					void callApi(() => commands.vaultRelease(vaultId), {
 						fallback: "vault release failed",
 					}).catch(() => undefined);

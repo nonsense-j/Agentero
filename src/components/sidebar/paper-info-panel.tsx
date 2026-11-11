@@ -4,15 +4,12 @@ import {
 	ChevronRight,
 	ExternalLink,
 	Library,
-	Loader2,
 	Pencil,
 	Tag,
 	Users,
 } from "lucide-react";
 import {
-	type ComponentProps,
 	type ComponentType,
-	forwardRef,
 	type KeyboardEvent,
 	type ReactNode,
 	type PointerEvent as ReactPointerEvent,
@@ -21,13 +18,7 @@ import {
 	useState,
 } from "react";
 import { useTranslation } from "react-i18next";
-import {
-	SiArxiv,
-	SiGithub,
-	SiHuggingface,
-	SiModelscope,
-	SiZhihu,
-} from "react-icons/si";
+import { SiArxiv, SiGithub, SiHuggingface, SiModelscope } from "react-icons/si";
 import { EditablePaperTag } from "@/components/library/editable-paper-tag";
 import { PaperTagRemoveButton } from "@/components/library/paper-tag-chip";
 import { TagColorPalette } from "@/components/library/tag-color-palette";
@@ -46,9 +37,6 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { copyTextToClipboard } from "@/lib/core/clipboard";
-import { errorText } from "@/lib/core/error";
-import { notifyError } from "@/lib/core/notify";
-import { openExternalUrl } from "@/lib/core/open-external";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { cn } from "@/lib/core/utils";
 import type { PaperMetadata } from "@/lib/paper";
@@ -65,9 +53,7 @@ import {
 } from "@/lib/paper/tags";
 import { venueInfo } from "@/lib/paper/venue-info";
 import { type TagColorId, tagSwatchStyle } from "@/lib/ui/tag-colors";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { getVaultPath } from "@/lib/vault/store";
-import { buildZhihuQuestionDraft, ZHIHU_HOME_URL } from "@/lib/zhihu";
 
 type PaperInfoPanelProps = {
 	meta: PaperMetadata | null;
@@ -75,9 +61,6 @@ type PaperInfoPanelProps = {
 	/** Persist tags to catalog. Required for editing. */
 	onTagsChange?: (tags: PaperTag[]) => Promise<void> | void;
 };
-
-/** Host-built Zhihu question draft (mirrors `ZhihuQuestionDraft`). */
-type ZhihuDraft = { title: string; body: string };
 
 function MetaRow({
 	icon: Icon,
@@ -250,38 +233,6 @@ function ServiceLinkChip({
 		</a>
 	);
 }
-
-const ServiceActionChip = forwardRef<
-	HTMLButtonElement,
-	ComponentProps<"button"> & { label: string; icon: ReactNode }
->(function ServiceActionChip({ label, icon, className, ...props }, ref) {
-	return (
-		<button
-			ref={ref}
-			type="button"
-			title={label}
-			aria-label={label}
-			{...props}
-			className={cn(
-				"inline-flex h-6 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border bg-background px-1.5",
-				"text-caption leading-none text-muted-foreground transition-colors",
-				"hover:bg-muted hover:text-foreground",
-				"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-				"disabled:pointer-events-none disabled:opacity-60",
-				className,
-			)}
-		>
-			{icon}
-			<span className="min-w-0 truncate @max-[18rem]/paper-links:hidden">
-				{label}
-			</span>
-			<ExternalLink
-				className="size-2.5 shrink-0 opacity-70 @max-[18rem]/paper-links:hidden"
-				aria-hidden
-			/>
-		</button>
-	);
-});
 
 function TagsEditor({
 	tags,
@@ -480,11 +431,6 @@ export function PaperInfoPanel({
 	const [contentHeight, setContentHeight] = useState(loadStoredHeight);
 	/** Disable height transition while the user is dragging the resize handle. */
 	const [isDragging, setIsDragging] = useState(false);
-	/** Building the Zhihu question draft (Host round trip + optional translation). */
-	const [zhihuBusy, setZhihuBusy] = useState(false);
-	/** Last generated draft, shown in a popover so the user can inspect it. */
-	const [zhihuDraft, setZhihuDraft] = useState<ZhihuDraft | null>(null);
-	const [zhihuDraftOpen, setZhihuDraftOpen] = useState(false);
 	const dragRef = useRef<{
 		startY: number;
 		startHeight: number;
@@ -555,8 +501,7 @@ export function PaperInfoPanel({
 
 	const resizable = open && Boolean(meta);
 	const vaultPath = getVaultPath();
-	const canEditMeta =
-		Boolean(meta) && !!vaultPath && !isRemoteVaultHandle(vaultPath);
+	const canEditMeta = Boolean(meta) && Boolean(vaultPath);
 	const arxivId = meta?.arxiv_id ? arxivUrls(meta.arxiv_id)?.id : null;
 	const modelScopeUrl = arxivId
 		? `https://modelscope.cn/papers/${arxivId}/overview`
@@ -582,45 +527,6 @@ export function PaperInfoPanel({
 				id: "paper-info-copied",
 			},
 		});
-	};
-
-	/**
-	 * "去知乎提问": build a question draft from the current paper (title
-	 * translated via Zhida when a secret is set), show it, copy it, then open
-	 * Zhihu. A desktop app cannot fill Zhihu's ask modal, so the draft lands on
-	 * the clipboard for the user to paste.
-	 */
-	const copyZhihuDraft = async (draft: ZhihuDraft) => {
-		await copyTextToClipboard(`${draft.title}\n\n${draft.body}`, {
-			successMessage: t("paperInfo.zhihuAskCopied"),
-			errorMessage: t("paperInfo.copyFailed"),
-			successNotify: { duration: 5000, id: "zhihu-ask-copied" },
-		});
-	};
-
-	const askOnZhihu = async () => {
-		if (!meta || zhihuBusy) return;
-		setZhihuBusy(true);
-		try {
-			const draft = await buildZhihuQuestionDraft({
-				title: meta.title ?? "",
-				authors: meta.authors ?? [],
-				venue: meta.publication ?? "",
-				year: meta.year != null ? String(meta.year) : "",
-				doi: meta.doi ?? "",
-				arxivId: meta.arxiv_id ?? "",
-				url: meta.html_url ?? meta.source_url ?? "",
-				abstractText: meta.abstract ?? "",
-			});
-			setZhihuDraft(draft);
-			setZhihuDraftOpen(true);
-			await copyZhihuDraft(draft);
-			openExternalUrl(ZHIHU_HOME_URL);
-		} catch (e) {
-			notifyError(errorText(e));
-		} finally {
-			setZhihuBusy(false);
-		}
 	};
 
 	return (
@@ -790,134 +696,96 @@ export function PaperInfoPanel({
 									}}
 								/>
 							</MetaRow>
-							<div className="@container/paper-links flex flex-col gap-1.5 px-3 pt-1.5">
-								<div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
-									{meta.pdf_url || meta.arxiv_id ? (
-										<LinkChip
-											href={
-												meta.pdf_url ?? `https://arxiv.org/pdf/${meta.arxiv_id}`
-											}
-											label={t("paperInfo.pdf")}
-											icon={
-												<SiArxiv
-													className="size-3.5 shrink-0 text-[#B31B1B]"
-													aria-hidden
-												/>
-											}
-										/>
-									) : null}
-									{alphaXivUrl ? (
-										<ServiceLinkChip
-											href={alphaXivUrl}
-											label={t("paperInfo.alphaXiv")}
-											icon={
-												<AlphaXivIcon className="size-3.5 shrink-0 text-[#B33131]" />
-											}
-										/>
-									) : null}
-									{modelScopeUrl ? (
-										<ServiceLinkChip
-											href={modelScopeUrl}
-											label={t("paperInfo.modelscopeInterpretation")}
-											icon={
-												<SiModelscope
-													className="size-3.5 shrink-0 text-[#624AFF]"
-													aria-hidden
-												/>
-											}
-										/>
-									) : null}
-									<Popover
-										open={zhihuDraftOpen && Boolean(zhihuDraft)}
-										onOpenChange={setZhihuDraftOpen}
-									>
-										<PopoverTrigger asChild>
-											<ServiceActionChip
-												label={t("paperInfo.zhihu")}
-												title={t("paperInfo.zhihuAskHint")}
-												onClick={() => void askOnZhihu()}
-												disabled={zhihuBusy}
-												icon={
-													zhihuBusy ? (
-														<Loader2
-															className="size-3.5 shrink-0 animate-spin"
+							{meta.pdf_url ||
+							meta.arxiv_id ||
+							alphaXivUrl ||
+							modelScopeUrl ||
+							codeRepo ||
+							huggingFaceUrl ||
+							openreviewUrl ? (
+								<div className="@container/paper-links flex flex-col gap-1.5 px-3 pt-1.5">
+									{meta.pdf_url ||
+									meta.arxiv_id ||
+									alphaXivUrl ||
+									modelScopeUrl ? (
+										<div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
+											{meta.pdf_url || meta.arxiv_id ? (
+												<LinkChip
+													href={
+														meta.pdf_url ??
+														`https://arxiv.org/pdf/${meta.arxiv_id}`
+													}
+													label={t("paperInfo.pdf")}
+													icon={
+														<SiArxiv
+															className="size-3.5 shrink-0 text-[#B31B1B]"
 															aria-hidden
 														/>
-													) : (
-														<SiZhihu
-															className="size-3.5 shrink-0 text-[#0084FF]"
-															aria-hidden
-														/>
-													)
-												}
-											/>
-										</PopoverTrigger>
-										<PopoverContent
-											side="top"
-											align="start"
-											className="w-80 gap-2 p-3"
-										>
-											{zhihuDraft ? (
-												<div className="flex flex-col gap-2">
-													<div className="text-xs font-medium text-muted-foreground">
-														{t("paperInfo.zhihuDraftHeading")}
-													</div>
-													<div className="rounded-md border bg-muted/40 p-2">
-														<div className="break-words font-medium text-foreground text-xs">
-															{zhihuDraft.title}
-														</div>
-														<div className="agentero-scroll mt-1.5 max-h-52 overflow-y-auto whitespace-pre-wrap break-words text-caption text-muted-foreground">
-															{zhihuDraft.body}
-														</div>
-													</div>
-													<div>
-														<Button
-															type="button"
-															variant="outline"
-															size="xs"
-															onClick={() => void copyZhihuDraft(zhihuDraft)}
-														>
-															{t("paperInfo.zhihuDraftCopy")}
-														</Button>
-													</div>
-												</div>
+													}
+												/>
 											) : null}
-										</PopoverContent>
-									</Popover>
+											{alphaXivUrl ? (
+												<ServiceLinkChip
+													href={alphaXivUrl}
+													label={t("paperInfo.alphaXiv")}
+													icon={
+														<AlphaXivIcon className="size-3.5 shrink-0 text-[#B33131]" />
+													}
+												/>
+											) : null}
+											{modelScopeUrl ? (
+												<ServiceLinkChip
+													href={modelScopeUrl}
+													label={t("paperInfo.modelscopeInterpretation")}
+													icon={
+														<SiModelscope
+															className="size-3.5 shrink-0 text-[#624AFF]"
+															aria-hidden
+														/>
+													}
+												/>
+											) : null}
+										</div>
+									) : null}
+									{codeRepo || huggingFaceUrl || openreviewUrl ? (
+										<div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
+											{codeRepo ? (
+												<ServiceLinkChip
+													href={repoHref(codeRepo)}
+													label={t("paperInfo.codeRepo")}
+													icon={
+														<SiGithub
+															className="size-3.5 shrink-0"
+															aria-hidden
+														/>
+													}
+												/>
+											) : null}
+											{huggingFaceUrl ? (
+												<ServiceLinkChip
+													href={huggingFaceUrl}
+													label={t("paperInfo.huggingface")}
+													icon={
+														<SiHuggingface
+															className="size-3.5 shrink-0 text-[#FF9D00]"
+															aria-hidden
+														/>
+													}
+												/>
+											) : null}
+											{openreviewUrl ? (
+												<ServiceLinkChip
+													href={openreviewUrl}
+													label={t("paperInfo.openreview")}
+													icon={
+														<OpenReviewIcon className="size-3.5 shrink-0" />
+													}
+												/>
+											) : null}
+										</div>
+									) : null}
 								</div>
-								{codeRepo || huggingFaceUrl || openreviewUrl ? (
-									<div className="flex flex-nowrap items-center gap-1.5 overflow-hidden">
-										{codeRepo ? (
-											<ServiceLinkChip
-												href={repoHref(codeRepo)}
-												label={t("paperInfo.codeRepo")}
-												icon={
-													<SiGithub className="size-3.5 shrink-0" aria-hidden />
-												}
-											/>
-										) : null}
-										{huggingFaceUrl ? (
-											<ServiceLinkChip
-												href={huggingFaceUrl}
-												label={t("paperInfo.huggingface")}
-												icon={
-													<SiHuggingface
-														className="size-3.5 shrink-0 text-[#FF9D00]"
-														aria-hidden
-													/>
-												}
-											/>
-										) : null}
-										{openreviewUrl ? (
-											<ServiceLinkChip
-												href={openreviewUrl}
-												label={t("paperInfo.openreview")}
-												icon={<OpenReviewIcon className="size-3.5 shrink-0" />}
-											/>
-										) : null}
-									</div>
-								) : null}
-							</div>
+							) : null}
 							{canEditMeta ? (
 								<div className="px-3 pt-2">
 									<Button

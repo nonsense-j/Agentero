@@ -82,7 +82,11 @@ const LEGACY_SETTINGS_KEY = "agentero-settings";
 type SettingsWire = AppSettings_Serialize | AppSettings_Deserialize;
 
 function fromSettingsWire(raw: SettingsWire): AppSettings {
-	return raw as AppSettings;
+	return raw as unknown as AppSettings;
+}
+
+function toSettingsWire(settings: AppSettings): AppSettings_Deserialize {
+	return settings as unknown as AppSettings_Deserialize;
 }
 
 /** In-memory snapshot (source of truth between Host round-trips). */
@@ -253,9 +257,12 @@ export async function saveSettingsAsync(
 }
 
 async function persistToHost(settings: AppSettings): Promise<AppSettings> {
-	const res = await callApi(() => commands.settingsSet(settings), {
-		fallback: "settings_set failed",
-	});
+	const res = await callApi(
+		() => commands.settingsSet(toSettingsWire(settings)),
+		{
+			fallback: "settings_set failed",
+		},
+	);
 	setCache(normalizeSettings(fromSettingsWire(res)));
 	return loadSettings();
 }
@@ -329,11 +336,6 @@ function normalizePartial(
 	} else {
 		merged.easyScholarKey = parsed.easyScholarKey.trim();
 	}
-	if (typeof parsed.zhihuAccessSecret !== "string") {
-		merged.zhihuAccessSecret = DEFAULT_SETTINGS.zhihuAccessSecret;
-	} else {
-		merged.zhihuAccessSecret = parsed.zhihuAccessSecret.trim();
-	}
 	if (typeof parsed.networkProxyEnabled !== "boolean") {
 		merged.networkProxyEnabled = DEFAULT_SETTINGS.networkProxyEnabled;
 	}
@@ -403,15 +405,6 @@ function normalizePartial(
 		merged.mcpPort > 65535
 	) {
 		merged.mcpPort = DEFAULT_SETTINGS.mcpPort;
-	}
-	if (typeof merged.mcpTunnelId !== "string") {
-		merged.mcpTunnelId = DEFAULT_SETTINGS.mcpTunnelId;
-	}
-	if (typeof merged.mcpTunnelApiKey !== "string") {
-		merged.mcpTunnelApiKey = DEFAULT_SETTINGS.mcpTunnelApiKey;
-	}
-	if (typeof parsed.telemetryEnabled !== "boolean") {
-		merged.telemetryEnabled = DEFAULT_SETTINGS.telemetryEnabled;
 	}
 	if (typeof parsed.plazaEnabled !== "boolean") {
 		merged.plazaEnabled = DEFAULT_SETTINGS.plazaEnabled;
@@ -737,12 +730,6 @@ function normalizeTranslateSettings(
 	}
 	if (typeof raw.customUser === "string") {
 		base.customUser = normalizeTranslateTemplate(raw.customUser);
-	}
-	if (typeof raw.cacheReflowIr === "boolean") {
-		base.cacheReflowIr = raw.cacheReflowIr;
-	}
-	if (typeof raw.cacheReflowFinal === "boolean") {
-		base.cacheReflowFinal = raw.cacheReflowFinal;
 	}
 	return base;
 }

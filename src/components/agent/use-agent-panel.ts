@@ -20,7 +20,6 @@ import { useSessionComposerState } from "@/hooks/use-session-composer-state";
 import {
 	cancelAgentRun,
 	ensureCatalogAgent,
-	isChatOnlyAgentTemplate,
 	openAgentLoginTerminal,
 	setDefaultAgent,
 } from "@/lib/agent";
@@ -72,7 +71,6 @@ export function useAgentPanel({
 
 	const {
 		selectedVaultPath,
-		selectedPaperMeta,
 		directoryPathSet,
 		paperPathSet,
 		labelForPath,
@@ -252,18 +250,14 @@ export function useAgentPanel({
 	// made selectedLogin → onAgentLogin unstable and defeated
 	// memo(ChatTranscript).
 	const selectedTemplateId = selected?.templateId ?? selected?.template ?? null;
-	// Chat-only built-in agents (Zhihu) cannot read Vault files: keep no auto
-	// context so the UI matches what is actually sent (no path leakage).
-	const chatOnlyAgent = isChatOnlyAgentTemplate(selected?.template);
 	const contextPaths = useMemo(() => {
-		if (chatOnlyAgent) return [];
 		const paths = [
 			...(includeSelectedFile && selectedVaultPath ? [selectedVaultPath] : []),
 			...mentionedPaths,
 		];
 		return [...new Set(paths)];
-	}, [chatOnlyAgent, includeSelectedFile, mentionedPaths, selectedVaultPath]);
-	const currentFilePath = chatOnlyAgent ? null : selectedFileIncluded;
+	}, [includeSelectedFile, mentionedPaths, selectedVaultPath]);
+	const currentFilePath = selectedFileIncluded;
 	const selectedLogin = useMemo(() => {
 		const templateId = selectedTemplateId;
 		if (!templateId || templateId === "custom") return null;
@@ -369,7 +363,6 @@ export function useAgentPanel({
 		setHistoryOpen,
 		setSelectedAgentId,
 		selectedVaultPath,
-		selectedPaperMeta,
 		contextPaths,
 		composer: composerState,
 		turnConfig,
@@ -606,7 +599,6 @@ export function useAgentPanel({
 	return {
 		t,
 		// Transcript (lines are owned by ChatTranscript's store subscription)
-		selectedPaperMeta,
 		activeTabId,
 		hydratingSessionId,
 		selected,

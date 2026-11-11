@@ -2,18 +2,14 @@
 
 use super::state::ProgressItem;
 use crate::core::error::AppError;
-use crate::core::fs::WriteOpts;
 use crate::features::paper::catalog::papers;
 use crate::features::paper::catalog::papers::is_internal_tag_name;
 use crate::features::paper::import::{
-    ensure_paper_assets_with_cookies, map_zotero_item_to_record, normalize_parent_dir,
-    write_paper_shell_opts, NoteShellMode,
+    ensure_paper_assets_with_cookies, map_zotero_item_to_record, NoteShellMode,
 };
 use crate::features::paper::zotero::ZOTERO_INTERNAL_TAG_PREFIX;
 use crate::features::translate::{free_mt_to_zh, looks_mostly_cjk};
 use crate::integration::connector::ConnectorController;
-use crate::integration::remote::import_bridge::{unique_remote_paper_path, upload_tree};
-use crate::integration::remote::{parse_remote_handle, RemoteSession};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,76 +125,6 @@ pub async fn import_connector_item_with_cookies(
     })
 }
 
-/// Remote vault variant: stage the shell, upload it, and push the catalog.
-pub async fn import_connector_item_remote_with_cookies(
-    ctrl: Arc<ConnectorController>,
-    _session_id: &str,
-    session: Arc<RemoteSession>,
-    parent_dir: &str,
-    item: &Value,
-    page_uri: Option<&str>,
-    _cookies: Option<&str>,
-) -> Result<ConnectorImportResult, AppError> {
-    let note_mode = note_mode_from_ctrl(&ctrl);
-    let parent_rel = normalize_parent_dir(parent_dir)?;
-    let connector_item_id = item.get("id").cloned().unwrap_or(Value::Null);
-    let item_type = item
-        .get("itemType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("journalArticle")
-        .to_string();
-
-    let mut meta = connector_paper_meta(item, page_uri)?;
-
-    let id = meta.id.clone();
-    if id.is_empty() {
-        return Err(AppError::message("resolved metadata has empty id"));
-    }
-
-    if let Ok(Some(existing)) = papers::get_by_id(&session.work_root, &id) {
-        return Ok(ConnectorImportResult {
-            path: existing.path,
-            id: existing.id,
-            title: existing.title,
-            deduped: true,
-            connector_item_id,
-            item_type,
-        });
-    }
-
-    let (folder_id, path_rel) =
-        unique_remote_paper_path(session.fs.as_ref(), &parent_rel, &id).await?;
-    meta.id = folder_id.clone();
-    let now = crate::core::time::now_rfc3339_millis();
-    meta.added_at = now.clone();
-    meta.updated_at = now;
-
-    let staging = session.work_root.join(&path_rel);
-    if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    fs::create_dir_all(&staging)?;
-    write_paper_shell_opts(&staging, &session.work_root, &meta, note_mode, false).await?;
-    let record = meta.clone().at_path(&path_rel);
-    papers::upsert_paper(&session.work_root, &record)?;
-
-    // Shell only first so Connector HTTP stays under timeout.
-    upload_tree(session.fs.as_ref(), &staging, &path_rel).await?;
-    {
-        let mut cat = session.catalog.lock().await;
-        cat.push(session.fs.clone()).await?;
-    }
-
-    Ok(ConnectorImportResult {
-        path: path_rel,
-        id: meta.id,
-        title: meta.title,
-        deduped: false,
-        connector_item_id,
-        item_type,
-    })
-}
-
 /// Store a SingleFile HTML snapshot inside a paper unit.
 pub async fn write_snapshot_html(
     vault: &Path,
@@ -217,158 +143,12 @@ pub async fn write_snapshot_html(
     Ok(format!("{rel}/snapshot.html"))
 }
 
-pub async fn write_snapshot_html_remote(
-    session: Arc<RemoteSession>,
-    paper_rel: &str,
-    html: &str,
-) -> Result<String, AppError> {
-    let rel = paper_rel.trim().trim_matches('/').replace('\\', "/");
-    if rel.is_empty() || !session.fs.exists(&rel).await? {
-        return Err(AppError::message("paper folder missing"));
-    }
-    let path = format!("{rel}/snapshot.html");
-    session
-        .fs
-        .write(
-            &path,
-            html.as_bytes(),
-            WriteOpts {
-                create_parents: true,
-            },
-        )
-        .await?;
-    Ok(path)
-}
-
 /// Validate that uploaded raw bytes have the `%PDF` header.
 fn ensure_pdf_bytes(bytes: &[u8]) -> Result<(), AppError> {
     if bytes.len() < 4 || &bytes[..4] != b"%PDF" {
         return Err(AppError::message("uploaded attachment is not a PDF"));
     }
     Ok(())
-}
-
-/// Write a browser-uploaded PDF into a remote paper folder.
-pub async fn write_attachment_pdf_remote(
-    session: Arc<RemoteSession>,
-    paper_rel: &str,
-    bytes: &[u8],
-) -> Result<String, AppError> {
-    ensure_pdf_bytes(bytes)?;
-    let rel = paper_rel.trim().trim_matches('/').replace('\\', "/");
-    if rel.is_empty() || !session.fs.exists(&rel).await? {
-        return Err(AppError::message("paper folder missing"));
-    }
-    let id = rel.rsplit('/').next().unwrap_or("paper").to_string();
-    let pdf_rel = format!("{rel}/{id}.pdf");
-    session
-        .fs
-        .write(
-            &pdf_rel,
-            bytes,
-            WriteOpts {
-                create_parents: true,
-            },
-        )
-        .await?;
-
-    Ok(rel)
-}
-
-/// List org folders under remote `papers/` for the Connector collection picker.
-pub async fn list_save_targets_remote(
-    session: &RemoteSession,
-) -> Vec<crate::integration::connector::targets::SaveTarget> {
-    use crate::integration::connector::targets::SaveTarget;
-    let mut out = vec![SaveTarget {
-        id: "L1".into(),
-        name: "papers".into(),
-        level: 0,
-    }];
-    walk_remote_org(session, "papers", 1, &mut out).await;
-    out
-}
-
-async fn walk_remote_org(
-    session: &RemoteSession,
-    rel: &str,
-    level: u32,
-    out: &mut Vec<crate::integration::connector::targets::SaveTarget>,
-) {
-    if level > 12 {
-        return;
-    }
-    let Ok(entries) = session.fs.list(rel).await else {
-        return;
-    };
-    let mut dirs: Vec<String> = entries
-        .into_iter()
-        .filter(|e| e.is_dir && !e.name.starts_with('.'))
-        .map(|e| e.name)
-        .collect();
-    dirs.sort_by_key(|a| a.to_lowercase());
-    for name in dirs {
-        let child = format!("{rel}/{name}");
-        // Paper unit heuristic: NOTES.md / metadata.json / {stem}.pdf
-        let is_paper = session
-            .fs
-            .exists(&format!("{child}/NOTES.md"))
-            .await
-            .unwrap_or(false)
-            || session
-                .fs
-                .exists(&format!("{child}/metadata.json"))
-                .await
-                .unwrap_or(false)
-            || session
-                .fs
-                .exists(&format!("{child}/{name}.pdf"))
-                .await
-                .unwrap_or(false);
-        if is_paper {
-            continue;
-        }
-        out.push(crate::integration::connector::targets::SaveTarget {
-            id: format!("D{child}"),
-            name: name.clone(),
-            level,
-        });
-        Box::pin(walk_remote_org(session, &child, level + 1, out)).await;
-    }
-}
-
-/// Move a remote paper folder under a new org parent + catalog path rewrite.
-pub async fn move_paper_folder_remote(
-    session: &RemoteSession,
-    from_rel: &str,
-    dest_parent: &str,
-) -> Result<String, AppError> {
-    let from = from_rel.trim().trim_matches('/').replace('\\', "/");
-    let dest_parent = dest_parent.trim().trim_matches('/').replace('\\', "/");
-    if from.is_empty() {
-        return Err(AppError::message("empty paper path"));
-    }
-    let base = from.rsplit('/').next().unwrap_or(from.as_str()).to_string();
-    let new_rel = format!("{dest_parent}/{base}");
-    if new_rel == from {
-        return Ok(from);
-    }
-    if !session.fs.exists(&from).await? {
-        return Err(AppError::message(format!("paper folder missing: {from}")));
-    }
-    if session.fs.exists(&new_rel).await? {
-        return Err(AppError::message(format!(
-            "destination already exists: {new_rel}"
-        )));
-    }
-    let _ = session.fs.mkdir(&dest_parent).await;
-    session.fs.rename(&from, &new_rel).await?;
-    let _ = papers::move_under_path(&session.work_root, &from, &new_rel);
-    {
-        let mut cat = session.catalog.lock().await;
-        cat.push(session.fs.clone()).await?;
-    }
-    Ok(new_rel)
 }
 
 /// Map a connector item and apply connector-specific meta fixups: tag the
@@ -570,7 +350,7 @@ fn ensure_standalone_session(
     }
 }
 
-/// Dispatch paper shell creation and PDF persistence to local or remote storage.
+/// Dispatch paper shell creation and PDF persistence to local storage.
 async fn dispatch_standalone_import(
     ctrl: &ConnectorController,
     vault_handle: &str,
@@ -579,26 +359,18 @@ async fn dispatch_standalone_import(
     bytes: &[u8],
 ) -> Result<ConnectorImportResult, AppError> {
     let note_mode = note_mode_from_ctrl(ctrl);
-    if let Some(sid) = parse_remote_handle(vault_handle) {
-        let reg = ctrl
-            .remote_registry()
-            .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-        let session = reg.get(sid).await?;
-        import_standalone_remote(session, parent_dir, meta, bytes, note_mode).await
-    } else {
-        let host_app = ctrl
-            .app_handle()
-            .map(|app| crate::features::host_hooks::wrap(&app));
-        import_standalone_local(
-            Path::new(vault_handle),
-            parent_dir,
-            meta,
-            bytes,
-            host_app.as_ref(),
-            note_mode,
-        )
-        .await
-    }
+    let host_app = ctrl
+        .app_handle()
+        .map(|app| crate::features::host_hooks::wrap(&app));
+    import_standalone_local(
+        Path::new(vault_handle),
+        parent_dir,
+        meta,
+        bytes,
+        host_app.as_ref(),
+        note_mode,
+    )
+    .await
 }
 
 /// Finalize session tracking, record item paths, and notify UI/Connector.
@@ -740,81 +512,6 @@ async fn import_standalone_local(
     })
 }
 
-async fn import_standalone_remote(
-    session: Arc<RemoteSession>,
-    parent_dir: &str,
-    mut meta: papers::PaperRecord,
-    bytes: &[u8],
-    note_mode: NoteShellMode,
-) -> Result<ConnectorImportResult, AppError> {
-    let parent_rel = normalize_parent_dir(parent_dir)?;
-    let id = meta.id.clone();
-    if id.is_empty() {
-        return Err(AppError::message("resolved metadata has empty id"));
-    }
-    if let Ok(Some(existing)) = papers::get_by_id(&session.work_root, &id) {
-        // Dedupe hit with a missing PDF: backfill the file both into the local
-        // staging mirror and onto the remote vault, or the save is lost.
-        let staging = session.work_root.join(&existing.path);
-        let pdf_path = staging.join(format!("{id}.pdf"));
-        if !pdf_path.is_file() {
-            fs::create_dir_all(&staging)?;
-            fs::write(&pdf_path, bytes)?;
-            let remote_pdf = format!("{}/{id}.pdf", existing.path.trim_matches('/'));
-            session
-                .fs
-                .write(
-                    &remote_pdf,
-                    bytes,
-                    WriteOpts {
-                        create_parents: true,
-                    },
-                )
-                .await?;
-        }
-        return Ok(ConnectorImportResult {
-            path: existing.path,
-            id: existing.id,
-            title: existing.title,
-            deduped: true,
-            connector_item_id: Value::Null,
-            item_type: "attachment".into(),
-        });
-    }
-
-    let (folder_id, path_rel) =
-        unique_remote_paper_path(session.fs.as_ref(), &parent_rel, &id).await?;
-    meta.id = folder_id.clone();
-    let now = crate::core::time::now_rfc3339_millis();
-    meta.added_at = now.clone();
-    meta.updated_at = now;
-    let title = meta.title.clone();
-
-    let staging = session.work_root.join(&path_rel);
-    if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    fs::create_dir_all(&staging)?;
-    fs::write(staging.join(format!("{folder_id}.pdf")), bytes)?;
-    write_paper_shell_opts(&staging, &session.work_root, &meta, note_mode, false).await?;
-    let record = meta.clone().at_path(&path_rel);
-    papers::upsert_paper(&session.work_root, &record)?;
-    upload_tree(session.fs.as_ref(), &staging, &path_rel).await?;
-    {
-        let mut cat = session.catalog.lock().await;
-        cat.push(session.fs.clone()).await?;
-    }
-
-    Ok(ConnectorImportResult {
-        path: path_rel,
-        id: meta.id,
-        title,
-        deduped: false,
-        connector_item_id: Value::Null,
-        item_type: "attachment".into(),
-    })
-}
-
 /// Whether an OA/crossref resolver might still obtain a PDF for this session item.
 /// True when the paper has a DOI or arXiv id and no local PDF yet.
 pub async fn session_has_attachment_resolvers(
@@ -853,33 +550,6 @@ pub async fn save_attachment_from_resolver(
 
     let id = paper_rel.rsplit('/').next().unwrap_or("paper").to_string();
 
-    if let Some(sid) = parse_remote_handle(&vault_handle) {
-        let reg = ctrl
-            .remote_registry()
-            .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-        let session = reg.get(sid).await?;
-        let paper_dir = session.work_root.join(&paper_rel);
-        fs::create_dir_all(&paper_dir)?;
-        let assets = ensure_paper_assets_with_cookies(
-            &paper_dir,
-            &id,
-            arxiv.as_deref(),
-            None,
-            doi.as_deref(),
-            None,
-        )
-        .await?;
-        if !assets.pdf && !crate::features::paper::import::has_local_pdf(&paper_dir) {
-            return Err(AppError::message("Failed to save an attachment"));
-        }
-        upload_tree(session.fs.as_ref(), &paper_dir, &paper_rel).await?;
-        {
-            let mut cat = session.catalog.lock().await;
-            cat.push(session.fs.clone()).await?;
-        }
-        return Ok("Full Text PDF".into());
-    }
-
     let vault = PathBuf::from(&vault_handle);
     let paper_dir = vault.join(&paper_rel);
     if !paper_dir.is_dir() {
@@ -905,44 +575,7 @@ async fn paper_resolver_hints(
     ctrl: &ConnectorController,
     paper_rel: &str,
 ) -> Result<(Option<String>, Option<String>, bool), AppError> {
-    let handle = {
-        let (h, _) = ctrl.vault_handle_and_parent()?;
-        h
-    };
-    if let Some(sid) = parse_remote_handle(&handle) {
-        let reg = ctrl
-            .remote_registry()
-            .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-        let session = reg.get(sid).await?;
-        let row = papers::get_by_path(&session.work_root, paper_rel)?;
-        let doi = row
-            .as_ref()
-            .and_then(|r| r.doi.clone())
-            .filter(|s| !s.is_empty());
-        let arxiv = row
-            .as_ref()
-            .and_then(|r| r.arxiv_id.clone())
-            .filter(|s| !s.is_empty());
-        let has_pdf =
-            crate::features::paper::import::has_local_pdf(&session.work_root.join(paper_rel))
-                || session
-                    .fs
-                    .list(paper_rel)
-                    .await
-                    .ok()
-                    .map(|entries| {
-                        entries.iter().any(|e| {
-                            !e.is_dir
-                                && e.name
-                                    .rsplit('.')
-                                    .next()
-                                    .map(|ext| ext.eq_ignore_ascii_case("pdf"))
-                                    .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false);
-        return Ok((doi, arxiv, has_pdf));
-    }
+    let (handle, _) = ctrl.vault_handle_and_parent()?;
     let vault = PathBuf::from(&handle);
     let row = papers::get_by_path(&vault, paper_rel)?;
     let doi = row

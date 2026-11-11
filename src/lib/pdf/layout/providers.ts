@@ -11,8 +11,8 @@ import type {
 } from "@/lib/pdf/layout/settings";
 
 export type LayoutProviderDescriptor = {
-	id: LayoutProviderId | "local";
-	kind: "local" | "remote";
+	id: LayoutBackend;
+	kind: "remote";
 	requiresApiKey: boolean;
 	supportsBaseUrl: boolean;
 	/** Document language is user-selectable (MinerU only). */
@@ -25,10 +25,7 @@ export type LayoutProviderDescriptor = {
 	sidecarMode: LayoutSidecarMode;
 };
 
-export type RemoteLayoutProviderDescriptor = LayoutProviderDescriptor & {
-	id: Exclude<LayoutBackend, "local">;
-	kind: "remote";
-};
+export type RemoteLayoutProviderDescriptor = LayoutProviderDescriptor;
 
 /** Credential-card shape shared by the layout and body-parser provider UIs. */
 export type ProviderCardDescriptor = {
@@ -49,13 +46,6 @@ export type ProviderCardDescriptor = {
 
 export const LAYOUT_PROVIDERS: Record<LayoutBackend, LayoutProviderDescriptor> =
 	{
-		local: {
-			id: "local",
-			kind: "local",
-			requiresApiKey: false,
-			supportsBaseUrl: false,
-			sidecarMode: "embedpdf-layout",
-		},
 		paddle: {
 			id: "paddle",
 			kind: "remote",

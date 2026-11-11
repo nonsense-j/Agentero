@@ -45,8 +45,6 @@ pub fn skill_mention_style(template: &AgentTemplate) -> SkillMentionStyle {
         | AgentTemplate::MinimaxCode
         | AgentTemplate::MimoCode
         | AgentTemplate::Codebuddy
-        // Built-in Zhihu agent has no skill mechanism at all.
-        | AgentTemplate::Zhihu
         | AgentTemplate::Custom => SkillMentionStyle::Slash,
     }
 }

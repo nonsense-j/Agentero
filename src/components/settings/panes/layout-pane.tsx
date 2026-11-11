@@ -14,7 +14,6 @@ import {
 	SettingsGroup,
 	SettingsRow,
 } from "@/components/settings/settings-layout";
-import type { SettingsHostContext } from "@/components/settings/types";
 import { Button } from "@/components/ui/button";
 import {
 	Collapsible,
@@ -103,17 +102,14 @@ export function LayoutPane({
 	settings,
 	patch,
 	vaultPath,
-	hostContext,
 }: {
 	settings: AppSettings;
 	patch: (p: Partial<AppSettings>) => void;
 	vaultPath?: string | null;
-	hostContext: SettingsHostContext;
 }) {
 	const { t } = useTranslation(["settings", "common"]);
 	const layout = settings.layout;
-	const isLocalVault = hostContext.kind === "local";
-	const canManageResults = Boolean(vaultPath) && isLocalVault && isTauri();
+	const canManageResults = Boolean(vaultPath) && isTauri();
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [dialogMode, setDialogMode] = useState<"clear" | "reparse">("clear");
 	const [scope, setScope] = useState<ParseResultScope>("all");
@@ -224,7 +220,7 @@ export function LayoutPane({
 							{backendOptions.map((descriptor) => (
 								<SelectItem key={descriptor.id} value={descriptor.id}>
 									{t(
-										`layout.backend.${descriptor.id}` as "layout.backend.local",
+										`layout.backend.${descriptor.id}` as "layout.backend.paddle",
 									)}
 								</SelectItem>
 							))}

@@ -7,7 +7,6 @@ import {
 	SettingsRow,
 	SettingsSectionLabel,
 } from "@/components/settings/settings-layout";
-import type { SettingsHostContext } from "@/components/settings/types";
 import { Button } from "@/components/ui/button";
 import {
 	Select,
@@ -58,12 +57,10 @@ import { TerminalAppRow } from "./general/terminal-app-row";
 export function GeneralPane({
 	settings,
 	patch,
-	hostContext,
 	vaultPath = null,
 }: {
 	settings: AppSettings;
 	patch: (p: Partial<AppSettings>) => void;
-	hostContext: SettingsHostContext;
 	vaultPath?: string | null;
 }) {
 	const { t } = useTranslation("settings");
@@ -76,9 +73,8 @@ export function GeneralPane({
 	const [systemProxy, setSystemProxy] = useState<string | null>(null);
 	const [seedingTemplate, setSeedingTemplate] = useState(false);
 
-	// Custom note mode seeds `.agentero/templates/NOTES.md` in the active vault;
-	// remote vaults have no local template file to create.
-	const canSeedTemplate = Boolean(vaultPath) && hostContext.kind === "local";
+	// Custom note mode seeds `.agentero/templates/NOTES.md` in the active vault.
+	const canSeedTemplate = Boolean(vaultPath);
 
 	const seedTemplate = async () => {
 		if (!vaultPath || !canSeedTemplate) return;
@@ -123,14 +119,6 @@ export function GeneralPane({
 	return (
 		<>
 			<PageTitle title={t("general.title")} />
-			{hostContext.kind === "remote" ? (
-				<p className="mb-3 rounded-lg border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-muted-foreground text-xs leading-relaxed">
-					{t("host.remoteContextHint", {
-						host: hostContext.label,
-						path: hostContext.remotePath || "—",
-					})}
-				</p>
-			) : null}
 			<SettingsSectionLabel>
 				{t("general.sections.papers")}
 			</SettingsSectionLabel>
@@ -409,12 +397,8 @@ export function GeneralPane({
 				}}
 			/>
 			<SettingsSectionLabel>{t("general.sections.mcp")}</SettingsSectionLabel>
-			<McpSettingsBlock
-				settings={settings}
-				patch={patch}
-				disabled={hostContext.kind === "remote"}
-			/>
-			<PrivacySettingsBlock settings={settings} patch={patch} />
+			<McpSettingsBlock settings={settings} patch={patch} />
+			<PrivacySettingsBlock />
 		</>
 	);
 }

@@ -121,12 +121,10 @@ export default defineConfig(async () => ({
 	optimizeDeps: {
 		// Only scan the main desktop entrypoint for dependency pre-bundling.
 		entries: ["index.html"],
-		// PDFium + ONNX Runtime load wasm/workers; dep-optimize rewrites break them.
+		// PDFium loads wasm/workers; dep-optimize rewrites break them.
 		exclude: [
 			"@embedpdf/pdfium",
 			"@embedpdf/engines",
-			"onnxruntime-web",
-			"@embedpdf/ai",
 			// Do NOT add `@platejs/toc` here even though it is patched in-repo.
 			// It imports the CommonJS-only `react-compiler-runtime`
 			// (`import { c } from "react-compiler-runtime"`), and only the
@@ -143,11 +141,6 @@ export default defineConfig(async () => ({
 	test: {
 		environment: "node",
 		include: ["test/**/*.test.ts"],
-		server: {
-			deps: {
-				inline: [/@embedpdf\/ai/],
-			},
-		},
 	},
 
 	// Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -158,9 +151,7 @@ export default defineConfig(async () => ({
 	server: {
 		port,
 		strictPort: true,
-		// iOS Simulator reaches the Mac dev server through the local network
-		// bridge; binding only to loopback makes localhost:1420 unreachable.
-		host: host || "0.0.0.0",
+		host: host || false,
 		// WebViews persist the HTTP cache across dev sessions on the same port.
 		// Do not let a cached dependency outlive a rebuilt prebundle.
 		headers: { "Cache-Control": "no-store" },

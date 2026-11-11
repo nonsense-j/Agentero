@@ -231,10 +231,10 @@ export function FileTreeDisclosureIcon({
 
 /** Ring shown on the row a drag is currently hovering (valid drop target). */
 const DROP_RING = "ring-1 ring-inset ring-primary bg-accent";
-/** Row interaction states shared by the reading tree and the writing sidebar. */
-export const FILE_TREE_ROW_STATE = `${TREE_ROW_TEXT_STATE} transition-[color,background-color,box-shadow,transform] duration-[var(--motion-duration-fast)] ease-[cubic-bezier(0.25,1,0.5,1)] hover:bg-sidebar-accent/85 active:not-has-[[data-tex-compile]:active]:scale-[0.99] active:not-has-[[data-tex-compile]:active]:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/80`;
+/** Row interaction states for tree rows. */
+export const FILE_TREE_ROW_STATE = `${TREE_ROW_TEXT_STATE} transition-[color,background-color,box-shadow,transform] duration-[var(--motion-duration-fast)] ease-[cubic-bezier(0.25,1,0.5,1)] hover:bg-sidebar-accent/85 active:scale-[0.99] active:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/80`;
 export const FILE_TREE_ROW_SELECTED_STATE =
-	"bg-sidebar-primary/85 text-sidebar-primary-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08),inset_0_0.5px_0_rgba(255,255,255,0.2)] hover:text-sidebar-primary-foreground hover:bg-sidebar-primary/85 active:not-has-[[data-tex-compile]:active]:bg-sidebar-primary/85 [&_svg]:text-sidebar-primary-foreground/95";
+	"bg-sidebar-primary/85 text-sidebar-primary-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08),inset_0_0.5px_0_rgba(255,255,255,0.2)] hover:text-sidebar-primary-foreground hover:bg-sidebar-primary/85 active:bg-sidebar-primary/85 [&_svg]:text-sidebar-primary-foreground/95";
 
 /**
  * Flat folder ROW (no nested children) for virtualized rendering: renders the
@@ -247,8 +247,6 @@ export const FileTreeFolderRow = ({
 	icon,
 	className,
 	style,
-	openOnLabel = false,
-	actions,
 }: {
 	path: string;
 	name: string;
@@ -257,9 +255,6 @@ export const FileTreeFolderRow = ({
 	className?: string;
 	/** Content inset; the row background still spans the full container. */
 	style?: CSSProperties;
-	openOnLabel?: boolean;
-	/** Trailing actions rendered inside the row background. */
-	actions?: ReactNode;
 }) => {
 	const {
 		expandedPaths,
@@ -306,13 +301,7 @@ export const FileTreeFolderRow = ({
 				}
 				// Expand/collapse children in the tree AND notify selection so the
 				// host can open a folder-scoped paper list in the center pane.
-				if (
-					!openOnLabel ||
-					(e.target as HTMLElement).closest("[data-tree-disclosure]")
-				) {
-					togglePath(path);
-					if (openOnLabel) return;
-				}
+				togglePath(path);
 				onSelectRow?.(path, {
 					meta: false,
 					ctrl: false,
@@ -359,16 +348,6 @@ export const FileTreeFolderRow = ({
 				/>
 			</span>
 			<FileTreeName className="min-w-0 flex-1">{name}</FileTreeName>
-			{actions ? (
-				<FileTreeActions
-					className="shrink-0"
-					onClick={(e) => e.stopPropagation()}
-					onDoubleClick={(e) => e.stopPropagation()}
-					onKeyDown={(e) => e.stopPropagation()}
-				>
-					{actions}
-				</FileTreeActions>
-			) : null}
 		</div>
 	);
 };

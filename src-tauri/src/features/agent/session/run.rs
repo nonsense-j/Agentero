@@ -72,7 +72,6 @@ pub struct RunOnceParams {
     pub response_language: Option<String>,
     pub personal_prompt: Option<String>,
     pub cancellation: watch::Receiver<bool>,
-    pub remote: Option<Arc<dyn crate::features::agent::remote_host::RemoteAgentLaunch>>,
     pub resume_session_id: Option<String>,
     /// Pool of warm connections consulted before the cold spawn chain.
     pub warm_pool: Option<Arc<AgentWarmPool>>,
@@ -192,21 +191,13 @@ fn emit_run_failed(app: &AgentEventEmitter, session_id: &str, error: &impl std::
 /// Prompt-assembly phase: resolve skill instructions, template the prompt, and
 /// pick the working directory. Emits `agent:failed` and errors when a selected
 /// local skill cannot be loaded or the spawn cwd cannot be resolved.
-async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppError> {
+fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppError> {
     let skill_style = skill_mention_style(&params.desc.template);
     let skill_instructions = if params.is_acp_command {
         String::new()
     } else {
-        // Skills: local vault path, or remote work_root after materializing SKILL.md from SFTP.
-        let skill_vault = if let Some(ref r) = params.remote {
-            if let Err(e) = r.materialize_skills().await {
-                log::warn!(target: "agentero::agent", "materialize remote skills: {e}");
-            }
-            Some(r.work_root().to_string_lossy().into_owned())
-        } else {
-            params.vault_path.clone()
-        };
-        match load_skill_instructions(&params.skill_ids, skill_vault.as_deref(), skill_style) {
+        match load_skill_instructions(&params.skill_ids, params.vault_path.as_deref(), skill_style)
+        {
             Ok(instructions) => instructions,
             Err(error) => {
                 if !params.suppress_transcript {
@@ -246,7 +237,6 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
         prepare_context(
             &params.session_id,
             None,
-            true,
             None,
             params.resume_session_id.clone(),
         )
@@ -254,7 +244,6 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
         prepare_context(
             &params.session_id,
             params.vault_path.as_deref(),
-            params.remote.is_some(),
             params.context.as_ref(),
             params.resume_session_id.clone(),
         )
@@ -283,7 +272,7 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
         params.vault_path.as_deref()
     };
     let prompt_images = params.images.clone();
-    let cwd = match agent_spawn_cwd(params.remote.as_deref(), effective_vault_path) {
+    let cwd = match agent_spawn_cwd(effective_vault_path) {
         Ok(cwd) => cwd,
         Err(error) => {
             if !params.suppress_transcript {
@@ -294,7 +283,7 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
     };
     let mut mcp_servers = prepared.mcp_servers;
     let mut skip_warm_pool = prepared.skip_warm_pool;
-    if is_plaza_deep_discover && params.remote.is_none() && !params.is_acp_command {
+    if is_plaza_deep_discover && !params.is_acp_command {
         match crate::integration::collection_mcp::collection_mcp_server() {
             Ok(server) => {
                 mcp_servers.push(server);
@@ -1231,7 +1220,7 @@ async fn run_on_pooled(
 /// A healthy pooled warm connection short-circuits the spawn chain.
 pub async fn run_once(params: RunOnceParams) -> Result<AgentResultPayload, AppError> {
     // Phase 1 — prompt: skill instructions + template envelope + cwd.
-    let prep = prepare_run_turn(&params).await?;
+    let prep = prepare_run_turn(&params)?;
 
     // Phase 1.5 — pooled warm connection: skip spawn → initialize →
     // session/new entirely when a healthy slot matches this run.
@@ -1243,17 +1232,8 @@ pub async fn run_once(params: RunOnceParams) -> Result<AgentResultPayload, AppEr
         if let Some(pool) = params.warm_pool.clone() {
             // Pi only reads its project-trust decision while starting up; a
             // slot created under another decision must not serve this turn.
-            let variant = if params.remote.is_none() {
-                crate::features::agent::pi_trust::pool_variant(&params.desc, &prep.cwd)
-            } else {
-                None
-            };
-            let key = pool_key(
-                &params.desc.id,
-                prep.cwd.clone(),
-                params.remote.as_ref(),
-                variant,
-            );
+            let variant = crate::features::agent::pi_trust::pool_variant(&params.desc, &prep.cwd);
+            let key = pool_key(&params.desc.id, prep.cwd.clone(), variant);
             if let Some(slot) = pool.take(&key).await {
                 match run_on_pooled(&pool, slot, &params, &prep).await {
                     PooledOutcome::Done(result) => {
@@ -1278,8 +1258,8 @@ pub async fn run_once(params: RunOnceParams) -> Result<AgentResultPayload, AppEr
         }
     }
 
-    // Phase 2 — spawn the ACP agent process (local, or SSH wrapper for remote).
-    let acp = match to_acp_agent(&params.desc, Some(&prep.cwd), params.remote.as_deref()) {
+    // Phase 2 — spawn the ACP agent process.
+    let acp = match to_acp_agent(&params.desc, Some(&prep.cwd)) {
         Ok(agent) => agent,
         Err(error) => {
             emit_run_failed(&params.app, &params.session_id, &error);
@@ -1315,7 +1295,7 @@ pub async fn run_once(params: RunOnceParams) -> Result<AgentResultPayload, AppEr
     }
 }
 
-/// One prompt for a delegated remote ACP connection.
+/// One prompt for a delegated ACP connection.
 pub struct DelegatePrompt {
     pub run_id: String,
     pub prompt: String,
@@ -1324,7 +1304,7 @@ pub struct DelegatePrompt {
     pub reply: tokio::sync::oneshot::Sender<Result<AgentResultPayload, String>>,
 }
 
-/// Keep one remote ACP process and run each queued prompt on it.
+/// Keep one ACP process and run each queued prompt on it.
 ///
 /// The first prompt opens the session. Later prompts reuse it. Cancel and
 /// errors drop the process so the next delegate call starts a new one.
@@ -1346,7 +1326,7 @@ async fn serve_delegate_connection(
     mut incoming: tokio::sync::mpsc::Receiver<DelegatePrompt>,
 ) -> Result<(), String> {
     apply_delegate_prompt(&mut base, &first);
-    let prep = match prepare_run_turn(&base).await {
+    let prep = match prepare_run_turn(&base) {
         Ok(prep) => prep,
         Err(error) => {
             let message = error.to_string();
@@ -1354,7 +1334,7 @@ async fn serve_delegate_connection(
             return Err(message);
         }
     };
-    let acp = match to_acp_agent(&base.desc, Some(&prep.cwd), base.remote.as_deref()) {
+    let acp = match to_acp_agent(&base.desc, Some(&prep.cwd)) {
         Ok(acp) => acp,
         Err(error) => {
             let message = error.to_string();

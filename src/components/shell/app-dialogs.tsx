@@ -8,7 +8,6 @@ import { CommandPalette } from "@/components/dialogs/command-palette";
 import { ExternalRenameDialog } from "@/components/dialogs/external-rename-dialog";
 import { PaperSearchDialog } from "@/components/dialogs/paper-search-dialog";
 import { SkillImportDialog } from "@/components/dialogs/skill-import-dialog";
-import { WordCitationDialog } from "@/components/dialogs/word-citation-dialog";
 import { ZoteroMigrateDialog } from "@/components/dialogs/zotero-migrate-dialog";
 import { ZoteroSyncDialog } from "@/components/dialogs/zotero-sync-dialog";
 import { CitingScanDialog } from "@/components/library/citing-scan-dialog";
@@ -58,7 +57,6 @@ export function AppDialogs() {
 
 	return (
 		<>
-			<WordCitationDialog />
 			<ZoteroMigrateDialog
 				open={zoteroOpen}
 				onOpenChange={setZoteroOpen}

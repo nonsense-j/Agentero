@@ -1,11 +1,8 @@
 /**
  * Low-frequency configuration reminders (#658).
  *
- * Two triggers, both at most once per app session and each individually
- * dismissible ("don't remind again", persisted in
- * {@link AppSettings.dismissedReminders}):
- * - `layout-local-model`: startup hint that local ONNX layout analysis costs
- *   memory / CPU, surfaced from {@link maybeShowLayoutLocalModelReminder}.
+ * At most once per app session and individually dismissible ("don't remind
+ * again", persisted in {@link AppSettings.dismissedReminders}):
  * - `network-proxy`: a failure that looks network-related while no proxy is
  *   configured, surfaced from {@link reportNetworkFailure} (called by the
  *   global notify funnel).
@@ -44,23 +41,6 @@ function claim(id: ConfigReminderId): boolean {
 	if (shownThisSession.has(id) || isReminderDismissed(id)) return false;
 	shownThisSession.add(id);
 	return true;
-}
-
-/**
- * Startup hint (once per session): layout analysis runs a bundled local model,
- * which is heavier on memory / CPU than a cloud provider.
- */
-export function maybeShowLayoutLocalModelReminder(): void {
-	if (getSettings().layout.backend !== "local") return;
-	if (!claim("layout-local-model")) return;
-	notifyReminder(i18n.t("app:reminders.layoutLocalModel.title"), {
-		id: "config-reminder-layout-local-model",
-		description: i18n.t("app:reminders.layoutLocalModel.description"),
-		actionLabel: i18n.t("app:reminders.layoutLocalModel.openSettings"),
-		onAction: () => openSettingsWindow("layout"),
-		dismissLabel: i18n.t("app:reminders.dismiss"),
-		onDismiss: () => dismissReminder("layout-local-model"),
-	});
 }
 
 /**

@@ -72,7 +72,6 @@ import {
 	MessageResponse,
 } from "@/components/agent/message";
 import { TerminalTool } from "@/components/agent/rendering/terminal-tool";
-import { ZhihuDiscussions } from "@/components/agent/zhihu-discussions";
 import {
 	selectionSurfaceProps,
 	useSelectionSource,
@@ -91,11 +90,7 @@ import {
 import { Shimmer } from "@/components/ui/shimmer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useActiveChatLines } from "@/lib/agent/agent-session-store";
-import {
-	type AgentPhaseState,
-	isAgentAuthFailure,
-	isChatOnlyAgentTemplate,
-} from "@/lib/agent/api";
+import { type AgentPhaseState, isAgentAuthFailure } from "@/lib/agent/api";
 import {
 	type AgentPart,
 	type AskUserQuestion,
@@ -120,9 +115,6 @@ import { selectionNavigationStore } from "@/lib/agent/selection-navigation-state
 import { selectionsPromptBlock } from "@/lib/agent/selection-prompt";
 import { terminalToolData } from "@/lib/agent/terminal-tool";
 import { cn } from "@/lib/core/utils";
-import type { PaperMetadata } from "@/lib/paper";
-import { workspaceStore } from "@/lib/workspace/store";
-import { isTexPath } from "@/lib/workspace/viewer";
 
 /** Compact note: interactive form is docked below, not inside the tool card. */
 function AskUserToolPendingNote() {
@@ -1174,8 +1166,6 @@ export const ChatTranscript = memo(function ChatTranscript({
 	onSendSuggestion,
 	onAgentLogin,
 	onOpenSource,
-	agentTemplate = null,
-	paper = null,
 	phase = null,
 }: {
 	activeTabId: string;
@@ -1202,10 +1192,6 @@ export const ChatTranscript = memo(function ChatTranscript({
 	onAgentLogin?: () => void;
 	/** Open a vault path / paper (or external URL) from Sources / inline citation. */
 	onOpenSource?: (source: string) => void;
-	/** Active agent template — chat-only built-ins (Zhihu) get a bespoke empty state. */
-	agentTemplate?: string | null;
-	/** Focused paper metadata, used by the Zhihu empty-state discussion cards. */
-	paper?: PaperMetadata | null;
 	/** Loading phase of the in-flight turn (starting / waiting-model / reconnecting). */
 	phase?: AgentPhaseState | null;
 }) {
@@ -1216,9 +1202,6 @@ export const ChatTranscript = memo(function ChatTranscript({
 	const lines = useActiveChatLines();
 	const restoringHistorySession =
 		hydratingSessionId === activeTabId && lines.length === 0;
-	// Chat-only built-ins (Zhihu) replace the generic suggestions with their own
-	// empty state.
-	const zhihuEmpty = isChatOnlyAgentTemplate(agentTemplate);
 
 	// Lifted Reasoning/Tool/Plan open state so virtualized rows keep their
 	// fold state across unmount/remount. Keyed by `${rowKey}:${part.id}`.
@@ -1261,11 +1244,7 @@ export const ChatTranscript = memo(function ChatTranscript({
 		editCompositionProps,
 	};
 	const hasOpenSource = Boolean(onOpenSource);
-	const writing = useStore(workspaceStore, (state) => {
-		const tab = state.tabs.find((tab) => tab.id === state.activeTabId);
-		return Boolean(tab && (tab.texRoot || isTexPath(tab.path)));
-	});
-	const suggestions = suggestionItems(writing);
+	const suggestions = suggestionItems();
 	const rowHandlers = useMemo<RowHandlers>(
 		() => ({
 			isEditBlockedByIme: (event) =>
@@ -1316,38 +1295,31 @@ export const ChatTranscript = memo(function ChatTranscript({
 					<MessageScrollerContent>
 						<MessageScrollerItem className="flex w-full flex-col gap-6">
 							<ConversationEmptyState
-								className={zhihuEmpty ? "px-2 py-8" : undefined}
 								title={t("empty.title")}
-								description={t(
-									writing ? "empty.writingDescription" : "empty.description",
-								)}
+								description={t("empty.description")}
 							>
-								{zhihuEmpty ? (
-									<ZhihuDiscussions paper={paper} />
-								) : (
-									<div className="mt-4 flex w-full max-w-sm flex-col items-stretch gap-2">
-										{activeTabIsRunning ? (
-											<Shimmer className="text-center text-sm">
-												{t("empty.waiting")}
-											</Shimmer>
-										) : (
-											suggestions.map((item) => {
-												const label = t(`suggestions.${item.key}`);
-												return (
-													<Suggestion
-														key={item.key}
-														suggestion={label}
-														className="h-auto w-full justify-start whitespace-normal rounded-lg px-3 py-2.5 text-left hover:shadow-raised"
-														onClick={(value) =>
-															onSendSuggestion(value, item.workflow)
-														}
-														disabled={activeTabIsRunning}
-													/>
-												);
-											})
-										)}
-									</div>
-								)}
+								<div className="mt-4 flex w-full max-w-sm flex-col items-stretch gap-2">
+									{activeTabIsRunning ? (
+										<Shimmer className="text-center text-sm">
+											{t("empty.waiting")}
+										</Shimmer>
+									) : (
+										suggestions.map((item) => {
+											const label = t(`suggestions.${item.key}`);
+											return (
+												<Suggestion
+													key={item.key}
+													suggestion={label}
+													className="h-auto w-full justify-start whitespace-normal rounded-lg px-3 py-2.5 text-left hover:shadow-raised"
+													onClick={(value) =>
+														onSendSuggestion(value, item.workflow)
+													}
+													disabled={activeTabIsRunning}
+												/>
+											);
+										})
+									)}
+								</div>
 							</ConversationEmptyState>
 						</MessageScrollerItem>
 					</MessageScrollerContent>

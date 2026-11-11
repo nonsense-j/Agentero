@@ -31,7 +31,6 @@ import { refreshTree, vaultStore } from "@/lib/vault/store";
 import { shouldIgnoreInternalRenameEvent } from "@/lib/wiki/store";
 import {
 	applyDiskChange,
-	compileTexOnManualSave,
 	persistExcalidrawFile,
 	persistFile,
 	persistTextFile,
@@ -215,8 +214,6 @@ export function DocWindowRoot() {
 	const textProps = useMemo(
 		() => ({
 			onPersistFile: persistTextFile,
-			// ⌘S in a popout window compiles the same way as the main dock.
-			onManualSave: (path: string) => void compileTexOnManualSave(path),
 			onTabPatch: onTabPatch,
 		}),
 		[onTabPatch],

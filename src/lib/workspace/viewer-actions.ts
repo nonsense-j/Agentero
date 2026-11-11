@@ -1,5 +1,5 @@
 /**
- * TeX compile/PDF, translation split, citation jumps, and wiki navigation.
+ * Translation split, citation jumps, and wiki navigation.
  */
 
 import i18n from "@/i18n";
@@ -11,17 +11,11 @@ import {
 	isAgentCitationHref,
 	rewriteCitationHrefToPdf,
 } from "@/lib/agent/citation-href";
-import { commands } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
-import { dirnameOf, normalizePath, normalizeSlashes } from "@/lib/core/path";
-import { isTauri } from "@/lib/core/tauri";
-import {
-	detectPaperDirectory,
-	localFileToArrayBuffer,
-	paperDirFromPath,
-} from "@/lib/paper";
+import { dirnameOf, normalizeSlashes } from "@/lib/core/path";
+import { detectPaperDirectory, paperDirFromPath } from "@/lib/paper";
 import { isLibraryVirtualPath } from "@/lib/paper/api";
 import {
 	lookupAnnotationRef,
@@ -44,16 +38,6 @@ import {
 } from "@/lib/pdf/pending-pdf-page";
 import { registerScrollSyncPair } from "@/lib/pdf/scroll-sync";
 import {
-	cancelScheduledTexAutoBuild,
-	registerTexAutoBuildRunner,
-} from "@/lib/tex/auto-build";
-import { queueTexBuild } from "@/lib/tex/build-queue";
-import { getTexProjectSettings } from "@/lib/tex/config";
-import { tryOpenWritingSource } from "@/lib/tex/editor-navigation";
-import { syncTexAfterBuild } from "@/lib/tex/synctex";
-import { isTexLiveRootActive } from "@/lib/tex-live/session";
-import {
-	ensureLocalFsScope,
 	joinVaultPath,
 	vaultPathExists,
 	vaultRelativePath,
@@ -74,489 +58,22 @@ import {
 	getTabs,
 	setActiveTabId,
 	setTabs,
-	updateTab,
 } from "@/lib/workspace/store";
-import { flushAllTextEditors } from "@/lib/workspace/text-editor-flush";
 import {
 	type PdfViewerHandle,
 	pdfHandleFor,
 	subscribePdfHandles,
 } from "@/lib/workspace/viewer/pdf-viewer-registry";
+import { cloneTabForSplit, openPaper, openPath, openTab } from "./navigation";
 import {
-	cloneTabForSplit,
-	closeTab,
-	openPaper,
-	openPath,
-	openTab,
-} from "./navigation";
-import {
-	basenameOf,
 	createNotesSplitPane,
-	createPlaceholderTab,
 	createTranslationSplitPane,
-	type DocTab,
-	insertPlaceholderTab,
 	patchTab,
-	SPLIT_PANE_ID_MARKER,
 	tabIdForPath,
 	tabNotesEligible,
 	translationSplitPlacement,
 } from "./tabs";
-import {
-	compileTexFile,
-	ensureTexEngines,
-	resolveTexPdfPath,
-	resolveTexRoot,
-	texCompileStore,
-} from "./tex-compile";
-import { isTexPath, preferredModeForPath } from "./viewer";
-
-function texPdfPaneId(pdfPath: string): string {
-	const matches = getTabs().filter(
-		(tab) =>
-			tab.mode === "pdf" && normalizePath(tab.path) === normalizePath(pdfPath),
-	);
-	return (
-		matches.find((tab) => tab.id === getActiveTabId())?.id ??
-		matches.find((tab) => tab.id === tabIdForPath(pdfPath))?.id ??
-		matches[0]?.id ??
-		tabIdForPath(pdfPath)
-	);
-}
-
-function updateTexPdfPanes(pdfPath: string, patch: Partial<DocTab>): void {
-	for (const tab of getTabs()) {
-		if (
-			(tab.mode === "pdf" || tab.mode === "translation") &&
-			normalizePath(tab.path) === normalizePath(pdfPath)
-		)
-			updateTab(tab.id, patch);
-	}
-}
-
-/**
- * Open (or refresh) the compiled PDF of a .tex file as a right split of its
- * editor pane — the TeX analogue of the paper→NOTES right split. The PDF is
- * the project ROOT's output (magic comment → self indicator → vault
- * \input/\include reverse scan → the file itself), so triggering this from a
- * child file still builds and shows the root's PDF. When the PDF is missing
- * on disk (or `forceCompile` is requested), the pane opens
- * immediately with a shimmer placeholder while the compile runs, then fills
- * in. Existing PDF tabs are refreshed in place (new bytes identity reloads
- * EmbedPDF) and activated.
- */
-export async function openTexPdf(
-	texPath: string,
-	opts?: {
-		referencePanelId?: string | null;
-		forceCompile?: boolean;
-		buildMode?: "normal" | "force" | "clean";
-		/** Compile and View PDF leave live preview. Pass false to keep it (⌘\\). */
-		exitLive?: boolean;
-	},
-): Promise<void> {
-	if (!isTexPath(texPath)) return;
-	try {
-		const root = await resolveTexRoot(texPath);
-		await queueTexBuild(
-			root,
-			() => openTexPdfNow(texPath, opts),
-			opts?.buildMode ? 3 : 2,
-		);
-	} catch (error) {
-		notifyError(errorText(error));
-	}
-}
-
-async function openTexPdfNow(
-	texPath: string,
-	opts?: {
-		referencePanelId?: string | null;
-		forceCompile?: boolean;
-		buildMode?: "normal" | "force" | "clean";
-		exitLive?: boolean;
-	},
-): Promise<void> {
-	const keepLive = opts?.exitLive === false;
-	// One in-flight compile at a time (mirrors compileTexFile's guard).
-	if (texCompileStore.getState().compilingPath) return;
-
-	// Locate the reference editor panel (handles ::pane-N clones); open the
-	// editor first when it is not on screen so the PDF lands beside it.
-	const canonicalTexId = tabIdForPath(texPath);
-	const refId =
-		opts?.referencePanelId ??
-		getTabs().find(
-			(t) =>
-				t.id === canonicalTexId ||
-				t.id.startsWith(`${canonicalTexId}${SPLIT_PANE_ID_MARKER}`),
-		)?.id ??
-		null;
-	if (!refId) {
-		// openTab creates the dockview panel synchronously, so the id below
-		// resolves immediately.
-		openTab(texPath, { preferMode: "text" });
-	}
-	const referencePanelId = refId ?? canonicalTexId;
-
-	// Flush every mounted editor's debounced autosave first (a root compile
-	// must read the latest bytes of all its sections — the saveAll
-	// equivalent), then resolve the root from that fresh disk state so a
-	// just-typed magic comment or \input already counts. Both before the
-	// fast path: the pane id must follow the root either way.
-	await flushAllTextEditors();
-	const rootPath = await resolveTexRoot(texPath);
-	cancelScheduledTexAutoBuild(rootPath);
-	const pdfPath = await resolveTexPdfPath(rootPath);
-	if (!keepLive) {
-		for (const tab of getTabs())
-			if (
-				tab.texLive &&
-				normalizePath(tab.texRoot ?? "") === normalizePath(rootPath)
-			)
-				updateTab(tab.id, { texLive: false });
-	}
-	const pdfId = texPdfPaneId(pdfPath);
-	await ensureLocalFsScope(vaultStore.getState().vaultPath);
-
-	if (!opts?.forceCompile) {
-		// Fast path: the PDF is already on disk → open/refresh, no shimmer.
-		const bytes = await localFileToArrayBuffer(pdfPath);
-		if (bytes) {
-			if (getTabs().some((t) => t.id === pdfId)) {
-				updateTexPdfPanes(pdfPath, {
-					pdfBytes: bytes,
-					loaded: true,
-					texCompiling: false,
-					texRoot: rootPath,
-					...(keepLive ? {} : { texLive: false }),
-					title: basenameOf(pdfPath),
-				});
-				setActiveTabId(pdfId);
-				dockHandle()?.activatePanel(pdfId);
-			} else {
-				openTab(pdfPath, {
-					preferMode: "pdf",
-					placement: { direction: "right", referencePanelId },
-				});
-				updateTexPdfPanes(pdfPath, { texRoot: rootPath });
-			}
-			return;
-		}
-	}
-
-	// Show the PDF pane immediately as a shimmer placeholder, then fill it
-	// once the compile lands.
-	const paneAlreadyOpen = getTabs().some((t) => t.id === pdfId);
-	if (paneAlreadyOpen) {
-		updateTexPdfPanes(pdfPath, {
-			texCompiling: true,
-			texLive: false,
-			texRoot: rootPath,
-		});
-		setActiveTabId(pdfId);
-		dockHandle()?.activatePanel(pdfId);
-	} else {
-		// Hand-rolled openTab prefix (placeholder + dock placement) without
-		// the async resource load — the PDF does not exist yet, so
-		// loadTabResources would only surface a cannotPreview error.
-		const beforeTabs = getTabs();
-		const { tabs: nextTabs, id: insertedId } = insertPlaceholderTab(
-			beforeTabs,
-			pdfPath,
-			"pdf",
-		);
-		const placeholder =
-			nextTabs.find((t) => t.id === insertedId) ??
-			createPlaceholderTab(pdfPath, "pdf");
-		setTabs(nextTabs);
-		setActiveTabId(insertedId);
-		dockHandle()?.openPanel(placeholder, {
-			direction: "right",
-			referencePanelId,
-		});
-		updateTab(insertedId, { texCompiling: true, texRoot: rootPath });
-	}
-
-	const compiled = await compileTexFile(rootPath, {
-		triggerPath: texPath,
-		...(opts?.buildMode ? { mode: opts.buildMode } : {}),
-	});
-	const bytes = compiled ? await localFileToArrayBuffer(compiled) : null;
-	if (!compiled || !bytes) {
-		// Failure already notified. Drop a pane we just created (it would sit
-		// on a shimmer forever); just un-flag a pre-existing one so it shows
-		// its previous content again.
-		if (paneAlreadyOpen) updateTexPdfPanes(pdfPath, { texCompiling: false });
-		else closeTab(pdfId, { remember: false });
-		if (compiled) {
-			// The compile itself succeeded but its output could not be read
-			// back (fs scope / file vanished). Say so — a silent revert behind
-			// the success toast reads as "the PDF did not update".
-			notifyError(
-				i18n.t("app:errors.pdfReadFailed", { name: basenameOf(pdfPath) }),
-			);
-		}
-		return;
-	}
-	updateTexPdfPanes(pdfPath, {
-		pdfBytes: bytes,
-		loaded: true,
-		texCompiling: false,
-		texRoot: rootPath,
-		...(keepLive ? {} : { texLive: false }),
-		title: basenameOf(pdfPath),
-	});
-	void syncTexAfterBuild(
-		rootPath,
-		compiled,
-		getTexProjectSettings(rootPath).syncAfterBuild,
-	);
-}
-
-/**
- * Leave live preview and show the PDF already on disk. Does not run latexmk.
- * With no PDF yet, the pane stays on the empty preview state.
- */
-export async function closeTexLive(texPath: string): Promise<void> {
-	if (!isTexPath(texPath)) return;
-	const rootPath = await resolveTexRoot(texPath);
-	for (const tab of getTabs()) {
-		if (
-			!tab.texLive ||
-			normalizePath(tab.texRoot ?? "") !== normalizePath(rootPath)
-		)
-			continue;
-		const bytes = tab.pdfBytes ?? (await localFileToArrayBuffer(tab.path));
-		updateTab(tab.id, {
-			texLive: false,
-			texCompiling: false,
-			...(bytes ? { pdfBytes: bytes, loaded: true } : {}),
-		});
-	}
-}
-
-/**
- * Open the real-time rtex preview for a .tex project. The pane reuses the
- * compiled PDF tab identity (root output path) and flips `texLive`, so the
- * editor + live preview split behaves exactly like the existing PDF split.
- * The session itself starts inside the viewer, which also feeds the editor
- * buffers into it (`set_document`).
- */
-export async function openTexLive(texPath: string): Promise<void> {
-	if (!isTexPath(texPath) || !isTauri()) return;
-	const status = await commands.rtexStatus();
-	if (!status.ok || !status.data?.available) {
-		notifyError(
-			status.error?.message ??
-				status.data?.error ??
-				i18n.t("sidebar:fileTree.livePreviewUnavailable"),
-		);
-		return;
-	}
-
-	// The live session reads disk once, then the viewer syncs every mounted
-	// editor buffer over it; flushing first keeps the very first layout close
-	// to what the user sees.
-	await flushAllTextEditors();
-	const rootPath = await resolveTexRoot(texPath);
-	const vaultPath = vaultStore.getState().vaultPath;
-	if (!vaultPath) return;
-
-	const pdfPath = await resolveTexPdfPath(rootPath);
-	const pdfId = tabIdForPath(pdfPath);
-	const editorId = tabIdForPath(texPath);
-	const referencePanelId =
-		getTabs().find(
-			(t) =>
-				t.id === editorId ||
-				t.id.startsWith(`${editorId}${SPLIT_PANE_ID_MARKER}`),
-		)?.id ?? editorId;
-	if (!getTabs().some((t) => t.id === referencePanelId)) {
-		openTab(texPath, { preferMode: "text" });
-	}
-
-	const existing = getTabs().find((t) => t.id === pdfId);
-	if (existing) {
-		updateTab(pdfId, {
-			texLive: true,
-			texRoot: rootPath,
-			loaded: true,
-			texCompiling: false,
-		});
-		setActiveTabId(pdfId);
-		dockHandle()?.activatePanel(pdfId);
-		return;
-	}
-
-	// Hand-rolled placeholder: the live pane does not need a PDF read, and a
-	// missing first PDF must not surface as "cannot preview".
-	const { tabs: nextTabs, id } = insertPlaceholderTab(
-		getTabs(),
-		pdfPath,
-		"pdf",
-	);
-	const placeholder =
-		nextTabs.find((t) => t.id === id) ?? createPlaceholderTab(pdfPath, "pdf");
-	setTabs(nextTabs);
-	setActiveTabId(id);
-	dockHandle()?.openPanel(placeholder, {
-		direction: "right",
-		referencePanelId,
-	});
-	updateTab(id, {
-		texLive: true,
-		texRoot: rootPath,
-		loaded: true,
-		texCompiling: false,
-		title: basenameOf(pdfPath),
-	});
-}
-
-/**
- * Quiet TeX compile + in-place refresh of the open PDF pane. Called after
- * a manual ⌘S save lands (`compileTexOnManualSave`). The build target is the
- * project ROOT (saving a child recompiles the root and refreshes the root's
- * PDF pane), resolved after flushing every mounted editor — ⌘S only guaranteed
- * the triggered file on disk. The pane's shimmer (`texCompiling`) stays up
- * while latexmk runs so partial watcher writes never flash through; triggers
- * landing mid-compile queue a single trailing run with the latest path
- * (re-resolving the root against the then-current disk state).
- */
-export async function compileTexOnSave(texPath: string): Promise<void> {
-	try {
-		const root = await resolveTexRoot(texPath);
-		await queueTexBuild(root, () => compileTexAndRefreshNow(texPath));
-	} catch (error) {
-		notifyError(errorText(error));
-	}
-}
-
-/** Explicit build refreshes existing previews without changing the active file or pane. */
-export async function compileTexProject(
-	texPath: string,
-	mode: "normal" | "force" | "clean" = "normal",
-): Promise<void> {
-	if (!isTexPath(texPath)) return;
-	try {
-		const root = await resolveTexRoot(texPath);
-		await queueTexBuild(
-			root,
-			() => compileTexAndRefreshNow(texPath, { explicit: true, mode }),
-			3,
-		);
-	} catch (error) {
-		notifyError(errorText(error));
-	}
-}
-
-async function compileTexAndRefreshNow(
-	texPath: string,
-	options?: { explicit: boolean; mode: "normal" | "force" | "clean" },
-): Promise<void> {
-	// Right after a window reload the detection scan may still be in flight:
-	// wait for it instead of silently dropping this trigger.
-	await ensureTexEngines();
-	const { engines, selectedEngine, compilingPath } = texCompileStore.getState();
-	if (compilingPath) return;
-	await flushAllTextEditors();
-	const rootPath = await resolveTexRoot(texPath);
-	// Recipes belong to the resolved project, including saves from child files.
-	if (
-		!selectedEngine &&
-		engines.length === 0 &&
-		!getTexProjectSettings(rootPath).recipe
-	) {
-		if (options?.explicit)
-			notifyError(i18n.t("sidebar:fileTree.noLatexEngine"));
-		return;
-	}
-	cancelScheduledTexAutoBuild(rootPath);
-	const pdfPath = await resolveTexPdfPath(rootPath);
-	const pdfId = texPdfPaneId(pdfPath);
-	// Save-triggered builds leave live preview alone. An explicit build exits
-	// live mode and refreshes the compiled bytes in place, without activation.
-	if (
-		!options?.explicit &&
-		(isTexLiveRootActive(rootPath) ||
-			getTabs().find((t) => t.id === pdfId)?.texLive)
-	)
-		return;
-	if (options?.explicit) {
-		for (const tab of getTabs()) {
-			if (
-				tab.texLive &&
-				normalizePath(tab.texRoot ?? "") === normalizePath(rootPath)
-			)
-				updateTab(tab.id, { texLive: false });
-		}
-	}
-	const paneOpen = getTabs().some((t) => t.id === pdfId);
-	if (paneOpen)
-		updateTexPdfPanes(pdfPath, {
-			texCompiling: true,
-			texLive: false,
-			texRoot: rootPath,
-		});
-	try {
-		const compiled = await compileTexFile(rootPath, {
-			...(!options?.explicit ? { quietSuccess: true } : {}),
-			triggerPath: texPath,
-			...(options ? { mode: options.mode } : {}),
-		});
-		const bytes = compiled ? await localFileToArrayBuffer(compiled) : null;
-		if (!compiled || !bytes) {
-			// Drop the shimmer on the previous content; compileTexFile has reported
-			// the failure (a toast, or the focused project's problems button).
-			if (paneOpen) updateTexPdfPanes(pdfPath, { texCompiling: false });
-			if (compiled) {
-				notifyError(
-					i18n.t("app:errors.pdfReadFailed", { name: basenameOf(pdfPath) }),
-				);
-			}
-			return;
-		}
-		updateTexPdfPanes(pdfPath, {
-			pdfBytes: bytes,
-			loaded: true,
-			texCompiling: false,
-			texLive: false,
-			texRoot: rootPath,
-			title: basenameOf(pdfPath),
-		});
-		void syncTexAfterBuild(
-			rootPath,
-			compiled,
-			getTexProjectSettings(rootPath).syncAfterBuild,
-		);
-	} finally {
-		if (paneOpen) updateTexPdfPanes(pdfPath, { texCompiling: false });
-	}
-}
-
-/**
- * ⌘S manual-save trigger for text tabs: compile the .tex once its save landed
- * (the editor flushes before calling this). Unlike the quiet path this
- * surfaces a missing engine — the user explicitly asked to build. Non-TeX
- * paths are a no-op (⌘S on them just saved).
- */
-export async function compileTexOnManualSave(path: string): Promise<void> {
-	if (!isTexPath(path)) return;
-	await ensureTexEngines();
-	const { engines, selectedEngine } = texCompileStore.getState();
-	const root = await resolveTexRoot(path);
-	if (
-		!selectedEngine &&
-		engines.length === 0 &&
-		!getTexProjectSettings(root).recipe
-	) {
-		notifyError(i18n.t("sidebar:fileTree.noLatexEngine"));
-		return;
-	}
-	await compileTexOnSave(path);
-}
-
-registerTexAutoBuildRunner(compileTexOnSave);
+import { preferredModeForPath } from "./viewer";
 
 /** Obsidian-style Split pane: add a right pane and keep columns evenly sized. */
 export function splitActivePane(): void {
@@ -567,15 +84,6 @@ export function splitActivePane(): void {
 	if (!active) return;
 	// Library is the resident singleton — never clone it into a second pane.
 	if (isLibraryVirtualPath(active.path)) return;
-
-	// TeX editor ⌘\ → open/refresh its compiled PDF as the right split.
-	if (isTexPath(active.path)) {
-		void openTexPdf(active.path, {
-			referencePanelId: active.id,
-			exitLive: false,
-		});
-		return;
-	}
 
 	const notesId = active.notesPath ? tabIdForPath(active.notesPath) : null;
 	const shouldOpenDefaultNotes =
@@ -895,7 +403,6 @@ export function openCitation(source: string): void {
 	const fragmentIndex = trimmed.indexOf("#");
 	const path = fragmentIndex >= 0 ? trimmed.slice(0, fragmentIndex) : trimmed;
 	const fragment = fragmentIndex >= 0 ? trimmed.slice(fragmentIndex + 1) : "";
-	if (tryOpenWritingSource(path, fragment)) return;
 	if (!fragment) {
 		// Prefer opening the paper unit for PDF paths; plain notes still use graph open.
 		if (/\.pdf$/i.test(path)) {

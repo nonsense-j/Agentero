@@ -37,18 +37,16 @@ jobs:
         # Desktop installers must not embed the headless CLI (#285). A prior
         # guard required beforeBuildCommand to run cli:bundle:stub; that stub
         # path was removed in 9dee13f0 after the fake Windows .exe triggered
-        # "Unsupported 16-bit application" (#320 follow-up). externalBin may
-        # contain only the real plugin-worker sidecar. prepare-plugin-worker.mjs
-        # refuses anything under 64 KiB so a renamed batch stub cannot ship.
+        # "Unsupported 16-bit application" (#320 follow-up).
         run: |
           set -euo pipefail
           node --input-type=commonjs -e "
             const conf = require('./src-tauri/tauri.conf.json');
             const bins = (conf.bundle && conf.bundle.externalBin) || [];
-            const allowed = ['binaries/agentero-plugin-host'];
+            const allowed = [];
             const same = bins.length === allowed.length && bins.every((bin, i) => bin === allowed[i]);
             if (!same) {
-              console.error('::error file=src-tauri/tauri.conf.json::bundle.externalBin must be only the plugin worker sidecar, not the CLI (#285/#320). Got: ' + JSON.stringify(bins));
+              console.error('::error file=src-tauri/tauri.conf.json::bundle.externalBin must be empty, not the CLI (#285/#320). Got: ' + JSON.stringify(bins));
               process.exit(1);
             }
           "
@@ -74,44 +72,6 @@ jobs:
       - name: Run frontend tests
         if: matrix.task != 'quality'
         run: pnpm exec vitest run --shard=${{ matrix.task == 'test-1' && '1/2' || '2/2' }}
-
-  # The release APK build is the only thing that compiles the mobile cfg, so
-  # target-gated `#[cfg]` drift (e.g. PDFium features left enabled on Android)
-  # only surfaced after a version bump. Check the Android lib on every PR/merge
-  # so mobile stays green without waiting for a release.
-  rust-mobile:
-    name: Rust (android cfg)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - name: Install Android NDK
-        env:
-          # Keep in sync with the release workflow's android matrix.
-          NDK_VERSION: "29.0.14206865"
-        run: |
-          set -euo pipefail
-          (yes || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" > /dev/null
-          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-      - name: Check Android lib target cfg
-        run: |
-          set -euo pipefail
-          # Mirror what `tauri android build` exports, so the external crates
-          # (cc / pdfium-sys) compile for the device ABI instead of the host.
-          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          API=24
-          export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
-          export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
-          export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
-          cargo check -p agentero --lib --target aarch64-linux-android
 
   rust:
     name: Rust (${{ matrix.task }})
@@ -156,14 +116,6 @@ jobs:
           # missing even for clippy/tests that never bundle.
           mkdir -p src-tauri/pdfium
           cp "$RUNNER_TEMP/pdfium/lib/libpdfium.dylib" src-tauri/pdfium/libpdfium.dylib
-      - name: Stage plugin worker sidecar
-        if: matrix.task != 'cli-tests'
-        run: |
-          set -euo pipefail
-          # Desktop externalBin makes tauri-build fail when the sidecar is
-          # absent, including clippy and `cargo test -p agentero`. cli-tests
-          # does not compile the agentero package, so it does not build the worker.
-          node scripts/prepare-plugin-worker.mjs
       - name: Run Rust checks
         run: |
           set -euo pipefail
@@ -173,7 +125,7 @@ jobs:
               cargo clippy --workspace --all-targets -- -D warnings
               ;;
             agentero-tests)
-              cargo test -p agentero -p agentero-plugin-host
+              cargo test -p agentero
               ;;
             cli-tests)
               # Dependency builds do not run core/MCP unit tests. Keep all
@@ -211,9 +163,6 @@ jobs:
       - name: Stage bundled ACP adapters
         if: matrix.task != 'cli-tests'
         run: node scripts/prepare-adapters.mjs
-      - name: Stage plugin worker sidecar
-        if: matrix.task != 'cli-tests'
-        run: node scripts/prepare-plugin-worker.mjs
       - name: Stage PDFium
         env:
           GH_TOKEN: ${{ github.token }}
@@ -231,17 +180,13 @@ jobs:
               cargo clippy --workspace --all-targets -- -D warnings
               ;;
             agentero-tests)
-              # tesseract-rs 0.2 builds Debug leptonica/tesseract on Windows
-              # (*d.lib) but only links the release names. The release profile
-              # makes CMake produce and link the matching libs; see
-              # CONTRIBUTING.md.
-              cargo test --release -p agentero -p agentero-plugin-host
+              cargo test -p agentero
               ;;
             cli-tests)
               # Dependency builds do not run core/MCP unit tests. Keep all
               # headless packages in this job to share PDFium and artifacts.
-              cargo test --release -p agentero-core -p agentero-mcp -p agentero-cli
-              cargo build --release -p agentero-cli
+              cargo test -p agentero-core -p agentero-mcp -p agentero-cli
+              cargo build -p agentero-cli
               ;;
             *)
               echo "::error::Unknown Rust CI task: ${{ matrix.task }}"

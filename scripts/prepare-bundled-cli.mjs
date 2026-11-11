@@ -3,10 +3,9 @@
  * `src-tauri/binaries` (dev discovery for Settings → Install CLI) and next to
  * the GUI binary in `target/{debug,release}`.
  *
- * Desktop packages do NOT bundle the CLI (`externalBin` is only the plugin
- * worker sidecar). End users install the same-version CLI from Settings →
- * About via GitHub Release download. This script is a dev convenience only
- * (`pnpm cli:bundle`).
+ * Desktop packages do NOT bundle the CLI. End users install the same-version
+ * CLI from Settings → About via GitHub Release download. This script is a dev
+ * convenience only (`pnpm cli:bundle`).
  *
  * Usage:
  *   node scripts/prepare-bundled-cli.mjs           # debug (default)
@@ -35,19 +34,6 @@ function hostTriple() {
 }
 
 const triple = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
-const tauriPlatform = process.env.TAURI_ENV_PLATFORM || "";
-// Mobile never ships the headless CLI (remote client only); building it under
-// iOS/Android env also pollutes native toolchains (e.g. tesseract/cmake).
-const isMobile =
-	tauriPlatform === "android" ||
-	tauriPlatform === "ios" ||
-	/-android|-ios\b/.test(triple);
-if (isMobile) {
-	console.log(
-		`[prepare-bundled-cli] mobile (${tauriPlatform || triple}): skipped (CLI is desktop-only)`,
-	);
-	process.exit(0);
-}
 
 const outDir = path.join(root, "src-tauri", "binaries");
 fs.mkdirSync(outDir, { recursive: true });

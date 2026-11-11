@@ -18,20 +18,9 @@ vi.mock("@/components/viewer/local-html-viewer", () => ({
 vi.mock("@/components/workspace/recycle-bin-view", () => ({
 	RecycleBinView: () => null,
 }));
-vi.mock("@/components/writing/tex-project-view", () => ({
-	TexProjectView: () => null,
-}));
 vi.mock("@/hooks/use-app-stores", () => ({ useSettings: () => true }));
 vi.mock("@/lib/core/notify", () => ({ notifyError: vi.fn() }));
-vi.mock("@/lib/workspace/navigation", () => ({
-	openWritingFile: vi.fn(),
-	rememberWritingSource: vi.fn(),
-}));
 vi.mock("@/lib/workspace/store", () => ({ updateTab: vi.fn() }));
-vi.mock("@/lib/writing/project-target", () => ({
-	isWritingPath: () => false,
-	resolveWritingTarget: vi.fn(),
-}));
 vi.mock("@/components/plaza/plaza-view", () => ({
 	PlazaView: ({ path }: { path: string }) => {
 		useEffect(() => {

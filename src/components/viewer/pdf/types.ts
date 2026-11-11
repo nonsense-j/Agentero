@@ -125,16 +125,7 @@ export type PdfViewerProps = {
 	 * (pages, zoom, search, text selection + copy) stays.
 	 */
 	plainViewer?: boolean;
-	/**
-	 * Keep the floating page / zoom / paper-tone bar in a plain viewer. The
-	 * writing preview opts in so its PDF chrome matches the reading layout.
-	 */
-	showBottomBar?: boolean;
-	/** Canonical TeX source and actual output path for compiled-document SyncTeX. */
-	texRootPath?: string | null;
 	pdfPath?: string | null;
-	/** Keep forward search on the writing preview instead of a reading tab. */
-	syncTexScope?: "writing";
 	/**
 	 * Identifier used by the "Import to library" action for remote papers.
 	 * Usually the arXiv abs/source URL.
@@ -145,17 +136,12 @@ export type PdfViewerProps = {
 export type PdfViewerInnerProps = PdfViewerProps & {
 	docId: string;
 	/**
-	 * Original bytes before the private copy passed to EmbedPDF. Cache keying
-	 * must not depend on a buffer the PDF engine may have transferred.
-	 */
-	pdfCacheBytes?: ArrayBuffer | null;
-	/**
 	 * Revision-stripped document id (the tab id / stable scope key). Cross-pane
 	 * callers — e.g. `onOpenTranslationTab`, which resolves it back to a
 	 * workspace tab — need this form, not the per-buffer `docId`.
 	 */
 	baseDocId: string;
-	/** Survives the inner EmbedPDF remount when the compiled buffer changes. */
+	/** Survives the inner EmbedPDF remount when the PDF buffer changes. */
 	reloadPositionRef?: RefObject<PdfReloadPosition | null>;
 };
 

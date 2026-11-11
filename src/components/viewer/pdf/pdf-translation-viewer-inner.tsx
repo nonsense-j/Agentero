@@ -35,7 +35,6 @@ import { usePdfPaperTone } from "@/components/viewer/pdf/hooks/use-pdf-paper-ton
 import { usePdfReadingMode } from "@/components/viewer/pdf/hooks/use-pdf-reading-mode";
 import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-sync";
 import { usePdfZoomControls } from "@/components/viewer/pdf/hooks/use-pdf-zoom-controls";
-import { useReflowDisplayDocument } from "@/components/viewer/pdf/hooks/use-reflow-display-document";
 import { getLinkDestination } from "@/components/viewer/pdf/layers/citation-links";
 import {
 	type PdfPageHandlers,
@@ -135,7 +134,6 @@ export function PdfTranslationViewerInner({
 	paperRelPath = null,
 	vaultPath = null,
 	sourceBytes = null,
-	pdfCacheBytes = null,
 	isRemotePaper = false,
 	importIdentifier,
 	isActive = true,
@@ -169,18 +167,11 @@ export function PdfTranslationViewerInner({
 		layoutTranslatePageStateByPage,
 		layoutTranslateActive,
 		layoutTranslateRunning,
-		layoutTranslatePreparing,
 		layoutTranslateWaiting,
 		layoutTranslateProgress,
-		reflowOutput,
 		toggleLayoutTranslate,
 		togglePageLayoutTranslate,
 	} = usePdfLayoutTranslate({
-		reflowContext: () => {
-			const engine = engineRef.current,
-				document = docCapRef.current?.getDocument(docId);
-			return engine && document ? { engine, document } : null;
-		},
 		docId,
 		layoutRawRegions,
 		translationPane: true,
@@ -188,14 +179,7 @@ export function PdfTranslationViewerInner({
 		paperRelPath,
 		paperKey,
 		vaultPath,
-		pdfBytes: pdfCacheBytes ?? sourceBytes,
 	});
-
-	const reflowDisplayDocumentId = useReflowDisplayDocument(
-		docCap,
-		reflowOutput,
-		docId,
-	);
 
 	// `openTranslationTab` seeds a snapshot at open time; if layout analysis was
 	// still running then, mirror the source result when it lands so the
@@ -478,7 +462,6 @@ export function PdfTranslationViewerInner({
 			<PdfPageLayers
 				docId={docId}
 				pageIndex={pageIndex}
-				reflowDocumentId={reflowDisplayDocumentId}
 				width={rotatedWidth || width}
 				height={rotatedHeight || height}
 				tone={pdfTone}
@@ -490,15 +473,7 @@ export function PdfTranslationViewerInner({
 				handlers={pageHandlers}
 			/>
 		),
-		[
-			docId,
-			pdfTone,
-			zoomRef,
-			pageMarks,
-			pageLayout,
-			pageHandlers,
-			reflowDisplayDocumentId,
-		],
+		[docId, pdfTone, zoomRef, pageMarks, pageLayout, pageHandlers],
 	);
 
 	return (
@@ -531,7 +506,6 @@ export function PdfTranslationViewerInner({
 			</DockviewViewport>
 			<PdfTranslateProgressChip
 				layoutTranslateRunning={layoutTranslateRunning}
-				layoutTranslatePreparing={layoutTranslatePreparing}
 				layoutTranslateWaiting={layoutTranslateWaiting}
 				layoutTranslateProgress={layoutTranslateProgress}
 				onStop={toggleLayoutTranslate}

@@ -51,14 +51,6 @@ export type DocTab = {
 	notesKey: number;
 	/** One-shot, monotonic intent consumed by the mounted Markdown editor. */
 	navigationIntent?: { id: number; fragment: LinkFragment };
-	/** Transient: compiled-PDF pane is waiting on a running LaTeX compile. */
-	texCompiling?: boolean;
-	/** Render the rtex live canvas instead of the compiled PDF (PDF tab only). */
-	texLive?: boolean;
-	/** Project root .tex for compiled PDFs and live previews, including custom outputs. */
-	texRoot?: string;
-	/** Owning writing project for source files and project assets. */
-	writingRoot?: string;
 	loaded: boolean;
 };
 
@@ -117,9 +109,6 @@ export type PersistedTab = {
 	mode: CenterViewMode;
 	/** Last resolved display title (paper metadata title); shown before hydration. */
 	title?: string;
-	/** rtex live pane; persists across window reloads instead of reverting to PDF. */
-	texLive?: boolean;
-	texRoot?: string;
 };
 
 /**
@@ -140,9 +129,6 @@ export type PanelPersistParams = {
 	mode: CenterViewMode;
 	/** Display title at save time; restore shows it before resources hydrate. */
 	title: string;
-	/** Live TeX pane state; only set while live. The source association persists in either mode. */
-	texLive?: boolean;
-	texRoot?: string;
 };
 
 export const NOTES_PLACEHOLDER =

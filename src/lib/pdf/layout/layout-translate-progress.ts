@@ -25,19 +25,3 @@ export function layoutTranslateSettledRatio(
 	}
 	return settled / items.length;
 }
-
-/** Translation and page generation report real work; cache hits only generate pages. */
-export function layoutTranslateDisplayRatio(
-	settled: number | null,
-	previewPending: boolean,
-	reflowProgress = 0,
-	cacheOnly = false,
-): number | null {
-	if (settled == null) return null;
-	if (!previewPending) return settled;
-	const built = Number.isFinite(reflowProgress)
-		? Math.max(0, Math.min(1, reflowProgress))
-		: 0;
-	// Leave 100% for the committed output, not just PDF byte generation.
-	return Math.min(0.99, cacheOnly ? built : settled * 0.7 + built * 0.3);
-}

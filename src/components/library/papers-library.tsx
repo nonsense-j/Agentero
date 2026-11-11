@@ -30,7 +30,6 @@ import {
 } from "@/components/library/library-row-utils";
 import { LibraryTableHeader } from "@/components/library/library-table-header";
 import { Button } from "@/components/ui/button";
-import { useWritingStore } from "@/hooks/use-app-stores";
 import { useDebouncedCallback } from "@/hooks/use-debounce";
 import { cn } from "@/lib/core/utils";
 import type { PaperLibraryRow, PaperMetadata } from "@/lib/paper";
@@ -48,7 +47,6 @@ import {
 	useUiScale,
 } from "@/lib/settings";
 import { joinVaultPath } from "@/lib/vault";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 
 export type PapersLibraryProps = {
 	/** Full catalog list (or pre-scoped); further filtered by `scopePath`. */
@@ -104,7 +102,6 @@ export function PapersLibrary({
 	rescanning,
 	className,
 }: PapersLibraryProps) {
-	const reading = useWritingStore((s) => s.surface === "reading");
 	const { t: tRaw, i18n } = useTranslation("sidebar");
 	/** Column renderers take plain string keys; cast off strict resource unions. */
 	const t = tRaw as unknown as CellT;
@@ -166,8 +163,7 @@ export function PapersLibrary({
 		onOpenPaper,
 	});
 
-	const canEditMeta =
-		Boolean(vaultPath) && !isRemoteVaultHandle(vaultPath ?? "");
+	const canEditMeta = Boolean(vaultPath);
 
 	/** Folder scope first (cheap path-prefix filter on in-memory catalog). */
 	const scopedPapers = useMemo(
@@ -239,8 +235,7 @@ export function PapersLibrary({
 		[columns, onColumnsChange],
 	);
 
-	const canSyncPublication =
-		Boolean(vaultPath) && !isRemoteVaultHandle(vaultPath);
+	const canSyncPublication = Boolean(vaultPath);
 	const handleSyncPublication = useCallback(() => {
 		void syncLibraryPublication(vaultPath, scopedPapers);
 	}, [vaultPath, scopedPapers]);
@@ -315,7 +310,7 @@ export function PapersLibrary({
 		[rows],
 	);
 	const previewPaper = useLibraryPreview({
-		active: active && reading,
+		active,
 		vaultPath,
 		scopePath,
 		paths: previewPaths,
@@ -508,7 +503,6 @@ export function PapersLibrary({
 												? joinVaultPath(vaultPath, p.path)
 												: null
 										}
-										vaultPath={vaultPath}
 										canEditMeta={canEditMeta}
 										onOpenPaper={openPaperFromRow}
 										onRowClick={onRowClick}

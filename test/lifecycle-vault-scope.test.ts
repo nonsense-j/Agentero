@@ -98,9 +98,6 @@ vi.mock("@/lib/vault/actions", () => ({
 vi.mock("@/lib/vault/path", () => ({
 	joinVaultPath: (a: string, b: string) => `${a}/${b}`,
 }));
-vi.mock("@/lib/vault/remote/remote-vault", () => ({
-	isRemoteVaultHandle: (p: string) => p.startsWith("remote:"),
-}));
 vi.mock("@/lib/vault/store", () => ({
 	getVaultPath: mocks.getVaultPath,
 	refreshTree: mocks.refreshTree,
@@ -169,21 +166,6 @@ describe("vault:opened scope", () => {
 		expect(mocks.callApi).toHaveBeenCalledWith(expect.any(Function), {
 			fallback: "vault release failed",
 		});
-	});
-
-	it("skips the Host hold and release for remote vaults, which have no local catalog", async () => {
-		const release = emitScoped("vault:opened", {
-			vaultId: "remote:abc",
-			timestamp: 1,
-		});
-		await drain();
-		release();
-		await drain();
-
-		for (const clear of clears) expect(clear).toHaveBeenCalledTimes(1);
-		expect(mocks.maybeShowPaperBackfill).not.toHaveBeenCalled();
-		expect(mocks.commandSpy("vaultHold")).not.toHaveBeenCalled();
-		expect(mocks.commandSpy("vaultRelease")).not.toHaveBeenCalled();
 	});
 
 	it("refreshes paper capability flags when deferred assets finish", async () => {

@@ -1,4 +1,3 @@
-export { getPdfAiRuntime } from "@/lib/pdf/layout/ai-runtime";
 export {
 	isLayoutRegionActivation,
 	LAYOUT_REGION_CLICK_MOVE_TOLERANCE_PX,
@@ -151,19 +150,14 @@ export {
 	verticalCeilingForTitle,
 } from "@/lib/pdf/layout/merge-captions";
 export {
-	ensureLayoutModel,
-	getLayoutModelStatus,
-	layoutModelLocalUrl,
-	prefetchLayoutModel,
-} from "@/lib/pdf/layout/model";
-export {
 	buildLayoutDocumentResult,
-	documentLayoutToResult,
-	pageLayoutToRegions,
-	regionsFromDocumentLayout,
 	summarizeLayoutResult,
 } from "@/lib/pdf/layout/normalize";
 export {
+	createPdfEngineLayoutTextSource,
+	type LayoutTaskErrorReason,
+	type LayoutTaskLike,
+	type LayoutTextSource,
 	type RunLayoutAnalysisOptions,
 	runDocumentLayoutAnalysis,
 } from "@/lib/pdf/layout/run-analysis";

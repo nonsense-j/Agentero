@@ -279,23 +279,17 @@ pub(crate) fn resolve_command_in_agent_env(
 
 /// Resolve the ACP session cwd, also used by cwd-aware process launchers.
 ///
-/// A remote target advertises its own vault path; a local one uses the open
-/// Vault, falling back to [`crate::core::paths::agent_scratch_dir`] when the
-/// vault path is missing or invalid. Never Agentero's process cwd: a macOS GUI
-/// app launched by LaunchServices has `/`, so an agent that scans its startup
-/// cwd would walk `$HOME` and trip TCC folder prompts (#570). If neither scratch
-/// location can be created, fail before spawning instead of broadening the cwd.
-pub(crate) fn agent_spawn_cwd(
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
-    vault_path: Option<&str>,
-) -> Result<PathBuf, AppError> {
-    let raw = match remote {
-        Some(remote) => remote.agent_cwd(),
-        None => vault_path
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .map_or_else(crate::core::paths::agent_scratch_dir, Ok)?,
-    };
+/// Uses the open Vault, falling back to [`crate::core::paths::agent_scratch_dir`]
+/// when the vault path is missing or invalid. Never Agentero's process cwd: a
+/// macOS GUI app launched by LaunchServices has `/`, so an agent that scans its
+/// startup cwd would walk `$HOME` and trip TCC folder prompts (#570). If neither
+/// scratch location can be created, fail before spawning instead of broadening
+/// the cwd.
+pub(crate) fn agent_spawn_cwd(vault_path: Option<&str>) -> Result<PathBuf, AppError> {
+    let raw = vault_path
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .map_or_else(crate::core::paths::agent_scratch_dir, Ok)?;
     Ok(windows_shell_path(&raw))
 }
 
@@ -394,7 +388,8 @@ fn plan_local_launch_with(
     Ok((desc.clone(), PathBuf::from(&desc.command)))
 }
 
-pub(crate) fn to_acp_agent_local(
+/// Build local ACP agent process.
+pub(crate) fn to_acp_agent(
     desc: &AgentDescriptor,
     cwd: Option<&Path>,
 ) -> Result<AcpAgent, AppError> {
@@ -428,36 +423,6 @@ pub(crate) fn to_acp_agent_local(
         AcpAgent::new(McpServer::Stdio(stdio)),
         &desc.name,
     ))
-}
-
-/// Build ACP agent process. When `remote` is SSH, wrap launch as `ssh … 'cd vault && exec agent'`.
-/// Local-sim remotes validate their vault and reuse the local platform launch policy.
-pub(crate) fn to_acp_agent(
-    desc: &AgentDescriptor,
-    cwd: Option<&Path>,
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
-) -> Result<AcpAgent, AppError> {
-    if let Some(r) = remote {
-        if r.is_ssh() {
-            let (program, args) = r.ssh_stdio(&desc.command, &desc.args, &desc.env)?;
-            let stdio = McpServerStdio::new(desc.name.clone(), program).args(args);
-            return Ok(acp_agent_with_debug(
-                AcpAgent::new(McpServer::Stdio(stdio)),
-                &desc.name,
-            ));
-        }
-        // A stale local-sim handle must not silently run against scratch (or
-        // fail later with an opaque shell/ACP handshake error). SSH paths were
-        // handled above and must never be checked against the local filesystem.
-        let remote_cwd = r.agent_cwd();
-        if r.is_local_sim() && !remote_cwd.is_dir() {
-            return Err(AppError::message(format!(
-                "local-sim vault directory is unavailable: {}",
-                remote_cwd.display()
-            )));
-        }
-    }
-    to_acp_agent_local(desc, cwd)
 }
 
 pub(crate) async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -681,7 +646,6 @@ mod timeout_tests {
 mod cwd_shell_wrap_tests {
     use super::*;
     use crate::features::agent::models::AgentTemplate;
-    use crate::features::agent::remote_host::RemoteAgentLaunch;
 
     fn descriptor(template: AgentTemplate) -> AgentDescriptor {
         let info = crate::features::agent::registry::templates::template_info(template.as_str());
@@ -701,53 +665,6 @@ mod cwd_shell_wrap_tests {
             last_probe_agent_name: None,
             last_probe_error: None,
             last_probed_at: None,
-        }
-    }
-
-    struct RemoteTarget {
-        cwd: PathBuf,
-        ssh: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl RemoteAgentLaunch for RemoteTarget {
-        fn is_ssh(&self) -> bool {
-            self.ssh
-        }
-        fn is_local_sim(&self) -> bool {
-            !self.ssh
-        }
-        fn host(&self) -> &str {
-            "test-host"
-        }
-        fn agent_cwd(&self) -> PathBuf {
-            self.cwd.clone()
-        }
-        fn work_root(&self) -> &Path {
-            &self.cwd
-        }
-        fn ssh_stdio(
-            &self,
-            _command: &str,
-            _args: &[String],
-            _env: &HashMap<String, String>,
-        ) -> Result<(PathBuf, Vec<String>), AppError> {
-            Ok((
-                PathBuf::from("ssh"),
-                vec![self.cwd.to_string_lossy().into_owned()],
-            ))
-        }
-        async fn which(&self, _bin: &str) -> Result<Option<String>, AppError> {
-            unreachable!()
-        }
-        async fn materialize_skills(&self) -> Result<(), AppError> {
-            unreachable!()
-        }
-        async fn ensure_vault_skills(
-            &self,
-            _locale: Option<&str>,
-        ) -> Result<crate::features::vault::CreateVaultResult, AppError> {
-            unreachable!()
         }
     }
 
@@ -974,28 +891,6 @@ mod cwd_shell_wrap_tests {
     }
 
     #[test]
-    fn stale_local_sim_is_rejected_without_checking_ssh_paths_locally() {
-        let root = tempfile::tempdir().unwrap();
-        let mut remote = RemoteTarget {
-            cwd: root.path().join("missing-vault"),
-            ssh: false,
-        };
-        let desc = descriptor(AgentTemplate::CodexAcp);
-        // None is also the Windows probe path: validation must not depend on
-        // whether the platform needs a cwd shell wrapper.
-        for cwd in [None, Some(remote.cwd.as_path())] {
-            let Err(error) = to_acp_agent(&desc, cwd, Some(&remote)) else {
-                panic!("stale local-sim vault must fail before spawning an agent");
-            };
-            assert!(error.to_string().contains("local-sim"));
-            assert!(error.to_string().contains("missing-vault"));
-        }
-        remote.ssh = true;
-        assert_eq!(agent_spawn_cwd(Some(&remote), None).unwrap(), remote.cwd);
-        assert!(to_acp_agent(&desc, Some(&remote.cwd), Some(&remote)).is_ok());
-    }
-
-    #[test]
     #[cfg(not(windows))]
     fn shell_quote_wraps_and_escapes_single_quotes() {
         assert_eq!(shell_quote("hello"), "'hello'");
@@ -1171,7 +1066,7 @@ mod cwd_shell_wrap_tests {
         // Windows exposes per-drive cwd entries through std::env::vars().
         // Replaying one through windows-spawn rejected the name before launch.
         desc.env.insert("=C:".into(), r"C:\".into());
-        let agent = to_acp_agent_local(&desc, None).unwrap();
+        let agent = to_acp_agent(&desc, None).unwrap();
         let (_stdin, _stdout, _stderr, mut child) = agent.spawn_process().unwrap();
         let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.status()).await;
         if status.is_err() {
@@ -1187,12 +1082,12 @@ mod cwd_shell_wrap_tests {
         std::fs::create_dir_all(&vault).unwrap();
 
         assert_eq!(
-            agent_spawn_cwd(None, vault.to_str()).unwrap(),
+            agent_spawn_cwd(vault.to_str()).unwrap(),
             windows_shell_path(&vault)
         );
         // Missing/invalid vault -> private scratch dir, never the process cwd.
         assert_eq!(
-            agent_spawn_cwd(None, vault.join("missing").to_str()).unwrap(),
+            agent_spawn_cwd(vault.join("missing").to_str()).unwrap(),
             windows_shell_path(&crate::core::paths::agent_scratch_dir().unwrap())
         );
 

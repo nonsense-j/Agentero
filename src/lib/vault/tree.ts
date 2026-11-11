@@ -5,18 +5,12 @@ import { toVaultRelative } from "@/lib/core/path";
 import { perfOp } from "@/lib/core/perf";
 import { compareNaturalName } from "@/lib/core/sort";
 import { normalizePathKey } from "@/lib/vault/path";
-import {
-	isRemoteVaultHandle,
-	remoteList,
-	remoteSessionIdFromHandle,
-} from "@/lib/vault/remote/remote-vault";
-import { joinRemotePath, remoteRelFromJoined } from "@/lib/vault/remote-path";
 import { ensureLocalFsScope } from "@/lib/vault/scope";
 import type { FileNode } from "@/lib/vault/types";
 import { isWikiTargetPath } from "@/lib/wiki/target-path";
 
 /**
- * Names never listed in the file tree (local or remote).
+ * Names never listed in the file tree.
  * Includes VCS, build/cache, virtualenvs, and Host-only `.agentero`.
  */
 export const TREE_IGNORE_NAMES = new Set([
@@ -52,93 +46,6 @@ export const TREE_EAGER_ROOT_NAMES = new Set(["papers", "notes", ".agents"]);
  */
 const TREE_ALLOWED_DOT_NAMES = new Set([".env.example", ".agents"]);
 
-/**
- * Cloud-sync store artifacts (`blobs/`, `manifests/`, `HEAD`, `vault.json` —
- * see Host `integration/sync/engine.rs`). When a WebDAV sync target is a
- * cloud folder a desktop client mirrors back into the vault, these land at
- * the vault root. Hidden at the root only — nested same-named folders are
- * user content — mirroring the Host tree rule
- * (`agentero-core/features/vault/tree.rs`).
- */
-const TREE_SYNC_STORE_ARTIFACT_NAMES = new Set([
-	"blobs",
-	"manifests",
-	"HEAD",
-	"vault.json",
-]);
-
-/** Any of these marks a directory as a paper unit whose `source/` is lazy. */
-const PAPER_MARKER_FILE_NAMES = new Set(["NOTES.md", "PAPER.md"]);
-
-/** Paper-internal directory markers (mirrors `src/lib/paper/paths.ts`). */
-const PAPER_MARKER_DIR_NAMES = new Set(["source", "assets", "marks"]);
-
-/** Paper subdirectory listed lazily (arXiv e-prints hold hundreds of files). */
-const LAZY_PAPER_DIR_NAME = "source";
-
-/**
- * App-owned rebuildable sidecars written inside a paper's `source/` bucket
- * (reference sidecar + PDF layout sidecars, see `docs/backend/api.md`). They
- * are never user content, so the tree blinds itself to them — mirrors the Host
- * rule in `crates/agentero-core/src/features/vault/tree.rs` (#747).
- */
-const PAPER_SOURCE_ARTIFACT_NAMES = new Set([
-	"agentero-cite.json",
-	"agentero-figures.json",
-	"layout.json",
-	"layout-index.json",
-	"layout-translate.json",
-]);
-
-/** Last segment of a vault-relative path (`""` at the vault root). */
-function lastRelSegment(rel: string): string {
-	const trimmed = rel.replace(/^\/+|\/+$/g, "");
-	return trimmed.slice(trimmed.lastIndexOf("/") + 1);
-}
-
-/** True when a vault-relative path sits at or below `papers/`. */
-function isUnderPapersRel(rel: string): boolean {
-	const r = rel.replace(/^\/+|\/+$/g, "");
-	return r === "papers" || r.startsWith("papers/");
-}
-
-/** Paper unit: under `papers/` and carrying a paper marker (file or dir). */
-function isPaperUnitRel(
-	rel: string,
-	hasPaperMarkerFile: boolean,
-	entries: TreeListEntry[],
-): boolean {
-	return (
-		isUnderPapersRel(rel) &&
-		(hasPaperMarkerFile ||
-			entries.some((e) => e.isDir && PAPER_MARKER_DIR_NAMES.has(e.name)))
-	);
-}
-
-/** One-level probe: the directory holds nothing but the app's own sidecars. */
-async function isAppSidecarOnlyDir(
-	adapter: TreeAdapter,
-	dirPath: string,
-	dirRel: string,
-): Promise<boolean> {
-	let entries: TreeListEntry[];
-	try {
-		entries = await listTreeEntries(adapter, dirPath, dirRel);
-	} catch {
-		return false;
-	}
-	let sawSidecar = false;
-	for (const entry of entries) {
-		if (PAPER_SOURCE_ARTIFACT_NAMES.has(entry.name)) {
-			sawSidecar = true;
-			continue;
-		}
-		if (shouldIgnoreTreeName(entry.name)) continue;
-		return false;
-	}
-	return sawSidecar;
-}
-
 /** True when this basename should never appear in the tree. */
 export function shouldIgnoreTreeName(name: string): boolean {
 	if (!name) return true;
@@ -173,29 +80,7 @@ function sortNodes(nodes: FileNode[]): FileNode[] {
 }
 
 /**
- * Build directory children.
- *
- * - `shallowOnly=false` (initial open): eager roots recurse fully; other dirs
- *   are listed **once** (one level of files + subdir shells with `childrenPending`).
- * - `shallowOnly=true` (inside a non-eager tree, or expand): files only; subdirs
- *   become pending shells (no further list until expand).
- *
- * `rel` is vault-relative (`""` at root). Local uses absolute `dirPath`.
- */
-type TreeListEntry = {
-	name: string;
-	childPath: string;
-	childRel: string;
-	isDir: boolean;
-	isFile: boolean;
-};
-
-type TreeAdapter = {
-	list(dirPath: string, rel: string): Promise<TreeListEntry[]>;
-};
-
-/**
- * True when an FS / SFTP error means the path is gone (or never existed).
+ * True when an FS error means the path is gone (or never existed).
  * Matches Host local tree semantics: missing dirs list as empty, not hard fail.
  */
 export function isPathMissingError(error: unknown): boolean {
@@ -207,169 +92,6 @@ export function isPathMissingError(error: unknown): boolean {
 		msg.includes("enoent") ||
 		msg.includes("does not exist")
 	);
-}
-
-function remoteTreeAdapter(handle: string): TreeAdapter {
-	const sessionId = remoteSessionIdFromHandle(handle);
-	return {
-		async list(_dirPath, rel) {
-			if (!sessionId) return [];
-			const entries = await remoteList(sessionId, rel);
-			return entries.map((e) => ({
-				name: e.name,
-				childPath: joinRemotePath(handle, e.path),
-				childRel: e.path,
-				isDir: e.isDir,
-				isFile: e.isFile,
-			}));
-		},
-	};
-}
-
-/** List via adapter; missing paths yield `[]` (local Host `read_dir` parity). */
-async function listTreeEntries(
-	adapter: TreeAdapter,
-	dirPath: string,
-	rel: string,
-): Promise<TreeListEntry[]> {
-	try {
-		return await adapter.list(dirPath, rel);
-	} catch (e) {
-		if (isPathMissingError(e)) return [];
-		throw e;
-	}
-}
-
-async function buildTree(
-	adapter: TreeAdapter,
-	dirPath: string,
-	rel: string,
-	depth = 0,
-	shallowOnly = false,
-): Promise<FileNode[]> {
-	if (depth > 12) return [];
-
-	const entries = await listTreeEntries(adapter, dirPath, rel);
-	const nodes: FileNode[] = [];
-	const hasPaperMarker = entries.some(
-		(e) => e.isFile && PAPER_MARKER_FILE_NAMES.has(e.name),
-	);
-	// Under `papers/` with a paper marker the folder is a paper unit: its
-	// `source/` bucket keeps its current handling (lazy shell, hidden by the
-	// renderer for paper rows).
-	const isPaperUnit = isPaperUnitRel(rel, hasPaperMarker, entries);
-
-	for (const entry of entries) {
-		if (shouldIgnoreTreeName(entry.name)) continue;
-		// Mirrored sync-store artifacts only ever sit at the vault root
-		// (`rel` is the listed directory's vault-relative path).
-		if (!rel && TREE_SYNC_STORE_ARTIFACT_NAMES.has(entry.name)) continue;
-		// The app's own sidecars inside a paper's `source/` bucket are never
-		// user content (references + PDF layout sidecars).
-		if (
-			lastRelSegment(rel) === LAZY_PAPER_DIR_NAME &&
-			PAPER_SOURCE_ARTIFACT_NAMES.has(entry.name)
-		) {
-			continue;
-		}
-
-		if (entry.isDir) {
-			// Paper `source/` (arXiv e-print) is listed lazily on expand.
-			if (
-				!shallowOnly &&
-				hasPaperMarker &&
-				entry.name === LAZY_PAPER_DIR_NAME
-			) {
-				// One-level probe so asset detection still sees TeX archives.
-				const sourceEntries = await listTreeEntries(
-					adapter,
-					entry.childPath,
-					entry.childRel,
-				);
-				nodes.push({
-					id: entry.childPath,
-					name: entry.name,
-					path: entry.childPath,
-					kind: "directory",
-					children: [],
-					childrenPending: true,
-					hasTex: sourceEntries.some(
-						(e) => e.isFile && /\.(tex|ltx)$/i.test(e.name),
-					),
-				});
-				continue;
-			}
-			// Outside a paper unit the `source/` bucket exists only to hold the
-			// app's rebuildable sidecars — skip it instead of surfacing an empty
-			// folder (#747).
-			if (
-				entry.name === LAZY_PAPER_DIR_NAME &&
-				!isPaperUnit &&
-				(await isAppSidecarOnlyDir(adapter, entry.childPath, entry.childRel))
-			) {
-				continue;
-			}
-			const node = await buildDirNode(
-				adapter,
-				entry.childPath,
-				entry.name,
-				entry.childRel,
-				depth,
-				shallowOnly,
-			);
-			nodes.push(node);
-		} else if (entry.isFile) {
-			nodes.push({
-				id: entry.childPath,
-				name: entry.name,
-				path: entry.childPath,
-				kind: "file",
-			});
-		}
-	}
-
-	return sortNodes(nodes);
-}
-
-async function buildDirNode(
-	adapter: TreeAdapter,
-	path: string,
-	name: string,
-	childRel: string,
-	depth: number,
-	shallowOnly: boolean,
-): Promise<FileNode> {
-	// Already one level into a non-eager tree (or expand): do not list further.
-	if (shallowOnly) {
-		return {
-			id: path,
-			name,
-			path,
-			kind: "directory",
-			children: [],
-			childrenPending: true,
-		};
-	}
-	if (isEagerTreeRel(childRel)) {
-		const children = await buildTree(adapter, path, childRel, depth + 1, false);
-		return {
-			id: path,
-			name,
-			path,
-			kind: "directory",
-			children,
-		};
-	}
-	// Non-product dir: list exactly one level; nested dirs stay pending.
-	const children = await buildTree(adapter, path, childRel, depth + 1, true);
-	return {
-		id: path,
-		name,
-		path,
-		kind: "directory",
-		children,
-		childrenPending: false,
-	};
 }
 
 /** Map Host `vault_tree_build` / `vault_tree_children` nodes to `FileNode`s,
@@ -400,12 +122,6 @@ export async function listVaultDirChildren(
 	rootPath: string,
 	dirAbsPath: string,
 ): Promise<FileNode[]> {
-	if (isRemoteVaultHandle(rootPath)) {
-		const rel = remoteRelFromJoined(rootPath, dirAbsPath);
-		// Expanding a non-eager folder: only one more level; subdirs stay pending.
-		return buildTree(remoteTreeAdapter(rootPath), dirAbsPath, rel, 0, true);
-	}
-	// Local: single IPC; the Host applies the same eager/lazy semantics.
 	const nodes = await callApiResult(() =>
 		commands.vaultTreeChildren(rootPath, dirAbsPath),
 	);
@@ -630,11 +346,8 @@ export function collectWikiTargetRelPaths(
  */
 export async function loadVaultTree(rootPath: string): Promise<FileNode[]> {
 	return perfOp("vault_tree_build", async () => {
-		if (isRemoteVaultHandle(rootPath)) {
-			return buildTree(remoteTreeAdapter(rootPath), rootPath, "");
-		}
 		await ensureLocalFsScope(rootPath);
-		// Local: the Host walks the vault in-process and returns the tree in one IPC.
+		// The Host walks the vault in-process and returns the tree in one IPC.
 		const nodes = await callApiResult(() => commands.vaultTreeBuild(rootPath));
 		return mapHostTreeNodes(nodes);
 	});

@@ -15,12 +15,6 @@ import type {
 	LayoutTranslateSentence,
 	PdfLayoutKind,
 } from "@/lib/pdf/layout/types";
-import {
-	type Paragraph,
-	reflowDisplayText,
-	reflowStructureForText,
-	validReflowTranslation,
-} from "@/lib/pdf/reflow/types";
 
 const LATIN_SENTENCE_PUNCT = new Set([".", "!", "?"]);
 /** CJK stops are unambiguous, so they end a sentence without a following space. */
@@ -274,83 +268,7 @@ export type LayoutSentenceDraft = {
 	quote: string;
 	source: string;
 	spans: LayoutSentenceSpan[];
-	/** Style tags immediately outside this sentence in the same paragraph. */
-	openStyleBefore?: string;
-	closeStyleAfter?: string;
 };
-
-export function reflowSentenceValidator(
-	p: Paragraph,
-	draft: LayoutSentenceDraft,
-) {
-	const prefix =
-		draft.openStyleBefore === undefined ? "" : `⟪S${draft.openStyleBefore}⟫`;
-	const suffix =
-		draft.closeStyleAfter === undefined ? "" : `⟪/S${draft.closeStyleAfter}⟫`;
-	const structure =
-		draft.source === p.protectedText
-			? p
-			: reflowStructureForText(p, prefix + draft.source + suffix);
-	// Supply missing neighbors for validation only. The assembled paragraph
-	// still has exactly one open/close pair for each original style.
-	return (text: string) =>
-		validReflowTranslation(structure, prefix + text + suffix);
-}
-
-/** Cut the original reflow paragraph while keeping formula and style tokens
- * attached to the matching sentence. An indivisible structure stays a block. */
-export function draftReflowSentences(p: Paragraph): LayoutSentenceDraft[] {
-	const draft = (quote: string, source: string): LayoutSentenceDraft => ({
-		quote,
-		source,
-		spans: [{ memberIndex: 0, rawLength: quote.length }],
-	});
-	const whole = [draft(p.source, p.protectedText)];
-	const quotes = splitLayoutSentences(p.source);
-	if (quotes.filter((quote) => /[\p{L}\p{N}]/u.test(quote)).length < 2)
-		return whole;
-
-	// Map visible characters to protected offsets. Every character of an
-	// atomic formula shares the same end, so a cut cannot bisect the token.
-	const compact = (text: string) => text.replace(/\s/g, "");
-	let visible = "";
-	const ends: number[] = [];
-	for (const match of p.protectedText.matchAll(/⟪(?:F|\/?S)\d+⟫|./gsu)) {
-		const value = compact(reflowDisplayText(p, match[0]));
-		visible += value;
-		for (let i = 0; i < value.length; i++)
-			ends.push(match.index + match[0].length);
-	}
-	if (visible !== compact(p.source)) return whole;
-
-	let count = 0;
-	let start = 0;
-	let activeStyle: string | undefined;
-	const drafts: LayoutSentenceDraft[] = [];
-	for (const [index, quote] of quotes.entries()) {
-		count += compact(quote).length;
-		let end = ends[count - 1];
-		if (end === undefined || end === ends[count]) return whole;
-		const close = p.protectedText.slice(end).match(/^(?:\s*⟪\/S\d+⟫)*/u)?.[0];
-		end =
-			index === quotes.length - 1
-				? p.protectedText.length
-				: end + (close?.length ?? 0);
-		const source = p.protectedText.slice(start, end).trim();
-		const openStyleBefore = activeStyle;
-		for (const tag of source.matchAll(/⟪(\/?)S(\d+)⟫/gu))
-			activeStyle = tag[1] ? undefined : tag[2];
-		const sentence = {
-			...draft(quote, source),
-			openStyleBefore,
-			closeStyleAfter: activeStyle,
-		};
-		if (!reflowSentenceValidator(p, sentence)(source)) return whole;
-		drafts.push(sentence);
-		start = end;
-	}
-	return drafts;
-}
 
 function memberQuoteText(member: { raw?: string; source: string }): string {
 	return member.raw?.trim() ? member.raw : member.source;

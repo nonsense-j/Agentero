@@ -308,9 +308,8 @@ export function seedTabs(
 /**
  * Refresh an open PDF / translation pane from disk. A fresh `pdfBytes`
  * identity is the viewer's reload signal (EmbedPDF re-inits on the new
- * buffer); panes the TeX compile flow owns (`texCompiling`) are skipped —
- * openTexPdf fills those itself when the run lands. Source and translation
- * panes share the registry's pdf-bytes resource.
+ * buffer). Source and translation panes share the registry's pdf-bytes
+ * resource.
  */
 export function refreshPdfTab(
 	prev: DocTab[],
@@ -321,8 +320,7 @@ export function refreshPdfTab(
 	return prev.map((t) => {
 		if (
 			normalizeTabPath(t.path) === key &&
-			viewerModeSpec(t.mode).resource === "pdf" &&
-			!t.texCompiling
+			viewerModeSpec(t.mode).resource === "pdf"
 		) {
 			return { ...t, pdfBytes: bytes, loaded: true };
 		}

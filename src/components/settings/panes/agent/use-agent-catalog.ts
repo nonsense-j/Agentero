@@ -19,35 +19,17 @@ import {
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
-import {
-	remoteAgentProbe,
-	remoteAgentScan,
-} from "@/lib/vault/remote/remote-vault";
-
-/** Where the agent catalog lives: this machine or the SSH host of a remote vault. */
-export type AgentCatalogTransport = "local" | { remote: { sessionId: string } };
 
 /**
- * Catalog scan + parallel ACP probe state shared by the local and remote agent
- * settings panes. `transport` selects the IPC backend; a remote scan response is
- * normalized into the local catalog shape (remote has no custom agents /
- * user-agent override).
+ * Catalog scan + parallel ACP probe state for the agent settings pane.
  */
-export function useAgentCatalog({
-	transport,
-}: {
-	transport: AgentCatalogTransport;
-}) {
+export function useAgentCatalog() {
 	const { t } = useTranslation("settings");
 	const [catalog, setCatalog] = useState<CatalogScanResponse | null>(null);
 	const [loading, setLoading] = useState(false);
 	const { probingKeys, setProbingKeys, clearProbingKey, clearAllProbingKeys } =
 		useProbingKeys();
 	const autoProbedRef = useRef(false);
-	// Primitive extract — deps stay stable even when callers pass an inline
-	// transport object (only the session id matters for the remote backend).
-	const sessionId =
-		typeof transport === "string" ? null : transport.remote.sessionId;
 
 	/** Scan only — does not toggle busy; callers own the loading flag. */
 	const scanOnce =
@@ -57,19 +39,6 @@ export function useAgentCatalog({
 				return null;
 			}
 			try {
-				if (sessionId) {
-					const scan = await remoteAgentScan(sessionId);
-					const next: CatalogScanResponse = {
-						entries: scan.entries,
-						customAgents: [],
-						defaultId: null,
-						enabled: true,
-						proxyEnabled: false,
-						proxyUrl: "",
-					};
-					setCatalog(next);
-					return next;
-				}
 				const scan = await scanCatalog();
 				setCatalog(scan);
 				return scan;
@@ -77,15 +46,15 @@ export function useAgentCatalog({
 				notifyError(errorText(e));
 				return null;
 			}
-		}, [t, sessionId]);
+		}, [t]);
 
 	/**
-	 * Local-only: re-scan and compare CLI versions so Upgrade shows only when a
-	 * newer silent-update target is known. Remote vaults skip (no silent update).
+	 * Re-scan and compare CLI versions so Upgrade shows only when a newer
+	 * silent-update target is known.
 	 */
 	const refreshVersions =
 		useCallback(async (): Promise<CatalogScanResponse | null> => {
-			if (!isTauri() || sessionId) return null;
+			if (!isTauri()) return null;
 			try {
 				const scan = await checkCatalogUpdates();
 				setCatalog(scan);
@@ -94,7 +63,7 @@ export function useAgentCatalog({
 				notifyError(errorText(e));
 				return null;
 			}
-		}, [sessionId]);
+		}, []);
 
 	/**
 	 * Parallel ACP probe. Soft open skips already-ready rows; force re-probes all
@@ -106,7 +75,6 @@ export function useAgentCatalog({
 			const candidates = scan.entries.filter((e) =>
 				catalogNeedsProbe(e, force),
 			);
-			// Remote scans carry no custom agents (customAgents is always [] there).
 			const custom = scan.customAgents.filter(
 				(a) => a.available && (force || a.lastProbeOk !== true),
 			);
@@ -126,9 +94,7 @@ export function useAgentCatalog({
 				...candidates.map(async (entry) => {
 					const key = catalogProbeKey(entry.templateId);
 					try {
-						const result = sessionId
-							? await remoteAgentProbe(sessionId, entry.templateId)
-							: await probeCatalogAgent(entry.templateId);
+						const result = await probeCatalogAgent(entry.templateId);
 						setCatalog((prev) =>
 							prev ? patchCatalogProbe(prev, entry.templateId, result) : prev,
 						);
@@ -171,12 +137,11 @@ export function useAgentCatalog({
 				}),
 			]);
 		},
-		[sessionId, clearProbingKey, clearAllProbingKeys, setProbingKeys],
+		[clearProbingKey, clearAllProbingKeys, setProbingKeys],
 	);
 
 	/**
-	 * PATH scan → parallel probe → one reconcile scan (local; remote keeps busy
-	 * through probing and skips the reconcile re-scan over SSH).
+	 * PATH scan → parallel probe → one reconcile scan.
 	 * `force`: Refresh / proxy change re-probe everything; open page skips ready.
 	 */
 	const rescanAndProbe = useCallback(
@@ -187,11 +152,6 @@ export function useAgentCatalog({
 			}
 			setLoading(true);
 			try {
-				if (sessionId) {
-					const scan = await scanOnce();
-					if (scan) await probeInstalled(scan, force);
-					return;
-				}
 				const scan = await scanOnce();
 				// Release global busy after PATH scan so Install stays clickable while
 				// ACP probes (often multi-second / timeouts) run in the background.
@@ -206,14 +166,7 @@ export function useAgentCatalog({
 				clearAllProbingKeys();
 			}
 		},
-		[
-			probeInstalled,
-			refreshVersions,
-			scanOnce,
-			t,
-			sessionId,
-			clearAllProbingKeys,
-		],
+		[probeInstalled, refreshVersions, scanOnce, t, clearAllProbingKeys],
 	);
 
 	const refreshAfterLogin = useCallback(() => {
@@ -231,7 +184,6 @@ export function useAgentCatalog({
 				notifyError(t("agent.desktopOnly"));
 				return false;
 			}
-			if (sessionId) return false;
 			try {
 				await openAgentLoginTerminal(templateId);
 				void refreshAfterLogin();
@@ -241,18 +193,15 @@ export function useAgentCatalog({
 				return false;
 			}
 		},
-		[t, sessionId, refreshAfterLogin],
+		[t, refreshAfterLogin],
 	);
 
 	// Open once: soft probe (skip ready). Refresh / proxy use force=true.
-	// Remote has no once-guard: soft probe when the session or callback changes.
 	useEffect(() => {
-		if (!sessionId) {
-			if (autoProbedRef.current) return;
-			autoProbedRef.current = true;
-		}
+		if (autoProbedRef.current) return;
+		autoProbedRef.current = true;
 		void rescanAndProbe(false);
-	}, [rescanAndProbe, sessionId]);
+	}, [rescanAndProbe]);
 
 	/** Mirror a committed ACP User-Agent into the catalog scan state. */
 	const patchUserAgent = useCallback(

@@ -1,4 +1,3 @@
-import { type ReflowContext, usePdfReflow } from "./use-pdf-reflow";
 /**
  * Bulk (whole-document) translation of body-text layout regions.
  *
@@ -47,10 +46,7 @@ import {
 	layoutSidecarNeedsTextLayer,
 	subscribeLayoutSidecarWrite,
 } from "@/lib/pdf/layout/io";
-import {
-	layoutTranslateDisplayRatio,
-	layoutTranslateSettledRatio,
-} from "@/lib/pdf/layout/layout-translate-progress";
+import { layoutTranslateSettledRatio } from "@/lib/pdf/layout/layout-translate-progress";
 import {
 	clearTranslationPartialDismissal,
 	dismissTranslationPartial,
@@ -61,7 +57,6 @@ import { openSettingsWindow } from "@/lib/shell/settings-window";
 import { displayTranslateError } from "@/lib/translate";
 
 export type UsePdfLayoutTranslateOptions = {
-	reflowContext?: ReflowContext;
 	docId: string;
 	/** Translation-only panes hydrate completed overlays from the shared cache. */
 	translationPane?: boolean;
@@ -75,8 +70,6 @@ export type UsePdfLayoutTranslateOptions = {
 	paperKey?: string | null;
 	/** Vault root passed to the Agent as its cwd. */
 	vaultPath?: string | null;
-	/** Viewer PDF bytes; hashed into the reflow IR cache key. */
-	pdfBytes?: ArrayBuffer | null;
 };
 
 /** View model for the partial-translation button and its anchored dialog. */
@@ -98,11 +91,6 @@ export type PdfLayoutTranslatePartial = {
 };
 
 export type PdfLayoutTranslate = {
-	reflowBusy: boolean;
-	reflowReady: boolean;
-	/** Finished translated PDF bytes for the in-app display renderer. */
-	reflowOutput: Uint8Array | null;
-	exportTranslatedPdf: (dual?: boolean) => Promise<void>;
 	/** Progressive bulk-translate overlays (body text / abstract / header), bucketed by page. */
 	layoutTranslateItemsByPage: ReadonlyMap<
 		number,
@@ -114,8 +102,6 @@ export type PdfLayoutTranslate = {
 		{ active: boolean; running: boolean }
 	>;
 	layoutTranslateRunning: boolean;
-	/** Final corrected preview/export output is still building after items settled. */
-	layoutTranslatePreparing: boolean;
 	/** Queued behind layout analysis; toolbar shows the waiting state. */
 	layoutTranslateWaiting: boolean;
 	/** Running, or finished with overlays still painted. */
@@ -356,7 +342,6 @@ function createTranslatePublishCoalescer(
 }
 
 export function usePdfLayoutTranslate({
-	reflowContext,
 	docId,
 	layoutRawRegions,
 	translationPane = false,
@@ -364,12 +349,10 @@ export function usePdfLayoutTranslate({
 	paperRelPath,
 	paperKey,
 	vaultPath,
-	pdfBytes,
 }: UsePdfLayoutTranslateOptions): PdfLayoutTranslate {
 	const { t } = useTranslation("viewer");
 	/** Progressive layout bulk-translate overlays (body text / abstract / header). */
 	const [sourcePreparing, setSourcePreparing] = useState(false);
-	const [cacheOnly, setCacheOnly] = useState(false);
 	const [layoutTranslateJob, setLayoutTranslateJob] =
 		useState<LayoutTranslateJobState>(EMPTY_LAYOUT_TRANSLATE_JOB);
 	const layoutTranslateJobRef = useRef(layoutTranslateJob);
@@ -379,28 +362,10 @@ export function usePdfLayoutTranslate({
 	const partialAutoOpenedKeyRef = useRef<string | null>(null);
 	/** Stable paper identity for the machine-local dismissal records. */
 	const dismissalPaperKey = paperAbsPath ?? paperRelPath ?? docId;
-	// Visibility must not discard the translation or invalidate its reflow preview.
+	// Visibility must not discard the translation.
 	const [hiddenPageIndexes, setHiddenPageIndexes] = useState<
 		ReadonlySet<number>
 	>(new Set());
-	const {
-		prepare: prepareReflow,
-		reflowItems,
-		reflowBusy,
-		reflowReady,
-		reflowOutput,
-		reflowProgress,
-		exportTranslatedPdf,
-	} = usePdfReflow(
-		reflowContext,
-		layoutRawRegions,
-		layoutTranslateJob.items,
-		layoutTranslateJob.status === "running",
-		docId,
-		paperAbsPath,
-		paperKey,
-		pdfBytes,
-	);
 	const layoutTranslateAbortRef = useRef<AbortController | null>(null);
 	/** Queued target to auto-start once layout regions land. */
 	const layoutTranslateWaitTargetRef = useRef<LayoutTranslateWaitTarget | null>(
@@ -585,21 +550,16 @@ export function usePdfLayoutTranslate({
 		void (async () => {
 			const sidecar = await readLayoutTranslateSidecar(paperAbsPath, cacheKey);
 			if (ac.signal.aborted) return;
-			const prepared = await prepareReflow(pendingItems, ac.signal);
-			if (ac.signal.aborted) return;
 			setSourcePreparing(false);
 			// Cache-first: render every hydrated block, then translate only when
 			// the sidecar had nothing usable. A cache with gaps stays partial.
-			const hydration = hydrateLayoutTranslateItems(prepared, sidecar, {
-				requireReflowSentencePairs: true,
-			});
+			const hydration = hydrateLayoutTranslateItems(pendingItems, sidecar);
 			const needsRun = !hydration.fromCache;
 			const dismissKey = layoutTranslatePendingDismissKey(
 				dismissalPaperKey,
 				cacheKey,
 				hydration.items,
 			);
-			setCacheOnly(!needsRun);
 			setLayoutTranslateJob({
 				status: needsRun
 					? "running"
@@ -619,8 +579,7 @@ export function usePdfLayoutTranslate({
 			});
 			if (!needsRun) {
 				// Cache-first renders a partial page without asking the user yet;
-				// the popover opens once the page build finishes and the button can
-				// anchor it. The build itself is never blocked.
+				// the popover opens once the button can anchor it.
 				if (hydration.pendingRequired > 0) schedulePartialAutoOpen(dismissKey);
 				return;
 			}
@@ -679,7 +638,6 @@ export function usePdfLayoutTranslate({
 		vaultPath,
 		dismissalPaperKey,
 		enterWaitingLayout,
-		prepareReflow,
 		notifyTranslateItemErrors,
 		notifyTranslateFailure,
 		schedulePartialAutoOpen,
@@ -750,14 +708,9 @@ export function usePdfLayoutTranslate({
 					cacheKey,
 				);
 				if (ac.signal.aborted) return;
-				const prepared = await prepareReflow(pendingItems, ac.signal);
-				if (ac.signal.aborted) return;
 				setSourcePreparing(false);
-				const pageItems = applyLayoutTranslateSidecar(prepared, sidecar, {
-					requireReflowSentencePairs: true,
-				});
+				const pageItems = applyLayoutTranslateSidecar(pendingItems, sidecar);
 				const needsRun = hasPendingLayoutTranslateItems(pageItems);
-				setCacheOnly(!needsRun);
 				setLayoutTranslateJob((prev) => {
 					const merged = mergeTranslatePageItems(
 						prev.items,
@@ -833,7 +786,6 @@ export function usePdfLayoutTranslate({
 			paperKey,
 			vaultPath,
 			enterWaitingLayout,
-			prepareReflow,
 			notifyTranslateItemErrors,
 			notifyTranslateFailure,
 			t,
@@ -903,7 +855,6 @@ export function usePdfLayoutTranslate({
 		setPartialDialogOpen(false);
 		setHiddenPageIndexes(new Set());
 		setSourcePreparing(false);
-		setCacheOnly(false);
 		const scopeIds = [...pendingIds];
 		const seed = job.items.map((item) =>
 			pendingIds.has(item.id)
@@ -1018,7 +969,6 @@ export function usePdfLayoutTranslate({
 		setPartialDialogOpen(false);
 		setHiddenPageIndexes(new Set());
 		setSourcePreparing(false);
-		setCacheOnly(false);
 		const scopeIds = job.items.map((item) => item.id);
 		// Keep the old text painted while the new pass streams; status alone
 		// tells the runner that every block still needs a request.
@@ -1270,9 +1220,6 @@ export function usePdfLayoutTranslate({
 		void (async () => {
 			const sidecar = await readLayoutTranslateSidecar(paperAbsPath, cacheKey);
 			if (cancelled || !sidecar?.items.length) return;
-			// Paint the cached blocks before the region-prepare pass. Besides making
-			// the pane visible sooner, this marks the job active so the pane's
-			// auto-start cannot fire a second, network-backed job while preparing.
 			const seededItems = sidecar.items.map((item) => ({
 				...item,
 				status: "done" as const,
@@ -1295,25 +1242,20 @@ export function usePdfLayoutTranslate({
 						listTranslatableLayoutRegions(layoutRawRegions),
 					)
 				: seededItems;
-			const prepared = await prepareReflow(seed);
-			if (cancelled) return;
-			const hydration = hydrateLayoutTranslateItems(prepared, sidecar, {
-				requireReflowSentencePairs: true,
-			});
+			const hydration = hydrateLayoutTranslateItems(seed, sidecar);
 			if (!hydration.fromCache) {
 				// The cache exists but no block matches the current layout/source.
 				// Fall back to the normal first-translation flow.
 				startLayoutTranslateRef.current();
 				return;
 			}
-			// A real run started while preparing owns the visible state.
+			// A real run started while reading owns the visible state.
 			if (layoutTranslateJobRef.current.status === "running") return;
 			const dismissKey = layoutTranslatePendingDismissKey(
 				dismissalPaperKey,
 				cacheKey,
 				hydration.items,
 			);
-			setCacheOnly(true);
 			setSourcePreparing(false);
 			setLayoutTranslateJob((prev) => ({
 				...prev,
@@ -1331,9 +1273,7 @@ export function usePdfLayoutTranslate({
 			}));
 		})().catch((error) => {
 			if (!cancelled)
-				notifyError(t("pdf.layoutTranslate.reflowFailed"), {
-					description: errorText(error),
-				});
+				notifyTranslateFailure(displayTranslateError(errorText(error)));
 		});
 		return () => {
 			cancelled = true;
@@ -1342,9 +1282,8 @@ export function usePdfLayoutTranslate({
 		translationPane,
 		paperAbsPath,
 		layoutRawRegions,
-		prepareReflow,
 		dismissalPaperKey,
-		t,
+		notifyTranslateFailure,
 	]);
 
 	// Bucket once per job update (not per page); unchanged buckets keep their
@@ -1356,13 +1295,15 @@ export function usePdfLayoutTranslate({
 	const layoutTranslateItemsByPage = useMemo(() => {
 		const grouped = groupLayoutTranslateItemsByPage(
 			hiddenPageIndexes.size > 0
-				? reflowItems.filter((item) => !hiddenPageIndexes.has(item.pageIndex))
-				: reflowItems,
+				? layoutTranslateJob.items.filter(
+						(item) => !hiddenPageIndexes.has(item.pageIndex),
+					)
+				: layoutTranslateJob.items,
 			layoutTranslateByPageRef.current,
 		);
 		layoutTranslateByPageRef.current = grouped;
 		return grouped;
-	}, [reflowItems, hiddenPageIndexes]);
+	}, [layoutTranslateJob.items, hiddenPageIndexes]);
 
 	const layoutTranslatePageStateByPage = useMemo(() => {
 		const states = new Map<number, { active: boolean; running: boolean }>();
@@ -1405,40 +1346,8 @@ export function usePdfLayoutTranslate({
 		layoutTranslateJob.runScope,
 		layoutTranslateJob.runScopeIds,
 	]);
-	const hasTranslatedText = layoutTranslateJob.items.some(
-		(item) => item.status === "done" && Boolean(item.translated?.trim()),
-	);
-	// `reflowReady` stays false for the whole run, and also for the paint
-	// before the final build flips `reflowBusy`. Hold the meter across that
-	// paint so the rim does not unmount, freeze, and start over.
-	const previewPending =
-		hasTranslatedText &&
-		!reflowReady &&
-		(layoutTranslateRunning ||
-			layoutTranslateJob.status === "done" ||
-			layoutTranslateJob.status === "partial");
-	const sawFinalReflowBusyRef = useRef(false);
-	if (layoutTranslateRunning || !previewPending) {
-		sawFinalReflowBusyRef.current = false;
-	} else if (reflowBusy) {
-		sawFinalReflowBusyRef.current = true;
-	}
-	const finalReflowFailed =
-		!layoutTranslateRunning &&
-		previewPending &&
-		sawFinalReflowBusyRef.current &&
-		!reflowBusy;
-	const layoutTranslateProgress = layoutTranslateDisplayRatio(
-		layoutTranslateRunning && sourcePreparing ? null : textSettled,
-		(layoutTranslateRunning || previewPending) && !finalReflowFailed,
-		reflowProgress,
-		cacheOnly,
-	);
-	// Cached re-runs settle almost immediately, but the translated page only
-	// paints once the final reflow build publishes its previews. Keep the
-	// loading indicator up through that build instead of leaving a blank wait.
-	const layoutTranslatePreparing =
-		previewPending && !layoutTranslateRunning && !finalReflowFailed;
+	const layoutTranslateProgress =
+		layoutTranslateRunning && sourcePreparing ? null : textSettled;
 	const layoutTranslateWaiting = layoutTranslateJob.status === "waitingLayout";
 	const layoutTranslateActive =
 		layoutTranslateRunning ||
@@ -1461,8 +1370,7 @@ export function usePdfLayoutTranslate({
 	}, []);
 
 	// The main translate button owns original/translated switching; the partial
-	// entry stays a separate, always-available action while gaps remain (page
-	// building does not hide it, only an in-flight translation run does).
+	// entry stays a separate, always-available action while gaps remain.
 	const layoutTranslatePartialVisible =
 		layoutTranslatePendingRequired > 0 &&
 		!layoutTranslateRunning &&
@@ -1505,14 +1413,9 @@ export function usePdfLayoutTranslate({
 	);
 
 	return {
-		reflowBusy,
-		reflowReady,
-		reflowOutput,
-		exportTranslatedPdf,
 		layoutTranslateItemsByPage,
 		layoutTranslatePageStateByPage,
 		layoutTranslateRunning,
-		layoutTranslatePreparing,
 		layoutTranslateWaiting,
 		layoutTranslateActive,
 		layoutTranslateLabel,

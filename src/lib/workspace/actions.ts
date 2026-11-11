@@ -4,8 +4,8 @@
  * dock handle.
  *
  * Implementations live in `./navigation` (tabs, paper, NOTES), `./persistence`
- * (save and disk reload), and `./viewer-actions` (TeX, citations, wiki jumps).
- * This module re-exports that public surface.
+ * (save and disk reload), and `./viewer-actions` (translation split, citations,
+ * wiki jumps). This module re-exports that public surface.
  */
 
 export {
@@ -47,17 +47,11 @@ export {
 	persistTextFile,
 } from "./persistence";
 export {
-	closeTexLive,
-	compileTexOnManualSave,
-	compileTexOnSave,
-	compileTexProject,
 	isLocalHtmlLink,
 	navigateWiki,
 	openCitation,
 	openGraphPath,
 	openHtmlPreviewLink,
-	openTexLive,
-	openTexPdf,
 	openTranslationTab,
 	openVaultRel,
 	scheduleCitationJump,

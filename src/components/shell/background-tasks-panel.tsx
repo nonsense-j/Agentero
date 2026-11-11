@@ -9,7 +9,6 @@ import {
 	CheckCircle2,
 	CircleX,
 	Download,
-	FileCode2,
 	FileUp,
 	LayoutGrid,
 	ListOrdered,
@@ -61,9 +60,8 @@ const HOVER_EXPAND_MS = 400;
 const LEAVE_COLLAPSE_MS = 100;
 
 /** Default icon per row kind; params-dependent rows carry an explicit hint. */
-const KIND_ICONS: Partial<Record<BackgroundTaskKind, BackgroundTaskIcon>> = {
+const KIND_ICONS: Partial<Record<string, BackgroundTaskIcon>> = {
 	downloadAssets: "download",
-	modelDownload: "download",
 	citingScan: "search",
 	import: "fileUp",
 	zoteroMigrate: "fileUp",
@@ -73,7 +71,6 @@ const KIND_ICONS: Partial<Record<BackgroundTaskKind, BackgroundTaskIcon>> = {
 	layoutRun: "layout",
 	connectorSync: "plug",
 	recognizeMetadata: "scan",
-	latexCompile: "fileCode",
 	paperRead: "read",
 	nodeInstall: "download",
 };
@@ -126,8 +123,6 @@ function iconGlyph(icon: BackgroundTaskIcon) {
 			return <Plug className={cls} aria-hidden />;
 		case "scan":
 			return <ScanSearch className={cls} aria-hidden />;
-		case "fileCode":
-			return <FileCode2 className={cls} aria-hidden />;
 		case "list":
 			return <ListOrdered className={cls} aria-hidden />;
 	}

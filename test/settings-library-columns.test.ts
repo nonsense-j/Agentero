@@ -6,7 +6,6 @@ import type { AppSettings, LibraryColumnPref } from "@/lib/settings/types";
 vi.mock("@/lib/core/tauri", () => ({
 	isTauri: () => false,
 	isMacOS: () => false,
-	isMobileApp: () => false,
 	getPlatformOS: () => "other",
 }));
 

@@ -13,18 +13,14 @@
 //! natural `XEvent` name (agent ACP payloads), the wrapper is named `XEvt` to
 //! keep specta type names unique.
 //!
-//! Coverage: every event emitted on desktop. iOS-only bridge client events
-//! (`bridge:status`, `bridge:progress`, `bridge:pair-pending` and the
-//! dynamically re-emitted forwarded agent events in
-//! `integration::bridge::client`) are intentionally excluded — they exist only
-//! in the iOS branch, mirroring the command exclusion in `bindings_test.rs`.
+//! Coverage: every event emitted on desktop.
 //!
 //! `job:progress` is emitted from several sites with structurally compatible
-//! payloads (`AssetDownloadProgress`, model-assets `ProgressEvent`,
-//! citing-scan `CitingScanProgress`); `AssetDownloadProgress` is the canonical
-//! wire shape (superset; the citing-scan variant additionally omits null
-//! `totalBytes`/counters, which TS already treats as optional). The wire name
-//! lives in `assets::JOB_PROGRESS_EVENT`; Host emitters route through
+//! payloads (`AssetDownloadProgress`, citing-scan `CitingScanProgress`);
+//! `AssetDownloadProgress` is the canonical wire shape (superset; the
+//! citing-scan variant additionally omits null `totalBytes`/counters, which TS
+//! already treats as optional). The wire name lives in
+//! `assets::JOB_PROGRESS_EVENT`; Host emitters route through
 //! `features::jobs::emit_job_progress`, core emitters use the constant.
 
 // Contract-only types: their fields are consumed by the specta exporter, never
@@ -216,15 +212,6 @@ pub struct AgentStreamEvt(pub crate::features::agent::models::AgentStreamEvent);
 #[tauri_specta(event_name = "agent:completed")]
 pub struct AgentCompletedEvent(pub crate::features::agent::models::AgentResultPayload);
 
-/// Desktop bridge host online flag (`bridge:host-status`, payload `bool`).
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "bridge:host-status")]
-pub struct BridgeHostStatusEvent(pub bool);
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "bridge:pair-request")]
-pub struct BridgePairRequestEvent(pub crate::integration::bridge::PairingRequest);
-
 #[derive(specta::Type, tauri_specta::Event)]
 #[tauri_specta(event_name = "connector:status")]
 pub struct ConnectorStatusEvent(pub crate::integration::connector::ConnectorStatus);
@@ -250,18 +237,6 @@ pub struct ConnectorErrorEvent {
 #[derive(specta::Type, tauri_specta::Event)]
 #[tauri_specta(event_name = "mcp:status")]
 pub struct McpStatusEvent(pub crate::integration::mcp::McpStatus);
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "mcp:tunnel-status")]
-pub struct McpTunnelStatusEvent(pub crate::integration::mcp::tunnel::McpTunnelStatus);
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "plugins:changed")]
-pub struct PluginsChangedEvent(pub ());
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "plugins:data-changed")]
-pub struct PluginsDataChangedEvent(pub String);
 
 /// Owned mirror of the private borrowed `SyncStateEvent` in
 /// `integration::sync::commands`.
@@ -325,34 +300,6 @@ pub struct PaperRenamedEventPayload {
     pub timestamp: i64,
 }
 
-/// Mirror of the inline `json!({ "line" })` in `features::compile::compile_tex`.
-#[derive(serde::Serialize, specta::Type, tauri_specta::Event)]
-#[serde(rename_all = "camelCase")]
-#[tauri_specta(event_name = "compile:log")]
-pub struct CompileLogEvent {
-    pub job_id: String,
-    pub root_path: String,
-    pub line: String,
-}
-
-/// Owned mirror of `features::rtex::RtexEventPayload`. The real payload lives
-/// in a desktop-only module, but the event contract must also compile for
-/// mobile targets, so the shape is mirrored here (pinned by the shape test
-/// below). `event` is rtex's own tagged JSON.
-#[derive(serde::Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RtexEventPayload {
-    pub session_id: String,
-    /// Specta's built-in `serde_json::Value` shape is inline-recursive and
-    /// cannot be expanded by the TS exporter; use the named `Json` union.
-    #[specta(type = crate::core::json::Json)]
-    pub event: serde_json::Value,
-}
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "rtex:event")]
-pub struct RtexEventEvt(pub RtexEventPayload);
-
 /// Anti-drift: event names registered here must equal the literals/constants
 /// used by the emit sites.
 #[test]
@@ -404,21 +351,12 @@ fn event_names_match_emit_literals() {
         McpStatusEvent::NAME,
         crate::integration::mcp::MCP_STATUS_EVENT
     );
-    assert_eq!(
-        McpTunnelStatusEvent::NAME,
-        crate::integration::mcp::tunnel::MCP_TUNNEL_STATUS_EVENT
-    );
-    #[cfg(all(
-        feature = "desktop",
-        not(any(target_os = "ios", target_os = "android"))
-    ))]
-    assert_eq!(RtexEventEvt::NAME, crate::features::rtex::RTEX_EVENT);
 }
 
 // ---------------------------------------------------------------------------
 // Anti-drift: whole-corpus event-name scan (T1).
 //
-// `event_names_match_emit_literals` only covers the 13 events whose names live
+// `event_names_match_emit_literals` only covers the events whose names live
 // in `const`s reachable from this crate. The scan below walks every `.rs` file
 // under `src-tauri/src`, `crates/agentero-core/src`, and
 // `crates/agentero-mcp/src`, extracts the event name
@@ -441,10 +379,7 @@ fn event_names_match_emit_literals() {
 // - wrapper methods (`.emit_status(`, `.emit_error(`, ...) are skipped: the
 //   real Tauri emit happens inside them and is captured at that site.
 //
-// Excluded files (documented misses, see module header):
-// - `integration/bridge/client.rs`: iOS-only bridge client (`bridge:status`,
-//   `bridge:progress`, `bridge:pair-pending` + the dynamic `bridge:event:*`
-//   re-emits) — not part of the desktop contract;
+// Excluded files:
 // - `app/bindings_test.rs` / `app/events_contract.rs`: test-only surfaces.
 // ---------------------------------------------------------------------------
 
@@ -454,7 +389,7 @@ use std::path::{Path, PathBuf};
 /// Every event name registered in this file (the desktop contract surface).
 fn registered_event_names() -> BTreeSet<String> {
     use tauri_specta::Event as _;
-    let mut names: Vec<&str> = vec![
+    let names: Vec<&str> = vec![
         JobOfferEvent::NAME,
         JobChangedEvent::NAME,
         JobCompletedEvent::NAME,
@@ -467,7 +402,6 @@ fn registered_event_names() -> BTreeSet<String> {
         VaultFileChangedEvent::NAME,
         SettingsChangedEvent::NAME,
         SettingsSectionRequestedEvent::NAME,
-        WordChangedEvent::NAME,
         JobProgressEvent::NAME,
         LayoutRemoteProgressEvent::NAME,
         AgentLifecycleProgressEvent::NAME,
@@ -488,25 +422,17 @@ fn registered_event_names() -> BTreeSet<String> {
         AgentStatusEvt::NAME,
         AgentStreamEvt::NAME,
         AgentCompletedEvent::NAME,
-        BridgeHostStatusEvent::NAME,
-        BridgePairRequestEvent::NAME,
         ConnectorStatusEvent::NAME,
         ConnectorItemSavedEvent::NAME,
         ConnectorProgressEvent::NAME,
         ConnectorErrorEvent::NAME,
         McpStatusEvent::NAME,
-        McpTunnelStatusEvent::NAME,
-        PluginsChangedEvent::NAME,
-        PluginsDataChangedEvent::NAME,
         SyncStateEvent::NAME,
         SyncProgressEvent::NAME,
         PaperImportedEvent::NAME,
         PaperAssetsReadyEvent::NAME,
         PaperRenamedEventPayload::NAME,
-        CompileLogEvent::NAME,
-        crate::features::compile::types::LatexCompileResult::NAME,
     ];
-    names.push(RtexEventEvt::NAME);
     let set: BTreeSet<String> = names.iter().map(|n| n.to_string()).collect();
     assert_eq!(set.len(), names.len(), "duplicate NAME in registered list");
     set
@@ -882,11 +808,7 @@ fn scan_emit_event_names() -> BTreeSet<String> {
         .join("agentero-mcp")
         .join("src");
     // Relative to `src-tauri/src` (the shared crates have no exclusions).
-    let excluded = [
-        "integration/bridge/client.rs",
-        "app/bindings_test.rs",
-        "app/events_contract.rs",
-    ];
+    let excluded = ["app/bindings_test.rs", "app/events_contract.rs"];
     let mut files: Vec<PathBuf> = Vec::new();
     for root in [&host_root, &core_root, &mcp_root] {
         for entry in walkdir::WalkDir::new(root)
@@ -1002,10 +924,9 @@ fn scanned_emit_event_names_match_registered_contract() {
 // - serde shape equality tests in the *owning* module (private structs are
 //   only reachable there): `features::lifecycle` (JobTerminalPayload),
 //   `integration::sync::commands` (SyncState/SyncProgress),
-//   `features::paper::analyze::layout::{model_assets, hosted}`
-//   (LayoutModelTask/LayoutRemoteProgress), `features::agent::registry::
-//   lifecycle` (AgentLifecycleProgress), `app::window::commands`
-//   (WindowClosed);
+//   `features::paper::analyze::layout::hosted` (LayoutRemoteProgress),
+//   `features::agent::registry::lifecycle` (AgentLifecycleProgress),
+//   `app::window::commands` (WindowClosed);
 // - `HostHooks` emit capture for the private agentero-core payloads
 //   (PaperFact / PaperRenamed) — see the tests below;
 // - source-level extraction of the inline `json!` keys for the four mirrors
@@ -1332,30 +1253,3 @@ fn paper_renamed_mirror_matches_core_emit_shape() {
          (vaultId + PaperRenamedEvent + timestamp, camelCase)"
     );
 }
-
-#[test]
-fn rtex_event_mirror_matches_emit_shape() {
-    #[cfg(all(
-        feature = "desktop",
-        not(any(target_os = "ios", target_os = "android"))
-    ))]
-    {
-        let actual = crate::features::rtex::RtexEventPayload {
-            session_id: "session".to_string(),
-            event: serde_json::json!({ "kind": "page", "page": 1 }),
-        };
-        let mirror = RtexEventPayload {
-            session_id: actual.session_id.clone(),
-            event: actual.event.clone(),
-        };
-        assert_eq!(
-            key_paths(&serde_json::to_value(actual).unwrap()),
-            key_paths(&serde_json::to_value(mirror).unwrap()),
-            "RtexEventPayload mirror drifted from the features::rtex emit shape"
-        );
-    }
-}
-
-#[derive(specta::Type, tauri_specta::Event)]
-#[tauri_specta(event_name = "word:changed")]
-pub struct WordChangedEvent(pub ());

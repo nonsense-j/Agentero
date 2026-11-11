@@ -34,43 +34,43 @@ beforeEach(() => {
 	openSettingsWindow.mockClear();
 });
 
-describe("layout reminder firing", () => {
-	it("fires once per session for the local backend", async () => {
+describe("network proxy reminder firing", () => {
+	it("fires once per session when no proxy is configured", async () => {
 		const { settingsStore, reminders } = await load();
 		const s = settingsStore.getState();
 		settingsStore.setState(
 			{
 				...s,
-				layout: { ...s.layout, backend: "local" },
+				networkProxyEnabled: false,
 				dismissedReminders: [],
 			},
 			true,
 		);
 
-		reminders.maybeShowLayoutLocalModelReminder();
+		reminders.reportNetworkFailure();
 		expect(notifyReminder).toHaveBeenCalledTimes(1);
-		reminders.maybeShowLayoutLocalModelReminder();
+		reminders.reportNetworkFailure();
 		expect(notifyReminder).toHaveBeenCalledTimes(1);
 	});
 
-	it("skips a remote backend and a dismissed reminder", async () => {
+	it("skips when proxy is enabled or reminder is dismissed", async () => {
 		const { settingsStore, reminders } = await load();
 		const s = settingsStore.getState();
 		settingsStore.setState(
 			{
 				...s,
-				layout: { ...s.layout, backend: "paddle" },
+				networkProxyEnabled: true,
 				dismissedReminders: [],
 			},
 			true,
 		);
-		reminders.maybeShowLayoutLocalModelReminder();
+		reminders.reportNetworkFailure();
 		expect(notifyReminder).not.toHaveBeenCalled();
 
 		settingsStore.setState(
 			{
 				...settingsStore.getState(),
-				layout: { ...s.layout, backend: "local" },
+				networkProxyEnabled: false,
 				dismissedReminders: ["network-proxy"],
 			},
 			true,

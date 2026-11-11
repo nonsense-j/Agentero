@@ -1,31 +1,23 @@
 /**
- * Headless layout analysis: open a paper PDF off-viewer, run PP-DocLayoutV3,
- * write `{paper}/source/layout.json`. Used after download/import so sidecar is
- * ready before the user opens the paper.
+ * Headless layout analysis: open a paper PDF off-viewer, run remote layout
+ * analysis, and write `{paper}/source/layout.json`. Used after download/import
+ * so sidecar is ready before the user opens the paper.
  */
 
-import { PluginRegistry } from "@embedpdf/core";
-import type { PdfEngine } from "@embedpdf/models";
-import { AiManagerPluginPackage } from "@embedpdf/plugin-ai-manager";
-import type { DocumentManagerCapability } from "@embedpdf/plugin-document-manager";
-import { DocumentManagerPluginPackage } from "@embedpdf/plugin-document-manager";
-import {
-	type LayoutAnalysisCapability,
-	LayoutAnalysisPluginPackage,
-} from "@embedpdf/plugin-layout-analysis";
-import { RenderPluginPackage } from "@embedpdf/plugin-render";
+import type { PdfDocumentObject, PdfEngine } from "@embedpdf/models";
 import { errorText } from "@/lib/core/error";
-
 import { findCanonicalPaperPdfPath, localFileToArrayBuffer } from "@/lib/paper";
 import { createPdfEngine } from "@/lib/pdf/engine";
-import { getPdfAiRuntime } from "@/lib/pdf/layout/ai-runtime";
 import {
 	layoutSidecarBlocksAnalysis,
 	readLayoutSidecar,
 	writeLayoutIndexFromRaw,
 } from "@/lib/pdf/layout/io";
-import type { LayoutTaskLike } from "@/lib/pdf/layout/run-analysis";
-import { runDocumentLayoutAnalysis } from "@/lib/pdf/layout/run-analysis";
+import {
+	createPdfEngineLayoutTextSource,
+	type LayoutTaskLike,
+	runDocumentLayoutAnalysis,
+} from "@/lib/pdf/layout/run-analysis";
 import { clearLayoutDocumentResult } from "@/lib/pdf/layout/store";
 
 let analysisEngine: PdfEngine | null = null;
@@ -116,49 +108,23 @@ export async function analyzePaperLayoutHeadless(opts: {
 	const engine = await getHeadlessPdfEngine();
 	const documentId =
 		opts.documentId ?? `headless-layout-${Date.now().toString(36)}`;
-	const registry = new PluginRegistry(engine);
-	registry.registerPlugin(DocumentManagerPluginPackage, {});
-	registry.registerPlugin(RenderPluginPackage);
-	registry.registerPlugin(AiManagerPluginPackage, {
-		runtime: getPdfAiRuntime(),
-	});
-	registry.registerPlugin(LayoutAnalysisPluginPackage, {
-		layoutThreshold: 0.3,
-		tableStructure: false,
-		autoAnalyze: false,
-		renderScale: 2,
-	});
+	let doc: PdfDocumentObject | null = null;
+	let docOpen = false;
 
 	try {
-		await registry.initialize();
-		await registry.pluginsReady();
-		if (opts.signal?.aborted) throw new Error("cancelled");
-
-		const docPlugin = registry.getPlugin("document-manager");
-		const layoutPlugin = registry.getPlugin("layout-analysis");
-		if (!docPlugin || !layoutPlugin) {
-			throw new Error("Layout plugins failed to register");
-		}
-		const docCap = (
-			docPlugin as unknown as { provides: () => DocumentManagerCapability }
-		).provides();
-		const layoutCap = (
-			layoutPlugin as unknown as { provides: () => LayoutAnalysisCapability }
-		).provides();
-
-		const openRes = await docCap
+		doc = await engine
 			.openDocumentBuffer({
-				buffer,
-				documentId,
-				name: "layout-analysis",
-				autoActivate: true,
+				id: documentId,
+				content: buffer,
 			})
 			.toPromise();
-		const doc = await openRes.task.toPromise();
+		docOpen = true;
 		const pageCount = doc.pageCount ?? 0;
 		if (opts.signal?.aborted) throw new Error("cancelled");
 
-		const scope = layoutCap.forDocument(documentId);
+		const textSource = createPdfEngineLayoutTextSource(engine, () =>
+			docOpen ? doc : null,
+		);
 		const summary = await new Promise<string>((resolve, reject) => {
 			let settled = false;
 			let layoutTask: LayoutTaskLike | null = null;
@@ -174,16 +140,16 @@ export async function analyzePaperLayoutHeadless(opts: {
 				finish(() => reject(new Error("cancelled")));
 			}
 			opts.signal?.addEventListener("abort", onAbort);
-			void runDocumentLayoutAnalysis(scope, documentId, {
+			void runDocumentLayoutAnalysis(textSource, documentId, {
 				paperAbsPath,
 				paperLabel: opts.paperLabel,
 				totalPages: pageCount > 0 ? pageCount : null,
 				force: opts.force === true,
 				pageSizeAt: (pageIndex) => {
-					const size = doc.pages[pageIndex]?.size;
+					const size = doc?.pages[pageIndex]?.size;
 					return size && size.width > 0 && size.height > 0 ? size : null;
 				},
-				isDocumentOpen: () => docCap.isDocumentOpen(documentId),
+				isDocumentOpen: () => docOpen && !opts.signal?.aborted,
 				onDone: (s) => finish(() => resolve(s)),
 				onError: (message, aborted) => {
 					finish(() => {
@@ -213,26 +179,18 @@ export async function analyzePaperLayoutHeadless(opts: {
 			regionCount: sidecar?.regions?.length ?? 0,
 		};
 	} finally {
-		try {
-			const docPlugin = registry.getPlugin("document-manager");
-			if (docPlugin) {
-				const docCap = (
-					docPlugin as unknown as {
-						provides: () => DocumentManagerCapability;
-					}
-				).provides();
-				await docCap
-					.closeDocument(documentId)
+		const openedDoc = doc;
+		docOpen = false;
+		doc = null;
+		if (openedDoc) {
+			try {
+				await engine
+					.closeDocument(openedDoc)
 					.toPromise()
 					.catch(() => undefined);
+			} catch {
+				// ignore close errors
 			}
-		} catch {
-			// ignore close errors
-		}
-		try {
-			await registry.destroy();
-		} catch {
-			// ignore
 		}
 		clearLayoutDocumentResult(documentId);
 	}

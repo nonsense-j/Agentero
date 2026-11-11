@@ -1,4 +1,4 @@
-import { getPlatformOS, isMobileApp } from "@/lib/core/tauri";
+import { getPlatformOS } from "@/lib/core/tauri";
 
 const SCROLLING_CLASS = "scrolling";
 const HIDE_DELAY_MS = 800;
@@ -32,7 +32,7 @@ export function initAutoHideScrollbars() {
 
 	document.documentElement.toggleAttribute(
 		"data-linux-scrollbars",
-		getPlatformOS() === "linux" && !isMobileApp(),
+		getPlatformOS() === "linux",
 	);
 
 	document.addEventListener("scroll", handleScroll, {

@@ -44,11 +44,9 @@ pub enum JobKind {
     RecognizeMetadata,
     Import,
     ConnectorSync,
-    ModelDownload,
     CitingScan,
     LibraryIo,
     MetadataRefresh,
-    LatexCompile,
     JevSmartHighlights,
 }
 
@@ -70,11 +68,9 @@ impl JobKind {
             JobKind::RecognizeMetadata => "recognizeMetadata",
             JobKind::Import => "import",
             JobKind::ConnectorSync => "connectorSync",
-            JobKind::ModelDownload => "modelDownload",
             JobKind::CitingScan => "citingScan",
             JobKind::LibraryIo => "libraryIo",
             JobKind::MetadataRefresh => "metadataRefresh",
-            JobKind::LatexCompile => "latexCompile",
             JobKind::JevSmartHighlights => "jevSmartHighlights",
         };
         // ParseRefs always runs with online lookup enabled; the segment is
@@ -506,15 +502,9 @@ fn kind_concurrency(inner: &JobCenterInner, kind: JobKind) -> usize {
         // One Connector attachment save at a time: the rows are per-attachment
         // and the browser drives them sequentially anyway.
         JobKind::ConnectorSync => 1,
-        // Global one-shot download (XDG cache); dedupe collapses re-triggers,
-        // the cap guards distinct force-enqueues.
-        JobKind::ModelDownload => 1,
         // Online scans / dialog-driven file IO / polite metadata batches:
         // one library-scope renderer job of each kind at a time.
         JobKind::CitingScan | JobKind::LibraryIo | JobKind::MetadataRefresh => 1,
-        // One latexmk build at a time: TeX runs are CPU-heavy and the compile
-        // button is interactive, so a second file waits instead of competing.
-        JobKind::LatexCompile => 1,
         // jEV smart highlights issue one network request per batch; keep one
         // paper at a time to avoid hammering the API and to keep progress
         // meaningful.
@@ -844,14 +834,6 @@ impl JobCenter {
         .await
     }
 
-    /// Enqueue the global layout-model download. The model lives in the XDG
-    /// cache (no vault / paper target), so every trigger shares the empty
-    /// scope and concurrent re-triggers dedupe into one active job.
-    pub async fn enqueue_model_download(&self, lane: JobLane, force: bool) -> JobSnapshot {
-        self.enqueue_core(JobKind::ModelDownload, "", "", lane, force, None, None)
-            .await
-    }
-
     /// Enqueue the reverse-citation scan of a vault (renderer executor drives
     /// the Host `library_citing_scan` command under the job id).
     pub async fn enqueue_citing_scan(
@@ -892,29 +874,6 @@ impl JobCenter {
             JobKind::MetadataRefresh,
             vault,
             "",
-            lane,
-            force,
-            None,
-            params,
-        )
-        .await
-    }
-
-    /// Enqueue a latexmk build. `path` is the .tex source (the job's identity
-    /// for dedupe / cancel-for-paper); `params` carries `{ texPath, engine }`
-    /// so the fingerprint folds in the engine choice.
-    pub async fn enqueue_latex_compile(
-        &self,
-        vault: impl Into<PathBuf>,
-        path: impl Into<String>,
-        lane: JobLane,
-        force: bool,
-        params: Option<serde_json::Value>,
-    ) -> JobSnapshot {
-        self.enqueue_core(
-            JobKind::LatexCompile,
-            vault,
-            path,
             lane,
             force,
             None,
@@ -2870,28 +2829,6 @@ mod tests {
             StartOutcome::Waiting => {}
             other => panic!("expected the second save Waiting at cap 1, got {other:?}"),
         }
-    }
-
-    /// The layout-model download is a global Host job: every trigger shares
-    /// the empty vault/paper scope, so concurrent re-triggers collapse into
-    /// one active job.
-    #[tokio::test]
-    async fn enqueue_dedupes_model_download_job_globally() {
-        let center = JobCenter::new();
-        let first = center.enqueue_model_download(JobLane::Normal, false).await;
-        let duplicate = center.enqueue_model_download(JobLane::Normal, false).await;
-
-        assert_eq!(first.id, duplicate.id);
-        assert_eq!(first.kind, JobKind::ModelDownload);
-        assert_eq!(first.host, ExecHost::Host);
-        assert_eq!(first.fingerprint, "modelDownload:v1:force:false");
-        assert_eq!(first.paper_path.as_deref(), Some(""));
-        assert_eq!(center.list(None, None).await.len(), 1);
-
-        // Settled jobs release the key: a later trigger starts a fresh job.
-        center.mark_succeeded_for_test(&first.id).await;
-        let next = center.enqueue_model_download(JobLane::Normal, false).await;
-        assert_ne!(next.id, first.id);
     }
 
     /// Bulk metadata refresh is renderer-executed and dedupes on its paper

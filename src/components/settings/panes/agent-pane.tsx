@@ -4,10 +4,7 @@ import { useTranslation } from "react-i18next";
 import { AgentCommonRows } from "@/components/settings/agent-common-rows";
 import { AgentModelPicker } from "@/components/settings/agent-model-picker";
 import { DesktopAppsSection } from "@/components/settings/desktop-apps-rows";
-import {
-	AgentCatalogRows,
-	RemoteAgentCatalogRow,
-} from "@/components/settings/panes/agent/agent-catalog-rows";
+import { AgentCatalogRows } from "@/components/settings/panes/agent/agent-catalog-rows";
 import { AgentCustomForm } from "@/components/settings/panes/agent/agent-custom-form";
 import { AgentDefaultBlock } from "@/components/settings/panes/agent/agent-default-block";
 import { AgentEmbeddingBlock } from "@/components/settings/panes/agent/agent-embedding-block";
@@ -17,20 +14,16 @@ import { AgentUserAgentBlock } from "@/components/settings/panes/agent/agent-use
 import { useAgentCatalog } from "@/components/settings/panes/agent/use-agent-catalog";
 import { useAgentRegistry } from "@/components/settings/panes/agent/use-agent-registry";
 import { useAgentUninstall } from "@/components/settings/panes/agent/use-agent-uninstall";
-import { ZhihuAgentRow } from "@/components/settings/panes/agent/zhihu-agent-row";
-import { catalogProbeKey } from "@/components/settings/panes/agent-catalog";
 import { AgentUninstallDialog } from "@/components/settings/panes/agent-uninstall-dialog";
 import {
 	PageTitle,
 	SettingsGroup,
 	SettingsSectionLabel,
 } from "@/components/settings/settings-layout";
-import type { SettingsHostContext } from "@/components/settings/types";
 import { Button } from "@/components/ui/button";
 import { useAgentToolLifecycle } from "@/hooks/use-agent-tool-lifecycle";
 import {
 	type AgentTemplate,
-	type CatalogEntry,
 	openAgentCliTerminal,
 	upsertAgent,
 } from "@/lib/agent";
@@ -38,7 +31,6 @@ import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import type { AppSettings } from "@/lib/settings";
-import { remoteAgentOpenInstallTerminal } from "@/lib/vault/remote/remote-vault";
 
 export function AgentPane({
 	settings,
@@ -63,7 +55,7 @@ export function AgentPane({
 		rescanAndProbe,
 		openLoginTerminal,
 		patchUserAgent,
-	} = useAgentCatalog({ transport: "local" });
+	} = useAgentCatalog();
 
 	// Agent/model seats (PDF Ask + 精读 paper-reader) share one listAgents registry
 	const { registry: seatRegistry, refresh: refreshSeatRegistry } =
@@ -223,10 +215,6 @@ export function AgentPane({
 					onOpenCli={onOpenCli}
 					onEditCustom={handleAddCustom}
 				/>
-				<ZhihuAgentRow
-					savedSecret={settings.zhihuAccessSecret}
-					onCommit={(value) => patch({ zhihuAccessSecret: value })}
-				/>
 				<AgentCustomForm busy={loading} onSubmit={handleAddCustom} />
 			</SettingsGroup>
 			<p className="mt-2 mb-3 px-0.5 text-muted-foreground text-xs leading-relaxed">
@@ -308,113 +296,6 @@ export function AgentPane({
 				onConfirm={(scope) => void onUninstallConfirm(scope)}
 				onCancel={() => setUninstallTarget(null)}
 			/>
-		</>
-	);
-}
-
-/**
- * Agent settings when the active vault is remote: discover + ACP probe run on the
- * SSH host (not this machine). App-level prefs (permission, language) still apply.
- */
-export function RemoteAgentPane({
-	settings,
-	patch,
-	hostContext,
-}: {
-	settings: AppSettings;
-	patch: (p: Partial<AppSettings>) => void;
-	hostContext: Extract<SettingsHostContext, { kind: "remote" }>;
-}) {
-	const { t } = useTranslation(["settings", "agent", "common"]);
-	const sessionId = hostContext.sessionId;
-	// Scan + ACP probe run on the SSH host via the remote transport; the hook
-	// soft-probes when the session changes.
-	const { catalog, loading, probingKeys, rescanAndProbe } = useAgentCatalog({
-		transport: { remote: { sessionId } },
-	});
-	const entries = catalog?.entries ?? [];
-	// A scan or any in-flight probe marks not-probed rows as "probing".
-	const batchActive = loading || probingKeys.size > 0;
-
-	const onInstallAdapter = async (entry: CatalogEntry) => {
-		if (!isTauri()) return;
-		try {
-			await remoteAgentOpenInstallTerminal(sessionId, entry.templateId);
-		} catch (e) {
-			notifyError(errorText(e));
-		}
-	};
-
-	const busy = loading;
-
-	return (
-		<>
-			<PageTitle title={t("agent.title")} />
-			<p className="mb-3 rounded-lg border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-muted-foreground text-xs leading-relaxed">
-				{t("agent.remote.banner", {
-					host: hostContext.label,
-					path: hostContext.remotePath || "—",
-				})}
-			</p>
-
-			<SettingsGroup>
-				<AgentCommonRows settings={settings} patch={patch} idSuffix="-r" />
-			</SettingsGroup>
-
-			{!isTauri() ? (
-				<p className="mb-3 text-muted-foreground text-xs">
-					{t("agent.desktopHint")}
-				</p>
-			) : null}
-
-			<div className="mb-2 flex items-center justify-between gap-2">
-				<SettingsSectionLabel className="mb-0 px-0">
-					{t("agent.remote.commonAgents")}
-				</SettingsSectionLabel>
-				<Button
-					type="button"
-					variant="ghost"
-					size="icon-xs"
-					aria-label={t("agent.probe")}
-					title={t("agent.remote.probeTitle")}
-					disabled={busy || !isTauri()}
-					onClick={() => void rescanAndProbe(true)}
-				>
-					{busy ? (
-						<Loader2 className="size-3.5 animate-spin" aria-hidden />
-					) : (
-						<RefreshCw className="size-3.5" aria-hidden />
-					)}
-				</Button>
-			</div>
-
-			<SettingsGroup>
-				{entries.length === 0 && busy ? (
-					<div className="flex items-center gap-2 px-3.5 py-4 text-muted-foreground text-xs">
-						<Loader2 className="size-3.5 animate-spin" aria-hidden />
-						{t("agent.scanning")}
-					</div>
-				) : null}
-				{entries.length === 0 && !busy ? (
-					<p className="px-3.5 py-3 text-muted-foreground text-xs">
-						{t("agent.remote.empty")}
-					</p>
-				) : null}
-				{entries.map((entry) => (
-					<RemoteAgentCatalogRow
-						key={entry.templateId}
-						entry={entry}
-						hostLabel={hostContext.label}
-						probing={probingKeys.has(catalogProbeKey(entry.templateId))}
-						batchActive={batchActive}
-						busy={busy}
-						onInstall={(e) => void onInstallAdapter(e)}
-					/>
-				))}
-			</SettingsGroup>
-			<p className="mt-2 mb-3 px-0.5 text-muted-foreground text-xs leading-relaxed">
-				{t("agent.remote.hint")}
-			</p>
 		</>
 	);
 }

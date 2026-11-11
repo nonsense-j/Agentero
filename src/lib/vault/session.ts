@@ -4,7 +4,6 @@ import { callResult } from "@/lib/core/ipc";
 import { perfActive } from "@/lib/core/perf";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { isTauri } from "@/lib/core/tauri";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 
 /** Per-window vault (sessionStorage — isolated across ⌘N windows). */
 const SESSION_VAULT_KEY = "agentero-vault-path";
@@ -25,7 +24,9 @@ export function isFreshWindow(): boolean {
 
 export function getSessionVaultPath(): string | null {
 	try {
-		return sessionStorage.getItem(SESSION_VAULT_KEY);
+		const session = sessionStorage.getItem(SESSION_VAULT_KEY);
+		if (session?.startsWith("remote:")) return null;
+		return session;
 	} catch {
 		return null;
 	}
@@ -35,8 +36,8 @@ export function getSessionVaultPath(): string | null {
 export function getLastVaultPath(): string | null {
 	try {
 		const last = localStorage.getItem(LAST_VAULT_KEY);
-		// Drop stale remote handles left by older builds (session no longer exists).
-		if (last && isRemoteVaultHandle(last)) return null;
+		// Drop stale remote handles left by older builds.
+		if (last?.startsWith("remote:")) return null;
 		return last;
 	} catch {
 		return null;
@@ -53,11 +54,9 @@ export function getSavedVaultPath(opts?: {
 	allowRestore?: boolean;
 }): string | null {
 	const session = getSessionVaultPath();
-	// Keep whatever this window already opened (incl. live `remote:<id>` handle).
 	if (session) return session;
 	if (isFreshWindow()) return null;
 	if (opts?.allowRestore === false) return null;
-	// Cross-launch restore: local path only (remote needs SSH re-connect).
 	return getLastVaultPath();
 }
 
@@ -71,7 +70,7 @@ export function getRecentVaults(): string[] {
 	if (!Array.isArray(parsed)) return [];
 	const list = parsed.filter(
 		(p): p is string =>
-			typeof p === "string" && p.length > 0 && !isRemoteVaultHandle(p),
+			typeof p === "string" && p.length > 0 && !p.startsWith("remote:"),
 	);
 	// Self-heal: strip remote handles written by older builds.
 	if (list.length !== parsed.length) {
@@ -82,7 +81,7 @@ export function getRecentVaults(): string[] {
 
 export function rememberRecentVault(path: string): void {
 	const normalized = path.replace(/[\\/]+$/, "");
-	if (!normalized || isRemoteVaultHandle(normalized)) return;
+	if (!normalized || normalized.startsWith("remote:")) return;
 	const next = [
 		normalized,
 		...getRecentVaults().filter((p) => p.replace(/[\\/]+$/, "") !== normalized),
@@ -101,15 +100,11 @@ export function removeRecentVault(path: string): void {
 export function saveVaultPath(path: string | null): void {
 	try {
 		if (path) {
-			// Always keep window-session binding (local path or live remote handle).
 			sessionStorage.setItem(SESSION_VAULT_KEY, path);
 			// A perf run must not replace the user's last-opened vault.
 			if (perfActive()) return;
-			// Durable "last / recent local" only for real filesystem roots.
-			if (!isRemoteVaultHandle(path)) {
-				localStorage.setItem(LAST_VAULT_KEY, path);
-				rememberRecentVault(path);
-			}
+			localStorage.setItem(LAST_VAULT_KEY, path);
+			rememberRecentVault(path);
 		} else {
 			sessionStorage.removeItem(SESSION_VAULT_KEY);
 		}

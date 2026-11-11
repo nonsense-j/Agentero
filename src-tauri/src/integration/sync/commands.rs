@@ -64,21 +64,8 @@ pub fn account_api_origin() -> String {
     }
 }
 
-pub async fn session_bearer(app: &AppHandle) -> Option<String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        use tauri_plugin_better_auth::BetterAuthExt;
-        return app
-            .better_auth()
-            .bearer_token()
-            .await
-            .filter(|token| !token.trim().is_empty());
-    }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        let _ = app;
-        None
-    }
+pub async fn session_bearer(_app: &AppHandle) -> Option<String> {
+    None
 }
 
 async fn attach_agentero_session(app: &AppHandle, cfg: &mut SyncBackendConfig) {

@@ -372,23 +372,10 @@ export const SUGGESTION_WORKFLOW: Record<SuggestionKey, string> = {
 	draftRelatedWork: "related_work",
 };
 
-/** Writing empty state. These are ordinary prompts; the open manuscript is the context. */
-export const WRITING_SUGGESTION_KEYS = [
-	"continueManuscript",
-	"tightenProse",
-	"pressArgument",
-	"citeFromLibrary",
-] as const;
-
-export type WritingSuggestionKey = (typeof WRITING_SUGGESTION_KEYS)[number];
-
-export function suggestionItems(writing: boolean): {
-	key: SuggestionKey | WritingSuggestionKey;
+export function suggestionItems(): {
+	key: SuggestionKey;
 	workflow?: string;
 }[] {
-	if (writing) {
-		return WRITING_SUGGESTION_KEYS.map((key) => ({ key }));
-	}
 	return SUGGESTION_KEYS.map((key) => ({
 		key,
 		workflow: SUGGESTION_WORKFLOW[key],
@@ -423,7 +410,6 @@ function catalogTemplateFromId(templateId: string): AgentTemplate | undefined {
 		case "mimo-code":
 		case "codebuddy":
 		case "qoder-cn":
-		case "zhihu":
 		case "custom":
 			return templateId;
 		default:

@@ -11,29 +11,19 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { errorText } from "@/lib/core/error";
-import {
-	isPaperDirectory,
-	isPapersRoot,
-	type PaperMetadata,
-} from "@/lib/paper";
+import { isPaperDirectory, isPapersRoot } from "@/lib/paper";
 import { TRASH_VIRTUAL_PATH } from "@/lib/paper/api";
 import { PLAZA_SOURCES, PLAZA_VIRTUAL_PATH } from "@/lib/plaza";
 import { getSettings, patchSettings } from "@/lib/settings/react-store";
-import {
-	type FileNode,
-	resolveCreateParent,
-	vaultRelativePath,
-} from "@/lib/vault";
+import { type FileNode, resolveCreateParent } from "@/lib/vault";
 import { isVaultAgentRoot } from "@/lib/vault/agent-tree";
 import { normalizePathKey } from "@/lib/vault/path";
-import { openTexPdf } from "@/lib/workspace/actions";
 import {
 	addFilePathToChat,
 	copyFilePath,
 	openFilePathInTerminal,
 	revealFilePath,
 } from "@/lib/workspace/file-path-actions";
-import { isTexPath } from "@/lib/workspace/viewer";
 import type { TreeContextMenuPortalProps } from "../tree-context-menu";
 import { pathKey, VAULT_ROOT_LABEL_KEY, vaultRootFace } from "../tree-helpers";
 import type {
@@ -48,24 +38,6 @@ function canRevealPath(path: string): boolean {
 	return Boolean(path) && !path.startsWith("agentero:");
 }
 
-/**
- * Catalog id for a paper-directory row. Files and plain folders get none,
- * and a paper with no loaded metadata stays undefined.
- */
-function paperDirectoryCatalogId(
-	isPaperMenu: boolean,
-	vaultPath: string | null,
-	menuPath: string,
-	paperMetaByRelPath: ReadonlyMap<string, PaperMetadata> | undefined,
-): string | undefined {
-	if (!isPaperMenu || !vaultPath || !paperMetaByRelPath) return undefined;
-	const rel = vaultRelativePath(vaultPath, menuPath);
-	if (!rel) return undefined;
-	const key = rel.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-	const id = paperMetaByRelPath.get(key)?.id.trim();
-	return id || undefined;
-}
-
 export type TreeContextMenuState = {
 	/** Non-null while the menu is open — spread onto `TreeContextMenuPortal`. */
 	menuProps: TreeContextMenuPortalProps | null;
@@ -77,7 +49,6 @@ export type TreeContextMenuState = {
 export function useTreeContextMenu({
 	nodes,
 	vaultPath,
-	paperMetaByRelPath,
 	byPath,
 	cutPaths,
 	cutPathKeys,
@@ -107,8 +78,6 @@ export function useTreeContextMenu({
 }: {
 	nodes: FileNode[];
 	vaultPath: string | null;
-	/** Catalog rows keyed by vault-relative path. Used only for paper-directory ids. */
-	paperMetaByRelPath?: ReadonlyMap<string, PaperMetadata>;
 	byPath: ReadonlyMap<string, FileNode>;
 	cutPaths: string[];
 	cutPathKeys: ReadonlySet<string>;
@@ -229,13 +198,6 @@ export function useTreeContextMenu({
 	const menuProps: TreeContextMenuPortalProps = {
 		menu,
 		menuRef,
-		vaultPath,
-		paperId: paperDirectoryCatalogId(
-			isPaperMenu,
-			vaultPath,
-			menu.path,
-			paperMetaByRelPath,
-		),
 		menuCount: targets.length,
 		menuNodeName,
 		isPaperMenu,
@@ -290,13 +252,6 @@ export function useTreeContextMenu({
 					onOpenPaperNotes(menu.path);
 				}
 			: undefined,
-		onOpenTexPdf:
-			targets.length === 1 && isTexPath(menu.path)
-				? () => {
-						setMenu(null);
-						void openTexPdf(menu.path);
-					}
-				: undefined,
 		onEditMeta:
 			isPaperMenu && onEditPaperMeta
 				? () => {

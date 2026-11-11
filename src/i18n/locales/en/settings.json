@@ -1,11 +1,6 @@
 {
 	"title": "Settings",
-	"host": {
-		"remote": "Remote",
-		"remoteContextHint": "Vault is open on {{host}} ({{path}}). App appearance stays local; Agent catalog below probes that host when you open the Agent section."
-	},
 	"nav": {
-		"account": "Account and teams",
 		"general": "General",
 		"appearance": "Appearance",
 		"agent": "Agent",
@@ -14,58 +9,10 @@
 		"experimental": "Experimental",
 		"doctor": "Doctor",
 		"keyboard": "Keyboard",
-		"remote-access": "Mobile access",
 		"about": "About",
 		"quickSetup": "Quick setup wizard",
 		"featureTour": "Feature tour",
-		"sync": "Sync",
-		"plugins": "Plugins"
-	},
-	"writing": {
-		"uploadMode": "When to upload",
-		"uploadManual": "Manually",
-		"uploadOnCompile": "After each compile",
-		"uploadInterval": "On a timer",
-		"uploadEvery": "Interval",
-		"uploadMinutes": "{{count}} min",
-		"save": "Save",
-		"saved": "Saved"
-	},
-	"remoteAccess": {
-		"title": "Mobile access",
-		"localVaultRequired": "Open a local Vault to provide mobile access.",
-		"hostName": {
-			"label": "Computer name"
-		},
-		"status": {
-			"online": "Online",
-			"offline": "Offline"
-		},
-		"start": "Enable mobile access",
-		"stop": "Disable mobile access",
-		"qrAlt": "Pairing QR code",
-		"pairing": {
-			"title": "Pair an iPhone or iPad"
-		},
-		"copyLink": "Copy pairing link",
-		"copied": "Pairing link copied",
-		"copyFailed": "Could not copy pairing link",
-		"request": {
-			"title": "Pair {{device}}",
-			"code": "Confirmation code: {{code}}"
-		},
-		"approve": "Approve",
-		"deny": "Deny",
-		"devices": {
-			"revoke": "Revoke {{device}}"
-		},
-		"cache": {
-			"section": "Remote vault cache",
-			"label": "PDF preview cache",
-			"clear": "Clear remote cache",
-			"clearing": "Clearing…",
-			"clearFailed": "Failed to clear remote cache"
-		}
+		"sync": "Sync"
 	},
 	"general": {
 		"title": "General",
@@ -222,31 +169,10 @@
 			"portLabel": "MCP port",
 			"invalidPort": "Port must be between 1 and 65535.",
 			"copyUrl": "Copy MCP URL",
-			"copied": "Copied",
-			"tunnel": {
-				"tunnelIdLabel": "Tunnel ID",
-				"apiKeyLabel": "Runtime API key",
-				"invalidTunnelId": "Tunnel ID should look like `tunnel_` + 32 hex characters.",
-				"label": "ChatGPT tunnel",
-				"start": "Start",
-				"stop": "Stop",
-				"starting": "Starting…",
-				"ready": "Connected",
-				"error": "Not connected",
-				"stopped": "Stopped",
-				"binaryMissing": "tunnel-client not found",
-				"installHint": "Install it; this page detects it without a restart:",
-				"copyCommand": "Copy install command",
-				"copied": "Copied",
-				"openTunnels": "Open tunnels",
-				"openApiKeys": "Open API keys"
-			}
+			"copied": "Copied"
 		},
 		"privacy": {
 			"section": "Privacy",
-			"telemetry": {
-				"label": "Share anonymous usage data"
-			},
 			"clearUsage": {
 				"label": "Clear activity history",
 				"action": "Clear",
@@ -322,17 +248,6 @@
 	},
 	"agent": {
 		"title": "Agent",
-		"zhihu": {
-			"section": "Zhihu",
-			"keyLabel": "Access Secret",
-			"placeholder": "Paste the Zhihu Access Secret",
-			"confirm": "Save",
-			"openKeyPage": "Open Zhihu developer console",
-			"probeIdle": "Not configured",
-			"probeProbing": "Checking…",
-			"probeOk": "Ready",
-			"probeFail": "Unavailable"
-		},
 		"userAgent": {
 			"section": "Relay compatibility",
 			"label": "User-Agent",
@@ -501,15 +416,6 @@
 			"registryOnly": "Only the Agentero registry entry will be removed; installed files stay on disk.",
 			"customConfirm": "Remove this custom agent from Agentero?",
 			"confirm": "Uninstall"
-		},
-		"remote": {
-			"banner": "Probing ACP agents on {{host}}. Binaries must be installed and logged in on the server (PATH / login shell).",
-			"commonAgents": "Agents on remote host",
-			"probeTitle": "Rescan & probe remote agents",
-			"empty": "No catalog results. Check the SSH session and remote PATH.",
-			"hint": "Refresh runs command -v then ACP initialize over SSH. If Claude shows “ACP adapter missing”, use Install ACP (opens Terminal → Enter → SSH install on the server). API keys stay on the remote machine (BYOA). If probe times out, enable Agent proxy (must be reachable from the server).",
-			"installAdapterAria": "Install ACP adapter for {{name}} on remote host via Terminal",
-			"installAdapterTitle": "Open Terminal, then SSH to {{host}} and run: {{command}} (press Enter to confirm)"
 		}
 	},
 	"translate": {
@@ -549,19 +455,6 @@
 			"label": "Translation display mode",
 			"overlay": "Overlay on original PDF",
 			"dualPane": "Dual pane"
-		},
-		"cache": {
-			"section": "Cache",
-			"ir": {
-				"label": "Cache reflow IR",
-				"description": "Saves extracted character geometry so reopening a paper skips extraction."
-			},
-			"final": {
-				"label": "Cache translated PDF",
-				"description": "Saves the built translated PDF. Each paper takes about 25 MB."
-			},
-			"tip": "Turning a switch off only stops new writes; existing entries keep being reused.",
-			"reset": "Restore defaults"
 		},
 		"providerConfig": {
 			"section": "API Services",
@@ -623,7 +516,6 @@
 		"title": "Layout Analysis",
 		"backend": {
 			"label": "Analysis engine",
-			"local": "On-device",
 			"paddle": "Paddle",
 			"mineru": "MinerU"
 		},
@@ -746,7 +638,6 @@
 	"doctor": {
 		"title": "Vault Doctor",
 		"refresh": "Run diagnosis again",
-		"remoteUnavailable": "Doctor is available for local Vaults only in this version.",
 		"openVault": "Open a local Vault to run Doctor.",
 		"sections": {
 			"host": "Host runtime",
@@ -938,16 +829,6 @@
 			"clearDone": "Cache cleared",
 			"clearFailed": "Couldn't clear the paper full-text cache."
 		},
-		"reflowCache": {
-			"label": "Translation cache",
-			"summary": "{{size}}",
-			"open": "Open cache folder",
-			"openFailed": "Couldn't open the cache folder.",
-			"clear": "Clear cache",
-			"clearDone": "Translation cache cleared",
-			"clearFailed": "Couldn't clear the translation cache.",
-			"tip": "Caches full-text translation intermediates so re-translating the same paper reuses them instead of re-extracting and rebuilding. Turning a switch off only stops new writes; existing entries keep being reused. Control both caches under Settings → Translate → Cache."
-		},
 		"downloadNetworkError": {
 			"title": "Network error downloading from GitHub",
 			"openSettings": "Open network settings"
@@ -995,25 +876,6 @@
 			"statusFailed": "Could not read CLI status",
 			"openReleaseFailed": "Could not open the release page",
 			"syncFailed": "Could not auto-sync the installed CLI with this app version. Update it from Settings → About"
-		},
-		"feedback": {
-			"label": "Feedback",
-			"description": "Send a problem or an idea to the team",
-			"open": "Write",
-			"title": "Feedback",
-			"hint": "Includes the app version and system. Your library, file names, and papers stay on this device.",
-			"kindBug": "Problem",
-			"kindIdea": "Idea",
-			"message": "Description",
-			"messagePlaceholder": "What happened, or what you'd like",
-			"contact": "Email",
-			"contactPlaceholder": "Optional, if we should reply",
-			"send": "Send",
-			"sending": "Sending",
-			"sent": "Sent",
-			"unavailable": "This build can't send feedback",
-			"invalid": "Write a short description first",
-			"failed": "Couldn't send feedback. Try again"
 		}
 	},
 	"sync": {
@@ -1021,7 +883,6 @@
 		"advanced": "Advanced",
 		"localVaultOnly": "Cloud sync is available for local vaults only.",
 		"backend": "Sync method",
-		"backendAgentero": "This account",
 		"backendS3": "Object storage",
 		"backendWebdav": "WebDAV",
 		"backendGit": "Git",
@@ -1061,11 +922,6 @@
 			"finalize": "Finalizing…"
 		},
 		"connect": "Connect",
-		"useAccount": "Sync with this account",
-		"space": "Sync to",
-		"spacePersonal": "Personal space",
-		"spaceTeam": "Current team",
-		"noTeam": "Open a team from your account before syncing to a team space.",
 		"save": "Save",
 		"autoSync": "Auto sync",
 		"interval": "Sync interval",
@@ -1076,78 +932,5 @@
 		"scopePdf": "PDFs",
 		"scopeSource": "LaTeX sources",
 		"scopeAttachments": "Attachments"
-	},
-	"cloudSync": {
-		"title": "Cloud sync",
-		"usedOf": "{{used}} used / {{limit}}",
-		"unlimited": "Unlimited",
-		"signInRequired": "Sign in to see your cloud sync capacity.",
-		"notIncluded": "The current plan does not include cloud sync."
-	},
-	"plugins": {
-		"install": "Install from folder…",
-		"localOnly": "Open a local Vault to manage plugins.",
-		"empty": "No plugins installed.",
-		"failed": "Plugin operation failed",
-		"configure": "Configure {{name}}",
-		"remove": "Uninstall {{name}}",
-		"enable": "Enable {{name}}",
-		"saveEnable": "Save and enable",
-		"permissions": {
-			"vault:read": "Read Vault files and papers",
-			"catalog:write": "Change paper tags and read status",
-			"vault:notes:write": "Write paper notes",
-			"vault:write": "Write Vault text and move papers"
-		},
-		"cancel": "Cancel"
-	},
-	"word": {
-		"damagedField": "This citation has an empty or damaged field result. Restore the document or reinsert the citation in a copy.",
-		"label": "Zotero Word plugin",
-		"search": "Search papers",
-		"pages": "Pages (for selected references)",
-		"style": "Citation style",
-		"styles": {
-			"apa": "APA 7",
-			"ieee": "IEEE",
-			"chicago": "Chicago author-date"
-		},
-		"cancel": "Cancel",
-		"apply": "Apply",
-		"working": "Updating Word…",
-		"noResults": "No papers found",
-		"actions": {
-			"addEditCitation": "Add / edit citation",
-			"addEditBibliography": "Add / update bibliography",
-			"setDocPrefs": "Document preferences",
-			"refresh": "Refresh citations"
-		},
-		"noDocument": "Open a document in Word first.",
-		"readOnly": "The Word document is read-only.",
-		"trackChanges": "Turn off Track Changes before using this prototype.",
-		"notesUnsupported": "This prototype supports body citations only, without footnotes or endnotes.",
-		"documentChanged": "The document changed. Run the Word command again.",
-		"selectionChanged": "The cursor moved. Run the Word command again.",
-		"insertFailed": "Word could not insert the citation field.",
-		"invalidPath": "Invalid Word driver path.",
-		"driverFailed": "Word automation failed.",
-		"timeout": "Word did not respond in time. Check the document before retrying.",
-		"platformUnsupported": "This prototype currently supports macOS and Windows.",
-		"foreignFields": "This document contains Zotero or unsupported citation fields. Use a new document for this prototype.",
-		"unknownStyle": "Unsupported citation style.",
-		"connectorRequired": "Enable Zotero Connector before enabling the Word integration.",
-		"localVaultRequired": "Open a local Vault first.",
-		"zoteroRunning": "Quit Zotero Desktop before enabling the Word integration.",
-		"busy": "A Word operation is already in progress.",
-		"expired": "The Word request expired. Run the command again.",
-		"disabled": "The Word integration is disabled.",
-		"commandUnsupported": "This Word command is not supported by the prototype.",
-		"collapseSelection": "Place the cursor at an insertion point without selecting text.",
-		"cursorInCitation": "Move the cursor outside the citation before inserting a bibliography.",
-		"vaultChanged": "The active Vault changed. Run the Word command again.",
-		"invalidSelection": "Select between 1 and 50 valid references.",
-		"noCitations": "Insert a citation before adding a bibliography.",
-		"permission": "Allow Agentero to control Microsoft Word in macOS System Settings → Privacy & Security → Automation.",
-		"failed": "Word integration failed: {{detail}}"
 	}
 }

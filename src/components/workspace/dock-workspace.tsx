@@ -42,7 +42,6 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { TexLiveStatusDot } from "@/components/viewer/texlive/tex-live-status";
 import { DocView, type DocViewProps } from "@/components/workspace/doc-view";
 import { DocumentTab } from "@/components/workspace/document-tab";
 import { PaperPathBar } from "@/components/workspace/paper-path-bar";
@@ -58,7 +57,6 @@ import { moveDocToWindow } from "@/lib/shell/leaf";
 import { formatShortcutById } from "@/lib/shell/shortcuts";
 import { setLayoutMode, uiStore } from "@/lib/shell/ui-store";
 import { TAG_COLOR_IDS, tagSwatchStyle } from "@/lib/ui/tag-colors";
-import { openTexPdf } from "@/lib/workspace/actions";
 import type { DockHandle } from "@/lib/workspace/dock-registry";
 import { installDockviewDragSelectionGuard } from "@/lib/workspace/dockview-drag-selection";
 import { installDockviewSashFrameLoop } from "@/lib/workspace/dockview-sash";
@@ -83,9 +81,7 @@ import {
 	tabIsPaperNotes,
 	tabNotesEligible,
 } from "@/lib/workspace/tabs";
-import { isTexPath } from "@/lib/workspace/viewer";
 import { pdfHandleFor } from "@/lib/workspace/viewer/pdf-viewer-registry";
-import { createWritingFocus } from "@/lib/workspace/writing-focus";
 
 import {
 	addPanelWithPlacement,
@@ -274,36 +270,29 @@ function WorkspaceTab({
 			closeLabel={t("tabs.close", { title })}
 			onClose={isLibrary ? undefined : close}
 			trailing={
-				<>
-					{tab?.texLive ? (
-						<TexLiveStatusDot
-							rootPath={tab.texRoot ?? tab.path.replace(/\.pdf$/i, ".tex")}
-						/>
-					) : null}
-					{canToggleHtml ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<button
-									type="button"
-									className="dv-default-tab-action"
-									aria-label={
-										tab?.mode === "pdf" ? t("tabs.showHtml") : t("tabs.showPdf")
-									}
-									onPointerDown={(event) => {
-										event.preventDefault();
-										event.stopPropagation();
-									}}
-									onClick={toggleHtml}
-								>
-									<FileCode2 className="size-3.5" />
-								</button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{tab?.mode === "pdf" ? t("tabs.showHtml") : t("tabs.showPdf")}
-							</TooltipContent>
-						</Tooltip>
-					) : null}
-				</>
+				canToggleHtml ? (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								className="dv-default-tab-action"
+								aria-label={
+									tab?.mode === "pdf" ? t("tabs.showHtml") : t("tabs.showPdf")
+								}
+								onPointerDown={(event) => {
+									event.preventDefault();
+									event.stopPropagation();
+								}}
+								onClick={toggleHtml}
+							>
+								<FileCode2 className="size-3.5" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="bottom">
+							{tab?.mode === "pdf" ? t("tabs.showHtml") : t("tabs.showPdf")}
+						</TooltipContent>
+					</Tooltip>
+				) : null
 			}
 			onPointerDown={(event) => {
 				middleClickRef.current = event.button === 1;
@@ -388,16 +377,6 @@ export const DockWorkspace = memo(
 		const disposablesRef = useRef<{ dispose: () => void }[]>([]);
 		const tabsRef = useRef(tabs);
 		tabsRef.current = tabs;
-		const writingFocus = useRef(createWritingFocus());
-		const vaultRef = useRef(centerProps.vaultPath);
-		vaultRef.current = centerProps.vaultPath;
-		const syncWritingFocus = useCallback((api: DockviewApi) => {
-			writingFocus.current(
-				api,
-				tabsRef.current.find((tab) => tab.id === api.activePanel?.id),
-				vaultRef.current,
-			);
-		}, []);
 		const layoutRef = useRef(layout);
 		layoutRef.current = layout;
 		const onCloseRef = useRef(onClosePanel);
@@ -481,7 +460,6 @@ export const DockWorkspace = memo(
 			(api: DockviewApi) => {
 				requestAnimationFrame(() => {
 					syncingRef.current = false;
-					syncWritingFocus(api);
 					if (
 						uiStore.getState().layoutMode === "reading" &&
 						!api.hasMaximizedGroup()
@@ -503,7 +481,7 @@ export const DockWorkspace = memo(
 					scheduleLayoutSave(api);
 				});
 			},
-			[publishVisiblePanels, scheduleLayoutSave, syncWritingFocus],
+			[publishVisiblePanels, scheduleLayoutSave],
 		);
 
 		const keepSet = useMemo(() => new Set(keepMountedIds), [keepMountedIds]);
@@ -719,7 +697,6 @@ export const DockWorkspace = memo(
 					}),
 					api.onDidActivePanelChange((ev) => {
 						if (syncingRef.current) return;
-						syncWritingFocus(api);
 						onActiveRef.current(ev.panel?.id ?? null);
 						publishVisiblePanels(api);
 					}),
@@ -764,13 +741,7 @@ export const DockWorkspace = memo(
 					syncPanels(api);
 				}
 			},
-			[
-				endSync,
-				publishVisiblePanels,
-				scheduleLayoutSave,
-				syncPanels,
-				syncWritingFocus,
-			],
+			[endSync, publishVisiblePanels, scheduleLayoutSave, syncPanels],
 		);
 
 		// Sync membership when panel ids change (not titles).
@@ -783,12 +754,7 @@ export const DockWorkspace = memo(
 		}, [panelIdsKey, syncPanels]);
 
 		// Title + persist params + renderer channel (mode/path without full membership).
-		const metaKey = tabs
-			.map(
-				(t) =>
-					`${t.id}:${t.title}:${t.mode}:${t.texRoot ?? ""}:${t.writingRoot ?? ""}`,
-			)
-			.join("|");
+		const metaKey = tabs.map((t) => `${t.id}:${t.title}:${t.mode}`).join("|");
 		useEffect(() => {
 			void metaKey;
 			const api = apiRef.current;
@@ -799,11 +765,10 @@ export const DockWorkspace = memo(
 				applyTabPanelMeta(panel, tab);
 			}
 			syncProjectPreviewHeaders(api);
-			syncWritingFocus(api);
 			// Param updates (e.g. resolved title) don't emit onDidLayoutChange;
 			// re-save so the next restore shows titles before hydration (#410).
 			scheduleLayoutSave(api);
-		}, [metaKey, scheduleLayoutSave, syncWritingFocus]);
+		}, [metaKey, scheduleLayoutSave]);
 
 		// Activate panel when React activePanelId changes (openTab / library).
 		useEffect(() => {
@@ -813,8 +778,7 @@ export const DockWorkspace = memo(
 			if (panel && api.activePanel?.id !== activePanelId) {
 				panel.api.setActive();
 			}
-			syncWritingFocus(api);
-		}, [activePanelId, syncWritingFocus]);
+		}, [activePanelId]);
 
 		useEffect(() => {
 			return () => {
@@ -891,18 +855,6 @@ export const DockWorkspace = memo(
 							label: t("tabs.contextOpenNotes"),
 							shortcut: formatShortcutById("splitPane"),
 							action: () => onOpenNotesRef.current?.(panel.id),
-						}),
-						"separator",
-					);
-				}
-				if (tab != null && isTexPath(tab.path)) {
-					menu.push(
-						buildTabContextMenuItem({
-							label: t("tabs.openTexPdf"),
-							shortcut: formatShortcutById("splitPane"),
-							action: () => {
-								void openTexPdf(tab.path, { referencePanelId: panel.id });
-							},
 						}),
 						"separator",
 					);

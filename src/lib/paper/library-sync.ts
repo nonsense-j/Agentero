@@ -13,7 +13,6 @@ import { isTauri } from "@/lib/core/tauri";
 import type { PaperLibraryRow } from "@/lib/paper/types";
 import { vaultPathExists } from "@/lib/vault/fs";
 import { joinVaultPath } from "@/lib/vault/path";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import {
 	getVaultPath,
 	scheduleTreeRefresh,
@@ -102,12 +101,7 @@ export async function reconcileExternalLibraryChange(
 	previous: readonly PaperLibraryRow[],
 	next: readonly PaperLibraryRow[],
 ): Promise<void> {
-	if (
-		previous.length === 0 ||
-		!isTauri() ||
-		isRemoteVaultHandle(vaultPath) ||
-		getVaultPath() !== vaultPath
-	) {
+	if (previous.length === 0 || !isTauri() || getVaultPath() !== vaultPath) {
 		return;
 	}
 	const { moves, removals } = planPaperPathChanges(previous, next);

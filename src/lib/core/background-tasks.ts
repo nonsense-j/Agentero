@@ -34,7 +34,6 @@ export type BackgroundTaskIcon =
 	| "read"
 	| "plug"
 	| "scan"
-	| "fileCode"
 	| "list";
 
 export type BackgroundTaskStatus =
@@ -92,8 +91,6 @@ export function phaseLabel(phase: string): string {
 	if (phase === "tex") return i18n.t("app:tasks.downloadPhaseTex");
 	if (phase === "parse") return i18n.t("app:tasks.downloadPhaseParse");
 	if (phase === "citingFetch") return i18n.t("app:tasks.citingScanPhaseFetch");
-	if (phase === "layout-model")
-		return i18n.t("app:tasks.downloadPhaseLayoutModel");
 	return i18n.t("app:tasks.downloadPhaseAsset");
 }
 

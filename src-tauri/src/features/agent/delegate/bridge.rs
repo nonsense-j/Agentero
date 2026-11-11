@@ -1,8 +1,7 @@
 //! Unix socket the `agentero-delegate` MCP worker calls back into.
 //!
-//! The worker is a child of the local CLI agent, so it cannot see
-//! [`RemoteAgentHosts`]. It presents the token from its grant file. The desktop
-//! process owns the SSH session and the remote ACP connection.
+//! The worker is a child of the local CLI agent and presents the token from
+//! its grant file.
 
 use agent_client_protocol::schema::v1::McpServer;
 use std::sync::Arc;
@@ -20,9 +19,7 @@ use super::protocol::{
 #[cfg(unix)]
 use crate::features::agent::acp::interaction::PermissionPolicy;
 #[cfg(unix)]
-use crate::features::agent::models::{is_builtin_template, AgentResultPayload};
-#[cfg(unix)]
-use crate::features::agent::remote_host::RemoteAgentHosts;
+use crate::features::agent::models::AgentResultPayload;
 #[cfg(unix)]
 use crate::features::agent::runtime::events::AgentEventEmitter;
 #[cfg(unix)]
@@ -455,22 +452,8 @@ async fn finish_record(record: &RunRecord, outcome: Result<AgentResultPayload, S
 }
 
 #[cfg(unix)]
-async fn connected_targets(app: &tauri::AppHandle) -> Result<Vec<TargetChoice>, String> {
-    let hosts = app.state::<Arc<dyn RemoteAgentHosts>>();
-    let listed = hosts
-        .list_targets()
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(listed
-        .into_iter()
-        .map(|target| TargetChoice {
-            handle: format!("remote:{}", target.session_id),
-            session_id: target.session_id,
-            destination: target.destination,
-            remote_path: target.remote_path,
-            local_sim: target.local_sim,
-        })
-        .collect())
+async fn connected_targets(_app: &tauri::AppHandle) -> Result<Vec<TargetChoice>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(unix)]
@@ -480,7 +463,7 @@ async fn agent_choices(app: &tauri::AppHandle) -> Result<Vec<AgentChoice>, Strin
     let mut agents: Vec<AgentChoice> = state
         .agents
         .into_iter()
-        .filter(|agent| !is_builtin_template(&agent.template) && !agent.command.trim().is_empty())
+        .filter(|agent| !agent.command.trim().is_empty())
         .map(|agent| AgentChoice {
             id: agent.id,
             name: agent.name,
@@ -500,14 +483,6 @@ async fn base_params(
 ) -> Result<RunOnceParams, String> {
     let registry = app.state::<AgentRegistry>();
     let desc = registry.get(&agent.id).map_err(|error| error.to_string())?;
-    if is_builtin_template(&desc.template) {
-        return Err("built-in agents cannot run on a remote host".into());
-    }
-    let hosts = app.state::<Arc<dyn RemoteAgentHosts>>();
-    let remote = hosts
-        .get_session(&target.session_id)
-        .await
-        .map_err(|error| error.to_string())?;
     let (_, cancel_rx) = watch::channel(false);
     Ok(RunOnceParams {
         app: AgentEventEmitter::new(app.clone(), window),
@@ -519,7 +494,7 @@ async fn base_params(
         images: Vec::new(),
         workflow: None,
         target: None,
-        vault_path: Some(format!("remote:{}", target.session_id)),
+        vault_path: Some(target.remote_path.clone()),
         preferred_model_id: None,
         preferred_collaboration_mode_id: None,
         preferred_reasoning_effort: None,
@@ -533,7 +508,6 @@ async fn base_params(
         response_language: None,
         personal_prompt: None,
         cancellation: cancel_rx,
-        remote: Some(remote),
         resume_session_id: None,
         warm_pool: None,
         context: None,

@@ -46,7 +46,6 @@ import {
 } from "@/lib/core/job-center";
 import { logger } from "@/lib/core/logger";
 import { listenEventSafe } from "@/lib/core/tauri-events";
-import { enqueueLatexBuild, type LatexBuildOptions } from "@/lib/tex/host";
 
 export type { JobKind, JobSnapshot, JobState };
 
@@ -206,11 +205,9 @@ export type TaskSpec = {
 		| "downloadAssets"
 		| "import"
 		| "connectorSync"
-		| "modelDownload"
 		| "citingScan"
 		| "libraryIo"
-		| "metadataRefresh"
-		| "latexCompile";
+		| "metadataRefresh";
 	vaultPath: string;
 	path: string;
 	lane?: JobLane;
@@ -218,9 +215,8 @@ export type TaskSpec = {
 	/** parseBody only: Host-side cooperative-cancel polling id. */
 	taskId?: string | null;
 	/**
-	 * import / connectorSync / libraryIo / metadataRefresh / latexCompile:
-	 * JSON-serializable mode / op / batch / `{ engine }` payload; feeds the
-	 * dedupe fingerprint.
+	 * import / connectorSync / libraryIo / metadataRefresh:
+	 * JSON-serializable mode / op / batch payload; feeds the dedupe fingerprint.
 	 */
 	params?: unknown;
 };
@@ -256,11 +252,6 @@ export async function enqueueTask(spec: TaskSpec): Promise<JobSnapshot> {
 						...args,
 						params: (spec.params ?? null) as Json | null,
 					});
-				case "modelDownload":
-					return commands.jobModelDownloadEnqueue({
-						lane: spec.lane ?? null,
-						force: spec.force ?? false,
-					});
 				case "citingScan":
 					return commands.jobCitingScanEnqueue({
 						vaultPath: spec.vaultPath,
@@ -282,19 +273,6 @@ export async function enqueueTask(spec: TaskSpec): Promise<JobSnapshot> {
 						force: spec.force ?? false,
 						params: (spec.params ?? null) as Json | null,
 					});
-				case "latexCompile": {
-					const params = spec.params as
-						| { engine?: string; build?: LatexBuildOptions }
-						| undefined;
-					return enqueueLatexBuild({
-						vaultPath: spec.vaultPath,
-						texPath: spec.path,
-						engine: params?.engine ?? "pdflatex",
-						build: params?.build,
-						lane: spec.lane ?? null,
-						force: spec.force ?? false,
-					}).then((data) => ({ status: "ok" as const, data }));
-				}
 			}
 		},
 		{ fallback: "job enqueue failed" },

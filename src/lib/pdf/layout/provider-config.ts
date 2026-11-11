@@ -10,6 +10,7 @@ import {
 	tinyProbeJpegBase64,
 } from "@/lib/pdf/layout/paddle";
 import {
+	DEFAULT_LAYOUT_SETTINGS,
 	isLayoutBackend,
 	isParserBackend,
 	type LayoutBackend,
@@ -22,8 +23,8 @@ import type { AppSettings } from "@/lib/settings";
 import { saveSettingsAsync } from "@/lib/settings";
 
 /**
- * When clearing a provider key, fall active backends back to local if they
- * still point at that provider (so Settings selects drop the option).
+ * When clearing a provider key, fall active backends back to their defaults if
+ * they still point at that provider (so Settings selects drop the option).
  */
 export function layoutBackendsAfterClearingProvider(
 	layout: LayoutSettings,
@@ -32,11 +33,11 @@ export function layoutBackendsAfterClearingProvider(
 	return {
 		backend:
 			isLayoutBackend(provider) && layout.backend === provider
-				? "local"
+				? DEFAULT_LAYOUT_SETTINGS.backend
 				: layout.backend,
 		parserBackend:
 			isParserBackend(provider) && layout.parserBackend === provider
-				? "local"
+				? DEFAULT_LAYOUT_SETTINGS.parserBackend
 				: layout.parserBackend,
 	};
 }

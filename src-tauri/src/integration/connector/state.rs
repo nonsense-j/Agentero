@@ -113,7 +113,7 @@ struct Inner {
     listening: bool,
     port: u16,
     last_error: Option<String>,
-    /// Local absolute path or `remote:<sessionId>` handle.
+    /// Local absolute vault path.
     vault_handle: Option<String>,
     parent_dir: String,
     /// Cancels the accept loop when the server should stop.
@@ -127,8 +127,6 @@ pub struct ConnectorController {
     inner: Mutex<Inner>,
     /// Fast path for handlers without locking the full struct for vault checks.
     running: AtomicBool,
-    /// Remote vault registry (injected at app start) for `remote:…` saves.
-    remote_registry: Mutex<Option<Arc<crate::integration::remote::RemoteRegistry>>>,
 }
 
 impl Default for ConnectorController {
@@ -152,7 +150,6 @@ impl ConnectorController {
                 app: None,
             }),
             running: AtomicBool::new(false),
-            remote_registry: Mutex::new(None),
         }
     }
 
@@ -164,16 +161,6 @@ impl ConnectorController {
 
     pub fn app_handle(&self) -> Option<AppHandle> {
         self.inner.lock().ok().and_then(|g| g.app.clone())
-    }
-
-    pub fn set_remote_registry(&self, registry: Arc<crate::integration::remote::RemoteRegistry>) {
-        if let Ok(mut g) = self.remote_registry.lock() {
-            *g = Some(registry);
-        }
-    }
-
-    pub fn remote_registry(&self) -> Option<Arc<crate::integration::remote::RemoteRegistry>> {
-        self.remote_registry.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn status(&self) -> ConnectorStatus {
@@ -194,7 +181,6 @@ impl ConnectorController {
     }
 
     /// Update the Vault handle used by `saveItems` (None when no vault open).
-    /// Accepts local absolute paths and `remote:<sessionId>` handles.
     pub fn set_vault(&self, vault_path: Option<String>) {
         if let Ok(mut g) = self.inner.lock() {
             let raw = vault_path
@@ -203,12 +189,10 @@ impl ConnectorController {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             g.vault_handle = raw.clone();
-            // Clear stale remote-only error / previous bind errors when rebinding.
-            if g.last_error.as_deref().is_some_and(|e| {
-                e.contains("remote vault is not supported")
-                    || e.contains("No vault open")
-                    || e.contains("remote session not found")
-            }) {
+            if g.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("No vault open"))
+            {
                 g.last_error = None;
             }
             log::debug!(
@@ -258,23 +242,15 @@ impl ConnectorController {
         self.status()
     }
 
-    /// Vault handle string (local path or `remote:…`) + parent dir.
+    /// Vault path string + parent dir.
     pub fn vault_handle_and_parent(&self) -> Result<(String, String), AppError> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let handle = g.vault_handle.clone().ok_or_else(|| {
             AppError::message(
-                "No vault open — open a local or remote vault in Agentero first (Connector needs an active vault)",
+                "No vault open — open a vault in Agentero first (Connector needs an active vault)",
             )
         })?;
         Ok((handle, g.parent_dir.clone()))
-    }
-
-    pub fn is_remote_vault(&self) -> bool {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|g| g.vault_handle.clone())
-            .is_some_and(|h| h.starts_with("remote:"))
     }
 
     /// Enable or disable the HTTP server. Idempotent.
@@ -657,7 +633,6 @@ impl ConnectorController {
     }
 
     /// Write a browser-uploaded attachment as the paper's `{id}.pdf` (login-wall PDFs).
-    /// Local vault: sync write. Remote vault: SFTP via async runtime.
     pub async fn write_attachment_pdf(
         &self,
         session_id: &str,
@@ -674,14 +649,6 @@ impl ConnectorController {
                 .clone()
                 .ok_or_else(|| AppError::message("No vault open"))?
         };
-
-        if let Some(sid) = crate::integration::remote::parse_remote_handle(&handle) {
-            let reg = self
-                .remote_registry()
-                .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-            let session = reg.get(sid).await?;
-            return super::import::write_attachment_pdf_remote(session, &rel, bytes).await;
-        }
 
         let vault = PathBuf::from(&handle);
         let paper_dir = vault.join(&rel);
@@ -744,13 +711,6 @@ impl ConnectorController {
     ) -> Result<String, AppError> {
         if Self::path_is_in_parent(from, parent) {
             return Ok(from.to_string());
-        }
-        if let Some(sid) = crate::integration::remote::parse_remote_handle(vault_handle) {
-            let reg = self
-                .remote_registry()
-                .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-            let session = reg.get(sid).await?;
-            return super::import::move_paper_folder_remote(&session, from, parent).await;
         }
 
         let app = self
@@ -935,47 +895,14 @@ impl ConnectorController {
         };
         let paper_tags: Vec<crate::features::paper::catalog::papers::PaperTag> =
             tags.iter().cloned().map(Into::into).collect();
-        if let Some(sid) = crate::integration::remote::parse_remote_handle(&handle) {
-            let reg = self
-                .remote_registry()
-                .ok_or_else(|| AppError::message("remote registry unavailable"))?;
-            let session = reg.get(sid).await?;
-            for path in paths {
-                let row = crate::features::paper::catalog::papers::add_tags(
-                    &session.work_root,
-                    &path,
-                    &paper_tags,
-                )?;
-                let metadata = serde_json::to_vec_pretty(&row)
-                    .map_err(|e| AppError::message(e.to_string()))?;
-                session
-                    .fs
-                    .write(
-                        &format!("{path}/metadata.json"),
-                        &metadata,
-                        crate::core::fs::WriteOpts {
-                            create_parents: true,
-                        },
-                    )
-                    .await?;
-            }
-            session
-                .catalog
-                .lock()
-                .await
-                .push(session.fs.clone())
-                .await?;
-        } else {
-            let vault = PathBuf::from(handle);
-            for path in paths {
-                let _ =
-                    crate::features::paper::catalog::papers::add_tags(&vault, &path, &paper_tags)?;
-            }
+        let vault = PathBuf::from(handle);
+        for path in paths {
+            let _ = crate::features::paper::catalog::papers::add_tags(&vault, &path, &paper_tags)?;
         }
         Ok(())
     }
 
-    /// JSON body for `/connector/getSelectedCollection` (async for remote targets).
+    /// JSON body for `/connector/getSelectedCollection`.
     pub async fn selected_collection_json(&self) -> serde_json::Value {
         let (parent, handle) = {
             let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -983,41 +910,14 @@ impl ConnectorController {
         };
 
         let vault_name_owned = handle.as_deref().and_then(|h| {
-            if h.starts_with("remote:") {
-                None
-            } else {
-                PathBuf::from(h)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-            }
+            PathBuf::from(h)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
         });
-        let vault_name = if handle.as_deref().is_some_and(|h| h.starts_with("remote:")) {
-            "Agentero Remote Vault"
-        } else {
-            vault_name_owned.as_deref().unwrap_or("Agentero Vault")
-        };
+        let vault_name = vault_name_owned.as_deref().unwrap_or("Agentero Vault");
 
         let targets = if let Some(h) = handle.as_deref() {
-            if let Some(sid) = crate::integration::remote::parse_remote_handle(h) {
-                if let Some(reg) = self.remote_registry() {
-                    match reg.get(sid).await {
-                        Ok(session) => super::import::list_save_targets_remote(&session).await,
-                        Err(_) => vec![super::targets::SaveTarget {
-                            id: "L1".into(),
-                            name: "papers".into(),
-                            level: 0,
-                        }],
-                    }
-                } else {
-                    vec![super::targets::SaveTarget {
-                        id: "L1".into(),
-                        name: "papers".into(),
-                        level: 0,
-                    }]
-                }
-            } else {
-                super::targets::list_save_targets(Path::new(h))
-            }
+            super::targets::list_save_targets(Path::new(h))
         } else {
             vec![super::targets::SaveTarget {
                 id: "L1".into(),
@@ -1115,37 +1015,13 @@ impl ConnectorController {
         // Only after the attachment writers and collection move have settled.
         // The common body preparation resolves arXiv TeX before considering OCR.
         if let Ok((vault, _)) = self.vault_handle_and_parent() {
-            if let Some(session_id) = crate::integration::remote::parse_remote_handle(&vault) {
-                if let Some(registry) = self.remote_registry() {
-                    let session_id = session_id.to_string();
-                    let path = payload.path.clone();
-                    let app = self.app_handle();
-                    tauri::async_runtime::spawn(async move {
-                        let result = async {
-                            let session = registry.get(&session_id).await?;
-                            crate::integration::remote::import_bridge::prepare_body_remote(
-                                session, &path,
-                            )
-                            .await
-                        }
-                        .await;
-                        if let Err(error) = result {
-                            log::warn!(target: "agentero::connector", "remote source preparation failed for {path}: {error}");
-                            if let Some(app) = app {
-                                emit_connector_error(&app, &error.to_string(), None);
-                            }
-                        }
-                    });
-                }
-            } else {
-                if let Some(app) = self.app_handle() {
-                    crate::features::jobs::spawn_parse_body_after_assets(
-                        Some(&app),
-                        std::path::Path::new(&vault),
-                        &payload.path,
-                        false,
-                    );
-                }
+            if let Some(app) = self.app_handle() {
+                crate::features::jobs::spawn_parse_body_after_assets(
+                    Some(&app),
+                    std::path::Path::new(&vault),
+                    &payload.path,
+                    false,
+                );
             }
         }
         if let Ok(g) = self.inner.lock() {
@@ -1210,17 +1086,6 @@ mod tests {
             deduped: false,
             session_id: session_id.to_string(),
         }
-    }
-
-    #[test]
-    fn set_vault_accepts_remote_handle() {
-        let ctrl = ConnectorController::new();
-        ctrl.set_vault(Some("remote:sess-abc".into()));
-        let (handle, parent) = ctrl.vault_handle_and_parent().expect("bound");
-        assert_eq!(handle, "remote:sess-abc");
-        assert_eq!(parent, "papers");
-        assert!(ctrl.is_remote_vault());
-        assert_eq!(ctrl.status().vault_path.as_deref(), Some("remote:sess-abc"));
     }
 
     #[test]

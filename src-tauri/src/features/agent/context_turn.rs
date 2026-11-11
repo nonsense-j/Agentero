@@ -24,7 +24,6 @@ pub(crate) struct PreparedContext {
 pub(crate) fn prepare_context(
     runtime_session_id: &str,
     vault_path: Option<&str>,
-    remote: bool,
     request: Option<&ContextRequest>,
     resume_session_id: Option<String>,
 ) -> PreparedContext {
@@ -40,7 +39,7 @@ pub(crate) fn prepare_context(
         };
     };
     let vault = vault_path.map(PathBuf::from).filter(|path| path.is_dir());
-    let mut expansion = if remote || vault.is_none() {
+    let mut expansion = if vault.is_none() {
         ContextExpansion::PromptOnly
     } else {
         ContextExpansion::Mcp

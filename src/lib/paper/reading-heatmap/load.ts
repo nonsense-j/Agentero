@@ -31,10 +31,6 @@ async function fetchReadingActivityBatch(
 	rels: string[],
 ): Promise<Record<string, ReadingActivityPoint[]>> {
 	if (!isTauri() || !rels.length) return {};
-	const { isRemoteVaultHandle } = await import(
-		"@/lib/vault/remote/remote-vault"
-	);
-	if (isRemoteVaultHandle(vaultPath)) return {};
 	try {
 		// Wire points type `y`/`weight` as nullable; JS arithmetic in the
 		// aggregator treats `null` as 0 (unchanged from the pre-binding cast).

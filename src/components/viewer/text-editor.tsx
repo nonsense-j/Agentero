@@ -1,4 +1,3 @@
-import { syntaxTree } from "@codemirror/language";
 import {
 	Compartment,
 	EditorState,
@@ -8,15 +7,9 @@ import {
 import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { useTheme } from "next-themes";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useTextEditorFontSize } from "@/components/viewer/hooks/use-text-editor-font-size";
-import { TexCitationPicker } from "@/components/viewer/tex-citation-picker";
 import { textLanguageExtensions } from "@/components/viewer/text-editor-language";
-import {
-	type EditorDiagnostic,
-	lintDiagnosticsWatcher,
-	TextEditorLintFooter,
-} from "@/components/viewer/text-editor-lint-footer";
 import {
 	editorChrome,
 	editorColorScheme,
@@ -24,44 +17,9 @@ import {
 } from "@/components/viewer/text-editor-theme";
 import { TextEditorToolbar } from "@/components/viewer/text-editor-toolbar";
 import { useTextEditorSelection } from "@/components/viewer/use-text-editor-selection";
-import { useWritingSelectionGroup } from "@/components/writing/writing-selection-group";
-import { dirnameOf, normalizePath } from "@/lib/core/path";
-import { texSettingsStore } from "@/lib/tex/config";
-import { insertTexCitation } from "@/lib/tex/editor-intelligence";
-import {
-	editorLintStore,
-	pendingEditorLineJump,
-} from "@/lib/tex/editor-lint-bridge";
-import {
-	markTexEditorActive,
-	registerTexEditor,
-} from "@/lib/tex/editor-navigation";
-import { latexFromClipboard } from "@/lib/tex/html-to-latex";
-import { type TexOutlineItem, texOutlineFromTree } from "@/lib/tex/outline";
-import { isInsideProject } from "@/lib/tex/project";
-import {
-	invalidateTexProjectIndex,
-	loadTexProjectIndex,
-	notifyTexProjectFilesChanged,
-	registerTexProjectBuffer,
-	subscribeTexProjectChanges,
-} from "@/lib/tex/project-index";
-import { syncTexToPdf } from "@/lib/tex/synctex";
-import {
-	registerTexLiveEditor,
-	texLiveApplyUpdate,
-	texLiveSetDocument,
-} from "@/lib/tex-live/session";
-import { dockHandle } from "@/lib/workspace/dock-registry";
-import { setActiveTabId } from "@/lib/workspace/store";
-import { tabIdForPath } from "@/lib/workspace/tabs";
-import { bindTexOutline } from "@/lib/workspace/tex-outline-bridge";
 import { registerTextEditorFlusher } from "@/lib/workspace/text-editor-flush";
-import { isTexPath, textLanguageIdForPath } from "@/lib/workspace/viewer";
-import { writingStore } from "@/lib/writing/store";
 
 interface TextEditorProps {
-	panelId?: string;
 	seed: string;
 	path: string;
 	reloadKey: number;
@@ -71,14 +29,8 @@ interface TextEditorProps {
 		lastSaved: string,
 	) => Promise<boolean>;
 	onDirtyChange: (dirty: boolean) => void;
-	/** Manual save (⌘S) after the flush landed — TeX compiles here. */
-	onManualSave?: (path: string) => void;
 	/** Whether the owning tab is the active panel — gates the selection toolbar. */
 	active?: boolean;
-	/** Which surface owns the live-preview buffer (reading dock vs writing). */
-	texLiveOwner?: "reading" | "writing";
-	/** Writing draws lint counts on the PDF bar. */
-	hideLintFooter?: boolean;
 	className?: string;
 }
 
@@ -93,19 +45,14 @@ const AUTOSAVE_DELAY_MS = 800;
  * undo history are not thrown away.
  */
 export function TextEditor({
-	panelId,
 	seed,
 	path,
 	reloadKey,
 	onPersist,
 	onDirtyChange,
-	onManualSave,
 	active = true,
-	texLiveOwner = "reading",
-	hideLintFooter = false,
 	className,
 }: TextEditorProps) {
-	const [citationOpen, setCitationOpen] = useState(false);
 	// Font size managed by hook with process-wide persistence (like PDF paper tone).
 	const { fontSize, setFontSize } = useTextEditorFontSize();
 
@@ -123,8 +70,6 @@ export function TextEditor({
 	const pendingContentRef = useRef<Text | null>(null);
 	const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const dirtyRef = useRef(false);
-	// rtex replays full-buffer `set_document` on reload instead of diff edits.
-	const texLiveReloadRef = useRef(false);
 
 	// Latest seed for the reload effect without re-mounting the editor.
 	const seedRef = useRef(seed);
@@ -155,7 +100,6 @@ export function TextEditor({
 			lastSavedRef.current = content;
 			dirtyRef.current = false;
 			onDirtyChangeRef.current(false);
-			notifyTexProjectFilesChanged([path]);
 		}
 		return ok;
 	}, [onPersist, path]);
@@ -179,40 +123,17 @@ export function TextEditor({
 
 	// Manual save (⌘S / Ctrl+S) rides the CodeMirror keymap (only when the
 	// editor is focused, same as its other bindings): flush immediately,
-	// skipping the debounce, then fire the hook — the TeX path compiles there.
-	// A clean buffer still fires it (explicit rebuild, Overleaf-style); a
-	// refused save (conflict guard) does not — compiling the disk copy would
-	// mislead. Routed through refs since the keymap registers once at mount.
+	// skipping the debounce. Routed through refs since the keymap registers
+	// once at mount.
 	const flushRef = useRef(flush);
 	flushRef.current = flush;
-	const onManualSaveRef = useRef(onManualSave);
-	onManualSaveRef.current = onManualSave;
 	const manualSaveKeymap = useMemo(
 		() => [
-			{
-				key: "Mod-Alt-j",
-				run: (view: EditorView) => {
-					if (!isTexPath(pathRef.current)) return false;
-					const position = view.state.selection.main.head;
-					const line = view.state.doc.lineAt(position);
-					void syncTexToPdf(
-						pathRef.current,
-						line.number,
-						position - line.from + 1,
-						writingStore.getState().surface === "writing"
-							? { scope: "writing" as const }
-							: undefined,
-					);
-					return true;
-				},
-			},
 			{
 				key: "Mod-s",
 				preventDefault: true,
 				run: () => {
-					void flushRef.current().then((ok) => {
-						if (ok) onManualSaveRef.current?.(pathRef.current);
-					});
+					void flushRef.current();
 					return true;
 				},
 			},
@@ -223,82 +144,14 @@ export function TextEditor({
 	// Selection → floating Quick chat / Add to chat toolbar (same chrome the
 	// PDF surfaces have). The listener extension registers once at mount and
 	// routes through refs inside the hook.
-	const writingSelectionGroup = useWritingSelectionGroup();
 	const selection = useTextEditorSelection({
 		viewRef,
 		path,
 		active,
-		selectionGroup: writingSelectionGroup,
 	});
 
-	// Lint diagnostics for the status-bar footer (TeX only — the only mode
-	// with lint sources). The watcher extension registers once at mount and
-	// pushes the merged findings after every lint run.
-	const [diagnostics, setDiagnostics] = useState<EditorDiagnostic[]>([]);
-	const handleDiagnostics = useCallback((next: EditorDiagnostic[]) => {
-		setDiagnostics(next);
-	}, []);
-	const hasLintSources = useMemo(
-		() => textLanguageIdForPath(path) === "tex",
-		[path],
-	);
-	const jumpToDiagnostic = useCallback((diagnostic: EditorDiagnostic) => {
-		const view = viewRef.current;
-		if (!view) return;
-		view.dispatch({
-			selection: { anchor: diagnostic.from, head: diagnostic.to },
-			scrollIntoView: true,
-		});
-		view.focus();
-	}, []);
-	const jumpToLine = useCallback((line: number) => {
-		const view = viewRef.current;
-		if (!view || line < 1) return;
-		const info = view.state.doc.line(Math.min(line, view.state.doc.lines));
-		view.dispatch({
-			selection: { anchor: info.from },
-			scrollIntoView: true,
-		});
-		view.focus();
-	}, []);
-
-	useEffect(() => {
-		if (!hideLintFooter || !hasLintSources) return;
-		editorLintStore.setState({
-			current: { path, diagnostics, jump: jumpToDiagnostic, jumpToLine },
-		});
-		return () => {
-			if (editorLintStore.getState().current?.path === path) {
-				editorLintStore.setState({ current: null });
-			}
-		};
-	}, [
-		hideLintFooter,
-		hasLintSources,
-		path,
-		diagnostics,
-		jumpToDiagnostic,
-		jumpToLine,
-	]);
-
-	useEffect(() => {
-		const pending = pendingEditorLineJump.getState();
-		if (!pending.path || normalizePath(pending.path) !== normalizePath(path)) {
-			return;
-		}
-		const line = pending.line;
-		pendingEditorLineJump.setState({ path: "", line: 0 });
-		const timer = window.setTimeout(() => jumpToLine(line), 0);
-		return () => window.clearTimeout(timer);
-	}, [path, jumpToLine]);
-
-	// Expose the flush to lib actions: the compile button builds disk bytes,
-	// so it must first land this editor's debounced autosave.
+	// Expose the flush to lib actions that read disk bytes directly.
 	useEffect(() => registerTextEditorFlusher(path, flush), [path, flush]);
-
-	// Filled after mount. The update listener (registered once) publishes
-	// through it; the effect below owns the binding.
-	const publishOutlineRef = useRef<((view: EditorView) => void) | null>(null);
 
 	// Editor owns its state: mount once, reconfigure language/theme in place.
 	useEffect(() => {
@@ -310,7 +163,6 @@ export function TextEditor({
 			EditorView.lineWrapping,
 			keymap.of(manualSaveKeymap),
 			selection.selectionListener,
-			lintDiagnosticsWatcher(handleDiagnostics),
 			languageCompartment.current.of(language),
 			editorChrome,
 			editorHighlight,
@@ -320,36 +172,11 @@ export function TextEditor({
 			fontSizeCompartment.current.of(
 				EditorView.theme({ "&": { fontSize: `${fontSizeRef.current}px` } }),
 			),
-			EditorView.domEventHandlers({
-				focus(_event, view) {
-					markTexEditorActive(pathRef.current, view);
-				},
-				paste(event, view) {
-					if (!isTexPath(pathRef.current)) return false;
-					const html = event.clipboardData?.getData("text/html") ?? "";
-					const plain = event.clipboardData?.getData("text/plain") ?? "";
-					const latex = latexFromClipboard(html, plain);
-					if (!latex) return false;
-					event.preventDefault();
-					view.dispatch(view.state.replaceSelection(latex));
-					return true;
-				},
-			}),
 			EditorView.updateListener.of((update) => {
-				if (update.docChanged || update.selectionSet) {
-					if (update.view.hasFocus)
-						markTexEditorActive(pathRef.current, update.view);
-					publishOutlineRef.current?.(update.view);
-				}
 				if (!update.docChanged) return;
-				if (isTexPath(pathRef.current) || /\.bib$/i.test(pathRef.current))
-					invalidateTexProjectIndex();
 				if (!dirtyRef.current) {
 					dirtyRef.current = true;
 					onDirtyChangeRef.current(true);
-				}
-				if (isTexPath(pathRef.current) && !texLiveReloadRef.current) {
-					texLiveApplyUpdate(pathRef.current, view, update);
 				}
 				schedulePersistRef.current(update.state.doc);
 			}),
@@ -364,137 +191,9 @@ export function TextEditor({
 			viewRef.current = null;
 		};
 		// Mount-once; seed/path/theme changes are handled by the effects below
-		// (`manualSaveKeymap` / `selection.selectionListener` /
-		// `handleDiagnostics` are stable — never re-mount the editor).
-	}, [manualSaveKeymap, selection.selectionListener, handleDiagnostics]);
-
-	useEffect(() => {
-		const view = viewRef.current;
-		if (!view) return;
-		const unregisterEditor = registerTexEditor(path, view, {
-			canonical: !panelId || panelId === tabIdForPath(path),
-			owner: texLiveOwner,
-			activate: panelId
-				? () => {
-						setActiveTabId(panelId);
-						dockHandle()?.activatePanel(panelId);
-					}
-				: undefined,
-		});
-		const unregisterBuffer = registerTexProjectBuffer(path, () =>
-			view.state.doc.toString(),
-		);
-		return () => {
-			unregisterEditor();
-			unregisterBuffer();
-		};
-	}, [path, panelId, texLiveOwner]);
-
-	// Mounted TeX buffer owns the sidebar outline and the click-to-jump
-	// target, including while the PDF tab is the one in front. Runs after
-	// the editor mounts so the first snapshot is the current buffer.
-	useEffect(() => {
-		if (!isTexPath(path)) return;
-		const binding = bindTexOutline(path);
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		let generation = 0;
-		let projectOutline: { items: TexOutlineItem[]; rootPath: string } | null =
-			null;
-		let previousDocument: Text | null = null;
-		let projectPaths = new Set<string>();
-		const publish = (view: EditorView) => {
-			const changed = previousDocument !== view.state.doc;
-			previousDocument = view.state.doc;
-			const cursorLine = view.state.doc.lineAt(
-				view.state.selection.main.head,
-			).number;
-			if (projectOutline) {
-				binding.publish(
-					projectOutline.items,
-					cursorLine,
-					projectOutline.rootPath,
-				);
-				if (!changed) return;
-			} else {
-				binding.publish(
-					texOutlineFromTree(syntaxTree(view.state).topNode, view.state.doc),
-					cursorLine,
-				);
-			}
-			if (timer) clearTimeout(timer);
-			const currentGeneration = ++generation;
-			timer = setTimeout(() => {
-				void loadTexProjectIndex(path)
-					.then((index) => {
-						if (currentGeneration !== generation || viewRef.current !== view)
-							return;
-						projectOutline = { items: index.outline, rootPath: index.rootPath };
-						projectPaths = new Set(
-							[...index.texFiles, ...index.bibFiles, ...index.dependencies].map(
-								normalizePath,
-							),
-						);
-						binding.publish(
-							index.outline,
-							view.state.doc.lineAt(view.state.selection.main.head).number,
-							index.rootPath,
-						);
-					})
-					.catch(() => {
-						/* Local outline remains usable without a desktop host. */
-					});
-			}, 500);
-		};
-		publishOutlineRef.current = publish;
-		const unsubscribeFiles = subscribeTexProjectChanges((paths) => {
-			const rootDir = dirnameOf(projectOutline?.rootPath ?? path);
-			if (
-				!paths.some(
-					(changed) =>
-						projectPaths.has(normalizePath(changed)) ||
-						isInsideProject(changed, rootDir),
-				)
-			)
-				return;
-			projectOutline = null;
-			const current = viewRef.current;
-			if (current) publish(current);
-		});
-		const unsubscribeSettings = texSettingsStore.subscribe(
-			(state, previous) => {
-				if (
-					state.roots === previous.roots &&
-					state.projects === previous.projects
-				)
-					return;
-				projectOutline = null;
-				const current = viewRef.current;
-				if (current) publish(current);
-			},
-		);
-		const view = viewRef.current;
-		if (view) publish(view);
-		return () => {
-			generation += 1;
-			if (timer) clearTimeout(timer);
-			if (publishOutlineRef.current === publish) {
-				publishOutlineRef.current = null;
-			}
-			binding.unbind();
-			unsubscribeSettings();
-			unsubscribeFiles();
-		};
-	}, [path]);
-
-	// A live preview session may already be running (restored pane / another
-	// split). Register this buffer so its edits and current text reach rtex.
-	useEffect(() => {
-		const view = viewRef.current;
-		if (!view) return;
-		return registerTexLiveEditor(path, {
-			getText: () => viewRef.current?.state.doc.toString() ?? "",
-		});
-	}, [path]);
+		// (`manualSaveKeymap` / `selection.selectionListener` are stable — never
+		// re-mount the editor).
+	}, [manualSaveKeymap, selection.selectionListener]);
 
 	// Follow light/dark without rebuilding the editor. Token colors use
 	// light-dark() against this color-scheme, and surface colors are CSS
@@ -558,19 +257,13 @@ export function TextEditor({
 		const next = seedRef.current;
 		lastSavedRef.current = next;
 		if (view && view.state.doc.toString() !== next) {
-			texLiveReloadRef.current = true;
-			try {
-				view.dispatch({
-					changes: { from: 0, to: view.state.doc.length, insert: next },
-				});
-			} finally {
-				texLiveReloadRef.current = false;
-			}
+			view.dispatch({
+				changes: { from: 0, to: view.state.doc.length, insert: next },
+			});
 		}
-		texLiveSetDocument(path, next);
 		dirtyRef.current = false;
 		onDirtyChangeRef.current(false);
-	}, [reloadKey, path]);
+	}, [reloadKey]);
 
 	// An unreadable file still opens an empty buffer — the next autosave
 	// creates/repairs the file on disk.
@@ -581,37 +274,10 @@ export function TextEditor({
 		<div
 			className={`relative flex h-full w-full flex-col overflow-hidden ${className ?? ""}`}
 		>
-			{isTexPath(path) ? (
-				<TexCitationPicker
-					path={path}
-					open={citationOpen}
-					onOpenChange={setCitationOpen}
-					onInsert={(key) => {
-						const view = viewRef.current;
-						if (!view) return;
-						insertTexCitation(view, key);
-					}}
-				/>
-			) : null}
-			{/* The chip anchors to the editor viewport, so the lint footer and
-			panel edges never affect its position. */}
 			<div className="relative min-h-0 w-full flex-1 overflow-hidden">
-				<TextEditorToolbar
-					fontSize={fontSize}
-					onFontSizeChange={setFontSize}
-					texTools={
-						isTexPath(path) ? { onCitation: () => setCitationOpen(true) } : null
-					}
-				/>
+				<TextEditorToolbar fontSize={fontSize} onFontSizeChange={setFontSize} />
 				<div ref={hostRef} className="h-full w-full overflow-hidden" />
 			</div>
-			{hasLintSources && !hideLintFooter ? (
-				<TextEditorLintFooter
-					path={path}
-					diagnostics={diagnostics}
-					onJump={jumpToDiagnostic}
-				/>
-			) : null}
 		</div>
 	);
 }

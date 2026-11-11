@@ -5,7 +5,6 @@ import { customPropertiesStore } from "@/lib/paper/custom-properties-store";
 vi.mock("@/lib/core/tauri", () => ({
 	isTauri: () => false,
 	isMacOS: () => false,
-	isMobileApp: () => false,
 	getPlatformOS: () => "other",
 }));
 

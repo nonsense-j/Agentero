@@ -253,18 +253,7 @@ export function isPlainPdfPath(path: string | null): boolean {
 	return !isUnderPapers(path) && !isRemoteArxivPath(path);
 }
 
-/** .tex source file outside papers/ (compilable in the file tree). */
-export function isTexPath(path: string | null): boolean {
-	if (!path || !/\.tex$/i.test(path)) return false;
-	return !isUnderPapers(path);
-}
-
-/** Compiled output path for a .tex source: same dir, same stem, .pdf. */
-export function texPdfPath(texPath: string): string {
-	return texPath.replace(/\.tex$/i, ".pdf");
-}
-
-export type TextLanguageId = "json" | "yaml" | "python" | "tex" | "bib";
+export type TextLanguageId = "json" | "yaml" | "python" | "bib";
 
 /**
  * Syntax-highlight language for the plain-text editor; null = plain text
@@ -281,10 +270,6 @@ export function textLanguageIdForPath(path: string): TextLanguageId | null {
 		case "py":
 		case "pyw":
 			return "python";
-		case "tex":
-		case "sty":
-		case "cls":
-			return "tex";
 		case "bib":
 			return "bib";
 		default:

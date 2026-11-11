@@ -36,13 +36,11 @@ import { patchSettings } from "@/lib/settings/react-store";
 import { openSettingsWindow } from "@/lib/shell/settings-window";
 import { joinVaultPath } from "@/lib/vault";
 import { handleTrashChanged } from "@/lib/vault/actions";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { refreshTree, setTreeSelectedPath } from "@/lib/vault/store";
 import { renameWikiHeadingAction } from "@/lib/wiki/actions";
 import {
 	closePlazaTabs,
 	closeTab,
-	compileTexOnManualSave,
 	ensureLibraryTabPresent,
 	handleActivePanelChange,
 	hydratePlaceholderTabs,
@@ -339,10 +337,7 @@ export function WorkspaceHost() {
 			},
 			onAssetsChanged: handleAssetsChanged,
 			onTabPatch: updateTab,
-			onRenameHeading:
-				vaultPath && !isRemoteVaultHandle(vaultPath)
-					? renameWikiHeadingAction
-					: undefined,
+			onRenameHeading: vaultPath ? renameWikiHeadingAction : undefined,
 		}),
 		[
 			editorFontSize,
@@ -375,8 +370,6 @@ export function WorkspaceHost() {
 	const textProps = useMemo(
 		() => ({
 			onPersistFile: persistTextFile,
-			// ⌘S: save landed — TeX compiles, everything else no-ops inside.
-			onManualSave: (path: string) => void compileTexOnManualSave(path),
 			onTabPatch: updateTab,
 		}),
 		[],

@@ -52,9 +52,7 @@
 		"tabNext": "Next Tab",
 		"tabPrev": "Previous Tab",
 		"exportAnnotatedPdf": "Export Annotated PDF",
-		"wandOpen": "Magic Wand (Import by ID)",
-		"pluginsLoadDevelopment": "Load development plugin…",
-		"pluginsUnloadDevelopment": "Unload development plugins"
+		"wandOpen": "Magic Wand (Import by ID)"
 	},
 	"titlebar": {
 		"showLeftSidebar": "Show left sidebar",
@@ -96,8 +94,6 @@
 		"close": "Close {{title}}",
 		"showHtml": "Show HTML version",
 		"showPdf": "Show PDF version",
-		"openTexPdf": "Open PDF",
-		"texCompiling": "Compiling…",
 		"contextCopyPath": "Copy path",
 		"copiedPath": "Path copied",
 		"copyPathFailed": "Could not copy path",
@@ -148,7 +144,6 @@
 	},
 	"vault": {
 		"openDesktopOnly": "Open vault is only available in the Tauri app.",
-		"remoteNoAutoLinkRepair": "Automatic link repair is unavailable for remote vaults.",
 		"externalRename": {
 			"title": "Repair links after external rename?",
 			"reviewTitle": "Review external rename repair",
@@ -185,20 +180,7 @@
 		"restoredVaultMissing": "The last vault no longer exists, please reopen it: {{path}}",
 		"switchVault": "Switch vault",
 		"openVaultButton": "Open vault…",
-		"openRemoteVaultButton": "Open remote…",
 		"createVaultButton": "Create vault",
-		"remoteDialogTitle": "Open remote vault (SSH)",
-		"remoteHostLabel": "SSH host",
-		"remoteHostPlaceholder": "gpu01 or user@host",
-		"remotePathLabel": "Remote vault path",
-		"remotePathPlaceholder": "/home/you/research-vault",
-		"remoteConnect": "Connect",
-		"remoteCancel": "Cancel",
-		"remoteConnecting": "Connecting…",
-		"remoteConnectFailed": "Failed to open remote vault",
-		"remoteBadge": "Remote",
-		"remoteNoFinder": "Reveal in Finder is not available for remote vaults.",
-		"remoteNoTerminal": "Open in Terminal is not available for remote vaults.",
 		"runTauriPrefix": "Run the app with",
 		"runTauriSuffix": "to open a vault.",
 		"skillsSeeded": "Installed {{count}} new skill(s): {{names}}",
@@ -240,14 +222,10 @@
 		"downloadPhaseAssets": "Download",
 		"downloadPhaseParse": "Parsing PDF",
 		"downloadPhaseAsset": "Asset",
-		"downloadPhaseLayoutModel": "Layout model",
-		"layoutModelDownload": "Download layout model",
-		"layoutModelDetail": "ModelScope → HuggingFace · PP-DocLayoutV3",
 		"layoutAnalysis": "Parse figures, tables, and text",
 		"pdfParse": "Parse PDF body",
 		"parseRefs": "Parse references",
 		"openLayoutSettings": "Open analysis settings",
-		"latexCompile": "Compile LaTeX",
 		"jevSmartHighlights": "jEV smart highlights",
 		"downloadBytes": "{{phase}} · {{downloaded}} / {{total}}",
 		"downloadBytesUnknown": "{{phase}} · {{downloaded}}",
@@ -275,22 +253,10 @@
 	},
 	"reminders": {
 		"dismiss": "Don't remind me again",
-		"layoutLocalModel": {
-			"title": "Layout analysis runs a local model",
-			"description": "Figures, tables, and formulas are detected on this device with a local model, which uses extra memory and CPU. Low-memory machines may feel slow — switch to a cloud provider in settings if needed.",
-			"openSettings": "Open analysis settings"
-		},
 		"networkProxy": {
 			"title": "Network request failed",
 			"description": "If access is restricted, configure a proxy in settings and try again.",
 			"openSettings": "Open network settings"
 		}
-	},
-	"plugins": {
-		"chooseDirectory": "Load plugin — allow reading the current vault",
-		"failed": "Plugin operation failed",
-		"loaded": "Development plugin loaded",
-		"commandTitle": "{{title}}",
-		"suspended": "{{name}} was stopped after repeated failures. Re-enable it in Settings."
 	}
 }

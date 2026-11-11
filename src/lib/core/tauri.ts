@@ -47,22 +47,3 @@ export function isMacOS(): boolean {
 export function isWindows(): boolean {
 	return getPlatformOS() === "windows";
 }
-
-/** Phone/tablet app shell: iPhone/iPad (incl. iPadOS `MacIntel`) or Android. */
-export function isMobileApp(): boolean {
-	if (typeof window === "undefined" || typeof navigator === "undefined") {
-		return false;
-	}
-	if (
-		new URLSearchParams(window.location.search).get("mobilePreview") === "1"
-	) {
-		return true;
-	}
-	const platform = navigator.platform ?? "";
-	const ua = navigator.userAgent ?? "";
-	return (
-		/iPhone|iPad|iPod/.test(platform) ||
-		/iPhone|iPad|iPod|Android/.test(ua) ||
-		(platform === "MacIntel" && navigator.maxTouchPoints > 1)
-	);
-}

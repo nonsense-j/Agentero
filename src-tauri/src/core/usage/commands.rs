@@ -7,7 +7,6 @@ use crate::core::blocking::run_blocking;
 use crate::core::error::{map_err, ApiResult};
 use crate::core::usage::{clear_default, record_default, UsageRecord};
 use serde::Deserialize;
-use tauri::AppHandle;
 
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -17,36 +16,12 @@ pub struct ActivityRecordArgs {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn activity_record_events(
-    app: AppHandle,
-    args: ActivityRecordArgs,
-) -> Result<ApiResult<usize>, String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    forward_to_telemetry(&app, &args.events);
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let _ = &app;
-
+pub async fn activity_record_events(args: ActivityRecordArgs) -> Result<ApiResult<usize>, String> {
     Ok(run_blocking(move || match record_default(&args.events) {
         Ok(n) => ApiResult::ok(n),
         Err(e) => map_err(e),
     })
     .await)
-}
-
-/// Project events to their sanitized PostHog shape and forward them. No-op
-/// unless product analytics is enabled; unmapped kinds are dropped.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn forward_to_telemetry(app: &AppHandle, events: &[UsageRecord]) {
-    use crate::core::telemetry::Telemetry;
-    use crate::core::usage::telemetry_projection;
-    use std::sync::Arc;
-    use tauri::Manager;
-
-    let Some(telemetry) = app.try_state::<Arc<Telemetry>>() else {
-        return;
-    };
-    let projections: Vec<_> = events.iter().filter_map(telemetry_projection).collect();
-    telemetry.capture_activity(&projections);
 }
 
 #[derive(Debug, Deserialize, specta::Type)]

@@ -6,8 +6,6 @@ import {
 	runLayoutRegionTranslate,
 } from "@/lib/pdf/layout/layout-translate";
 import { runLayoutRegionTranslate as runPublicLayoutTranslate } from "@/lib/pdf/layout/layout-translate-reliable";
-import { paragraphFromCharacters } from "@/lib/pdf/reflow/extract";
-import { validReflowTranslation } from "@/lib/pdf/reflow/types";
 
 const runTranslate = vi.fn<(...args: unknown[]) => Promise<string>>();
 
@@ -51,49 +49,13 @@ describe("runLayoutRegionTranslate paragraph chains", () => {
 		runTranslate.mockReset();
 	});
 
-	it("keeps separate reflow sentence pairs with formulas and styles spanning sentences", async () => {
-		const reflow = paragraphFromCharacters(
-			"p",
-			0,
-			{ x: 0, y: 0, w: 100, h: 40 },
-			[],
-			[],
-			false,
-		);
-		reflow.source = "Use x here. Bold follows. Last sentence.";
-		reflow.protectedText =
-			"Use ⟪F0⟫ here. ⟪S0⟫Bold follows. Last sentence.⟪/S0⟫";
-		reflow.formulas = [
-			{
-				id: "0",
-				text: "x",
-				box: { x: 0, y: 0, w: 5, h: 5 },
-				characterIndexes: [4],
-				baselineOffset: 0,
-			},
-		];
-		reflow.styles = { "0": { ...reflow.style, bold: true } };
-		runTranslate.mockResolvedValueOnce(
-			"[[1]] 使用 ⟦0⟧。\n[[2]] ⟦0⟧接着是粗体。\n[[3]] 末句。⟦0⟧",
-		);
+	it("hydrates matching sidecar items and preserves sentence pairs", async () => {
+		const base = item("p", "First sentence. Second sentence.", 0);
+		runTranslate.mockResolvedValueOnce("[[1]] 第一句。\n[[2]] 第二句。");
 		const [translated] = await runLayoutRegionTranslate({
-			items: [
-				{ ...item("p", reflow.protectedText, 0), raw: reflow.source, reflow },
-			],
+			items: [base],
 			onUpdate: () => {},
 		});
-		expect(translated.status).toBe("done");
-		expect(
-			translated.sentences?.map(({ quote, translated }) => [quote, translated]),
-		).toEqual([
-			["Use x here.", "使用 ⟪F0⟫。"],
-			["Bold follows.", "⟪S0⟫接着是粗体。"],
-			["Last sentence.", "末句。⟪/S0⟫"],
-		]);
-		expect(validReflowTranslation(reflow, translated.translated ?? "")).toBe(
-			true,
-		);
-
 		const sidecar: LayoutTranslateSidecar = {
 			schemaVersion: 2,
 			source: {
@@ -108,31 +70,15 @@ describe("runLayoutRegionTranslate paragraph chains", () => {
 				{
 					...translated,
 					translated: translated.translated ?? "",
-					sentences: [
-						{
-							quote: reflow.source,
-							source: reflow.protectedText,
-							translated: translated.translated ?? "",
-						},
-					],
+					sentences: translated.sentences,
 				},
 			],
 		};
-		expect(
-			applyLayoutTranslateSidecar([translated], sidecar, {
-				requireReflowSentencePairs: true,
-			})[0],
-		).toMatchObject({
-			status: "pending",
-			translated: undefined,
-			sentences: undefined,
+		expect(applyLayoutTranslateSidecar([base], sidecar)[0]).toMatchObject({
+			status: "done",
+			translated: "第一句。第二句。",
+			sentences: translated.sentences,
 		});
-		sidecar.items[0].sentences = translated.sentences;
-		expect(
-			applyLayoutTranslateSidecar([translated], sidecar, {
-				requireReflowSentencePairs: true,
-			})[0],
-		).toMatchObject({ status: "done", sentences: translated.sentences });
 	});
 
 	it("publishes valid batch results before a different paragraph finishes retrying", async () => {
@@ -323,76 +269,4 @@ describe("runLayoutRegionTranslate paragraph chains", () => {
 		expect(out[0]?.sentences).toBeUndefined();
 		expect(out[0]?.translated).toBeUndefined();
 	});
-});
-
-it("retries structural formulas with nonnumeric placeholders when MT interprets token IDs as quantities", async () => {
-	runTranslate.mockReset();
-	const reflow = paragraphFromCharacters(
-		"p",
-		0,
-		{ x: 0, y: 0, w: 100, h: 30 },
-		[],
-		[],
-		false,
-	);
-	reflow.source = "Factor x";
-	reflow.protectedText = "Factor ⟪F0⟫";
-	reflow.formulas = [
-		{
-			id: "0",
-			text: "x",
-			box: { x: 0, y: 0, w: 5, h: 10 },
-			characterIndexes: [0],
-			baselineOffset: 0,
-		},
-	];
-	runTranslate
-		.mockResolvedValueOnce("倍数 0")
-		.mockImplementation(async (task) =>
-			(task as { text: string }).text.replace("Factor", "倍数"),
-		);
-	const out = await runLayoutRegionTranslate({
-		items: [{ ...item("p", reflow.protectedText, 0), reflow }],
-		onUpdate: () => {},
-	});
-	expect(out[0].status).toBe("done");
-	expect(out[0].translated).toContain("⟪F0⟫");
-	expect(runTranslate.mock.calls[1]?.[0]).toMatchObject({
-		text: "Factor ZXQAQXZ",
-	});
-});
-it.each([
-	false,
-	true,
-])("retains style order when prose batch markers are damaged: %s", async (damaged) => {
-	runTranslate.mockReset();
-	const reflow = paragraphFromCharacters(
-		"p",
-		0,
-		{ x: 0, y: 0, w: 100, h: 30 },
-		[],
-		[],
-		false,
-	);
-	reflow.source = ". A word";
-	reflow.protectedText = ". A ⟪S0⟫word⟪/S0⟫";
-	reflow.styles = { "0": { ...reflow.style, bold: true } };
-	runTranslate
-		.mockResolvedValueOnce("坏结果")
-		.mockResolvedValueOnce("坏结果")
-		.mockResolvedValueOnce(damaged ? "一个词" : "[[1]] 一个\n\n[[2]] 词")
-		.mockResolvedValueOnce("一个")
-		.mockResolvedValueOnce("词");
-	const out = await runLayoutRegionTranslate({
-		items: [{ ...item("p", reflow.protectedText, 0), reflow }],
-		onUpdate: () => {},
-	});
-	expect(out[0].status).toBe("done");
-	expect(out[0].reflowFallback).toBe("protected-spans");
-	expect(runTranslate).toHaveBeenCalledTimes(damaged ? 5 : 3);
-	expect(runTranslate.mock.calls[2]?.[0]).toMatchObject({
-		text: "[[1]] A \n\n[[2]] word",
-	});
-	expect(out[0].translated).toContain(". 一个");
-	expect(out[0].translated).toContain("⟪S0⟫ 词 ⟪/S0⟫");
 });

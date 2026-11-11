@@ -11,7 +11,7 @@ import { openExternalUrl } from "@/lib/core/open-external";
 import { initPaintOptimizations } from "@/lib/core/paint-perf";
 import { perfActive, perfEmit } from "@/lib/core/perf";
 import { initAutoHideScrollbars } from "@/lib/core/scrollbars";
-import { isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isTauri } from "@/lib/core/tauri";
 import {
 	applyDocumentChrome,
 	ensureSettingsLoaded,
@@ -217,7 +217,7 @@ async function boot() {
 	// initialize a second PDFium instance.
 	const [{ default: App }, { PdfEngineHost }, { EditorDndProvider }] =
 		await Promise.all([
-			import(isMobileApp() ? "./components/mobile/mobile-app" : "./App"),
+			import("./App"),
 			import("@/components/viewer/pdf/engine-provider"),
 			import("@/components/editor/plugins/dnd-kit"),
 			import("katex/dist/katex.min.css"),
@@ -225,7 +225,7 @@ async function boot() {
 	bootStage("app-module");
 	initVaultStore();
 	initWorkspaceStore();
-	if (!isMobileApp()) initShellLayoutFromPrefs();
+	initShellLayoutFromPrefs();
 	ReactDOM.createRoot(root).render(
 		<PdfEngineHost>
 			{/* HTML5Backend cannot remount under StrictMode — drag sources go dead. */}
@@ -254,8 +254,6 @@ async function boot() {
 	// After an in-app update relaunches the app, re-align the installed CLI
 	// shim with the new build (the updater only replaces the GUI package).
 	void syncInstalledCli();
-	// Layout model download is a Host background task; App mounts
-	// `useLayoutModelPrefetch` to surface it in the tasks panel.
 }
 
 /** A single main window owns the background update notification. */

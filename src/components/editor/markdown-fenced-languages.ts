@@ -53,12 +53,4 @@ export const markdownFencedLanguages = [
 				),
 			),
 	}),
-	LanguageDescription.of({
-		name: "LaTeX",
-		alias: ["tex"],
-		load: async () =>
-			new LanguageSupport(
-				(await import("codemirror-lang-latex")).latexLanguage,
-			),
-	}),
 ];

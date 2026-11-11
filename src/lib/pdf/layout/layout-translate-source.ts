@@ -150,7 +150,7 @@ export function buildLayoutTranslateChains(
 	const chains: LayoutTranslateChain[] = [];
 	let open: LayoutTranslateChain | null = null;
 	for (const item of items) {
-		if (item.reflow || !isLayoutContinuationKind(item.kind)) {
+		if (!isLayoutContinuationKind(item.kind)) {
 			chains.push({ members: [item], source: item.source });
 			// figure/table captions interrupt the layout, not the paragraph.
 			if (item.kind !== "figure_title") open = null;

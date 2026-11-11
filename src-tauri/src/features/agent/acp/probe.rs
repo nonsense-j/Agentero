@@ -12,21 +12,17 @@ use agent_client_protocol::{Agent, ConnectionTo};
 use std::sync::{Arc, Mutex};
 
 /// Spawn agent, initialize ACP, report agent info. Does not send a user prompt.
-/// When `remote` is set, the agent process is launched on the remote host (SSH).
-pub async fn probe_agent(
-    desc: &AgentDescriptor,
-    remote: Option<&dyn crate::features::agent::remote_host::RemoteAgentLaunch>,
-) -> ProbeResult {
+pub async fn probe_agent(desc: &AgentDescriptor) -> ProbeResult {
     let agent_id = desc.id.clone();
-    // Unix probes use scratch (or the remote vault) instead of inheriting `/`
-    // from LaunchServices. Windows probes keep their original direct launch:
-    // no cwd wrapper is added; launcher descendants may outlive SDK cleanup.
+    // Unix probes use scratch instead of inheriting `/` from LaunchServices.
+    // Windows probes keep their original direct launch: no cwd wrapper is added;
+    // launcher descendants may outlive SDK cleanup.
     let cwd = if cfg!(windows) {
         Ok(None)
     } else {
-        agent_spawn_cwd(remote, None).map(Some)
+        agent_spawn_cwd(None).map(Some)
     };
-    let acp = match cwd.and_then(|cwd| to_acp_agent(desc, cwd.as_deref(), remote)) {
+    let acp = match cwd.and_then(|cwd| to_acp_agent(desc, cwd.as_deref())) {
         Ok(a) => a,
         Err(e) => {
             return ProbeResult {
@@ -108,32 +104,30 @@ pub async fn probe_agent(
                 Some((name, version, session_caps)) => {
                     // ACP adapters initialize fine without host-CLI auth, so OAuth-gated
                     // templates get an explicit login-status probe of their own.
-                    if remote.is_none() {
-                        let unauthenticated = match desc.template {
-                            AgentTemplate::CodexAcp => {
-                                diagnose_codex_auth(desc).await.status
-                                    == CodexAuthStatus::Unauthenticated
-                            }
-                            AgentTemplate::ClaudeAcp => {
-                                diagnose_claude_auth(desc).await.status
-                                    == CodexAuthStatus::Unauthenticated
-                            }
-                            _ => false,
-                        };
-                        if unauthenticated {
-                            let host = match desc.template {
-                                AgentTemplate::ClaudeAcp => "Claude",
-                                _ => "Codex",
-                            };
-                            return ProbeResult {
-                                agent_id,
-                                available: false,
-                                agent_name: Some(name),
-                                protocol_version: Some(version),
-                                error: Some(format!("{host} is not logged in")),
-                                session_capabilities: Some(session_caps),
-                            };
+                    let unauthenticated = match desc.template {
+                        AgentTemplate::CodexAcp => {
+                            diagnose_codex_auth(desc).await.status
+                                == CodexAuthStatus::Unauthenticated
                         }
+                        AgentTemplate::ClaudeAcp => {
+                            diagnose_claude_auth(desc).await.status
+                                == CodexAuthStatus::Unauthenticated
+                        }
+                        _ => false,
+                    };
+                    if unauthenticated {
+                        let host = match desc.template {
+                            AgentTemplate::ClaudeAcp => "Claude",
+                            _ => "Codex",
+                        };
+                        return ProbeResult {
+                            agent_id,
+                            available: false,
+                            agent_name: Some(name),
+                            protocol_version: Some(version),
+                            error: Some(format!("{host} is not logged in")),
+                            session_capabilities: Some(session_caps),
+                        };
                     }
                     ProbeResult {
                         agent_id,

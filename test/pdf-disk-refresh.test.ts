@@ -62,19 +62,6 @@ describe("refreshPdfTab", () => {
 		expect(next[1]?.pdfBytes).toBe(fresh);
 		expect(next[2]?.pdfBytes).toBe(otherBytes);
 	});
-
-	it("leaves compile-shimmer panes to the compile flow", () => {
-		const oldBytes = new ArrayBuffer(8);
-		const tab = makePdfTab(PDF_PATH, {
-			pdfBytes: oldBytes,
-			texCompiling: true,
-		});
-
-		const next = refreshPdfTab([tab], PDF_PATH, new ArrayBuffer(16));
-
-		expect(next[0]?.pdfBytes).toBe(oldBytes);
-		expect(next[0]?.texCompiling).toBe(true);
-	});
 });
 
 describe("applyDiskChange pdf panes", () => {

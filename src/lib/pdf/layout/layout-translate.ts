@@ -15,11 +15,9 @@ import {
 import { parseBbox } from "@/lib/pdf/layout/layout-index";
 import {
 	draftChainSentences,
-	draftReflowSentences,
 	joinTranslatedDisplays,
 	type LayoutSentenceDraft,
 	paintSentenceTranslations,
-	reflowSentenceValidator,
 } from "@/lib/pdf/layout/layout-sentences";
 import {
 	buildLayoutTranslateChains,
@@ -463,31 +461,12 @@ export async function readLayoutTranslateSidecar(
 export function applyLayoutTranslateSidecar(
 	items: readonly LayoutTranslateItem[],
 	sidecar: LayoutTranslateSidecar | null,
-	options?: { requireReflowSentencePairs?: boolean },
 ): LayoutTranslateItem[] {
 	if (!sidecar?.items.length) return items.map((it) => ({ ...it }));
 	const byId = new Map(sidecar.items.map((item) => [item.id, item]));
 	return items.map((item) => {
 		const cached = byId.get(item.id);
 		if (!cached || cached.source !== item.source) return { ...item };
-		if (options?.requireReflowSentencePairs && item.reflow) {
-			const drafts = draftReflowSentences(item.reflow);
-			if (
-				drafts.length > 1 &&
-				(cached.sentences?.length !== drafts.length ||
-					drafts.some(
-						(draft, index) => draft.quote !== cached.sentences?.[index]?.quote,
-					))
-			) {
-				return {
-					...item,
-					status: "pending",
-					translated: undefined,
-					sentences: undefined,
-					error: undefined,
-				};
-			}
-		}
 		return {
 			...item,
 			status: "done" as const,
@@ -521,9 +500,8 @@ export type LayoutTranslateCacheHydration = {
 export function hydrateLayoutTranslateItems(
 	items: readonly LayoutTranslateItem[],
 	sidecar: LayoutTranslateSidecar | null,
-	options?: { requireReflowSentencePairs?: boolean },
 ): LayoutTranslateCacheHydration {
-	const hydrated = applyLayoutTranslateSidecar(items, sidecar, options);
+	const hydrated = applyLayoutTranslateSidecar(items, sidecar);
 	let cachedCount = 0;
 	for (const item of hydrated) {
 		if (item.translated?.trim()) cachedCount += 1;
@@ -667,9 +645,6 @@ function sameLayoutTranslateBucketSlot(
 		before.id === after.id &&
 		before.status === after.status &&
 		before.translated === after.translated &&
-		before.reflow === after.reflow &&
-		before.reflowPreview === after.reflowPreview &&
-		before.reflowLayout === after.reflowLayout &&
 		sentencePaintKey(before) === sentencePaintKey(after)
 	);
 }
@@ -917,7 +892,6 @@ export async function runLayoutRegionTranslate(options: {
 	type SentenceUnit = {
 		source: string;
 		tokens: MaskedToken[];
-		validateReflow?: (text: string) => boolean;
 		job: ChainJob;
 		draftIndex: number;
 	};
@@ -926,10 +900,7 @@ export async function runLayoutRegionTranslate(options: {
 	for (const chain of buildLayoutTranslateChains(items).filter(
 		chainNeedsTranslate,
 	)) {
-		const structural = chain.members[0]?.reflow;
-		const drafts: LayoutSentenceDraft[] = structural
-			? draftReflowSentences(structural)
-			: draftChainSentences(chain.members);
+		const drafts: LayoutSentenceDraft[] = draftChainSentences(chain.members);
 		if (drafts.length === 0) {
 			for (const member of chain.members) {
 				member.status = "error";
@@ -948,9 +919,6 @@ export async function runLayoutRegionTranslate(options: {
 			units.push({
 				source: masked.text,
 				tokens: masked.tokens,
-				validateReflow: structural
-					? reflowSentenceValidator(structural, draft)
-					: undefined,
 				job,
 				draftIndex,
 			});
@@ -1007,86 +975,13 @@ export async function runLayoutRegionTranslate(options: {
 		tokens: readonly MaskedToken[],
 	): Promise<string> => {
 		const restored = restoreInlineTokens(segment.trim(), tokens);
-		const validateReflow = unit.validateReflow;
-		if (
-			restored.missing === 0 &&
-			!restored.invalid &&
-			(!validateReflow || validateReflow(restored.text))
-		)
-			return restored.text;
+		if (restored.missing === 0 && !restored.invalid) return restored.text;
 		if (signal?.aborted) return "";
-		// A structural failure may recur with the same token spelling. Change
-		// the spelling immediately instead of repeating the same request.
-		const retry = validateReflow
-			? restored
-			: restoreInlineTokens(
-					await translateText(unit.source, pageOf(unit)),
-					tokens,
-				);
-		if (
-			retry.missing ||
-			retry.invalid ||
-			(validateReflow && !validateReflow(retry.text))
-		) {
-			if (validateReflow) {
-				// Some MT engines interpret a numeric placeholder as a number (e.g.
-				// "factor of ⟦4⟧" becomes "4 倍"). Retry with nonnumeric opaque words.
-				const aliases = tokens.map((token, index) => ({
-					token: token.placeholder,
-					alias: `ZXQ${index.toString(26).replace(/[0-9a-p]/g, (c) => String.fromCharCode(65 + Number.parseInt(c, 26)))}QXZ`,
-				}));
-				let protectedSource = unit.source;
-				for (const { token, alias } of aliases)
-					protectedSource = protectedSource.replaceAll(token, alias);
-				let alternate = await translateText(protectedSource, pageOf(unit));
-				for (const { token, alias } of aliases)
-					alternate = alternate.replace(new RegExp(alias, "gi"), token);
-				const restoredAlternate = restoreInlineTokens(alternate, tokens);
-				if (
-					!restoredAlternate.missing &&
-					!restoredAlternate.invalid &&
-					validateReflow(restoredAlternate.text)
-				)
-					return restoredAlternate.text;
-				// Last resort: keep structural boundaries in source order and translate
-				// only their intervening prose. This trades sentence fluency for an
-				// intact formula/style contract, and is exposed for acceptance audits.
-				const protectedParts = unit.source.split(/(⟦\d+⟧)/u);
-				const prose = protectedParts.flatMap((part, index) => {
-					if (!part.trim() || /^⟦\d+⟧$/u.test(part) || !/\p{L}/u.test(part))
-						return [];
-					// Keep leading punctuation outside MT, which may otherwise echo
-					// an entire fragment unchanged.
-					const leading = part.match(/^[\s.,;:!?。；，：！？)\]]*/u)?.[0] ?? "";
-					return [{ index, leading, source: part.slice(leading.length) }];
-				});
-				// Reuse the normal payload budget and strict marker parser. Most
-				// paragraphs need one request, not one round trip per style span.
-				for (const batch of buildTranslateBatches(prose)) {
-					if (signal?.aborted) return "";
-					const result = await translateText(
-						buildNumberedPayload(batch),
-						pageOf(unit),
-					);
-					const segments = parseNumberedTranslation(result, batch.length);
-					for (const [index, part] of batch.entries()) {
-						if (signal?.aborted) return "";
-						protectedParts[part.index] =
-							part.leading +
-							(segments?.[index] ??
-								(await translateText(part.source, pageOf(unit))));
-					}
-				}
-				const segmented = restoreInlineTokens(protectedParts.join(" "), tokens);
-				if (
-					!segmented.missing &&
-					!segmented.invalid &&
-					validateReflow(segmented.text)
-				) {
-					unit.job.chain.members[0].reflowFallback = "protected-spans";
-					return segmented.text;
-				}
-			}
+		const retry = restoreInlineTokens(
+			await translateText(unit.source, pageOf(unit)),
+			tokens,
+		);
+		if (retry.missing || retry.invalid) {
 			throw new Error(i18n.t("viewer:pdf.layoutTranslate.invalidTokens"));
 		}
 		return retry.text;
@@ -1187,12 +1082,7 @@ export async function runLayoutRegionTranslate(options: {
 			if (signal?.aborted) return;
 			const segment = segments[index] ?? "";
 			const restored = restoreInlineTokens(segment.trim(), masked.tokens);
-			const validateReflow = masked.unit.validateReflow;
-			if (
-				restored.missing ||
-				restored.invalid ||
-				(validateReflow && !validateReflow(restored.text))
-			) {
+			if (restored.missing || restored.invalid) {
 				retries.push({ ...masked, segment });
 				continue;
 			}

@@ -502,46 +502,6 @@ describe("panelPersistParams", () => {
 			title: "Attention Is All You Need",
 		});
 	});
-
-	it("round-trips live TeX pane state", () => {
-		const tab = makeTab("/vault/thesis/main.pdf", {
-			texLive: true,
-			texRoot: "/vault/thesis/main.tex",
-		});
-		expect(panelPersistParams(tab)).toEqual({
-			panelId: "/vault/thesis/main.pdf",
-			path: "/vault/thesis/main.pdf",
-			mode: "markdown",
-			title: "main.pdf",
-			texLive: true,
-			texRoot: "/vault/thesis/main.tex",
-		});
-
-		const extracted = extractTabsFromLayout({
-			panels: {
-				"/vault/thesis/main.pdf": {
-					id: "/vault/thesis/main.pdf",
-					params: panelPersistParams(tab),
-				},
-			},
-			grid: {
-				root: {
-					type: "leaf",
-					data: {
-						id: "g1",
-						views: ["/vault/thesis/main.pdf"],
-						activeView: "/vault/thesis/main.pdf",
-					},
-				},
-			},
-			activeGroup: "g1",
-		});
-		expect(extracted.tabs[0]).toMatchObject({
-			path: "/vault/thesis/main.pdf",
-			texLive: true,
-			texRoot: "/vault/thesis/main.tex",
-		});
-	});
 });
 
 describe("tab session persistence", () => {

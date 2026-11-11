@@ -146,7 +146,7 @@ async fn probe_one(registry: &AgentRegistry, desc: &AgentDescriptor) -> ProbeRes
             session_capabilities: None,
         }
     } else {
-        probe_agent(desc, None).await
+        probe_agent(desc).await
     };
     let _ = registry.apply_probe_result(&desc.id, &result);
     result

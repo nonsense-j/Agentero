@@ -26,7 +26,9 @@ import {
 	layoutSidecarPath,
 	readLayoutSidecar,
 } from "@/lib/pdf/layout/io";
+import { layoutProviderFor } from "@/lib/pdf/layout/providers";
 import { layoutAnalysisStore } from "@/lib/pdf/layout/store";
+import { loadSettings } from "@/lib/settings/store";
 import {
 	isPathMissingError,
 	joinVaultPath,
@@ -100,6 +102,18 @@ async function runLayoutAnalyzeExecutor(
 	}
 }
 
+function isLayoutBackendConfigured(): boolean {
+	const { layout } = loadSettings();
+	const provider = layoutProviderFor(layout.backend);
+	if (!provider) return false;
+	if (!provider.requiresApiKey) return true;
+	const cfg = layout.providerConfigs[provider.id];
+	if (cfg?.apiKey?.trim()) return true;
+	return Boolean(
+		provider.supportsSelfHosted && cfg?.selfHosted && cfg.baseUrl?.trim(),
+	);
+}
+
 /**
  * After assets land on disk, ensure layout.json is produced. Enqueues a
  * JobCenter `layoutAnalyze` job; the `job:changed` projection owns the task
@@ -135,6 +149,7 @@ export function enqueuePaperLayoutAnalysis(opts: {
 		try {
 			const cached = await readLayoutSidecar(paperAbsPath);
 			if (cached?.regions?.length) return;
+			if (!opts.focus && !isLayoutBackendConfigured()) return;
 			await callApiResult(
 				() =>
 					commands.jobLayoutAnalyzeEnqueue({

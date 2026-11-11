@@ -1,4 +1,4 @@
-import { isMacOS, isMobileApp, isTauri } from "@/lib/core/tauri";
+import { isMacOS, isTauri } from "@/lib/core/tauri";
 import type { ThemePreference } from "@/lib/settings";
 
 let applied: ThemePreference | null = null;
@@ -15,7 +15,7 @@ let applied: ThemePreference | null = null;
  * already, and `set_theme` there overrides the app-wide `NSAppearance`.
  */
 export function applyNativeWindowTheme(preference: ThemePreference): void {
-	if (!isTauri() || isMobileApp() || isMacOS()) return;
+	if (!isTauri() || isMacOS()) return;
 	if (applied === preference) return;
 	applied = preference;
 	void import("@tauri-apps/api/window")

@@ -3,10 +3,6 @@ import i18n from "@/i18n";
 import { commands } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
 import { isTauri } from "@/lib/core/tauri";
-import {
-	remoteEnsureVault,
-	remoteSessionIdFromHandle,
-} from "@/lib/vault/remote/remote-vault";
 import type { CreateVaultResult } from "@/lib/vault/types";
 
 export async function pickVaultDirectory(): Promise<string | null> {
@@ -80,10 +76,6 @@ export async function ensureVault(
 
 	const { logOp } = await import("@/lib/core/logger");
 	return logOp("ensureVault", { path, locale }, async () => {
-		const remoteSessionId = remoteSessionIdFromHandle(path);
-		if (remoteSessionId) {
-			return remoteEnsureVault(remoteSessionId, locale);
-		}
 		return callApi(() => commands.vaultEnsure(path, locale ?? null), {
 			fallback: i18n.t("app:vault.createFailed"),
 		});

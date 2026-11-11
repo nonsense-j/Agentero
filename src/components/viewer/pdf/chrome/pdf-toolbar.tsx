@@ -1,7 +1,6 @@
 import type { PdfEngine } from "@embedpdf/models";
 import {
 	Check,
-	Download,
 	Highlighter,
 	Languages,
 	Library,
@@ -13,12 +12,6 @@ import { motion } from "motion/react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
 	Tooltip,
 	TooltipContent,
@@ -33,14 +26,11 @@ import { useShortcutLabel } from "@/hooks/use-shortcut-label";
 import { cn } from "@/lib/core/utils";
 
 type PdfToolbarProps = {
-	onExportTranslatedPdf?: (dual?: boolean) => void;
 	regionSelecting: boolean;
 	visualCropPending: boolean;
 	engine: PdfEngine | null;
 	onToggleRegionSelect: () => void;
 	layoutTranslateRunning: boolean;
-	/** Final corrected preview is still building after items settled. */
-	layoutTranslatePreparing?: boolean;
 	/** Queued behind layout analysis; plain click cancels the wait. */
 	layoutTranslateWaiting?: boolean;
 	layoutTranslateActive: boolean;
@@ -48,8 +38,7 @@ type PdfToolbarProps = {
 	/** Partial-translation entry; hidden while the meter is running. */
 	layoutTranslatePartial?: PdfLayoutTranslatePartial | null;
 	/**
-	 * 0–1 fill. Stays under full while the reflow preview is still blank.
-	 * Null before the total is known.
+	 * 0–1 fill. Null before the total is known.
 	 */
 	layoutTranslateProgress?: number | null;
 	onToggleLayoutTranslate: () => void;
@@ -67,13 +56,11 @@ type PdfToolbarProps = {
 
 /** Top-right toolbar: region select, bulk translate. Always visible. */
 export const PdfToolbar = memo(function PdfToolbar({
-	onExportTranslatedPdf,
 	regionSelecting,
 	visualCropPending,
 	engine,
 	onToggleRegionSelect,
 	layoutTranslateRunning,
-	layoutTranslatePreparing = false,
 	layoutTranslateWaiting = false,
 	layoutTranslateActive,
 	layoutTranslateLabel,
@@ -177,7 +164,6 @@ export const PdfToolbar = memo(function PdfToolbar({
 
 	const translateMeter = useTranslateMeter({
 		layoutTranslateRunning,
-		layoutTranslatePreparing,
 		layoutTranslateWaiting,
 		layoutTranslateProgress,
 	});
@@ -225,36 +211,6 @@ export const PdfToolbar = memo(function PdfToolbar({
 						PDF_CHROME_CHIP,
 					)}
 				>
-					{onExportTranslatedPdf ? (
-						<div className={asideClass} inert={meterOpen}>
-							<div className="min-w-0 overflow-hidden">
-								<DropdownMenu>
-									<DropdownMenuTrigger asChild>
-										<Button
-											type="button"
-											size="icon-xs"
-											variant="ghost"
-											aria-label={t("pdf.layoutTranslate.exportPdf")}
-										>
-											<Download className="size-3.5" />
-										</Button>
-									</DropdownMenuTrigger>
-									<DropdownMenuContent>
-										<DropdownMenuItem
-											onSelect={() => onExportTranslatedPdf(false)}
-										>
-											{t("pdf.layoutTranslate.exportPdf")}
-										</DropdownMenuItem>
-										<DropdownMenuItem
-											onSelect={() => onExportTranslatedPdf(true)}
-										>
-											{t("pdf.layoutTranslate.exportDualPdf")}
-										</DropdownMenuItem>
-									</DropdownMenuContent>
-								</DropdownMenu>
-							</div>
-						</div>
-					) : null}
 					{isRemotePaper ? (
 						<Tooltip>
 							<TooltipTrigger asChild>

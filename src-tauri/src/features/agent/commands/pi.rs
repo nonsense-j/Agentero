@@ -35,11 +35,6 @@ fn local_vault_path(vault_path: &str) -> Result<PathBuf, AppError> {
     if trimmed.is_empty() {
         return Err(AppError::message("Pi project trust: vault path is empty"));
     }
-    if trimmed.starts_with("remote:") {
-        return Err(AppError::message(
-            "Pi project trust only applies to local Vaults",
-        ));
-    }
     let path = PathBuf::from(trimmed);
     if !path.is_dir() {
         return Err(AppError::message(format!(

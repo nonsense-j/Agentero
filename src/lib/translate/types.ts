@@ -62,7 +62,6 @@ export type TranslateSettings = {
 	/**
 	 * Which source drives the left pane when `displayMode === "dualPane"`.
 	 * - `pdf`: the rendered PDF.
-	 * - `latex`: the arXiv LaTeX source.
 	 */
 	dualPaneSource: DualPaneSource;
 	/**
@@ -92,17 +91,6 @@ export type TranslateSettings = {
 	 * otherwise the source is still quoted. Max 8000 chars.
 	 */
 	customUser: string;
-	/**
-	 * Persist extracted reflow character IR pages under the app cache directory
-	 * (default on). Off = extraction runs again on every open and nothing is
-	 * written; existing files stay until the cache is cleared.
-	 */
-	cacheReflowIr: boolean;
-	/**
-	 * Persist the finished translated PDF under the app cache directory
-	 * (default off: each final is ~25 MB).
-	 */
-	cacheReflowFinal: boolean;
 };
 
 export type TranslateProviderConfig = {
@@ -227,7 +215,7 @@ export const TRANSLATION_DISPLAY_MODES: TranslationDisplayMode[] = [
 ];
 
 /** Source pane type for dual-pane full-document translation. */
-export type DualPaneSource = "pdf" | "latex";
+export type DualPaneSource = "pdf";
 
 /** Canonical dual-pane source values in UI order. */
-export const DUAL_PANE_SOURCES: DualPaneSource[] = ["pdf", "latex"];
+export const DUAL_PANE_SOURCES: DualPaneSource[] = ["pdf"];

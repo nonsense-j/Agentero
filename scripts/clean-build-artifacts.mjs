@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 
 const projectRoot = new URL("../", import.meta.url);
-const buildArtifacts = ["dist", "target", "src-tauri/target", "target-ios"];
+const buildArtifacts = ["dist", "target", "src-tauri/target"];
 
 await Promise.all(
 	buildArtifacts.map(async (artifact) => {

@@ -12,7 +12,6 @@ import { uiStore } from "@/lib/shell/ui-store";
 import { vaultStore } from "@/lib/vault/store";
 import { wikiStore } from "@/lib/wiki/store";
 import { workspaceStore } from "@/lib/workspace/store";
-import { writingStore } from "@/lib/writing/store";
 
 type ExtractState<S> = S extends { getState: () => infer T } ? T : never;
 
@@ -62,10 +61,4 @@ export function useSettings<T>(
 	selector: (state: ExtractState<typeof settingsStore>) => T,
 ): T {
 	return useStore(settingsStore, selector);
-}
-
-export function useWritingStore<T>(
-	selector: (state: ExtractState<typeof writingStore>) => T,
-): T {
-	return useStore(writingStore, selector);
 }

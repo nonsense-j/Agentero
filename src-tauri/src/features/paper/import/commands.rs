@@ -3,11 +3,9 @@
 use crate::core::error::{ApiResult, AppError};
 use crate::core::fs::resolve_vault;
 use crate::core::log_util::{trunc, OpTimer};
-use crate::core::remote::parse_remote_handle;
 use crate::features::paper::catalog::papers::PaperRecord;
 use crate::features::paper::catalog::CapsCache;
 use crate::features::paper::import::search_router::needs_s2_venue_enrichment;
-use crate::features::paper::import::RemoteImportOps;
 use crate::features::paper::import::{
     ImportLocalPdfArgs, ImportLocalPdfResult, LookupImportBatchArgs, LookupImportBatchResult,
     SkillImportResult, StageImportFileArgs, StageImportFileResult,
@@ -16,7 +14,6 @@ use crate::features::paper::scholar_api::sources::semantic_scholar::{
     better_publication, SemanticScholarApi,
 };
 use serde::Deserialize;
-use std::sync::Arc;
 use tauri::State;
 
 /// Batch resolve identifiers and write papers into vault.
@@ -25,7 +22,6 @@ use tauri::State;
 #[specta::specta]
 pub async fn lookup_import_batch(
     app: tauri::AppHandle,
-    remote: State<'_, Arc<dyn RemoteImportOps>>,
     cache: State<'_, CapsCache>,
     args: LookupImportBatchArgs,
 ) -> Result<ApiResult<LookupImportBatchResult>, String> {
@@ -33,23 +29,6 @@ pub async fn lookup_import_batch(
     let op = OpTimer::start_with("lookup_import_batch", format!("count={n}"));
     let note_mode = crate::features::paper::import::note_mode_from_app(&app);
     let host_app = crate::features::host_hooks::wrap(&app);
-    if let Some(session_id) = parse_remote_handle(&args.vault_path).map(str::to_owned) {
-        let vault_id = std::path::PathBuf::from(&args.vault_path);
-        let result = remote
-            .import_by_identifier_batch_remote(&session_id, args, note_mode)
-            .await;
-        if let Ok(r) = &result {
-            for paper in &r.imported {
-                crate::features::lifecycle::emit_paper_imported(
-                    Some(&host_app),
-                    &vault_id,
-                    &paper.id,
-                    &paper.path,
-                );
-            }
-        }
-        return Ok(op.finish_result(result));
-    }
     let vault_path = args.vault_path.clone();
     let result =
         super::import_by_identifier_batch(args, Some(&host_app), Some(&cache), note_mode).await;
@@ -181,7 +160,6 @@ pub fn skill_discard(discovery_id: String) -> ApiResult<()> {
 #[specta::specta]
 pub async fn paper_import_local_pdf(
     app: tauri::AppHandle,
-    remote: State<'_, Arc<dyn RemoteImportOps>>,
     cache: State<'_, CapsCache>,
     args: ImportLocalPdfArgs,
 ) -> Result<ApiResult<ImportLocalPdfResult>, String> {
@@ -189,39 +167,19 @@ pub async fn paper_import_local_pdf(
     let op = OpTimer::start_with("paper_import_local_pdf", format!("count={n}"));
     let note_mode = crate::features::paper::import::note_mode_from_app(&app);
     let host_app = crate::features::host_hooks::wrap(&app);
-    let result = if let Some(session_id) = parse_remote_handle(&args.vault_path).map(str::to_owned)
-    {
-        let vault_id = std::path::PathBuf::from(&args.vault_path);
-        let result = remote
-            .import_local_pdfs_remote(&session_id, args, note_mode)
-            .await;
-        if let Ok(r) = &result {
-            for paper in &r.papers {
-                crate::features::lifecycle::emit_paper_imported(
-                    Some(&host_app),
-                    &vault_id,
-                    &paper.id,
-                    &paper.path,
+    let vault_path = args.vault_path.clone();
+    let result = super::import_local_pdfs(args, Some(&host_app), Some(&cache), note_mode).await;
+    if let Ok(imported) = &result {
+        if let Ok(vault) = resolve_vault(&vault_path) {
+            for paper in &imported.papers {
+                crate::features::host_hooks::enqueue_preparation_plan(
+                    &app,
+                    &vault,
+                    &paper.preparation,
                 );
             }
         }
-        result
-    } else {
-        let vault_path = args.vault_path.clone();
-        let result = super::import_local_pdfs(args, Some(&host_app), Some(&cache), note_mode).await;
-        if let Ok(imported) = &result {
-            if let Ok(vault) = resolve_vault(&vault_path) {
-                for paper in &imported.papers {
-                    crate::features::host_hooks::enqueue_preparation_plan(
-                        &app,
-                        &vault,
-                        &paper.preparation,
-                    );
-                }
-            }
-        }
-        result
-    };
+    }
     Ok(op.finish_result_ok_extra(result, |r| {
         format!("imported={} errors={}", r.papers.len(), r.errors.len())
     }))

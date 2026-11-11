@@ -952,9 +952,10 @@ async fn run_liteparse_markdown_direct(
     // step and is immune.
     let data = fs::read(pdf_path).map_err(|e| AppError::message(format!("read pdf: {e}")))?;
 
-    // Prefer native text; OCR is best-effort and must not abort the whole parse.
+    // Extract native PDF text without invoking Tesseract OCR (`liteparse`
+    // builds with `default-features = false`).
     let config = LiteParseConfig {
-        ocr_enabled: true,
+        ocr_enabled: false,
         ocr_failure_fatal: false,
         output_format: OutputFormat::Markdown,
         image_mode: ImageMode::Off,
@@ -966,27 +967,12 @@ async fn run_liteparse_markdown_direct(
 
     let parser = LiteParse::new(config);
 
-    // Complexity pre-pass for quality labeling (cheap text-layer only).
-    let needs_ocr = match parser
-        .is_complex(liteparse::types::PdfInput::Bytes(data.clone()))
-        .await
-    {
-        Ok(pages) => pages.iter().any(|p| p.needs_ocr),
-        Err(_) => false,
-    };
-
     let result = parser
         .parse_input(liteparse::types::PdfInput::Bytes(data))
         .await
         .map_err(|e| AppError::message(format!("liteparse: {e}")))?;
 
-    let (body_source, body_quality) = if needs_ocr {
-        ("ocr".to_string(), "low".to_string())
-    } else {
-        ("pdf".to_string(), "medium".to_string())
-    };
-
-    Ok((result.text, body_source, body_quality))
+    Ok((result.text, "pdf".to_string(), "medium".to_string()))
 }
 
 #[cfg(any(target_os = "ios", target_os = "android"))]

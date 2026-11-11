@@ -79,7 +79,7 @@ export function LayoutStep({
 	}, [mode, onNextChange]);
 
 	const useSystemDefault = () => {
-		patch({ layout: { ...layout, backend: "local" } });
+		patch({ layout: { ...layout, backend: "paddle", parserBackend: "local" } });
 		onUseDefault();
 	};
 

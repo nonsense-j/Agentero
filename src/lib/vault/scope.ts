@@ -1,6 +1,5 @@
 import { commands } from "@/lib/core/bindings";
 import { isTauri } from "@/lib/core/tauri";
-import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 
 /** In-flight / completed fs-scope grants, keyed by normalized vault root. */
 const fsScopeGrants = new Map<string, Promise<void>>();
@@ -13,10 +12,10 @@ const fsScopeGrants = new Map<string, Promise<void>>();
  * the static scope (`$HOME/**`, `$DOCUMENT/**`, …) fails every fs-plugin call
  * (`readDir` / `readTextFile` / `exists` …) with "forbidden path" until a dialog
  * re-grants it. Call before any fs-plugin read for a restored vault. Concurrent
- * callers share one grant; no-op off Tauri or for remote handles.
+ * callers share one grant; no-op off Tauri.
  */
 export function ensureLocalFsScope(rootPath: string | null): Promise<void> {
-	if (!isTauri() || !rootPath || isRemoteVaultHandle(rootPath)) {
+	if (!isTauri() || !rootPath) {
 		return Promise.resolve();
 	}
 	const key = rootPath.replace(/[\\/]+$/, "");

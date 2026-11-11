@@ -7,10 +7,6 @@ import {
 	toVaultRelative,
 } from "@/lib/core/path";
 import { isMarkdownPath } from "@/lib/vault/fs";
-import {
-	getRemoteSessionMeta,
-	isRemoteVaultHandle,
-} from "@/lib/vault/remote/remote-vault";
 import type { FileNode } from "@/lib/vault/types";
 
 export function vaultRelativePath(
@@ -91,11 +87,6 @@ export function planVaultRename(args: {
 
 export function vaultDisplayName(rootPath: string | null): string {
 	if (!rootPath) return i18n.t("app:vault.noVaultName");
-	if (isRemoteVaultHandle(rootPath)) {
-		const meta = getRemoteSessionMeta();
-		if (meta?.displayName) return meta.displayName;
-		return rootPath;
-	}
 	return basenameOf(rootPath) || rootPath;
 }
 
