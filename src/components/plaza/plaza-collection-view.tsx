@@ -1,20 +1,25 @@
 /**
- * Native 广场 panel: Paper Collection (2026 arXiv + SE/AI/PL/Security Venues
- * including ASE, ICSE, FSE, ISSTA, PLDI, TOSEM, TSE).
+ * Native 广场 panel: Paper Collection (2026–Now arXiv + 28 DBLP 2026 Venues).
  *
- * Local-first persistence with arXiv latest-submission update detection,
- * fixed researchr/Crossref/DBLP parsers + optional Agent extraction for custom
- * venue URLs, time & keyword filtering, and single/batch Add to Library.
+ * Two-stage flow:
+ * 1. Portal Hub: Separate `arXiv` (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`, …) and
+ *    `Venue` (`Conference` + `Journal`, all 2026 from DBLP) entry cards.
+ * 2. List View: Top navigation bar with source switcher, `arXiv`-only time filter
+ *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 100-paper initial slice with
+ *    +50 preloaded Load More, and full detail dialog on card click.
  */
 
 import {
+	ArrowLeft,
 	ArrowUpRight,
 	BookOpen,
 	Check,
 	CheckSquare,
+	ChevronDown,
 	Download,
 	Loader2,
 	Plus,
+	Quote,
 	RefreshCw,
 	Search,
 	Settings2,
@@ -26,7 +31,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
-import { SelectionSurface } from "@/components/selection/selection-surface";
+import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
+import {
+	CollectionPortalHub,
+	type VenueKindFilter,
+} from "@/components/plaza/collection-portal-hub";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -51,28 +60,53 @@ import {
 	type CollectionState,
 	checkArxivCollectionUpdate,
 	DEFAULT_ARXIV_CATEGORIES,
+	ensureVenueLoaded,
 	fetchMoreArxivCollection,
+	hydrateCollectionStateFromIdb,
+	inferVenueKind,
+	isPreloadingCollection,
 	loadCollectionState,
 	mergeCollectionItems,
+	preloadAll2026ArxivInBackground,
 	refreshPaperCollection,
 	saveCollectionState,
 	searchArxivCollection,
+	subscribeCollectionState,
+	subscribePreloadingCollection,
 	type VenueConfig,
+	type VenueDomain,
 } from "@/lib/plaza/collection";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
-type SourceFilter = "all" | CollectionSourceType;
+type ViewStage = "hub" | "list";
 type TimeRangeFilter = "all" | "30d" | "7d";
+type DomainFilter = "all" | VenueDomain;
+
+const INITIAL_DISPLAY_COUNT = 100;
+const LOAD_MORE_STEP = 50;
 
 export function PlazaCollectionView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
 	const [state, setState] = useState<CollectionState>(loadCollectionState);
-	const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-	const [subFilter, setSubFilter] = useState<string | null>(null);
+	const [preloading, setPreloading] = useState<boolean>(isPreloadingCollection);
+
+	const [viewStage, setViewStage] = useState<ViewStage>("hub");
+	const [activeSource, setActiveSource] =
+		useState<CollectionSourceType>("arxiv");
+	const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+	const [venueKindFilter, setVenueKindFilter] =
+		useState<VenueKindFilter>("all");
+	const [venueDomainFilter, setVenueDomainFilter] =
+		useState<DomainFilter>("all");
+	const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
 	const [timeRange, setTimeRange] = useState<TimeRangeFilter>("all");
 	const [query, setQuery] = useState("");
+	const [displayLimit, setDisplayLimit] = useState(INITIAL_DISPLAY_COUNT);
+
 	const [busy, setBusy] = useState(false);
+	const [loadingVenueId, setLoadingVenueId] = useState<string | null>(null);
+	const [loadingMoreRemote, setLoadingMoreRemote] = useState(false);
 	const [checkingUpdate, setCheckingUpdate] = useState(false);
 	const [updateHint, setUpdateHint] = useState<ArxivUpdateCheckResult | null>(
 		null,
@@ -80,10 +114,25 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
 	const [batchImporting, setBatchImporting] = useState(false);
-	const [loadingMore, setLoadingMore] = useState(false);
-	const [arxivOffset, setArxivOffset] = useState(150);
+	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
+		null,
+	);
+
 	const mountedRef = useRef(false);
 	const checkTimerRef = useRef<number | null>(null);
+
+	// Subscribe to reactive collection state & background preloader updates
+	useEffect(() => {
+		const unsubState = subscribeCollectionState((next) => setState(next));
+		const unsubPreload = subscribePreloadingCollection((flag) =>
+			setPreloading(flag),
+		);
+		void hydrateCollectionStateFromIdb().then((hydrated) => setState(hydrated));
+		return () => {
+			unsubState();
+			unsubPreload();
+		};
+	}, []);
 
 	const runCheckUpdate = useCallback(
 		async (silent = false) => {
@@ -115,7 +164,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				venues: state.venues,
 			});
 			setState(next);
-			setArxivOffset(150);
 		} catch (err) {
 			notifyError(errorText(err));
 		} finally {
@@ -123,29 +171,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		}
 	}, [busy, state.categories, state.venues]);
 
-	const handleLoadMoreArxiv = useCallback(async () => {
-		if (loadingMore || busy) return;
-		setLoadingMore(true);
-		try {
-			const targetCats =
-				subFilter && state.categories.includes(subFilter)
-					? [subFilter]
-					: state.categories;
-			const { state: next } = await fetchMoreArxivCollection({
-				categories: targetCats,
-				startOffset: arxivOffset,
-				maxResultsPerCategory: 100,
-			});
-			setState(next);
-			setArxivOffset((prev) => prev + 100);
-		} catch (err) {
-			notifyError(errorText(err));
-		} finally {
-			setLoadingMore(false);
-		}
-	}, [arxivOffset, busy, loadingMore, state.categories, subFilter]);
-
-	// Initial load: if empty or any configured category/venue is missing from cache, refresh automatically; otherwise check for arXiv updates silently.
+	// Initial preload of 2026-Now papers and DBLP 2026 venues
 	useEffect(() => {
 		if (mountedRef.current) return;
 		mountedRef.current = true;
@@ -157,54 +183,95 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						(item.sourceLabel === cat || item.categories.includes(cat)),
 				),
 		);
-		const missingVenue = state.venues.some(
-			(venue) =>
-				!state.items.some(
-					(item) =>
-						item.sourceType === "venue" &&
-						(item.venueId === venue.id || item.sourceLabel === venue.name),
-				),
-		);
-		if (state.items.length === 0 || missingCategory || missingVenue) {
+		const hasAnyVenue = state.items.some((item) => item.sourceType === "venue");
+		if (state.items.length === 0 || missingCategory || !hasAnyVenue) {
 			void handleRefresh();
 		} else {
 			void runCheckUpdate(true);
+			const arxivCount = state.items.filter(
+				(i) => i.sourceType === "arxiv",
+			).length;
+			if (arxivCount < 300) {
+				void preloadAll2026ArxivInBackground(state.categories);
+			}
 		}
-	}, [
-		handleRefresh,
-		runCheckUpdate,
-		state.categories,
-		state.items,
-		state.venues,
-	]);
+	}, [handleRefresh, runCheckUpdate, state.categories, state.items]);
 
-	// Trigger update check and on-demand arXiv category search when user searches (debounced).
+	// Priority-load selected venue if not yet cached
+	useEffect(() => {
+		if (viewStage !== "list" || activeSource !== "venue" || !selectedVenueId) {
+			return;
+		}
+		const hasPapers = state.items.some(
+			(p) => p.sourceType === "venue" && p.venueId === selectedVenueId,
+		);
+		if (hasPapers) return;
+
+		let cancelled = false;
+		setLoadingVenueId(selectedVenueId);
+		void ensureVenueLoaded(selectedVenueId)
+			.then((next) => {
+				if (!cancelled) setState(next);
+			})
+			.catch((err) => {
+				if (!cancelled) notifyError(errorText(err));
+			})
+			.finally(() => {
+				if (!cancelled) setLoadingVenueId(null);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [activeSource, selectedVenueId, state.items, viewStage]);
+
+	const handleEnterArxiv = useCallback((category: string | null) => {
+		setActiveSource("arxiv");
+		setSelectedCategory(category);
+		setDisplayLimit(INITIAL_DISPLAY_COUNT);
+		setViewStage("list");
+	}, []);
+
+	const handleEnterVenue = useCallback(
+		(kind: VenueKindFilter, venueId: string | null) => {
+			setActiveSource("venue");
+			setVenueKindFilter(kind);
+			setVenueDomainFilter("all");
+			setSelectedVenueId(venueId);
+			setDisplayLimit(INITIAL_DISPLAY_COUNT);
+			setViewStage("list");
+		},
+		[],
+	);
+
 	const handleQueryChange = useCallback(
 		(nextQuery: string) => {
 			setQuery(nextQuery);
+			setDisplayLimit(INITIAL_DISPLAY_COUNT);
 			if (checkTimerRef.current) {
 				window.clearTimeout(checkTimerRef.current);
 			}
 			const trimmed = nextQuery.trim();
 			if (trimmed.length >= 2) {
 				checkTimerRef.current = window.setTimeout(() => {
-					void runCheckUpdate(true);
-					void searchArxivCollection(trimmed, state.categories)
-						.then((found) => {
-							if (found.length === 0) return;
-							setState((prev) => {
-								const merged = mergeCollectionItems([prev.items, found]);
-								if (merged.length === prev.items.length) return prev;
-								const next = { ...prev, items: merged };
-								saveCollectionState(next);
-								return next;
-							});
-						})
-						.catch(() => undefined);
+					if (activeSource === "arxiv") {
+						void runCheckUpdate(true);
+						void searchArxivCollection(trimmed, state.categories)
+							.then((found) => {
+								if (found.length === 0) return;
+								setState((prev) => {
+									const merged = mergeCollectionItems([prev.items, found]);
+									if (merged.length === prev.items.length) return prev;
+									const next = { ...prev, items: merged };
+									saveCollectionState(next);
+									return next;
+								});
+							})
+							.catch(() => undefined);
+					}
 				}, 550);
 			}
 		},
-		[runCheckUpdate, state.categories],
+		[activeSource, runCheckUpdate, state.categories],
 	);
 
 	const updateConfig = useCallback(
@@ -218,73 +285,169 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		[],
 	);
 
+	const filteredVenuesForBar = useMemo(() => {
+		return state.venues.filter((v) => {
+			if (venueKindFilter !== "all" && inferVenueKind(v) !== venueKindFilter) {
+				return false;
+			}
+			if (venueDomainFilter !== "all" && v.domain !== venueDomainFilter) {
+				return false;
+			}
+			return true;
+		});
+	}, [state.venues, venueDomainFilter, venueKindFilter]);
+
 	const visiblePapers = useMemo(() => {
 		const now = Date.now();
 		const q = query.trim().toLowerCase();
 		const qTokens = q ? q.split(/\s+/).filter(Boolean) : [];
+
 		return state.items.filter((paper: CollectionPaperItem) => {
-			if (sourceFilter !== "all" && paper.sourceType !== sourceFilter) {
-				return false;
-			}
-			if (
-				subFilter &&
-				paper.sourceLabel !== subFilter &&
-				!paper.categories.includes(subFilter)
-			) {
-				return false;
-			}
-			if (timeRange !== "all") {
-				const days = timeRange === "7d" ? 7 : 30;
-				const ts = Date.parse(paper.publishedAt);
-				if (!Number.isNaN(ts) && now - ts > days * 86_400_000) {
+			if (paper.sourceType !== activeSource) return false;
+
+			if (activeSource === "arxiv") {
+				if (
+					selectedCategory &&
+					paper.sourceLabel !== selectedCategory &&
+					!paper.categories.includes(selectedCategory)
+				) {
+					return false;
+				}
+				// Time range applies ONLY to arXiv (`2026-Now`, `30d`, `7d`)
+				if (timeRange === "all") {
+					if (paper.year < 2026) return false;
+				} else {
+					const days = timeRange === "7d" ? 7 : 30;
+					const ts = Date.parse(paper.publishedAt);
+					if (!Number.isNaN(ts) && now - ts > days * 86_400_000) {
+						return false;
+					}
+				}
+			} else {
+				const vKind = paper.venueKind ?? "conference";
+				if (venueKindFilter !== "all" && vKind !== venueKindFilter) {
+					return false;
+				}
+				if (
+					venueDomainFilter !== "all" &&
+					paper.venueDomain !== venueDomainFilter
+				) {
+					return false;
+				}
+				if (selectedVenueId && paper.venueId !== selectedVenueId) {
 					return false;
 				}
 			}
+
 			if (qTokens.length > 0) {
 				const hay =
-					`${paper.title} ${paper.abstract} ${paper.authors.join(" ")} ${paper.sourceLabel} ${paper.categories.join(" ")} ${paper.arxivId ?? ""} ${paper.doi ?? ""}`.toLowerCase();
+					`${paper.title} ${paper.abstract} ${paper.authors.join(" ")} ${(paper.keywords ?? []).join(" ")} ${paper.sourceLabel} ${paper.categories.join(" ")} ${paper.arxivId ?? ""} ${paper.doi ?? ""}`.toLowerCase();
 				if (!qTokens.every((tok) => hay.includes(tok))) return false;
 			}
 			return true;
 		});
-	}, [query, sourceFilter, state.items, subFilter, timeRange]);
+	}, [
+		activeSource,
+		query,
+		selectedCategory,
+		selectedVenueId,
+		state.items,
+		timeRange,
+		venueDomainFilter,
+		venueKindFilter,
+	]);
 
-	const availableSubFilters = useMemo(() => {
-		const counts = new Map<string, number>();
-		if (sourceFilter !== "venue") {
-			for (const cat of state.categories) {
-				counts.set(cat, 0);
-			}
-		}
+	const displayedPapers = useMemo(
+		() => visiblePapers.slice(0, displayLimit),
+		[displayLimit, visiblePapers],
+	);
+
+	const arxivChipCounts = useMemo(() => {
+		const map = new Map<string, number>();
+		let total = 0;
+		for (const cat of state.categories) map.set(cat, 0);
 		for (const p of state.items) {
-			if (sourceFilter !== "all" && p.sourceType !== sourceFilter) continue;
-			if (p.sourceType === "arxiv") {
-				const matchedCats = state.categories.filter(
-					(cat) => p.sourceLabel === cat || p.categories.includes(cat),
-				);
-				if (matchedCats.length > 0) {
-					for (const cat of matchedCats) {
-						counts.set(cat, (counts.get(cat) ?? 0) + 1);
-					}
-				} else {
-					counts.set(p.sourceLabel, (counts.get(p.sourceLabel) ?? 0) + 1);
+			if (p.sourceType !== "arxiv" || p.year < 2026) continue;
+			total += 1;
+			for (const cat of state.categories) {
+				if (p.sourceLabel === cat || p.categories.includes(cat)) {
+					map.set(cat, (map.get(cat) ?? 0) + 1);
 				}
-			} else {
-				counts.set(p.sourceLabel, (counts.get(p.sourceLabel) ?? 0) + 1);
 			}
 		}
-		const pinnedOrder = new Map(state.categories.map((cat, idx) => [cat, idx]));
-		return Array.from(counts.entries())
-			.filter(([label, count]) => count > 0 || pinnedOrder.has(label))
-			.sort((a, b) => {
-				const aPin = pinnedOrder.get(a[0]);
-				const bPin = pinnedOrder.get(b[0]);
-				if (aPin !== undefined && bPin !== undefined) return aPin - bPin;
-				if (aPin !== undefined) return -1;
-				if (bPin !== undefined) return 1;
-				return b[1] - a[1];
+		return { total, map };
+	}, [state.categories, state.items]);
+
+	const venueChipCounts = useMemo(() => {
+		const map = new Map<string, number>();
+		let total = 0;
+		for (const v of filteredVenuesForBar) map.set(v.id, 0);
+		for (const p of state.items) {
+			if (p.sourceType !== "venue") continue;
+			const vKind = p.venueKind ?? "conference";
+			if (venueKindFilter !== "all" && vKind !== venueKindFilter) continue;
+			if (venueDomainFilter !== "all" && p.venueDomain !== venueDomainFilter) {
+				continue;
+			}
+			total += 1;
+			if (p.venueId && map.has(p.venueId)) {
+				map.set(p.venueId, (map.get(p.venueId) ?? 0) + 1);
+			}
+		}
+		return { total, map };
+	}, [filteredVenuesForBar, state.items, venueDomainFilter, venueKindFilter]);
+
+	const handleRevealNext50 = useCallback(() => {
+		const nextLimit = displayLimit + LOAD_MORE_STEP;
+		setDisplayLimit(nextLimit);
+		// Keep preloaded pool comfortably ahead when browsing arXiv
+		if (
+			activeSource === "arxiv" &&
+			visiblePapers.length - nextLimit < 80 &&
+			!preloading &&
+			!loadingMoreRemote
+		) {
+			const targetCats = selectedCategory
+				? [selectedCategory]
+				: state.categories;
+			setLoadingMoreRemote(true);
+			void fetchMoreArxivCollection({
+				categories: targetCats,
+				maxResultsPerCategory: 150,
+			})
+				.then(({ state: next }) => setState(next))
+				.catch(() => undefined)
+				.finally(() => setLoadingMoreRemote(false));
+		}
+	}, [
+		activeSource,
+		displayLimit,
+		loadingMoreRemote,
+		preloading,
+		selectedCategory,
+		state.categories,
+		visiblePapers.length,
+	]);
+
+	const handlePullDeeperRemoteArxiv = useCallback(async () => {
+		if (loadingMoreRemote || busy) return;
+		setLoadingMoreRemote(true);
+		try {
+			const targetCats = selectedCategory
+				? [selectedCategory]
+				: state.categories;
+			const { state: next } = await fetchMoreArxivCollection({
+				categories: targetCats,
+				maxResultsPerCategory: 150,
 			});
-	}, [sourceFilter, state.categories, state.items]);
+			setState(next);
+			setDisplayLimit((prev) => prev + LOAD_MORE_STEP);
+		} catch (err) {
+			notifyError(errorText(err));
+		} finally {
+			setLoadingMoreRemote(false);
+		}
+	}, [busy, loadingMoreRemote, selectedCategory, state.categories]);
 
 	const toggleSelect = useCallback((id: string) => {
 		setSelectedIds((prev) => {
@@ -295,15 +458,15 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		});
 	}, []);
 
-	const toggleSelectAllVisible = useCallback(() => {
+	const toggleSelectAllDisplayed = useCallback(() => {
 		setSelectedIds((prev) => {
 			const allSelected =
-				visiblePapers.length > 0 &&
-				visiblePapers.every((p: CollectionPaperItem) => prev.has(p.id));
+				displayedPapers.length > 0 &&
+				displayedPapers.every((p) => prev.has(p.id));
 			if (allSelected) return new Set();
-			return new Set(visiblePapers.map((p: CollectionPaperItem) => p.id));
+			return new Set(displayedPapers.map((p) => p.id));
 		});
-	}, [visiblePapers]);
+	}, [displayedPapers]);
 
 	const importPapers = useCallback(
 		async (targets: CollectionPaperItem[]) => {
@@ -344,8 +507,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 
 	const selectedPapers = useMemo(
-		() =>
-			visiblePapers.filter((p: CollectionPaperItem) => selectedIds.has(p.id)),
+		() => visiblePapers.filter((p) => selectedIds.has(p.id)),
 		[selectedIds, visiblePapers],
 	);
 
@@ -356,286 +518,543 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				className,
 			)}
 		>
-			{/* Sticky translucent Magpie control bar */}
-			<div
-				data-plaza-header
-				className="sticky top-0 z-10 flex flex-col gap-2 bg-background/80 px-3 py-2.5 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
-			>
-				<div className="flex flex-wrap items-center gap-2">
-					{/* Source Segmented Control */}
-					<div className="magpie-seg">
-						{(["all", "arxiv", "venue"] as const).map((kind) => (
-							<button
-								key={kind}
-								type="button"
-								data-active={sourceFilter === kind}
-								onClick={() => {
-									setSourceFilter(kind);
-									setSubFilter(null);
-								}}
-								className="magpie-seg-btn"
-							>
-								{t(`plaza.collection.source.${kind}`)}
-							</button>
-						))}
-					</div>
-
-					{/* Time Range Segmented Control */}
-					<div className="magpie-seg">
-						{(["all", "30d", "7d"] as const).map((range) => (
-							<button
-								key={range}
-								type="button"
-								data-active={timeRange === range}
-								onClick={() => setTimeRange(range)}
-								className="magpie-seg-btn"
-							>
-								{t(`plaza.collection.time.${range}`)}
-							</button>
-						))}
-					</div>
-
-					{/* Search box */}
-					<div className="relative min-w-[180px] flex-1">
-						<Search
-							className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-							aria-hidden
-						/>
-						<input
-							type="search"
-							value={query}
-							onChange={(e) => handleQueryChange(e.target.value)}
-							placeholder={t("plaza.collection.searchPlaceholder")}
-							className="h-7 w-full rounded-lg bg-[var(--magpie-surface)] pr-7 pl-8 text-xs shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-brand/60"
-						/>
-						{query ? (
-							<button
-								type="button"
-								onClick={() => setQuery("")}
-								className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-								aria-label={t("plaza.collection.clearSearch")}
-							>
-								<X className="size-3" />
-							</button>
-						) : null}
-					</div>
-
-					{/* Right actions: Select all, Batch import, Config, Refresh */}
-					<div className="ml-auto flex items-center gap-1.5">
-						{selectedPapers.length > 0 ? (
-							<Button
-								type="button"
-								size="sm"
-								disabled={batchImporting}
-								onClick={() => void importPapers(selectedPapers)}
-								className="h-6 gap-1 rounded-md px-2.5 text-caption"
-							>
-								{batchImporting ? (
-									<Loader2 className="size-3 animate-spin" />
-								) : (
-									<Download className="size-3" />
-								)}
-								{t("plaza.collection.importSelected", {
-									count: selectedPapers.length,
-								})}
-							</Button>
-						) : null}
-
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-sm"
-									onClick={toggleSelectAllVisible}
-									disabled={visiblePapers.length === 0}
-									aria-label={t("plaza.collection.toggleSelectAll")}
-								>
-									{selectedPapers.length > 0 &&
-									selectedPapers.length === visiblePapers.length ? (
-										<CheckSquare className="size-3.5 text-brand" />
-									) : (
-										<Square className="size-3.5" />
-									)}
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent>
-								{t("plaza.collection.toggleSelectAll")}
-							</TooltipContent>
-						</Tooltip>
-
-						<CollectionConfigPopover
-							arxivCategories={state.categories}
-							venues={state.venues}
-							onChangeCategories={(cats) => {
-								updateConfig((prev) => ({ ...prev, categories: cats }));
-								void refreshPaperCollection({
-									categories: cats,
-									venues: state.venues,
-								})
-									.then((next) => setState(next))
-									.catch(() => undefined);
-							}}
-							onChangeVenues={(venues) =>
-								updateConfig((prev) => ({ ...prev, venues }))
-							}
-						/>
-
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-sm"
-									disabled={busy}
-									onClick={() => void handleRefresh()}
-									aria-label={t("plaza.collection.refresh")}
-								>
-									{busy ? (
-										<Loader2 className="size-3.5 animate-spin" />
-									) : (
-										<RefreshCw className="size-3.5" />
-									)}
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent>{t("plaza.collection.refresh")}</TooltipContent>
-						</Tooltip>
-					</div>
-				</div>
-
-				{/* Sub-filter chips (cs.SE, cs.AI, TOSEM 2026, TSE 2026, ICSE 2026, etc.) */}
-				{availableSubFilters.length > 0 ? (
-					<div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
-						<button
-							type="button"
-							data-active={subFilter === null}
-							onClick={() => setSubFilter(null)}
-							className="magpie-chip shrink-0"
-						>
-							{t("plaza.collection.allTags")}
-							<span className="text-muted-foreground tabular-nums">
-								{state.items.length}
-							</span>
-						</button>
-						{availableSubFilters.map(([label, count]) => (
-							<button
-								key={label}
-								type="button"
-								data-active={subFilter === label}
-								onClick={() =>
-									setSubFilter((prev) => (prev === label ? null : label))
-								}
-								className="magpie-chip shrink-0"
-							>
-								<span>{label}</span>
-								<span className="text-muted-foreground tabular-nums">
-									{count}
+			{viewStage === "hub" ? (
+				<>
+					{/* Hub Header */}
+					<div
+						data-plaza-header
+						className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-background/80 px-4 py-2 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
+					>
+						<div className="flex items-center gap-2 text-muted-foreground text-xs">
+							{busy || preloading ? (
+								<span className="inline-flex items-center gap-1.5 text-brand">
+									<Loader2 className="size-3.5 animate-spin" />
+									<span>{t("plaza.collection.preloading")}</span>
 								</span>
-							</button>
-						))}
-					</div>
-				) : null}
+							) : (
+								<span className="font-mono tabular-nums">
+									{t("plaza.collection.papersCount", {
+										count: state.items.length,
+									})}
+								</span>
+							)}
+						</div>
 
-				{/* Update Reminder Banner when newer arXiv papers are detected */}
-				{updateHint?.hasUpdate && updateHint.remoteLatestTitle ? (
-					<div className="flex items-center justify-between gap-2 rounded-lg bg-brand/10 px-3 py-1.5 text-xs shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--brand)_40%,transparent)]">
-						<span className="min-w-0 truncate text-foreground">
-							<span className="font-medium">
-								{t("plaza.collection.updateAvailable")}
-							</span>{" "}
-							<span className="text-muted-foreground">
-								({updateHint.remoteLatestId} · {updateHint.remoteLatestTitle})
-							</span>
-						</span>
-						<div className="flex shrink-0 items-center gap-1">
-							<Button
-								type="button"
-								size="sm"
-								disabled={busy}
-								onClick={() => void handleRefresh()}
-								className="h-6 px-2 text-caption"
-							>
-								{t("plaza.collection.refreshNow")}
-							</Button>
-							<button
-								type="button"
-								onClick={() => setUpdateHint(null)}
-								className="rounded p-0.5 text-muted-foreground hover:text-foreground"
-								aria-label={t("plaza.collection.dismissUpdate")}
-							>
-								<X className="size-3" />
-							</button>
+						<div className="flex items-center gap-1.5">
+							<CollectionConfigPopover
+								arxivCategories={state.categories}
+								venues={state.venues}
+								onChangeCategories={(cats) => {
+									updateConfig((prev) => ({ ...prev, categories: cats }));
+									void refreshPaperCollection({
+										categories: cats,
+										venues: state.venues,
+									})
+										.then((next) => setState(next))
+										.catch(() => undefined);
+								}}
+								onChangeVenues={(venues) =>
+									updateConfig((prev) => ({ ...prev, venues }))
+								}
+							/>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon-sm"
+										disabled={busy}
+										onClick={() => void handleRefresh()}
+										aria-label={t("plaza.collection.refresh")}
+									>
+										{busy ? (
+											<Loader2 className="size-3.5 animate-spin" />
+										) : (
+											<RefreshCw className="size-3.5" />
+										)}
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent>{t("plaza.collection.refresh")}</TooltipContent>
+							</Tooltip>
 						</div>
 					</div>
-				) : null}
-			</div>
 
-			{/* Main Paper Card Stream */}
-			<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
-				{busy && state.items.length === 0 ? (
-					<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
-						<Loader2 className="size-4 animate-spin" />
-						<span>{t("plaza.collection.loading")}</span>
+					{/* Two-Card Portal Hub */}
+					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto">
+						<CollectionPortalHub
+							categories={state.categories}
+							venues={state.venues}
+							items={state.items}
+							onEnterArxiv={handleEnterArxiv}
+							onEnterVenue={handleEnterVenue}
+						/>
 					</div>
-				) : visiblePapers.length === 0 ? (
-					<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
-						<p className="text-muted-foreground text-xs">
-							{state.items.length === 0
-								? t("plaza.collection.empty")
-								: t("plaza.collection.emptyFiltered")}
-						</p>
-						{state.items.length === 0 ? (
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								onClick={() => void handleRefresh()}
-							>
-								<RefreshCw className="size-3.5" />
-								{t("plaza.collection.refresh")}
-							</Button>
+				</>
+			) : (
+				<>
+					{/* List View Top Navigation Bar */}
+					<div
+						data-plaza-header
+						className="sticky top-0 z-10 flex flex-col gap-2 bg-background/80 px-3 py-2.5 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
+					>
+						<div className="flex flex-wrap items-center gap-2">
+							{/* Back to Portal Hub */}
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon-sm"
+										onClick={() => setViewStage("hub")}
+										aria-label={t("plaza.collection.backToHub")}
+									>
+										<ArrowLeft className="size-3.5" />
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent>
+									{t("plaza.collection.backToHub")}
+								</TooltipContent>
+							</Tooltip>
+
+							{/* Source Switcher: arXiv | Venue */}
+							<div className="magpie-seg">
+								{(["arxiv", "venue"] as const).map((kind) => (
+									<button
+										key={kind}
+										type="button"
+										data-active={activeSource === kind}
+										onClick={() => {
+											setActiveSource(kind);
+											setDisplayLimit(INITIAL_DISPLAY_COUNT);
+										}}
+										className="magpie-seg-btn"
+									>
+										{t(`plaza.collection.source.${kind}`)}
+									</button>
+								))}
+							</div>
+
+							{/* arXiv ONLY: Time Range (`2026-Now`, `30d`, `7d`) */}
+							{activeSource === "arxiv" ? (
+								<div className="magpie-seg">
+									{(["all", "30d", "7d"] as const).map((range) => (
+										<button
+											key={range}
+											type="button"
+											data-active={timeRange === range}
+											onClick={() => {
+												setTimeRange(range);
+												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+											}}
+											className="magpie-seg-btn"
+										>
+											{t(`plaza.collection.time.${range}`)}
+										</button>
+									))}
+								</div>
+							) : (
+								<>
+									{/* Venue ONLY: Conference | Journal + Domain Switcher */}
+									<div className="magpie-seg">
+										{(["all", "conference", "journal"] as const).map((vk) => (
+											<button
+												key={vk}
+												type="button"
+												data-active={venueKindFilter === vk}
+												onClick={() => {
+													setVenueKindFilter(vk);
+													setSelectedVenueId(null);
+													setDisplayLimit(INITIAL_DISPLAY_COUNT);
+												}}
+												className="magpie-seg-btn"
+											>
+												{t(`plaza.collection.venueKind.${vk}`)}
+											</button>
+										))}
+									</div>
+
+									<div className="magpie-seg">
+										{(["all", "PL/SE", "CR", "AI"] as const).map((dom) => (
+											<button
+												key={dom}
+												type="button"
+												data-active={venueDomainFilter === dom}
+												onClick={() => {
+													setVenueDomainFilter(dom);
+													setSelectedVenueId(null);
+													setDisplayLimit(INITIAL_DISPLAY_COUNT);
+												}}
+												className="magpie-seg-btn"
+											>
+												{dom === "all" ? t("plaza.collection.allTags") : dom}
+											</button>
+										))}
+									</div>
+								</>
+							)}
+
+							{/* Search box */}
+							<div className="relative min-w-[180px] flex-1">
+								<Search
+									className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+									aria-hidden
+								/>
+								<input
+									type="search"
+									value={query}
+									onChange={(e) => handleQueryChange(e.target.value)}
+									placeholder={t("plaza.collection.searchPlaceholder")}
+									className="h-7 w-full rounded-lg bg-[var(--magpie-surface)] pr-7 pl-8 text-xs shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-brand/60"
+								/>
+								{query ? (
+									<button
+										type="button"
+										onClick={() => {
+											setQuery("");
+											setDisplayLimit(INITIAL_DISPLAY_COUNT);
+										}}
+										className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+										aria-label={t("plaza.collection.clearSearch")}
+									>
+										<X className="size-3" />
+									</button>
+								) : null}
+							</div>
+
+							{/* Right actions */}
+							<div className="ml-auto flex items-center gap-1.5">
+								{preloading ? (
+									<span
+										className="hidden items-center gap-1 text-[11px] text-brand xl:inline-flex"
+										title={t("plaza.collection.preloading")}
+									>
+										<Loader2 className="size-3 animate-spin" />
+									</span>
+								) : null}
+
+								{selectedPapers.length > 0 ? (
+									<Button
+										type="button"
+										size="sm"
+										disabled={batchImporting}
+										onClick={() => void importPapers(selectedPapers)}
+										className="h-6 gap-1 rounded-md px-2.5 text-caption"
+									>
+										{batchImporting ? (
+											<Loader2 className="size-3 animate-spin" />
+										) : (
+											<Download className="size-3" />
+										)}
+										{t("plaza.collection.importSelected", {
+											count: selectedPapers.length,
+										})}
+									</Button>
+								) : null}
+
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon-sm"
+											onClick={toggleSelectAllDisplayed}
+											disabled={displayedPapers.length === 0}
+											aria-label={t("plaza.collection.toggleSelectAll")}
+										>
+											{displayedPapers.length > 0 &&
+											displayedPapers.every((p) => selectedIds.has(p.id)) ? (
+												<CheckSquare className="size-3.5 text-brand" />
+											) : (
+												<Square className="size-3.5" />
+											)}
+										</Button>
+									</TooltipTrigger>
+									<TooltipContent>
+										{t("plaza.collection.toggleSelectAll")}
+									</TooltipContent>
+								</Tooltip>
+
+								<CollectionConfigPopover
+									arxivCategories={state.categories}
+									venues={state.venues}
+									onChangeCategories={(cats) => {
+										updateConfig((prev) => ({ ...prev, categories: cats }));
+										void refreshPaperCollection({
+											categories: cats,
+											venues: state.venues,
+										})
+											.then((next) => setState(next))
+											.catch(() => undefined);
+									}}
+									onChangeVenues={(venues) =>
+										updateConfig((prev) => ({ ...prev, venues }))
+									}
+								/>
+
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon-sm"
+											disabled={busy}
+											onClick={() => void handleRefresh()}
+											aria-label={t("plaza.collection.refresh")}
+										>
+											{busy ? (
+												<Loader2 className="size-3.5 animate-spin" />
+											) : (
+												<RefreshCw className="size-3.5" />
+											)}
+										</Button>
+									</TooltipTrigger>
+									<TooltipContent>
+										{t("plaza.collection.refresh")}
+									</TooltipContent>
+								</Tooltip>
+							</div>
+						</div>
+
+						{/* Sub-navigation bar: cs.XX tags for arXiv OR DBLP 2026 venue chips for Venue */}
+						{activeSource === "arxiv" ? (
+							<div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
+								<button
+									type="button"
+									data-active={selectedCategory === null}
+									onClick={() => {
+										setSelectedCategory(null);
+										setDisplayLimit(INITIAL_DISPLAY_COUNT);
+									}}
+									className="magpie-chip shrink-0"
+								>
+									<span>{t("plaza.collection.allTags")}</span>
+									<span className="text-muted-foreground tabular-nums">
+										{arxivChipCounts.total}
+									</span>
+								</button>
+								{state.categories.map((cat) => (
+									<button
+										key={cat}
+										type="button"
+										data-active={selectedCategory === cat}
+										onClick={() => {
+											setSelectedCategory((prev) =>
+												prev === cat ? null : cat,
+											);
+											setDisplayLimit(INITIAL_DISPLAY_COUNT);
+										}}
+										className="magpie-chip shrink-0 font-mono"
+									>
+										<span>{cat}</span>
+										<span className="text-muted-foreground tabular-nums">
+											{arxivChipCounts.map.get(cat) ?? 0}
+										</span>
+									</button>
+								))}
+							</div>
+						) : (
+							<div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
+								<button
+									type="button"
+									data-active={selectedVenueId === null}
+									onClick={() => {
+										setSelectedVenueId(null);
+										setDisplayLimit(INITIAL_DISPLAY_COUNT);
+									}}
+									className="magpie-chip shrink-0"
+								>
+									<span>{t("plaza.collection.allTags")}</span>
+									<span className="text-muted-foreground tabular-nums">
+										{venueChipCounts.total}
+									</span>
+								</button>
+								{filteredVenuesForBar.map((v) => {
+									const cnt = venueChipCounts.map.get(v.id) ?? 0;
+									return (
+										<button
+											key={v.id}
+											type="button"
+											data-active={selectedVenueId === v.id}
+											onClick={() => {
+												setSelectedVenueId((prev) =>
+													prev === v.id ? null : v.id,
+												);
+												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+											}}
+											className="magpie-chip shrink-0"
+										>
+											<span>{v.name}</span>
+											{v.ccfRank ? (
+												<span className="font-mono text-[10px] text-brand/80">
+													{v.ccfRank.replace("CCF-", "")}
+												</span>
+											) : null}
+											<span className="text-muted-foreground tabular-nums">
+												{cnt}
+											</span>
+										</button>
+									);
+								})}
+							</div>
+						)}
+
+						{/* Update Reminder Banner for arXiv */}
+						{activeSource === "arxiv" &&
+						updateHint?.hasUpdate &&
+						updateHint.remoteLatestTitle ? (
+							<div className="flex items-center justify-between gap-2 rounded-lg bg-brand/10 px-3 py-1.5 text-xs shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--brand)_40%,transparent)]">
+								<span className="min-w-0 truncate text-foreground">
+									<span className="font-medium">
+										{t("plaza.collection.updateAvailable")}
+									</span>{" "}
+									<span className="text-muted-foreground">
+										({updateHint.remoteLatestId} ·{" "}
+										{updateHint.remoteLatestTitle})
+									</span>
+								</span>
+								<div className="flex shrink-0 items-center gap-1">
+									<Button
+										type="button"
+										size="sm"
+										disabled={busy}
+										onClick={() => void handleRefresh()}
+										className="h-6 px-2 text-caption"
+									>
+										{t("plaza.collection.refreshNow")}
+									</Button>
+									<button
+										type="button"
+										onClick={() => setUpdateHint(null)}
+										className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+										aria-label={t("plaza.collection.dismissUpdate")}
+									>
+										<X className="size-3" />
+									</button>
+								</div>
+							</div>
 						) : null}
 					</div>
-				) : (
-					<div className="grid gap-2.5">
-						{visiblePapers.map((paper: CollectionPaperItem) => (
-							<CollectionPaperCard
-								key={paper.id}
-								paper={paper}
-								selected={selectedIds.has(paper.id)}
-								imported={importedIds.has(paper.id)}
-								onToggleSelect={() => toggleSelect(paper.id)}
-								onImport={() => void importPapers([paper])}
-							/>
-						))}
-						{sourceFilter !== "venue" &&
-						(!subFilter || state.categories.includes(subFilter)) ? (
-							<div className="flex justify-center py-2">
+
+					{/* Main Paper List (100 initial, +50 per Load More from preloaded pool) */}
+					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
+						{(busy || Boolean(loadingVenueId)) && visiblePapers.length === 0 ? (
+							<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
+								<Loader2 className="size-4 animate-spin" />
+								<span>{t("plaza.collection.loading")}</span>
+							</div>
+						) : visiblePapers.length === 0 ? (
+							<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
+								<p className="text-muted-foreground text-xs">
+									{state.items.length === 0
+										? t("plaza.collection.empty")
+										: t("plaza.collection.emptyFiltered")}
+								</p>
 								<Button
 									type="button"
 									variant="outline"
 									size="sm"
-									disabled={loadingMore || busy}
-									onClick={() => void handleLoadMoreArxiv()}
-									className="h-7 gap-1.5 text-xs"
+									disabled={busy}
+									onClick={() =>
+										selectedVenueId
+											? void ensureVenueLoaded(selectedVenueId).then((next) =>
+													setState(next),
+												)
+											: void handleRefresh()
+									}
 								>
-									{loadingMore ? (
-										<>
-											<Loader2 className="size-3.5 animate-spin" />
-											<span>{t("plaza.collection.loadingMoreArxiv")}</span>
-										</>
-									) : (
-										<>
-											<RefreshCw className="size-3.5" />
-											<span>{t("plaza.collection.loadMoreArxiv")}</span>
-										</>
-									)}
+									<RefreshCw className="size-3.5" />
+									{t("plaza.collection.refresh")}
 								</Button>
 							</div>
-						) : null}
+						) : (
+							<div className="grid gap-2.5">
+								{displayedPapers.map((paper) => (
+									<CollectionPaperCard
+										key={paper.id}
+										paper={paper}
+										selected={selectedIds.has(paper.id)}
+										imported={importedIds.has(paper.id)}
+										onToggleSelect={() => toggleSelect(paper.id)}
+										onImport={() => void importPapers([paper])}
+										onOpenDetail={() => setDetailPaper(paper)}
+									/>
+								))}
+
+								{/* Preloaded Pagination Footer (+50 per click) */}
+								<div className="flex flex-col items-center justify-center gap-2 py-3">
+									{displayLimit < visiblePapers.length ? (
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onClick={handleRevealNext50}
+											className="h-8 gap-1.5 px-4 text-xs"
+										>
+											<ChevronDown className="size-3.5" />
+											<span>
+												{t("plaza.collection.loadMoreStep", {
+													step: Math.min(
+														LOAD_MORE_STEP,
+														visiblePapers.length - displayLimit,
+													),
+													shown: displayedPapers.length,
+													total: visiblePapers.length,
+												})}
+											</span>
+										</Button>
+									) : (
+										<div className="flex flex-wrap items-center justify-center gap-2">
+											<span className="text-muted-foreground text-xs tabular-nums">
+												{t("plaza.collection.showingAll", {
+													total: visiblePapers.length,
+												})}
+											</span>
+											{activeSource === "arxiv" ? (
+												<Button
+													type="button"
+													variant="ghost"
+													size="sm"
+													disabled={loadingMoreRemote || busy}
+													onClick={() => void handlePullDeeperRemoteArxiv()}
+													className="h-7 gap-1.5 text-xs"
+												>
+													{loadingMoreRemote ? (
+														<>
+															<Loader2 className="size-3.5 animate-spin" />
+															<span>
+																{t("plaza.collection.loadingMoreArxiv")}
+															</span>
+														</>
+													) : (
+														<>
+															<RefreshCw className="size-3.5" />
+															<span>{t("plaza.collection.loadMoreArxiv")}</span>
+														</>
+													)}
+												</Button>
+											) : null}
+										</div>
+									)}
+								</div>
+							</div>
+						)}
 					</div>
-				)}
-			</div>
+				</>
+			)}
+
+			{/* Complete Paper Detail Dialog on Card Click */}
+			<CollectionPaperDetailDialog
+				paper={detailPaper}
+				open={detailPaper !== null}
+				imported={detailPaper ? importedIds.has(detailPaper.id) : false}
+				onOpenChange={(open) => {
+					if (!open) setDetailPaper(null);
+				}}
+				onImport={(p) => importPapers([p])}
+				onPaperUpdated={(updated) => {
+					setDetailPaper(updated);
+				}}
+			/>
 		</div>
 	);
 }
@@ -646,12 +1065,14 @@ function CollectionPaperCard({
 	imported,
 	onToggleSelect,
 	onImport,
+	onOpenDetail,
 }: {
 	paper: CollectionPaperItem;
 	selected: boolean;
 	imported: boolean;
 	onToggleSelect: () => void;
 	onImport: () => void;
+	onOpenDetail: () => void;
 }) {
 	const { t } = useTranslation("sidebar");
 	const [busy, setBusy] = useState(false);
@@ -666,10 +1087,12 @@ function CollectionPaperCard({
 		}
 	};
 
+	const topKeywords = paper.keywords?.slice(0, 4) ?? [];
+
 	return (
 		<div
 			className={cn(
-				"magpie-card group relative flex items-start gap-3 p-3.5",
+				"magpie-card group relative flex items-start gap-3 p-3.5 transition-colors hover:bg-muted/30",
 				selected && "magpie-card-selected",
 			)}
 		>
@@ -681,14 +1104,27 @@ function CollectionPaperCard({
 				/>
 			</div>
 
-			<div className="min-w-0 flex-1">
+			<button
+				type="button"
+				onClick={onOpenDetail}
+				className="min-w-0 flex-1 cursor-pointer text-left focus:outline-none"
+			>
 				<div className="flex flex-wrap items-center gap-1.5">
 					<PlazaSourceBadge
 						source={paper.sourceType}
 						label={paper.sourceLabel}
 					/>
+					{paper.ccfRank ? (
+						<span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] text-brand">
+							{paper.ccfRank}
+						</span>
+					) : null}
 					<span className="font-mono text-[11px] text-muted-foreground tabular-nums">
 						{paper.publishedAt.slice(0, 10)}
+					</span>
+					<span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tabular-nums">
+						<Quote className="size-2.5" />
+						{paper.citationCount ?? 0}
 					</span>
 					{paper.authors.length > 0 ? (
 						<span className="truncate text-caption text-muted-foreground">
@@ -699,27 +1135,31 @@ function CollectionPaperCard({
 				</div>
 
 				<h3
-					className="mt-1 line-clamp-2 font-medium text-foreground text-sm leading-snug"
+					className="mt-1 line-clamp-2 font-medium text-foreground text-sm leading-snug group-hover:text-brand"
 					title={paper.title}
 				>
 					{paper.title}
 				</h3>
 
 				{paper.abstract ? (
-					<SelectionSurface
-						source={{
-							sourcePath: paper.url,
-							sourceUrl: paper.url,
-							sourceTitle: paper.title,
-							origin: "markdown",
-							surface: "abstract",
-						}}
-						className="mt-1.5 line-clamp-3 select-text text-muted-foreground text-xs leading-relaxed"
-					>
+					<p className="mt-1.5 line-clamp-3 text-muted-foreground text-xs leading-relaxed">
 						{paper.abstract}
-					</SelectionSurface>
+					</p>
 				) : null}
-			</div>
+
+				{topKeywords.length > 0 ? (
+					<div className="mt-2 flex flex-wrap items-center gap-1">
+						{topKeywords.map((kw) => (
+							<span
+								key={kw}
+								className="rounded bg-[var(--magpie-surface)] px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-[0_0_0_0.5px_var(--magpie-hairline)]"
+							>
+								{kw}
+							</span>
+						))}
+					</div>
+				) : null}
+			</button>
 
 			<div className="flex shrink-0 items-center gap-0.5">
 				{paper.arxivId ? (
@@ -812,7 +1252,7 @@ function CollectionConfigPopover({
 	const [catSearch, setCatSearch] = useState("");
 	const [newVenueLabel, setNewVenueLabel] = useState("");
 	const [newVenueUrl, setNewVenueUrl] = useState("");
-	const [newVenueAgent, setNewVenueAgent] = useState(true);
+	const [newVenueAgent, setNewVenueAgent] = useState(false);
 
 	const orderedCategories = useMemo(() => {
 		const seen = new Set<string>();
@@ -846,6 +1286,7 @@ function CollectionConfigPopover({
 		const url = newVenueUrl.trim();
 		if (!name || !url) return;
 		const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+		const kind = inferVenueKind({ id, name, url });
 		onChangeVenues([
 			...venues,
 			{
@@ -853,6 +1294,7 @@ function CollectionConfigPopover({
 				name,
 				url,
 				mode: newVenueAgent ? "agent" : "auto",
+				kind,
 			},
 		]);
 		setNewVenueLabel("");
@@ -924,7 +1366,7 @@ function CollectionConfigPopover({
 					<p className="font-medium text-xs">
 						{t("plaza.collection.venuesTitle")}
 					</p>
-					<div className="mt-1.5 max-h-44 space-y-1.5 overflow-y-auto pr-1">
+					<div className="agentero-scroll mt-1.5 max-h-44 space-y-1.5 overflow-y-auto pr-1">
 						{venues.map((v) => (
 							<div
 								key={v.id}
@@ -948,6 +1390,11 @@ function CollectionConfigPopover({
 									title={t("plaza.collection.agentExtract")}
 								>
 									<span className="truncate font-medium">{v.name}</span>
+									{v.ccfRank ? (
+										<span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+											{v.ccfRank}
+										</span>
+									) : null}
 									{v.mode === "agent" ? (
 										<Sparkles className="size-3 shrink-0 text-brand" />
 									) : null}

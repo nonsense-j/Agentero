@@ -2,10 +2,17 @@ import { describe, expect, it } from "vitest";
 import { PLAZA_SOURCES } from "@/lib/plaza";
 import {
 	type CollectionPaperItem,
+	DBLP_2026_VENUE_SPECS,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	derivePaperKeywords,
+	formatPaperBibtex,
+	formatPaperCitationText,
+	isPlaceholderAbstract,
 	parseArxivAtomXml,
+	parseArxivRssXml,
 	parseResearchrHtml,
+	reconstructOpenAlexAbstract,
 	saveCollectionState,
 } from "@/lib/plaza/collection";
 import { ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
@@ -40,18 +47,159 @@ describe("Plaza AI & SE overhaul", () => {
 		]);
 	});
 
-	it("includes ASE, ICSE, FSE, ISSTA, PLDI, TOSEM, and TSE in default 2026 venues", () => {
-		const ids = DEFAULT_COLLECTION_VENUES.map((v) => v.id);
-		expect(ids).toEqual(
-			expect.arrayContaining([
-				"ase-2026",
-				"icse-2026",
-				"fse-2026",
-				"issta-2026",
-				"pldi-2026",
-				"tosem-2026",
-				"tse-2026",
-			]),
+	it("configures all 28 DBLP 2026 venues across PL/SE (CCF-A/B Conf & Journal), CR (CCF-A), and AI (CCF-A)", () => {
+		expect(DBLP_2026_VENUE_SPECS).toHaveLength(28);
+		expect(DEFAULT_COLLECTION_VENUES).toHaveLength(28);
+
+		for (const v of DEFAULT_COLLECTION_VENUES) {
+			expect(v.url).toContain("dblp.uni-trier.de/db/");
+			expect(v.name).toContain("2026");
+		}
+
+		const plseConfA = DEFAULT_COLLECTION_VENUES.filter(
+			(v) =>
+				v.domain === "PL/SE" &&
+				v.kind === "conference" &&
+				v.ccfRank === "CCF-A",
+		).map((v) => v.id);
+		expect(plseConfA).toEqual([
+			"ase-2026",
+			"icse-2026",
+			"issta-2026",
+			"fse-2026",
+			"pldi-2026",
+			"popl-2026",
+			"oopsla-2026",
+		]);
+
+		const plseConfB = DEFAULT_COLLECTION_VENUES.filter(
+			(v) =>
+				v.domain === "PL/SE" &&
+				v.kind === "conference" &&
+				v.ccfRank === "CCF-B",
+		).map((v) => v.id);
+		expect(plseConfB).toEqual([
+			"ecoop-2026",
+			"icpc-2026",
+			"re-2026",
+			"saner-2026",
+			"icsme-2026",
+			"sas-2026",
+			"esem-2026",
+			"issre-2026",
+		]);
+
+		const plseJournals = DEFAULT_COLLECTION_VENUES.filter(
+			(v) => v.domain === "PL/SE" && v.kind === "journal",
+		).map((v) => v.id);
+		expect(plseJournals).toEqual([
+			"tse-2026",
+			"tosem-2026",
+			"ase-journal-2026",
+			"ese-2026",
+		]);
+
+		const crConfs = DEFAULT_COLLECTION_VENUES.filter(
+			(v) => v.domain === "CR",
+		).map((v) => v.id);
+		expect(crConfs).toEqual([
+			"ccs-2026",
+			"sp-2026",
+			"usenix-sec-2026",
+			"ndss-2026",
+		]);
+
+		const aiConfs = DEFAULT_COLLECTION_VENUES.filter(
+			(v) => v.domain === "AI",
+		).map((v) => v.id);
+		expect(aiConfs).toEqual([
+			"aaai-2026",
+			"neurips-2026",
+			"acl-2026",
+			"iclr-2026",
+			"icml-2026",
+		]);
+	});
+
+	it("reconstructs OpenAlex abstracts, rejects placeholder abstracts, and formats keywords & citations", () => {
+		const abstract = reconstructOpenAlexAbstract({
+			We: [0],
+			present: [1],
+			a: [2],
+			static: [3],
+			analysis: [4],
+			fuzzer: [5],
+			for: [6],
+			Rust: [7],
+			compilers: [8],
+			with: [9],
+			soundness: [10],
+			guarantees: [11],
+		});
+		expect(abstract).toBe(
+			"We present a static analysis fuzzer for Rust compilers with soundness guarantees",
+		);
+		expect(isPlaceholderAbstract("ICSE 2026 · ICSE", "ICSE 2026")).toBe(true);
+		expect(isPlaceholderAbstract(abstract, "ICSE 2026")).toBe(false);
+
+		const keywords = derivePaperKeywords(
+			"Directed Fuzzing for Smart Contracts via Static Analysis",
+			abstract,
+			["cs.SE"],
+		);
+		expect(keywords).toEqual(
+			expect.arrayContaining(["Fuzzing", "Static Analysis", "Smart Contract"]),
+		);
+
+		const sampleItem: CollectionPaperItem = {
+			id: "doi:10.1145/3770000",
+			title: "Directed Fuzzing for Smart Contracts",
+			authors: ["Alice Smith", "Bob Jones"],
+			abstract,
+			publishedAt: "2026-04-01T00:00:00Z",
+			year: 2026,
+			sourceType: "venue",
+			sourceLabel: "ISSTA 2026",
+			venueKind: "conference",
+			venueFull: "Proceedings of ISSTA 2026",
+			categories: ["ISSTA 2026"],
+			url: "https://doi.org/10.1145/3770000",
+			doi: "10.1145/3770000",
+			citationCount: 12,
+			keywords,
+		};
+		expect(formatPaperCitationText(sampleItem)).toContain(
+			"Alice Smith, Bob Jones. (2026). Directed Fuzzing for Smart Contracts.",
+		);
+		expect(formatPaperBibtex(sampleItem)).toContain(
+			"@inproceedings{smith2026directed,",
+		);
+	});
+
+	it("parses fast rss.arxiv.org XML feeds with complete abstracts and derived keywords", () => {
+		const rss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <item>
+      <title>Symbolic Execution for LLM Agents (arXiv:2604.01234v1 [cs.SE])</title>
+      <link>https://arxiv.org/abs/2604.01234</link>
+      <description>arXiv:2604.01234v1 Announce Type: new 
+Abstract: We introduce a symbolic execution engine tailored for verifying multi-agent LLM tool invocations.</description>
+      <dc:creator>Ada Lovelace, Alan Turing</dc:creator>
+      <pubDate>Tue, 07 Apr 2026 00:00:00 -0400</pubDate>
+      <category>cs.SE</category>
+      <category>cs.AI</category>
+    </item>
+  </channel>
+</rss>`;
+		const parsed = parseArxivRssXml(rss, "cs.SE", ["cs.SE", "cs.AI"]);
+		expect(parsed).toHaveLength(1);
+		expect(parsed[0]?.arxivId).toBe("2604.01234");
+		expect(parsed[0]?.abstract).toBe(
+			"We introduce a symbolic execution engine tailored for verifying multi-agent LLM tool invocations.",
+		);
+		expect(parsed[0]?.keywords).toEqual(
+			expect.arrayContaining(["Symbolic Execution", "LLM Agent"]),
 		);
 	});
 

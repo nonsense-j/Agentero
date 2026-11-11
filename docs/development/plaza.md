@@ -410,10 +410,10 @@ DocTab：`kind: "plaza"`（或 `file` + mode `plaza` + path 虚拟 URI——实�
 *修订：2026-08-15 — 订阅 MVP 落地（XDG `feeds.sqlite` + 原生双栏 + 论文入库）。*  
 *修订：2026-08-21 — arXiv 推荐落地（embedding + 时间衰减；缓存进 catalog schema v6；`vault:opened` 预热）。*
 *修订：2026-09-10 — arXiv Daily 的 embedding 凭据新增内置来源（`embedding.source`），新装默认走产品网关；隐私取舍与空态条件随之改写，见 §3.4。*
-*修订：2026-11-09 — 广场 AI & SE 专项升级与 Magpie 视觉重构：*
-- **默认 arXiv 分区**：统一调整为 `["cs.AI", "cs.CR", "cs.PL", "cs.SE"]`。
+*修订：2026-11-11 — 广场 AI & SE 专项升级与 Paper Collection 双入口重构：*
+- **默认 arXiv 分区**：统一调整为 `["cs.SE", "cs.CR", "cs.PL", "cs.AI"]`。
 - **四大核心模块（`PLAZA_SOURCES`）**：
-  1. **Paper Collection (`agentero:plaza/collection`)**：本地优先的 2026 论文池（`src/lib/plaza/collection.ts` + `src/components/plaza/plaza-collection-view.tsx`），分为 `arXiv` 与 `Venue` 两类来源，默认覆盖 `ASE 2026`、`ICSE 2026`、`FSE 2026`、`ISSTA 2026`、`PLDI 2026` 以及顶刊 **`TOSEM 2026`**（`1049-331X`）与 **`TSE 2026`**（`0098-5589`）；支持检索时自动检测 arXiv 最新提交并提醒刷新、固定解析器 + Agent 自定义网页抽取、时间与关键词过滤、单选/多选批量入库。
+  1. **Paper Collection (`agentero:plaza/collection`)**：本地优先的 2026 论文池（`src/lib/plaza/collection.ts` + `src/lib/plaza/collection-enrichment.ts` + `src/components/plaza/plaza-collection-view.tsx`）。首页分为 **`arXiv` 入口卡**（各 `cs.XX` 分区独立子入口，后台自动预加载 `2026-Now` 论文至 IndexedDB 池）与 **`Venue` 入口卡**（区分 `Conference` 与 `Journal` 两大类，覆盖 PL/SE CCF-A/B 会议与期刊、CR CCF-A 会议、AI CCF-A 会议共 28 个 2026 DBLP 来源，全部从 DBLP 读取并结合 OpenAlex/Crossref 补全完整摘要、被引数、关键词与格式化引用/BibTeX）；进入列表后顶部导航切换来源与子项，`arXiv` 专属提供 `2026-Now` / `30d` / `7d` 时间筛选，列表默认首屏渲染 100 篇、每次点击从已预加载池追加展示 50 篇，点击任意卡片弹出完整摘要、被引数量、关键词与引用/BibTeX 详情弹窗。
   2. **Paper Discover (`agentero:plaza/discover`)**：移植 `dr-dumpling/PaperSearch` 的多源纯元数据检索器（`DBLP`、`ACM`、`USENIX`、`OpenReview`、`IACR ePrint`、`arXiv`、`Semantic Scholar`、`OpenAlex`，检索阶段零 PDF 下载），提供「快速检索」与「Grill-Me 式交互式 Agent 深度检索」（动态拆分检索词芯片 + 逐个澄清问题 + 随时一键「立即开始检索 / 不再追问」）。
   3. **Paper Recommend (`agentero:plaza/arxiv-rec`)**：基于可配置推荐关键词芯片从 `Paper Collection` 匹配推送，记录 `pushedIds` 保证历史已推送论文永不重复推送，支持切换 `Recent`（最新推送）与 `Full`（全部历史）视图。
   4. **CCF Deadline (`agentero:plaza/ccf-deadlines`)**：从 `ccfddl` 同步截稿日程，原生列表默认联动 `Paper Collection` 仅展示所关注会议的截稿倒计时，支持与内嵌 `https://ccfddl.com/` 网页视图一键切换。
