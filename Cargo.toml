@@ -9,23 +9,44 @@ resolver = "2"
 [patch.crates-io]
 tesseract-rs = { path = "vendor/tesseract-rs" }
 
-# Shared dependencies declared once for both members (src-tauri / cli).
-# Only version + common features live here; `optional`, target-specific
-# sections, and extra features stay in the member crates
-# (`{ workspace = true, features = [...] }` merges on top).
+# Shared dependencies declared once across workspace members so Cargo reuses a
+# single feature-unified compilation unit for `agentero-core`, `agentero-mcp`,
+# and heavy upstream crates (`tokio`, `rusqlite`, `reqwest`, `axum`, `rmcp`).
 [workspace.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+dirs = "6"
+futures-util = { version = "0.3.33", features = ["sink"] }
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "multipart", "cookies"] }
+rmcp = { version = "3.1", default-features = false, features = [
+  "server",
+  "macros",
+  "schemars",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# tokio features differ per crate (GUI: sync/rt/time/process/io-util/net;
-# CLI: rt-multi-thread/macros; dev: test-util), so declare no features here.
-tokio = "1"
-dirs = "6"
-log = "0.4"
+specta = { version = "2.0.0-rc.22", features = ["derive", "chrono"] }
 tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+
+# Keep line tables for Agentero crates while skipping full debuginfo across the
+# ~950 transitive dependencies (cuts `target/debug` by tens of GB and speeds up
+# MSVC PDB linking).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 # Profiles only take effect from the workspace root. Shipped binaries were
-# unstripped and non-LTO (#320): GUI 76MB, headless CLI 31MB.
+# unstripped and non-LTO (#320): GUI 76MB, headless CLI 31MB. Thin LTO keeps
+# nearly all size/perf wins while parallelizing across cores instead of running
+# single-threaded fat LTO across ~950 crates.
 [profile.release]
 strip = true
-lto = true
+lto = "thin"
 codegen-units = 1

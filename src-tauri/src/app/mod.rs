@@ -150,7 +150,6 @@ pub fn run() {
         .manage(crate::features::agent::AskUserGate::new())
         .manage(crate::features::agent::delegate::DelegateBridge::new())
         .manage(crate::integration::bridge::BridgeController::new())
-        .manage(crate::integration::bridge::BridgeClientController::new())
         .manage(
             crate::features::jobs::JobCenter::with_layout_backend(&layout_backend)
                 .with_import_concurrency(import_concurrency),
@@ -164,6 +163,11 @@ pub fn run() {
         .manage(crate::app::open_request::PendingVaultOpen::new())
         .manage(crate::app::open_request::PendingUiRequest::new())
         .manage(crate::features::web::html_preview::HtmlPreviewGrants::default());
+
+    #[cfg(target_os = "ios")]
+    {
+        builder = builder.manage(crate::integration::bridge::BridgeClientController::new());
+    }
 
     #[cfg(not(target_os = "ios"))]
     {

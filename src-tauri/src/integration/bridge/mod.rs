@@ -4,7 +4,9 @@
 //! Host identity, pairing registry, and QR offer wire format; transport and RPC
 //! execution are layered on top in sibling modules.
 
+#[cfg(target_os = "ios")]
 mod client;
+#[cfg(target_os = "ios")]
 pub mod client_commands;
 pub mod commands;
 mod crypto;
@@ -14,6 +16,7 @@ mod messages;
 mod protocol;
 mod relay;
 
+#[cfg(target_os = "ios")]
 pub use client::{BridgeClientController, BridgeClientStatus};
 pub use crypto::SessionCipher;
 pub use host::{BridgeController, BridgeStatus, PairingRequest};
