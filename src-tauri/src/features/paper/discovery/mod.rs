@@ -1,5 +1,8 @@
 //! Paper discovery sources and recommendations.
 
+pub use agentero_core::features::paper::discovery::collection_pool;
+#[cfg(feature = "desktop")]
+pub mod collection_commands;
 #[cfg(feature = "desktop")]
 pub mod coolpapers;
 pub use agentero_core::features::paper::discovery::discover;

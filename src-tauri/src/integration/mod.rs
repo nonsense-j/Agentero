@@ -4,6 +4,8 @@
 #[cfg(feature = "desktop")]
 pub mod bridge;
 #[cfg(feature = "desktop")]
+pub mod collection_mcp;
+#[cfg(feature = "desktop")]
 pub mod connector;
 #[cfg(feature = "desktop")]
 pub mod context_mcp;

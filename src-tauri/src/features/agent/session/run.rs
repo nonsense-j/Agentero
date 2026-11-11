@@ -276,8 +276,14 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
             full_prompt = insert_resume_transcript(&full_prompt, transcript);
         }
     }
+    let is_plaza_deep_discover = params.workflow.as_deref() == Some("plaza_deep_discover");
+    let effective_vault_path = if is_plaza_deep_discover {
+        None
+    } else {
+        params.vault_path.as_deref()
+    };
     let prompt_images = params.images.clone();
-    let cwd = match agent_spawn_cwd(params.remote.as_deref(), params.vault_path.as_deref()) {
+    let cwd = match agent_spawn_cwd(params.remote.as_deref(), effective_vault_path) {
         Ok(cwd) => cwd,
         Err(error) => {
             if !params.suppress_transcript {
@@ -287,6 +293,21 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
         }
     };
     let mut mcp_servers = prepared.mcp_servers;
+    let mut skip_warm_pool = prepared.skip_warm_pool;
+    if is_plaza_deep_discover && params.remote.is_none() && !params.is_acp_command {
+        match crate::integration::collection_mcp::collection_mcp_server() {
+            Ok(server) => {
+                mcp_servers.push(server);
+                skip_warm_pool = true;
+            }
+            Err(error) => {
+                if !params.suppress_transcript {
+                    emit_run_failed(&params.app, &params.session_id, &error);
+                }
+                return Err(error);
+            }
+        }
+    }
     mcp_servers.extend(params.delegate_mcp.clone());
     Ok(RunTurnPrep {
         full_prompt,
@@ -297,7 +318,7 @@ async fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppErro
         context_fingerprint: prepared.fingerprint,
         context_usage: prepared.usage_path,
         context_vault: prepared.vault,
-        skip_warm_pool: prepared.skip_warm_pool,
+        skip_warm_pool,
     })
 }
 

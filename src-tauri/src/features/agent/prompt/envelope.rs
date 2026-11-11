@@ -27,6 +27,41 @@ pub fn build_prompt(
         return format!("{target_line}{user_prompt}");
     }
 
+    if workflow == "plaza_deep_discover" {
+        let system = format!(
+            "You are the Agentero Paper Discover assistant running an interactive multi-turn Deep Search \
+             strictly inside the user's local Plaza `Paper Collection`.\n\
+             \n\
+             ## Exclusive Interface (`agentero-collection` MCP)\n\
+             You have read-only MCP tools attached in `agentero-collection`:\n\
+             - `collection_overview`: inspect total pool size, arXiv vs Venue counts, date span, CCF-A/CCF-B distribution, categories, and venues.\n\
+             - `collection_search`: boolean query (`AND` by space, `\"exact phrase\"`, `OR`, `-exclude`) + advanced filters (`ccfRanks`, `venues`, `categories`, `venueKind`, `venueDomain`, `dateFrom`, `dateTo`, `fields`).\n\
+               - Use `mode: \"random_sample\"` with `sampleSize: 50` on the initial broad exploration turn.\n\
+               - Use `mode: \"ranked\"` (`sort`: `\"relevance\"` | `\"newest\"` | `\"citations\"`) when narrowing to specific sub-domains or techniques.\n\
+             - `collection_citations`: snowball discovery from 1-5 seed `paperIds` (`direction`: `\"both\"` | `\"references\"` | `\"cited_by\"` | `\"cocited\"`). Every returned paper is guaranteed to belong to `Paper Collection`.\n\
+             - `collection_curate`: publish categorized candidate groups (`groups`: `[{{ label, items: [{{ id, reason }}] }}]`), `mode` (`\"replace\"` or `\"append\"`), and 3-5 concise `suggestedFollowUps` pills to the user's right-hand Candidate Tray.\n\
+             \n\
+             ## Strict Boundaries\n\
+             1. NEVER run shell commands, web searches, curl, or filesystem scans. Use ONLY `agentero-collection` MCP tools.\n\
+             2. NEVER invent, hallucinate, or recommend any paper outside `agentero-collection` tool outputs. Always pass exact `id` values to `collection_curate` and `collection_citations`.\n\
+             3. Always call `collection_curate` before finishing a turn whenever you identify or refine candidate papers, and include 3-5 actionable `suggestedFollowUps`.\n\
+             \n\
+             ## Multi-Turn Discovery Protocol\n\
+             - **Turn 1 (Initial Broad Request)**:\n\
+               1. Translate the user's research topic into an effective boolean query and call `collection_search` with `mode: \"random_sample\"` and `sampleSize: 50` (if strict matches are sparse, inspect `broadened` or refine terms).\n\
+               2. Analyze the sampled papers (up to 50) and group their approaches into a clear **Method / Technical Taxonomy** (3-6 method categories or sub-problems, noting approximate counts and representative papers).\n\
+               3. Call `collection_curate` (`mode: \"replace\"`) with representative papers per taxonomy group and 3-5 `suggestedFollowUps`.\n\
+               4. Ask the user whether they want to compare across sub-domains or focus on specific technical paradigms (e.g., multi-agent collaboration, program analysis/verification, empirical benchmarks, CCF-A venues).\n\
+             - **Follow-up Turns (Refinement & Snowballing)**:\n\
+               1. Combine `collection_search(mode: \"ranked\")` for targeted filtering and `collection_citations` on strong seed papers to uncover direct citations and co-cited technical lineages inside `Paper Collection`.\n\
+               2. Call `collection_curate` (`mode: \"replace\"` when narrowing focus, `mode: \"append\"` when snowball-expanding) with updated groups and fresh `suggestedFollowUps`.\n\
+               3. Synthesize methodology trade-offs concisely and guide the next refinement step.{}{}",
+            language_directive(response_language),
+            personal_preference_directive(personal_prompt),
+        );
+        return format!("{system}\n\n{target_line}User request:\n{user_prompt}");
+    }
+
     // Vault layout, reading order, citations, and CLI policy live in `AGENTS.md`
     // (cwd = vault root) and selected skills. Envelope only sets the turn role.
     // Skill activation wording is not duplicated here for free/qa/etc. — that lives in
@@ -160,6 +195,7 @@ pub fn strip_prompt_envelope_for_display(text: &str) -> String {
     for prefix in [
         "You are an assistant working inside a Agentero research Vault",
         "You are an assistant working inside a Motif research Vault",
+        "You are the Agentero Paper Discover assistant",
         "You are running the Agentero paper-reader workflow",
         "You are helping with a research vault",
         "You are answering questions about a local research vault",
@@ -524,5 +560,27 @@ You are an assistant working inside a Agentero research Vault.
 User request:
 hello world"#;
         assert_eq!(strip_prompt_envelope_for_display(mixed), "hello world");
+    }
+
+    #[test]
+    fn plaza_deep_discover_envelope_scopes_to_collection_mcp_and_strips_cleanly() {
+        let p = build_prompt(
+            Some("plaza_deep_discover"),
+            "Find multi-agent software testing papers",
+            None,
+            SkillMentionStyle::InjectedOnly,
+            &[],
+            Some("zh-CN"),
+            None,
+        );
+        assert!(p.contains("agentero-collection"));
+        assert!(p.contains("random_sample"));
+        assert!(p.contains("collection_citations"));
+        assert!(p.contains("collection_curate"));
+        assert!(!p.contains("openui-blocks"));
+        assert_eq!(
+            strip_prompt_envelope_for_display(&p),
+            "Find multi-agent software testing papers"
+        );
     }
 }

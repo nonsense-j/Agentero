@@ -167,6 +167,7 @@ pub(crate) fn export_typescript_bindings() {
             crate::features::paper::discovery::scratch::plaza_scratch_prepare,
             crate::features::paper::discovery::scratch::plaza_scratch_stats,
             crate::features::paper::discovery::scratch::plaza_scratch_clear,
+            crate::features::paper::discovery::collection_commands::plaza_collection_sync_snapshot,
             crate::features::paper::discovery::feeds::commands::feeds_set_pinned,
             crate::features::paper::discovery::feeds::commands::feeds_resolve_body,
             crate::features::paper::discovery::recommend::commands::recommend_arxiv,

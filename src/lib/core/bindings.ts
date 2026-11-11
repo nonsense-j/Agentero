@@ -432,6 +432,11 @@ export const commands = {
 	plazaScratchPrepare: (args: PlazaScratchPrepareArgs) => __TAURI_INVOKE<ApiResult<PlazaScratchEntry[]>>("plaza_scratch_prepare", { args }),
 	plazaScratchStats: () => __TAURI_INVOKE<ApiResult<ScratchStats>>("plaza_scratch_stats"),
 	plazaScratchClear: () => __TAURI_INVOKE<ApiResult<ScratchClearResult>>("plaza_scratch_clear"),
+	/**
+	 *  Persist the frontend Paper Collection pool to `<cache>/agentero/plaza-collection/snapshot.json`
+	 *  so Deep Search's `agentero-collection` MCP server can query and snowball over it.
+	 */
+	plazaCollectionSyncSnapshot: (snapshot: CollectionSnapshot_Deserialize) => __TAURI_INVOKE<ApiResult<CollectionSyncStatus>>("plaza_collection_sync_snapshot", { snapshot }),
 	feedsSetPinned: (args: FeedsSetPinnedArgs) => __TAURI_INVOKE<ApiResult<FeedSub>>("feeds_set_pinned", { args }),
 	feedsResolveBody: (args: FeedsIdArgs) => __TAURI_INVOKE<ApiResult<FeedItem>>("feeds_resolve_body", { args }),
 	/**
@@ -2603,6 +2608,86 @@ export type CliInstallStatus = {
 	commandName: string,
 	/**  Human-readable note (e.g. PATH hint). */
 	message: string | null,
+};
+
+export type CollectionSnapshot = CollectionSnapshot_Serialize | CollectionSnapshot_Deserialize;
+
+export type CollectionSnapshotPaper = CollectionSnapshotPaper_Serialize | CollectionSnapshotPaper_Deserialize;
+
+export type CollectionSnapshotPaper_Deserialize = {
+	id: string,
+	title: string,
+	authors?: string[],
+	abstract?: string,
+	publishedAt?: string,
+	year?: number,
+	/**  `"arxiv"` or `"venue"`. */
+	sourceType?: string,
+	sourceLabel?: string,
+	categories?: string[],
+	url?: string,
+	pdfUrl?: string | null,
+	arxivId?: string | null,
+	doi?: string | null,
+	venueId?: string | null,
+	venueKind?: string | null,
+	venueDomain?: string | null,
+	ccfRank?: string | null,
+	venueFull?: string | null,
+	citationCount?: number,
+	keywords?: string[],
+};
+
+export type CollectionSnapshotPaper_Serialize = {
+	id: string,
+	title: string,
+	authors: string[],
+	abstract: string,
+	publishedAt: string,
+	year: number,
+	/**  `"arxiv"` or `"venue"`. */
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	url: string,
+	pdfUrl?: string | null,
+	arxivId?: string | null,
+	doi?: string | null,
+	venueId?: string | null,
+	venueKind?: string | null,
+	venueDomain?: string | null,
+	ccfRank?: string | null,
+	venueFull?: string | null,
+	citationCount: number,
+	keywords: string[],
+};
+
+export type CollectionSnapshot_Deserialize = {
+	updatedAt?: string,
+	categories?: string[],
+	venues?: CollectionVenueMeta[],
+	items?: CollectionSnapshotPaper_Deserialize[],
+};
+
+export type CollectionSnapshot_Serialize = {
+	updatedAt: string,
+	categories: string[],
+	venues: CollectionVenueMeta[],
+	items: CollectionSnapshotPaper_Serialize[],
+};
+
+export type CollectionSyncStatus = {
+	dir: string,
+	totalPapers: number,
+	updatedAt: string,
+};
+
+export type CollectionVenueMeta = {
+	id: string,
+	name: string,
+	kind?: string | null,
+	domain?: string | null,
+	ccfRank?: string | null,
 };
 
 export type CommitStatus = 
