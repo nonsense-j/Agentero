@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	type InstitutionProxyPresetOption,
@@ -41,6 +41,8 @@ import {
 	type AppSettings,
 	AUTO_UPDATE_INTERNAL_LINKS,
 	type AutoUpdateInternalLinks,
+	ensureSettingsLoaded,
+	loadSettings,
 	PAPER_NOTE_MODES,
 	type PaperNoteMode,
 	PDF_SCROLL_STRATEGIES,
@@ -85,52 +87,81 @@ export function GeneralPane({
 		useState(settings.institutionProxyPrefix);
 	const [institutionProxyCookieDraft, setInstitutionProxyCookieDraft] =
 		useState(settings.institutionProxyCookie);
+	const cookieDirtyRef = useRef(false);
 	const [institutionProxyTesting, setInstitutionProxyTesting] = useState(false);
 	const [institutionProxyResult, setInstitutionProxyResult] = useState<
 		{ status: "ok" | "fail"; message: string } | undefined
 	>(undefined);
-	const commitInstitutionProxy = useCallback(() => {
-		patch({
-			institutionProxyPrefix: institutionProxyPrefixDraft.trim(),
-			institutionProxyCookie: institutionProxyCookieDraft.trim(),
-		});
-	}, [institutionProxyPrefixDraft, institutionProxyCookieDraft, patch]);
-	const testInstitutionProxy = useCallback(async () => {
-		setInstitutionProxyTesting(true);
-		setInstitutionProxyResult(undefined);
-		try {
-			const result = await commands.institutionProxyProbe();
-			setInstitutionProxyResult(
-				result.ok
-					? { status: "ok", message: result.data ?? "" }
-					: { status: "fail", message: result.error?.message ?? "failed" },
-			);
-			if (result.error?.code === "institution_proxy_auth_required") {
-				notifyError(t("general.institutionProxy.cookieExpired"));
-			}
-		} catch (error) {
-			setInstitutionProxyResult({
-				status: "fail",
-				message: error instanceof Error ? error.message : "failed",
+	const flushInstitutionProxyAsync = useCallback(
+		async (overrides?: Partial<AppSettings>) => {
+			const latest = loadSettings();
+			const nextPrefix = (
+				overrides?.institutionProxyPrefix ?? institutionProxyPrefixDraft
+			).trim();
+			const nextCookie = cookieDirtyRef.current
+				? institutionProxyCookieDraft.trim()
+				: latest.institutionProxyCookie;
+			cookieDirtyRef.current = false;
+			await saveSettingsAsync({
+				...latest,
+				institutionProxyPrefix: nextPrefix,
+				institutionProxyCookie: nextCookie,
+				...(overrides?.institutionProxyType
+					? { institutionProxyType: overrides.institutionProxyType }
+					: {}),
 			});
-		} finally {
-			setInstitutionProxyTesting(false);
-		}
-	}, [t]);
+		},
+		[institutionProxyCookieDraft, institutionProxyPrefixDraft],
+	);
+	const commitInstitutionProxy = useCallback(() => {
+		void flushInstitutionProxyAsync();
+	}, [flushInstitutionProxyAsync]);
+	const testInstitutionProxy = useCallback(
+		async (skipFlush = false) => {
+			setInstitutionProxyTesting(true);
+			setInstitutionProxyResult(undefined);
+			try {
+				if (!skipFlush) {
+					await flushInstitutionProxyAsync();
+				}
+				const result = await commands.institutionProxyProbe();
+				setInstitutionProxyResult(
+					result.ok
+						? { status: "ok", message: result.data ?? "" }
+						: { status: "fail", message: result.error?.message ?? "failed" },
+				);
+				if (result.error?.code === "institution_proxy_auth_required") {
+					notifyError(t("general.institutionProxy.cookieExpired"));
+				}
+			} catch (error) {
+				setInstitutionProxyResult({
+					status: "fail",
+					message: error instanceof Error ? error.message : "failed",
+				});
+			} finally {
+				setInstitutionProxyTesting(false);
+			}
+		},
+		[flushInstitutionProxyAsync, t],
+	);
 	const openInstitutionLogin = useCallback(async () => {
-		commitInstitutionProxy();
 		try {
+			const trimmedPrefix = institutionProxyPrefixDraft.trim();
+			await flushInstitutionProxyAsync({
+				institutionProxyPrefix: trimmedPrefix,
+			});
 			const captured = await callResult(() =>
-				commands.institutionProxyLoginOpen(institutionProxyPrefixDraft),
+				commands.institutionProxyLoginOpen(trimmedPrefix),
 			);
-			if (captured) void testInstitutionProxy();
+			await ensureSettingsLoaded();
+			if (captured) void testInstitutionProxy(true);
 		} catch (error) {
 			notifyError(t("general.institutionProxy.loginFailed"), {
 				description: errorText(error),
 			});
 		}
 	}, [
-		commitInstitutionProxy,
+		flushInstitutionProxyAsync,
 		institutionProxyPrefixDraft,
 		t,
 		testInstitutionProxy,
@@ -146,12 +177,12 @@ export function GeneralPane({
 	const selectInstitutionProxyPreset = useCallback(
 		(preset: InstitutionProxyPresetOption) => {
 			setInstitutionProxyPrefixDraft(preset.prefix);
-			patch({
+			void flushInstitutionProxyAsync({
 				institutionProxyPrefix: preset.prefix,
 				institutionProxyType: preset.kind,
 			});
 		},
-		[patch],
+		[flushInstitutionProxyAsync],
 	);
 	const institutionProxyProbeStatus: ProbeStatus = institutionProxyTesting
 		? "probing"
@@ -539,7 +570,10 @@ export function GeneralPane({
 					presetsLabel={t("general.institutionProxy.presetsLabel")}
 					presets={institutionProxyPresets}
 					onPrefixChange={setInstitutionProxyPrefixDraft}
-					onCookieChange={setInstitutionProxyCookieDraft}
+					onCookieChange={(val) => {
+						cookieDirtyRef.current = true;
+						setInstitutionProxyCookieDraft(val);
+					}}
 					onPresetSelect={selectInstitutionProxyPreset}
 					onCommit={commitInstitutionProxy}
 					onTest={() => void testInstitutionProxy()}

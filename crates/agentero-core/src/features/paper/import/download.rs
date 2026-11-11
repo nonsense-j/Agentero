@@ -24,12 +24,50 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tar::Archive;
 
-/// Institution proxy (EZProxy/WebVPN) credentials for paywalled PDF fallback.
+/// Institution proxy (EZProxy/WebVPN/CARSI) credentials for paywalled PDF fallback.
 ///
 /// Set by the host when settings load or change (`set_institution_proxy`);
 /// read per request by the download fallback chain. An empty prefix disables
 /// the layer — the unauthenticated behaviour stays the default.
 static INSTITUTION_PROXY: Mutex<Option<InstitutionProxyConf>> = Mutex::new(None);
+
+/// Optional desktop WebView2/WKWebView PDF fetcher installed by `src-tauri`.
+///
+/// Publisher CDNs such as `dl.acm.org` (Cloudflare) and `ieeexplore.ieee.org`
+/// (`stamp.jsp` session checks) bind CARSI SAML sessions to the Chromium TLS
+/// stack and `HttpOnly` cookies inside the login WebView, rejecting bare
+/// `reqwest` requests with HTTP 403 / 502. When installed, CARSI probes and
+/// downloads execute inside an offscreen WebView sharing that exact profile.
+pub type BrowserPdfFetchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>;
+pub type BrowserPdfFetcher =
+    std::sync::Arc<dyn Fn(String) -> BrowserPdfFetchFuture + Send + Sync>;
+
+static BROWSER_PDF_FETCHER: Mutex<Option<BrowserPdfFetcher>> = Mutex::new(None);
+
+/// Register the desktop host's WebView-backed publisher PDF fetcher.
+pub fn install_browser_pdf_fetcher(fetcher: BrowserPdfFetcher) {
+    if let Ok(mut guard) = BROWSER_PDF_FETCHER.lock() {
+        *guard = Some(fetcher);
+    }
+}
+
+async fn browser_pdf_fetch(url: &str) -> Option<Result<Vec<u8>, String>> {
+    let fetcher = BROWSER_PDF_FETCHER.lock().ok().and_then(|g| g.clone())?;
+    Some((fetcher)(url.to_string()).await)
+}
+
+/// Returns `true` when `prefix` points to a publisher Shibboleth / CARSI WAYF
+/// endpoint rather than an EZProxy or wengine WebVPN gateway.
+pub fn is_carsi_sso_prefix(prefix: &str) -> bool {
+    let lower = prefix.trim().to_ascii_lowercase();
+    lower.contains("dl.acm.org/action/ssostart")
+        || lower.contains("ieeexplore.ieee.org/servlet/wayf.jsp")
+        || lower.contains("wayf.springernature.com")
+        || lower.contains("authn.sd.elsevier.com")
+        || lower.contains("ds.carsi.edu.cn")
+        || lower.contains("onlinelibrary.wiley.com/action/ssostart")
+}
 
 /// Gateway flavour of the configured institution proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +95,14 @@ impl InstitutionProxyKind {
             Self::Carsi
         } else {
             Self::EzProxy
+        }
+    }
+
+    pub fn from_setting_and_prefix(s: &str, prefix: &str) -> Self {
+        if is_carsi_sso_prefix(prefix) {
+            Self::Carsi
+        } else {
+            Self::from_setting(s)
         }
     }
 }
@@ -123,7 +169,10 @@ struct InstitutionProxySettings {
 /// be unit-tested without touching the process-wide proxy.
 fn parse_institution_proxy_settings(raw: &str) -> Option<(InstitutionProxyKind, String, String)> {
     let s: InstitutionProxySettings = serde_json::from_str(raw).ok()?;
-    let kind = InstitutionProxyKind::from_setting(&s.institution_proxy_type);
+    let kind = InstitutionProxyKind::from_setting_and_prefix(
+        &s.institution_proxy_type,
+        &s.institution_proxy_prefix,
+    );
     Some((kind, s.institution_proxy_prefix, s.institution_proxy_cookie))
 }
 
@@ -597,16 +646,35 @@ pub async fn probe_institution_proxy(
             let carsi_target = if lower_prefix.contains("acm.org") {
                 "https://dl.acm.org/doi/pdf/10.1145/2786805.2786814"
             } else if lower_prefix.contains("ieee.org") {
-                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=7194613&ref="
-            } else if lower_prefix.contains("springer.com") {
-                "https://link.springer.com/content/pdf/10.1007/BF01386390.pdf"
+                "https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=7194613"
+            } else if lower_prefix.contains("springer") {
+                "https://link.springer.com/content/pdf/10.1007/s10515-023-00407-8.pdf"
+            } else if lower_prefix.contains("elsevier") || lower_prefix.contains("sciencedirect") {
+                "https://www.sciencedirect.com/science/article/pii/S0164121223003199/pdfft?isDTMRedir=true&download=true"
+            } else if lower_prefix.contains("wiley.com") {
+                "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/smr.2624?download=true"
             } else {
                 target
             };
+
+            if let Some(browser_res) = browser_pdf_fetch(carsi_target).await {
+                match browser_res {
+                    Ok(bytes) if bytes.len() >= 4 && &bytes[..4] == b"%PDF" => {
+                        return Ok(bytes.len());
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.contains("authentication required") => {
+                        return Err(e);
+                    }
+                    Err(_) => {}
+                }
+            }
+
             let host_cookie = cookie_for_url(cookie, carsi_target);
             if host_cookie.is_empty() {
                 return Err(
-                    "authentication required: sign in via CARSI first so publisher cookies are captured".into(),
+                    "authentication required: sign in via CARSI first so publisher session is active"
+                        .into(),
                 );
             }
             (carsi_target.to_string(), host_cookie)
@@ -1479,6 +1547,33 @@ async fn try_institution_proxy_download(
         }
         targets = next_targets;
     }
+
+    if conf.kind == InstitutionProxyKind::Carsi {
+        let mut browser_targets = publisher_direct_pdf_targets(doi);
+        browser_targets.push(format!("https://doi.org/{doi}"));
+        for target in &browser_targets {
+            if let Some(res) = browser_pdf_fetch(target).await {
+                match res {
+                    Ok(bytes) if bytes.len() >= 4 && &bytes[..4] == b"%PDF" => {
+                        let name = safe_filename(id, "pdf");
+                        if let Err(e) = fs::write(paper_dir.join(name), &bytes) {
+                            out.messages
+                                .push(format!("CARSI browser PDF write failed: {e}"));
+                            return false;
+                        }
+                        out.messages
+                            .push(format!("pdf ok via CARSI browser session ({target})"));
+                        return true;
+                    }
+                    Ok(_) => {}
+                    Err(e) => out
+                        .messages
+                        .push(format!("CARSI browser candidate failed ({target}): {e}")),
+                }
+            }
+        }
+    }
+
     out.messages
         .push("institution proxy did not yield a PDF (cookie expired or not subscribed?)".into());
     false

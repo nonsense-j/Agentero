@@ -208,7 +208,7 @@ pub fn run() {
                 // corrupt the native titlebar hit-test (buttons become dead until
                 // a resize/double-click). Only show if currently hidden.
                 let win = webview.window();
-                if !win.is_visible().unwrap_or(false) {
+                if !win.is_visible().unwrap_or(false) && !win.label().starts_with("carsi-fetch-") {
                     let _ = win.show();
                 }
             }
@@ -245,6 +245,20 @@ pub fn run() {
             // Deep agentero-core pollers (pdf parse, asset downloads, citing
             // scans) check cancellation through the JobCenter task-id registry.
             crate::core::cancel::install_cancel_probe(crate::features::jobs::is_task_cancelled);
+            {
+                let handle = app.handle().clone();
+                agentero_core::features::paper::import::download::install_browser_pdf_fetcher(
+                    std::sync::Arc::new(move |url| {
+                        let h = handle.clone();
+                        Box::pin(async move {
+                            crate::features::system::settings::commands::webview_fetch_publisher_pdf(
+                                h, url,
+                            )
+                            .await
+                        })
+                    }),
+                );
+            }
         }
         // Shared System One provider for the smart-highlight stream.
         app.manage(crate::features::decision::build_provider(

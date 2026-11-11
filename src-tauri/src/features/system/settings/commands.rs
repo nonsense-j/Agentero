@@ -68,13 +68,272 @@ fn has_institutional_auth_cookie(cookie_header: &str) -> bool {
         "_shibsession_",
         "shibstate",
         "erights=",
+        "wlsession=",
         "sim-inst-token=",
+        "idp_session=",
+        "sd_remoteaccess=",
+        "sns_session=",
+        "maid=",
+        "i2kbrck=",
+        "almighty=",
         "athens",
         "wengine_vpn_ticket",
         "ezproxy",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn is_sso_or_wayf_url(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    let query = url.query().unwrap_or_default().to_ascii_lowercase();
+    host.contains("carsi")
+        || host.starts_with("wayf.")
+        || host.starts_with("authn.")
+        || host.starts_with("idp.")
+        || host.starts_with("sso.")
+        || host.starts_with("cas.")
+        || host.starts_with("login.")
+        || host.starts_with("passport.")
+        || path.contains("/ssostart")
+        || path.contains("/showlogin")
+        || path.contains("/wayf")
+        || path.contains("/shibboleth")
+        || path.contains("/saml")
+        || path.contains("/idp/")
+        || path.contains("/cas/")
+        || path.contains("/login")
+        || query.contains("wayf")
+}
+
+fn is_authenticated_publisher_landing(url: &Url) -> bool {
+    if is_sso_or_wayf_url(url) {
+        return false;
+    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    [
+        "dl.acm.org",
+        "ieeexplore.ieee.org",
+        "link.springer.com",
+        "www.nature.com",
+        "www.sciencedirect.com",
+        "onlinelibrary.wiley.com",
+    ]
+    .iter()
+    .any(|pub_host| host == *pub_host || host.ends_with(&format!(".{pub_host}")))
+}
+
+/// Fetch a publisher PDF inside an offscreen WebView sharing the desktop app's
+/// persistent cookie jar and Chromium TLS stack (required for CARSI sessions on
+/// Cloudflare/Atypon/IEEE endpoints that block non-browser HTTP clients).
+pub async fn webview_fetch_publisher_pdf(
+    app: AppHandle,
+    target_url: String,
+) -> Result<Vec<u8>, String> {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tauri::webview::{DownloadEvent, PageLoadEvent};
+    use tokio::sync::{oneshot, Mutex as AsyncMutex};
+
+    static FETCH_SERIALIZER: std::sync::OnceLock<AsyncMutex<()>> = std::sync::OnceLock::new();
+    let _guard = FETCH_SERIALIZER
+        .get_or_init(|| AsyncMutex::new(()))
+        .lock()
+        .await;
+
+    let normalized_url =
+        if target_url.contains("dl.acm.org/doi/pdf/") && !target_url.contains("download=") {
+            format!("{target_url}?download=true")
+        } else if target_url.contains("ieeexplore.ieee.org/stampPDF/getPDF.jsp") {
+            target_url.replace("/stampPDF/getPDF.jsp", "/stamp/stamp.jsp")
+        } else {
+            target_url.clone()
+        };
+
+    let nav_url = Url::parse(&normalized_url).map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let label = format!("carsi-fetch-{id}");
+    let staging_path = std::env::temp_dir().join(format!("agentero-carsi-{id}.pdf"));
+
+    let (tx, rx) = oneshot::channel::<Result<Vec<u8>, String>>();
+    let tx_slot = Arc::new(Mutex::new(Some(tx)));
+
+    let dl_tx = Arc::clone(&tx_slot);
+    let dl_staging = staging_path.clone();
+
+    let eval_script = r#"
+(function () {
+  if (window.__agenteroCarsiHandled) return;
+  window.__agenteroCarsiHandled = true;
+  function signalSentinel(name) {
+    try {
+      const b = new Blob(["0"], { type: "application/octet-stream" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(b);
+      a.download = name;
+      (document.body || document.documentElement).appendChild(a);
+      a.click();
+    } catch (_) {}
+  }
+  const href = String(location.href || "");
+  const lower = href.toLowerCase();
+  if (
+    lower.includes("/ssostart") ||
+    lower.includes("/showlogin") ||
+    lower.includes("wayf") ||
+    lower.includes("carsi") ||
+    lower.includes("/shibboleth") ||
+    lower.includes("/saml") ||
+    lower.includes("/idp/") ||
+    lower.includes("/cas/") ||
+    lower.includes("authn.sd.elsevier")
+  ) {
+    signalSentinel("__agentero_auth_required__");
+    return;
+  }
+  function pickPdfUrl() {
+    if (lower.includes("/doi/pdf/") || lower.endsWith(".pdf") || lower.includes("pdfft")) {
+      return href;
+    }
+    const iframe = document.querySelector('iframe[src*="getPDF.jsp"], iframe[src*=".pdf"]');
+    if (iframe && iframe.src) return iframe.src;
+    const meta = document.querySelector('meta[name="citation_pdf_url"]');
+    if (meta && meta.content) {
+      try {
+        const u = new URL(meta.content, href);
+        if (u.origin === location.origin) return u.href;
+      } catch (_) {}
+    }
+    const sel = 'a[href*="/doi/pdf/"], a[href*="/content/pdf/"], a[href*="pdfft"], a[href*="pdfdirect"]';
+    const link = document.querySelector(sel);
+    if (link && link.href) return link.href;
+    const arMatch = /arnumber=(\d+)/i.exec(href) || /\/document\/(\d+)/i.exec(href);
+    if (lower.includes("ieeexplore.ieee.org") && arMatch) {
+      return location.origin + "/stampPDF/getPDF.jsp?tp=&arnumber=" + arMatch[1] + "&ref=";
+    }
+    return href;
+  }
+  (async function () {
+    try {
+      await new Promise((r) => setTimeout(r, 350));
+      const pdfUrl = pickPdfUrl();
+      const resp = await fetch(pdfUrl, { credentials: "include" });
+      if (resp.status === 401 || resp.status === 403) {
+        signalSentinel("__agentero_auth_required__");
+        return;
+      }
+      const buf = await resp.arrayBuffer();
+      const head = new Uint8Array(buf.slice(0, 5));
+      if (head.length >= 4 && head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46) {
+        const blob = new Blob([buf], { type: "application/pdf" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "paper.pdf";
+        (document.body || document.documentElement).appendChild(a);
+        a.click();
+        return;
+      }
+      const txt = new TextDecoder().decode(buf.slice(0, 4096)).toLowerCase();
+      if (
+        txt.includes("institutional sign in") ||
+        txt.includes("access through your institution") ||
+        txt.includes("get access") ||
+        txt.includes("purchase pdf") ||
+        txt.includes("shibboleth")
+      ) {
+        signalSentinel("__agentero_auth_required__");
+      } else {
+        signalSentinel("__agentero_not_pdf__");
+      }
+    } catch (_) {
+      signalSentinel("__agentero_not_pdf__");
+    }
+  })();
+})();
+"#;
+
+    let build_res = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(nav_url))
+        .title("CARSI PDF Fetch")
+        .inner_size(900.0, 700.0)
+        .visible(false)
+        .on_download(move |_webview, event| match event {
+            DownloadEvent::Requested { destination, .. } => {
+                let fname = destination
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if fname.contains("__agentero_auth_required__") {
+                    if let Ok(mut guard) = dl_tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(Err(
+                                "authentication required: institutional session missing or expired"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    return false;
+                }
+                if fname.contains("__agentero_not_pdf__") {
+                    if let Ok(mut guard) = dl_tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(Err(
+                                "response was HTML, not a PDF (institution may not subscribe to this resource)"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    return false;
+                }
+                *destination = dl_staging.clone();
+                true
+            }
+            DownloadEvent::Finished { path, success, .. } => {
+                let file_path = path.unwrap_or_else(|| dl_staging.clone());
+                let outcome = if !success {
+                    Err("browser PDF download failed".into())
+                } else {
+                    match std::fs::read(&file_path) {
+                        Ok(bytes) if bytes.len() >= 4 && &bytes[..4] == b"%PDF" => Ok(bytes),
+                        Ok(_) => Err(
+                            "authentication required: downloaded content was not a PDF".into(),
+                        ),
+                        Err(e) => Err(format!("failed reading downloaded PDF: {e}")),
+                    }
+                };
+                let _ = std::fs::remove_file(&file_path);
+                if let Ok(mut guard) = dl_tx.lock() {
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(outcome);
+                    }
+                }
+                true
+            }
+            _ => true,
+        })
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                let _ = webview.eval(eval_script);
+            }
+        })
+        .build();
+
+    if let Err(e) = build_res {
+        let _ = std::fs::remove_file(&staging_path);
+        return Err(e.to_string());
+    }
+
+    let result = match tokio::time::timeout(Duration::from_secs(25), rx).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(_)) => Err("CARSI browser PDF channel closed unexpectedly".into()),
+        Err(_) => Err("timed out waiting for publisher PDF in browser session".into()),
+    };
+
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.close();
+    }
+    let _ = std::fs::remove_file(&staging_path);
+    result
 }
 
 async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
@@ -93,6 +352,7 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
         .map(|(_, _, cookie)| cookie)
         .unwrap_or_default();
     let mut persisted_any = false;
+    let mut last_probed_landing = String::new();
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
         interval.tick().await;
@@ -107,8 +367,21 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
             continue;
         }
 
-        let candidate_cookie = if kind == InstitutionProxyKind::Carsi {
+        if kind == InstitutionProxyKind::Carsi {
+            let current_url = window.url().ok();
+            let landed_on_publisher = current_url
+                .as_ref()
+                .is_some_and(is_authenticated_publisher_landing);
+
             let mut origins: Vec<Url> = vec![gateway_url.clone()];
+            if let Some(cur) = &current_url {
+                if !origins
+                    .iter()
+                    .any(|existing| existing.host_str() == cur.host_str())
+                {
+                    origins.push(cur.clone());
+                }
+            }
             for raw in CARSI_PUBLISHER_ORIGINS {
                 if let Ok(u) = Url::parse(raw) {
                     if !origins
@@ -145,11 +418,11 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
                 continue;
             }
             let merged = merge_carsi_cookie_map(&existing_cookie, &collected);
-            if collected
+            let has_auth_cookie = collected
                 .iter()
-                .any(|(_, c)| has_institutional_auth_cookie(c))
-                && merged != existing_cookie
-            {
+                .any(|(_, c)| has_institutional_auth_cookie(c));
+
+            if (landed_on_publisher || has_auth_cookie) && merged != existing_cookie {
                 if let Ok(Some(settings)) =
                     store.update_institution_proxy_cookie(&saved_prefix, merged.clone())
                 {
@@ -157,9 +430,42 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
                     persisted_any = true;
                 }
             }
-            merged
-        } else {
-            let url = gateway_url.clone();
+
+            if !landed_on_publisher {
+                continue;
+            }
+            let landing_key = format!(
+                "{}|{}",
+                current_url
+                    .as_ref()
+                    .and_then(|u| u.host_str())
+                    .unwrap_or_default(),
+                merged
+            );
+            if landing_key == last_probed_landing {
+                continue;
+            }
+            last_probed_landing = landing_key;
+
+            if probe_institution_proxy(kind, &saved_prefix, &merged)
+                .await
+                .is_ok()
+            {
+                if let Ok(Some(settings)) =
+                    store.update_institution_proxy_cookie(&saved_prefix, merged)
+                {
+                    let _ = app.emit("settings:changed", settings);
+                }
+                if let Some(win) = app.get_webview_window(PROXY_LOGIN_WINDOW) {
+                    let _ = win.close();
+                }
+                return true;
+            }
+            continue;
+        }
+
+        let url = gateway_url.clone();
+        let candidate_cookie =
             match tauri::async_runtime::spawn_blocking(move || window.cookies_for_url(url)).await {
                 Ok(Ok(cookies)) => cookies
                     .into_iter()
@@ -167,8 +473,7 @@ async fn monitor_institution_login(app: AppHandle, prefix: String) -> bool {
                     .collect::<Vec<_>>()
                     .join("; "),
                 _ => continue,
-            }
-        };
+            };
 
         if candidate_cookie.is_empty() || candidate_cookie == last_cookie {
             continue;

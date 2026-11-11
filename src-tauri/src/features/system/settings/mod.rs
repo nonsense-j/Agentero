@@ -1017,8 +1017,9 @@ impl AppSettingsStore {
     )> {
         use agentero_core::features::paper::import::download::InstitutionProxyKind;
         let guard = self.inner.lock().ok()?;
-        let kind = InstitutionProxyKind::from_setting(&guard.institution_proxy_type);
         let prefix = guard.institution_proxy_prefix.trim();
+        let kind =
+            InstitutionProxyKind::from_setting_and_prefix(&guard.institution_proxy_type, prefix);
         let cookie = guard.institution_proxy_cookie.trim();
         if prefix.is_empty() && !(kind == InstitutionProxyKind::Carsi && !cookie.is_empty()) {
             return None;
@@ -1265,16 +1266,21 @@ fn normalize(s: &mut AppSettings) {
         .trim_end_matches('/')
         .to_string();
     s.institution_proxy_cookie = s.institution_proxy_cookie.trim().to_string();
-    s.institution_proxy_type = if s.institution_proxy_type.eq_ignore_ascii_case("wengine") {
-        "wengine".to_string()
-    } else if s.institution_proxy_type.eq_ignore_ascii_case("carsi") {
-        "carsi".to_string()
-    } else {
-        "ezproxy".to_string()
-    };
+    s.institution_proxy_type =
+        if agentero_core::features::paper::import::download::is_carsi_sso_prefix(
+            &s.institution_proxy_prefix,
+        ) || s.institution_proxy_type.eq_ignore_ascii_case("carsi")
+        {
+            "carsi".to_string()
+        } else if s.institution_proxy_type.eq_ignore_ascii_case("wengine") {
+            "wengine".to_string()
+        } else {
+            "ezproxy".to_string()
+        };
     // Keep the core download fallback in sync on both load and set paths.
-    let kind = agentero_core::features::paper::import::download::InstitutionProxyKind::from_setting(
+    let kind = agentero_core::features::paper::import::download::InstitutionProxyKind::from_setting_and_prefix(
         &s.institution_proxy_type,
+        &s.institution_proxy_prefix,
     );
     agentero_core::features::paper::import::download::set_institution_proxy(
         kind,
