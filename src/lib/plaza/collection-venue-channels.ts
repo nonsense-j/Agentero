@@ -1633,7 +1633,6 @@ export async function fetchMultiChannelVenuePapers(
 	latestPublishedAt: string | null;
 }> {
 	let requestCount = 0;
-	let successCount = 0;
 	let lastError: unknown = null;
 
 	const trackedFetchJson: FetchJsonFn = async <T = unknown>(
@@ -1641,9 +1640,7 @@ export async function fetchMultiChannelVenuePapers(
 	): Promise<T> => {
 		requestCount += 1;
 		try {
-			const res = await rawFetchJson<T>(url);
-			successCount += 1;
-			return res;
+			return await rawFetchJson<T>(url);
 		} catch (err) {
 			lastError = err;
 			throw err;
@@ -1656,9 +1653,7 @@ export async function fetchMultiChannelVenuePapers(
 	): Promise<string> => {
 		requestCount += 1;
 		try {
-			const res = await rawFetchText(url, accept);
-			successCount += 1;
-			return res;
+			return await rawFetchText(url, accept);
 		} catch (err) {
 			lastError = err;
 			throw err;
@@ -1864,12 +1859,7 @@ export async function fetchMultiChannelVenuePapers(
 		merged = await backfillSpringerAbstracts(merged, fetchText, 220);
 	}
 
-	if (
-		merged.length === 0 &&
-		requestCount > 0 &&
-		successCount === 0 &&
-		lastError
-	) {
+	if (merged.length === 0 && requestCount > 0 && lastError) {
 		throw lastError;
 	}
 

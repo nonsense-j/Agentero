@@ -463,17 +463,17 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(sparqlRes.items[0]?.citationCount).toBe(4);
 	});
 
-	it("treats v5-synced Venues as immutable on open, upgrades pre-v5 caches once, and does not toggle preloading flag during Venue refresh", async () => {
+	it("treats v6-synced Venues as immutable on open, upgrades pre-v6 caches once, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		expect(CURRENT_VENUE_SYNC_VERSION).toBe(5);
+		expect(CURRENT_VENUE_SYNC_VERSION).toBe(6);
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v4 venue -> requires one-time v5 upgrade
+		// Legacy v5 venue -> requires one-time v6 upgrade
 		expect(
 			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 4, lastFetchedAt: "2026-06-01T00:00:00Z" },
+				{ ...ase, syncVersion: 5, lastFetchedAt: "2026-06-01T00:00:00Z" },
 				[],
 			),
 		).toBe(false);
@@ -1224,5 +1224,103 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"controlled empirical study across 42 repositories",
 		);
 		expect(lipicsRes.items[0]?.pdfUrl).toContain("LIPIcs.ESEM.2026.14.pdf");
+	});
+
+	it("falls back to Crossref offset proceedings search for ASE 2026 when OpenAlex hits HTTP 429 and throws on empty upstream failure", async () => {
+		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
+		if (!ase) throw new Error("Missing ase-2026");
+
+		const crossrefUrls: string[] = [];
+		const res = await fetchVenueStructuredPapers(
+			ase,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org")) {
+					throw new Error("HTTP 429 Rate limit exceeded");
+				}
+				if (url.includes("api.crossref.org/works")) {
+					crossrefUrls.push(url);
+					return {
+						message: {
+							items: [
+								{
+									DOI: "10.1145/3832783.3832801",
+									type: "proceedings-article",
+									title: ["Sound Symbolic Execution for Rust Async Kernels"],
+									abstract:
+										"<jats:p>We present a sound symbolic execution engine for concurrent Rust async kernels with zero false alarms.</jats:p>",
+									"container-title": [
+										"Proceedings of the 41st IEEE/ACM International Conference on Automated Software Engineering",
+									],
+									author: [{ given: "Ada", family: "Lovelace" }],
+									published: { "date-parts": [[2026, 10, 12]] },
+								},
+								{
+									DOI: "10.1145/9999999.1111111",
+									type: "proceedings-article",
+									title: ["Unrelated ACM Conference Paper"],
+									author: [{ given: "Eve", family: "Other" }],
+									published: { "date-parts": [[2026, 10, 12]] },
+								},
+							],
+						},
+					} as T;
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		);
+
+		expect(crossrefUrls[0]).toContain("offset=0");
+		expect(crossrefUrls[0]).toContain("prefix:10.1145");
+		expect(res.items).toHaveLength(1);
+		expect(res.items[0]?.doi).toBe("10.1145/3832783.3832801");
+		expect(res.items[0]?.abstract).toContain(
+			"sound symbolic execution engine for concurrent Rust async kernels",
+		);
+
+		// If OpenAlex & Crossref fail while DBLP SPARQL returns 200 OK with 0 rows,
+		// fetchMultiChannelVenuePapers must throw instead of silently returning 0 items.
+		await expect(
+			fetchMultiChannelVenuePapers(
+				ase,
+				2026,
+				async <T>(url: string) => {
+					if (url.includes("sparql.dblp.org")) {
+						return { results: { bindings: [] } } as T;
+					}
+					if (url.includes("semanticscholar.org")) {
+						return { total: 0, data: [] } as T;
+					}
+					throw new Error("HTTP 429 Rate limit exceeded");
+				},
+				async () => "<feed></feed>",
+			),
+		).rejects.toThrow("HTTP 429");
+
+		// applyFreshVenueItems replaces stale cached items (including legacy sourceLabel-only entries)
+		const stalePool: CollectionPaperItem[] = Array.from(
+			{ length: 196 },
+			(_, idx) => ({
+				id: `venue:ase-2026:old-${idx}`,
+				title: `Stale Cached ASE Item ${idx}`,
+				authors: ["Author"],
+				abstract: "Old abstract",
+				publishedAt: "2026-03-01T00:00:00Z",
+				year: 2026,
+				sourceType: "venue",
+				sourceLabel: "ASE 2026",
+				categories: ["ASE 2026"],
+				url: `https://doi.org/10.1145/3832783.${idx}`,
+				venueId: idx % 2 === 0 ? "ase-2026" : undefined,
+			}),
+		);
+		const replaced = applyFreshVenueItems(
+			stalePool,
+			"ase-2026",
+			res.items,
+			"ASE 2026",
+		);
+		expect(replaced).toHaveLength(1);
+		expect(replaced[0]?.doi).toBe("10.1145/3832783.3832801");
 	});
 });

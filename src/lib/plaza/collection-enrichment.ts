@@ -8,7 +8,7 @@ export type VenueKind = "conference" | "journal";
 export type VenueDomain = "PL/SE" | "CR" | "AI";
 export type VenueCcfRank = "CCF-A" | "CCF-B";
 
-export const CURRENT_VENUE_SYNC_VERSION = 5;
+export const CURRENT_VENUE_SYNC_VERSION = 6;
 
 export type VenueConfig = {
 	id: string;
@@ -95,6 +95,8 @@ export type DblpVenueSpec = {
 	arxivVenueAliases?: readonly string[];
 	/** Optional Crossref `container-title` substring guard when querying Crossref. */
 	crossrefContainerMatch?: string;
+	/** Optional Crossref `query.container-title` proceedings title for offset fallback when OpenAlex is rate-limited. */
+	crossrefProceedingsQuery?: string;
 	/** Optional Crossref proceedings ISBNs (e.g. Springer LNCS `SAS 2026`). */
 	crossrefIsbns?: readonly string[];
 	/** IEEE Computer Society Digital Library (`computer.org/csdl/api/v1/graphql`) `idPrefix` for full official abstracts. */
@@ -119,6 +121,8 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 		dblpStream: "streams/conf/kbse",
 		openAlexSourceIds: ["S4363608212"],
 		doiPrefixFilters: ["10.1145/3832783"],
+		crossrefProceedingsQuery:
+			"41st IEEE/ACM International Conference on Automated Software Engineering",
 		dblpAllowedPubIn: ["ASE"],
 		s2VenueNames: ["ASE"],
 		arxivVenueAliases: ["ASE 2026"],
@@ -140,6 +144,8 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 			"10.1145/3786580",
 		],
 		excludeDoiPrefixes: ["10.1145/3774748"],
+		crossrefProceedingsQuery:
+			"48th International Conference on Software Engineering",
 		dblpAllowedPubIn: [
 			"ICSE",
 			"ICSE-SEIP",
@@ -236,6 +242,8 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 		ccfRank: "CCF-B",
 		dblpStream: "streams/conf/ecoop",
 		doiPrefixFilter: "10.4230/lipics.ecoop.2026",
+		crossrefProceedingsQuery:
+			"European Conference on Object-Oriented Programming",
 		dblpAllowedPubIn: ["ECOOP"],
 		s2VenueNames: ["ECOOP"],
 		arxivVenueAliases: ["ECOOP 2026"],
@@ -250,6 +258,8 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 		dblpStream: "streams/conf/iwpc",
 		openAlexSourceIds: ["S7407088527", "S4306419777"],
 		doiPrefixFilters: ["10.1145/3794763"],
+		crossrefProceedingsQuery:
+			"34th IEEE/ACM International Conference on Program Comprehension",
 		dblpAllowedPubIn: ["ICPC"],
 		s2VenueNames: ["ICPC"],
 		arxivVenueAliases: ["ICPC 2026"],
@@ -1255,6 +1265,129 @@ export async function fetchVenueStructuredPapers(
 		}
 	}
 
+	const openAlexFailed = attemptedRequests > 0 && succeededRequests === 0;
+
+	type CrossrefWorkRow = {
+		DOI?: string;
+		type?: string;
+		title?: string[];
+		abstract?: string;
+		subject?: string[];
+		volume?: string;
+		issue?: string;
+		page?: string;
+		"is-referenced-by-count"?: number;
+		"container-title"?: string[];
+		author?: Array<{ given?: string; family?: string }>;
+		published?: { "date-parts"?: number[][] };
+		"published-online"?: { "date-parts"?: number[][] };
+		"published-print"?: { "date-parts"?: number[][] };
+	};
+
+	const convertCrossrefRow = (
+		row: CrossrefWorkRow,
+		requireDoiPrefix: boolean,
+	): CollectionPaperItem | null => {
+		const rowType = (row.type ?? "").toLowerCase();
+		if (
+			rowType === "book" ||
+			rowType === "proceedings" ||
+			rowType === "journal-issue" ||
+			rowType === "journal-volume"
+		) {
+			return null;
+		}
+		const doi = cleanDoi(row.DOI);
+		const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
+		if (!doi || !title || isFrontmatterTitle(title)) return null;
+		if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) return null;
+		if (requireDoiPrefix) {
+			const lowerDoi = doi.toLowerCase();
+			const matched = doiPrefixes.some(
+				(px) => lowerDoi.startsWith(`${px}.`) || lowerDoi.startsWith(`${px}/`),
+			);
+			if (!matched) return null;
+		}
+
+		const containerTitle = (row["container-title"]?.[0] ?? "").trim();
+		if (
+			spec?.crossrefContainerMatch &&
+			!containerTitle
+				.toLowerCase()
+				.includes(spec.crossrefContainerMatch.toLowerCase())
+		) {
+			return null;
+		}
+		if (
+			spec?.kind === "conference" &&
+			containerTitle &&
+			isWorkshopOrCompanionVenue(containerTitle)
+		) {
+			return null;
+		}
+
+		if (spec?.pacmIssue) {
+			const iss = (row.issue ?? "").trim().toUpperCase();
+			if (!iss.startsWith(spec.pacmIssue.toUpperCase())) return null;
+		}
+
+		const onlineParts = row["published-online"]?.["date-parts"]?.[0];
+		const printParts = row["published-print"]?.["date-parts"]?.[0];
+		const pubParts = row.published?.["date-parts"]?.[0];
+		const parts = printParts ?? onlineParts ?? pubParts ?? [];
+		const maxYear = Math.max(
+			typeof onlineParts?.[0] === "number" ? onlineParts[0] : 0,
+			typeof printParts?.[0] === "number" ? printParts[0] : 0,
+			typeof pubParts?.[0] === "number" ? pubParts[0] : 0,
+		);
+		const y = maxYear > 0 ? maxYear : year;
+		if (y < year && !spec?.crossrefIsbns?.length && !requireDoiPrefix) {
+			return null;
+		}
+		const m = String(parts[1] ?? 1).padStart(2, "0");
+		const d = String(parts[2] ?? 1).padStart(2, "0");
+		const authors = (row.author ?? [])
+			.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
+			.filter(Boolean);
+		if (authors.length === 0) return null;
+
+		const rawAbs = (row.abstract ?? "")
+			.replace(/<[^>]+>/g, " ")
+			.replace(/^abstract[:.\s-]*/i, "")
+			.replace(/\s+/g, " ")
+			.trim();
+		const cleanAbs = isPlaceholderAbstract(rawAbs, venue.name) ? "" : rawAbs;
+
+		const categories = [
+			venue.name,
+			...(spec?.domain ? [spec.domain] : []),
+			...(spec?.ccfRank ? [spec.ccfRank] : []),
+		];
+		return {
+			id: buildVenuePaperId(venue.id, doi, undefined, title),
+			title,
+			authors,
+			abstract: cleanAbs,
+			publishedAt: `${Math.max(y, year)}-${m}-${d}T00:00:00Z`,
+			year: Math.max(y, year),
+			sourceType: "venue",
+			sourceLabel: venue.name,
+			categories,
+			url: `https://doi.org/${doi}`,
+			doi,
+			venueId: venue.id,
+			venueKind: spec?.kind,
+			venueDomain: spec?.domain,
+			ccfRank: spec?.ccfRank,
+			venueFull: containerTitle || venue.name,
+			citationCount: Math.max(0, row["is-referenced-by-count"] ?? 0),
+			keywords: derivePaperKeywords(title, cleanAbs, categories, row.subject),
+			volume: row.volume,
+			issue: row.issue,
+			pages: row.page,
+		};
+	};
+
 	const crossrefFilters: string[] = [];
 	const fromDate = sinceDate ?? `${year}-01-01`;
 	const untilDate = `${year}-12-31`;
@@ -1269,8 +1402,9 @@ export async function fetchVenueStructuredPapers(
 		);
 	}
 
+	const rawCrossrefPendingEnrich: CollectionPaperItem[] = [];
+
 	if (crossrefFilters.length > 0) {
-		const rawCrossrefPendingEnrich: CollectionPaperItem[] = [];
 		const crMaxPages = Math.min(maxPages, 12);
 
 		for (const crFilter of crossrefFilters) {
@@ -1284,22 +1418,7 @@ export async function fetchVenueStructuredPapers(
 						message?: {
 							"total-results"?: number;
 							"next-cursor"?: string;
-							items?: Array<{
-								DOI?: string;
-								type?: string;
-								title?: string[];
-								abstract?: string;
-								subject?: string[];
-								volume?: string;
-								issue?: string;
-								page?: string;
-								"is-referenced-by-count"?: number;
-								"container-title"?: string[];
-								author?: Array<{ given?: string; family?: string }>;
-								published?: { "date-parts"?: number[][] };
-								"published-online"?: { "date-parts"?: number[][] };
-								"published-print"?: { "date-parts"?: number[][] };
-							}>;
+							items?: CrossrefWorkRow[];
 						};
 					}>(crUrl);
 					succeededRequests += 1;
@@ -1320,104 +1439,9 @@ export async function fetchVenueStructuredPapers(
 					if (rows.length === 0) break;
 
 					for (const row of rows) {
-						const rowType = (row.type ?? "").toLowerCase();
-						if (
-							rowType === "book" ||
-							rowType === "proceedings" ||
-							rowType === "journal-issue" ||
-							rowType === "journal-volume"
-						) {
-							continue;
-						}
-						const doi = cleanDoi(row.DOI);
-						const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
-						if (!doi || !title || isFrontmatterTitle(title)) continue;
-						if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) continue;
-
-						const containerTitle = (row["container-title"]?.[0] ?? "").trim();
-						if (
-							spec?.crossrefContainerMatch &&
-							!containerTitle
-								.toLowerCase()
-								.includes(spec.crossrefContainerMatch.toLowerCase())
-						) {
-							continue;
-						}
-						if (
-							spec?.kind === "conference" &&
-							containerTitle &&
-							isWorkshopOrCompanionVenue(containerTitle)
-						) {
-							continue;
-						}
-
-						if (spec?.pacmIssue) {
-							const iss = (row.issue ?? "").trim().toUpperCase();
-							if (!iss.startsWith(spec.pacmIssue.toUpperCase())) continue;
-						}
-
-						const onlineParts = row["published-online"]?.["date-parts"]?.[0];
-						const printParts = row["published-print"]?.["date-parts"]?.[0];
-						const pubParts = row.published?.["date-parts"]?.[0];
-						const parts = printParts ?? onlineParts ?? pubParts ?? [];
-						const maxYear = Math.max(
-							typeof onlineParts?.[0] === "number" ? onlineParts[0] : 0,
-							typeof printParts?.[0] === "number" ? printParts[0] : 0,
-							typeof pubParts?.[0] === "number" ? pubParts[0] : 0,
-						);
-						const y = maxYear > 0 ? maxYear : year;
-						if (y < year && !spec?.crossrefIsbns?.length) continue;
-						const m = String(parts[1] ?? 1).padStart(2, "0");
-						const d = String(parts[2] ?? 1).padStart(2, "0");
-						const authors = (row.author ?? [])
-							.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
-							.filter(Boolean);
-						if (authors.length === 0) continue;
-
-						const rawAbs = (row.abstract ?? "")
-							.replace(/<[^>]+>/g, " ")
-							.replace(/^abstract[:.\s-]*/i, "")
-							.replace(/\s+/g, " ")
-							.trim();
-						const cleanAbs = isPlaceholderAbstract(rawAbs, venue.name)
-							? ""
-							: rawAbs;
-
-						const categories = [
-							venue.name,
-							...(spec?.domain ? [spec.domain] : []),
-							...(spec?.ccfRank ? [spec.ccfRank] : []),
-						];
-						const candidate: CollectionPaperItem = {
-							id: buildVenuePaperId(venue.id, doi, undefined, title),
-							title,
-							authors,
-							abstract: cleanAbs,
-							publishedAt: `${Math.max(y, year)}-${m}-${d}T00:00:00Z`,
-							year: Math.max(y, year),
-							sourceType: "venue",
-							sourceLabel: venue.name,
-							categories,
-							url: `https://doi.org/${doi}`,
-							doi,
-							venueId: venue.id,
-							venueKind: spec?.kind,
-							venueDomain: spec?.domain,
-							ccfRank: spec?.ccfRank,
-							venueFull: containerTitle || venue.name,
-							citationCount: Math.max(0, row["is-referenced-by-count"] ?? 0),
-							keywords: derivePaperKeywords(
-								title,
-								cleanAbs,
-								categories,
-								row.subject,
-							),
-							volume: row.volume,
-							issue: row.issue,
-							pages: row.page,
-						};
-
-						if (cleanAbs) {
+						const candidate = convertCrossrefRow(row, false);
+						if (!candidate) continue;
+						if (candidate.abstract) {
 							pushUnique(candidate);
 						} else {
 							rawCrossrefPendingEnrich.push(candidate);
@@ -1434,17 +1458,68 @@ export async function fetchVenueStructuredPapers(
 				}
 			}
 		}
+	}
 
-		if (rawCrossrefPendingEnrich.length > 0) {
-			const enrichedCr = await enrichDblpItemsBatch(
-				rawCrossrefPendingEnrich,
-				venue,
-				fetchJson,
-				out,
-			);
-			for (const item of enrichedCr) {
-				pushUnique(item);
+	// Offset-paginated Crossref proceedings fallback when OpenAlex is rate-limited / empty
+	// (`cursor=*` disables relevance ranking, whereas `offset=` ranks exact container-title matches first).
+	if (
+		out.length + rawCrossrefPendingEnrich.length < 40 &&
+		spec?.crossrefProceedingsQuery &&
+		doiPrefixes.length > 0
+	) {
+		const pubRoot = doiPrefixes[0]?.split("/")[0] ?? "";
+		if (pubRoot) {
+			const typeClause =
+				pubRoot === "10.1145" ? ",type:proceedings-article" : "";
+			const procFilter = `prefix:${encodeURIComponent(pubRoot)}${typeClause},from-pub-date:${fromDate},until-pub-date:${untilDate}`;
+			const pageSize = 250;
+			const maxOffsetPages = Math.min(maxPages, 6);
+			for (let page = 0; page < maxOffsetPages; page++) {
+				const offset = page * pageSize;
+				attemptedRequests += 1;
+				try {
+					const crUrl = `https://api.crossref.org/works?filter=${procFilter}&query.container-title=${encodeURIComponent(spec.crossrefProceedingsQuery)}&rows=${pageSize}&offset=${offset}&mailto=${MAILTO}`;
+					const crData = await fetchJson<{
+						message?: {
+							items?: CrossrefWorkRow[];
+						};
+					}>(crUrl);
+					succeededRequests += 1;
+					const rows = crData.message?.items ?? [];
+					if (rows.length === 0) break;
+
+					let matchedOnPage = 0;
+					for (const row of rows) {
+						const candidate = convertCrossrefRow(row, true);
+						if (!candidate) continue;
+						matchedOnPage += 1;
+						if (candidate.abstract) {
+							pushUnique(candidate);
+						} else {
+							rawCrossrefPendingEnrich.push(candidate);
+						}
+					}
+					if (matchedOnPage === 0 || rows.length < pageSize) {
+						break;
+					}
+				} catch {
+					break;
+				}
 			}
+		}
+	}
+
+	if (rawCrossrefPendingEnrich.length > 0) {
+		const finalizedCr = openAlexFailed
+			? rawCrossrefPendingEnrich
+			: await enrichDblpItemsBatch(
+					rawCrossrefPendingEnrich,
+					venue,
+					fetchJson,
+					out,
+				);
+		for (const item of finalizedCr) {
+			pushUnique(item);
 		}
 	}
 

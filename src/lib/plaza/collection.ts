@@ -217,11 +217,13 @@ export function resetCollectionMemoryForTests(): void {
 	memoryState = null;
 	idbHydrated = false;
 	idbHydrationPromise = null;
+	replacedVenueIds.clear();
 }
 
 let memoryState: CollectionState | null = null;
 let idbHydrated = false;
 let idbHydrationPromise: Promise<CollectionState> | null = null;
+const replacedVenueIds = new Set<string>();
 
 function migrateCachedVenues(venues: VenueConfig[]): VenueConfig[] {
 	const migrated = venues.map((venue) => {
@@ -391,8 +393,14 @@ export function saveCollectionState(next: CollectionState): void {
 				await saveItemsToIndexedDb(latest.items);
 				return;
 			}
-			const sanitized = sanitizeCachedItems(existingIdb).filter((item) =>
-				matchesAnyArxivCategory(item, latest.categories),
+			const sanitized = sanitizeCachedItems(existingIdb).filter(
+				(item) =>
+					matchesAnyArxivCategory(item, latest.categories) &&
+					!(
+						item.sourceType === "venue" &&
+						item.venueId &&
+						replacedVenueIds.has(item.venueId)
+					),
 			);
 			const merged = mergeCollectionItems([latest.items, sanitized]);
 			await saveItemsToIndexedDb(merged);
@@ -424,8 +432,14 @@ export async function hydrateCollectionStateFromIdb(): Promise<CollectionState> 
 		idbHydrated = true;
 		const latest = loadCollectionState();
 		if (!idbItems || idbItems.length === 0) return latest;
-		const sanitized = sanitizeCachedItems(idbItems).filter((item) =>
-			matchesAnyArxivCategory(item, latest.categories),
+		const sanitized = sanitizeCachedItems(idbItems).filter(
+			(item) =>
+				matchesAnyArxivCategory(item, latest.categories) &&
+				!(
+					item.sourceType === "venue" &&
+					item.venueId &&
+					replacedVenueIds.has(item.venueId)
+				),
 		);
 		if (sanitized.length === 0) return latest;
 		const merged = mergeCollectionItems([latest.items, sanitized]);
@@ -2407,12 +2421,19 @@ export function applyFreshVenueItems(
 	pool: readonly CollectionPaperItem[],
 	venueId: string,
 	freshVenueItems: CollectionPaperItem[],
+	venueName?: string,
 ): CollectionPaperItem[] {
 	if (freshVenueItems.length === 0) {
 		return [...pool];
 	}
+	replacedVenueIds.add(venueId);
 	const rest = pool.filter(
-		(i) => !(i.sourceType === "venue" && i.venueId === venueId),
+		(i) =>
+			!(
+				i.sourceType === "venue" &&
+				(i.venueId === venueId ||
+					(!i.venueId && venueName && i.sourceLabel === venueName))
+			),
 	);
 	return mergeCollectionItems([freshVenueItems, rest]);
 }
@@ -2426,17 +2447,29 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 }> {
 	const snap = loadCollectionState();
 	const cachedForVenue = snap.items.filter(
-		(i) => i.sourceType === "venue" && i.venueId === venue.id,
+		(i) =>
+			i.sourceType === "venue" &&
+			(i.venueId === venue.id || (!i.venueId && i.sourceLabel === venue.name)),
 	);
 	const nowIso = new Date().toISOString();
 
 	const fullBundle = await fetchSingleVenueBundle(venue, false, {
 		maxPages: 25,
 	});
-	const combinedCount =
-		fullBundle.items.length > 0
-			? fullBundle.items.length
-			: cachedForVenue.length;
+	if (fullBundle.items.length === 0 && cachedForVenue.length > 0) {
+		throw new Error(`No papers returned when refreshing ${venue.name}`);
+	}
+	if (
+		(venue.syncVersion ?? 0) >= CURRENT_VENUE_SYNC_VERSION &&
+		cachedForVenue.length >= 80 &&
+		fullBundle.items.length > 0 &&
+		fullBundle.items.length < Math.floor(cachedForVenue.length * 0.4)
+	) {
+		throw new Error(
+			`Incomplete upstream response when refreshing ${venue.name}`,
+		);
+	}
+	const combinedCount = fullBundle.items.length;
 
 	return {
 		venuePatch: {
@@ -2445,7 +2478,7 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 				fullBundle.latestPublishedAt ?? venue.latestPublishedAt ?? null,
 			remoteTotalCount: Math.max(fullBundle.remoteTotalCount, combinedCount),
 			syncVersion: CURRENT_VENUE_SYNC_VERSION,
-			paperCount: combinedCount || venue.paperCount,
+			paperCount: combinedCount,
 		},
 		fullItems: fullBundle.items,
 	};
@@ -2463,6 +2496,7 @@ export async function ensureVenueLoaded(
 	if (existing) return existing;
 
 	const task = (async () => {
+		await hydrateCollectionStateFromIdb();
 		const state = loadCollectionState();
 		const venue = state.venues.find((v) => v.id === venueId);
 		if (!venue) return state;
@@ -2473,6 +2507,7 @@ export async function ensureVenueLoaded(
 			latest.items,
 			venueId,
 			result.fullItems,
+			venue.name,
 		);
 		const updatedVenues = latest.venues.map((v) =>
 			v.id === venueId
@@ -2724,6 +2759,7 @@ export async function refreshVenueCollection(options?: {
 		total: number,
 	) => void;
 }): Promise<CollectionState> {
+	await hydrateCollectionStateFromIdb();
 	const current = loadCollectionState();
 	const baseVenues = options?.venues ?? current.venues;
 	const idSet =
