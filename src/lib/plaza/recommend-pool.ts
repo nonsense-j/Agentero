@@ -14,8 +14,8 @@
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import {
 	type CollectionPaperItem,
+	hydrateCollectionStateFromIdb,
 	loadCollectionState,
-	refreshPaperCollection,
 } from "@/lib/plaza/collection";
 
 export type RecommendKeywordChip = {
@@ -172,11 +172,7 @@ export async function pushFromCollection(options?: {
 		collection.items.length === 0 &&
 		options?.ensureCollectionLoaded !== false
 	) {
-		try {
-			collection = await refreshPaperCollection();
-		} catch {
-			// Continue with current items if offline.
-		}
+		collection = await hydrateCollectionStateFromIdb();
 	}
 
 	const pushedSet = new Set(state.pushedIds);

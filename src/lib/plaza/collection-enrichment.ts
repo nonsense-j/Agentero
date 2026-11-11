@@ -8,8 +8,6 @@ export type VenueKind = "conference" | "journal";
 export type VenueDomain = "PL/SE" | "CR" | "AI";
 export type VenueCcfRank = "CCF-A" | "CCF-B";
 
-export const CURRENT_VENUE_SYNC_VERSION = 7;
-
 export type VenueConfig = {
 	id: string;
 	/** Short display name, e.g. `ASE 2026`, `ISSTA 2026`, `TOSEM 2026`. */
@@ -27,8 +25,6 @@ export type VenueConfig = {
 	latestPublishedAt?: string | null;
 	/** Upstream total paper count observed at last sync for watermark diffing. */
 	remoteTotalCount?: number;
-	/** Schema / pagination version so older truncated caches upgrade once automatically. */
-	syncVersion?: number;
 	paperCount?: number;
 };
 

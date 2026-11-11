@@ -4,7 +4,6 @@ import {
 	applyFreshVenueItems,
 	backfillSpringerAbstracts,
 	type CollectionPaperItem,
-	CURRENT_VENUE_SYNC_VERSION,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
 	extractSpringerHtmlAbstract,
@@ -314,9 +313,8 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		});
 
 		try {
-			// Simulate pre-v2 cached state where cs.AI was enabled by the old default
+			// Fresh state without explicit categories uses default ["cs.SE", "cs.CR", "cs.PL"] and filters out pure cs.AI items
 			writeJsonStorage("plaza:collection:state:v2", {
-				categories: ["cs.SE", "cs.CR", "cs.PL", "cs.AI"],
 				venues: [...DEFAULT_COLLECTION_VENUES],
 				items: [
 					{
@@ -353,13 +351,13 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			});
 			resetCollectionMemoryForTests();
 
-			const migrated = loadCollectionState();
-			expect(migrated.categories).toEqual(["cs.SE", "cs.CR", "cs.PL"]);
-			expect(migrated.items.map((p) => p.id)).toEqual(["arxiv:2606.00002"]);
+			const initial = loadCollectionState();
+			expect(initial.categories).toEqual(["cs.SE", "cs.CR", "cs.PL"]);
+			expect(initial.items.map((p) => p.id)).toEqual(["arxiv:2606.00002"]);
 
-			// If the user explicitly turns cs.AI back ON, their choice persists across reload
+			// If the user explicitly turns cs.AI ON, their choice persists across reload
 			saveCollectionState({
-				...migrated,
+				...initial,
 				categories: ["cs.SE", "cs.CR", "cs.PL", "cs.AI"],
 			});
 			resetCollectionMemoryForTests();
@@ -463,25 +461,15 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(sparqlRes.items[0]?.citationCount).toBe(4);
 	});
 
-	it("treats v7-synced Venues as immutable on open, upgrades pre-v7 caches once, and does not toggle preloading flag during Venue refresh", async () => {
+	it("marks Venues with lastFetchedAt or cached items as loaded without version tracking, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		expect(CURRENT_VENUE_SYNC_VERSION).toBe(7);
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v6 venue -> requires one-time v7 upgrade
-		expect(
-			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 6, lastFetchedAt: "2026-06-01T00:00:00Z" },
-				[],
-			),
-		).toBe(false);
 
-		// Once v5 synced, opening Paper Collection never re-checks or re-fetches it
 		const loadedVenues = DEFAULT_COLLECTION_VENUES.map((v) => ({
 			...v,
-			syncVersion: CURRENT_VENUE_SYNC_VERSION,
 			lastFetchedAt: "2026-06-02T00:00:00Z",
 		}));
 		expect(isVenueAlreadyLoaded(loadedVenues[0] ?? ase, [])).toBe(true);
@@ -493,8 +481,8 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			lastRefreshedAt: "2026-06-02T00:00:00Z",
 			latestArxiv: null,
 		});
-		const stateAfterOpen = await refreshVenueCollection({ skipLoaded: true });
-		expect(stateAfterOpen.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
+		const stateAfterSkip = await refreshVenueCollection({ skipLoaded: true });
+		expect(stateAfterSkip.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
 		expect(isPreloadingCollection()).toBe(false);
 	});
 

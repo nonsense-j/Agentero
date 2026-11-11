@@ -18,7 +18,6 @@ import {
 	buildVenuePaperId,
 	type CollectionPaperItem,
 	type CollectionSourceType,
-	CURRENT_VENUE_SYNC_VERSION,
 	DBLP_2026_VENUE_SPECS,
 	type DblpVenueSpec,
 	derivePaperKeywords,
@@ -76,7 +75,6 @@ export type {
 export {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
-	CURRENT_VENUE_SYNC_VERSION,
 	DBLP_2026_VENUE_SPECS,
 	derivePaperKeywords,
 	enrichDblpItemsBatch,
@@ -105,23 +103,11 @@ export {
 
 export const DEFAULT_ARXIV_CATEGORIES = ["cs.SE", "cs.CR", "cs.PL"] as const;
 
-export const CURRENT_DEFAULT_CATEGORIES_VERSION = 2;
-
 export type ArxivLatestRecord = {
 	arxivId: string;
 	title: string;
 	publishedAt: string;
 	categoriesKey: string;
-	checkedAt: string;
-};
-
-export type ArxivUpdateCheckResult = {
-	hasUpdate: boolean;
-	remoteLatestId: string | null;
-	remoteLatestTitle: string | null;
-	remotePublishedAt: string | null;
-	recordedLatestId: string | null;
-	newCountEstimate: number;
 	checkedAt: string;
 };
 
@@ -139,7 +125,6 @@ export type ArxivCategoryWatermark = {
 
 export type CollectionState = {
 	categories: string[];
-	categoriesVersion?: number;
 	venues: VenueConfig[];
 	items: CollectionPaperItem[];
 	lastRefreshedAt: string | null;
@@ -148,7 +133,6 @@ export type CollectionState = {
 };
 
 const STORAGE_KEY = "plaza:collection:state:v2";
-const LEGACY_STORAGE_KEY_V1 = "plaza:collection:state:v1";
 const LOCAL_STORAGE_MAX_ITEMS = 350;
 const TARGET_YEAR = 2026;
 
@@ -188,19 +172,6 @@ export function subscribePreloadingCollection(
 	return () => {
 		preloadListeners.delete(listener);
 	};
-}
-
-function isLegacyDefaultCategories(cats: string[]): boolean {
-	const legacySets: readonly (readonly string[])[] = [
-		["cs.AI", "cs.CL", "cs.LG", "cs.CV", "stat.ML"],
-		["cs.AI", "cs.CR", "cs.PL", "cs.SE"],
-		["cs.SE", "cs.CR", "cs.PL", "cs.AI"],
-	];
-	return legacySets.some(
-		(legacy) =>
-			cats.length === legacy.length &&
-			cats.every((c, idx) => c === legacy[idx]),
-	);
 }
 
 export function matchesAnyArxivCategory(
@@ -315,22 +286,14 @@ function sanitizeCachedItems(
 
 export function loadCollectionState(): CollectionState {
 	if (memoryState) return memoryState;
-	const raw =
-		readJsonStorage<Partial<CollectionState> | null>(STORAGE_KEY, null) ??
-		readJsonStorage<Partial<CollectionState> | null>(
-			LEGACY_STORAGE_KEY_V1,
-			null,
-		);
-	const rawCategories =
+	const raw = readJsonStorage<Partial<CollectionState> | null>(
+		STORAGE_KEY,
+		null,
+	);
+	const categories =
 		Array.isArray(raw?.categories) && raw.categories.length > 0
 			? raw.categories
 			: [...DEFAULT_ARXIV_CATEGORIES];
-	const shouldMigrateDefaultCategories =
-		(raw?.categoriesVersion ?? 0) < CURRENT_DEFAULT_CATEGORIES_VERSION &&
-		isLegacyDefaultCategories(rawCategories);
-	const categories = shouldMigrateDefaultCategories
-		? [...DEFAULT_ARXIV_CATEGORIES]
-		: rawCategories;
 	const venues =
 		Array.isArray(raw?.venues) && raw.venues.length > 0
 			? migrateCachedVenues(raw.venues)
@@ -346,7 +309,6 @@ export function loadCollectionState(): CollectionState {
 			: {};
 	const loaded: CollectionState = {
 		categories,
-		categoriesVersion: CURRENT_DEFAULT_CATEGORIES_VERSION,
 		venues,
 		items,
 		lastRefreshedAt:
@@ -361,8 +323,6 @@ export function loadCollectionState(): CollectionState {
 export function saveCollectionState(next: CollectionState): void {
 	const stamped: CollectionState = {
 		...next,
-		categoriesVersion:
-			next.categoriesVersion ?? CURRENT_DEFAULT_CATEGORIES_VERSION,
 		items: next.items.filter((item) =>
 			matchesAnyArxivCategory(item, next.categories),
 		),
@@ -1841,93 +1801,6 @@ export async function searchArxivCollection(
 	return mergeCollectionItems(groups);
 }
 
-/**
- * Lightweight check against arXiv's latest submissions for the configured categories.
- * Compares the newest remote arXiv submission with our recorded `latestArxiv` state.
- */
-export async function checkArxivCollectionUpdate(
-	categories?: readonly string[],
-): Promise<ArxivUpdateCheckResult> {
-	const state = loadCollectionState();
-	const activeCats =
-		categories && categories.length > 0 ? categories : state.categories;
-	const cleanCats = activeCats.map((c) => c.trim()).filter(Boolean);
-	const checkedAt = new Date().toISOString();
-
-	if (cleanCats.length === 0) {
-		return {
-			hasUpdate: false,
-			remoteLatestId: null,
-			remoteLatestTitle: null,
-			remotePublishedAt: null,
-			recordedLatestId: state.latestArxiv?.arxivId ?? null,
-			newCountEstimate: 0,
-			checkedAt,
-		};
-	}
-
-	const catQuery =
-		cleanCats.length === 1
-			? `cat:${cleanCats[0]}`
-			: `(${cleanCats.map((c) => `cat:${c}`).join("+OR+")})`;
-	const probeUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&max_results=10`;
-	const xml = await plazaFetchText(
-		probeUrl,
-		"application/atom+xml,text/xml,*/*",
-	);
-	const remoteItems = parseArxivAtomXml(xml, null);
-	const remoteTop = remoteItems[0] ?? null;
-
-	const recordedId =
-		state.latestArxiv?.arxivId ??
-		state.items.find((i) => i.sourceType === "arxiv")?.arxivId ??
-		null;
-
-	if (!remoteTop) {
-		return {
-			hasUpdate: false,
-			remoteLatestId: null,
-			remoteLatestTitle: null,
-			remotePublishedAt: null,
-			recordedLatestId: recordedId,
-			newCountEstimate: 0,
-			checkedAt,
-		};
-	}
-
-	const knownArxivIds = new Set(
-		state.items
-			.filter((i) => i.sourceType === "arxiv")
-			.map((i) => stripVersion(i.arxivId ?? i.id.replace(/^arxiv:/, ""))),
-	);
-
-	const remoteTopId = stripVersion(remoteTop.arxivId ?? remoteTop.id);
-	let newCountEstimate = 0;
-	for (const item of remoteItems) {
-		const id = stripVersion(item.arxivId ?? item.id);
-		if (!knownArxivIds.has(id)) {
-			newCountEstimate += 1;
-		} else {
-			break;
-		}
-	}
-
-	const hasUpdate =
-		!recordedId ||
-		stripVersion(recordedId) !== remoteTopId ||
-		newCountEstimate > 0;
-
-	return {
-		hasUpdate,
-		remoteLatestId: remoteTopId,
-		remoteLatestTitle: remoteTop.title,
-		remotePublishedAt: remoteTop.publishedAt,
-		recordedLatestId: recordedId,
-		newCountEstimate: hasUpdate ? Math.max(1, newCountEstimate) : 0,
-		checkedAt,
-	};
-}
-
 function stripResearchrBadges(rawTitleHtmlOrText: string): string {
 	return rawTitleHtmlOrText
 		.replace(
@@ -2457,7 +2330,6 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 		throw new Error(`No papers returned when refreshing ${venue.name}`);
 	}
 	if (
-		(venue.syncVersion ?? 0) >= CURRENT_VENUE_SYNC_VERSION &&
 		cachedForVenue.length >= 80 &&
 		fullBundle.items.length > 0 &&
 		fullBundle.items.length < Math.floor(cachedForVenue.length * 0.4)
@@ -2474,7 +2346,6 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 			latestPublishedAt:
 				fullBundle.latestPublishedAt ?? venue.latestPublishedAt ?? null,
 			remoteTotalCount: Math.max(fullBundle.remoteTotalCount, combinedCount),
-			syncVersion: CURRENT_VENUE_SYNC_VERSION,
 			paperCount: combinedCount,
 		},
 		fullItems: fullBundle.items,
@@ -2658,16 +2529,12 @@ export function mergeCollectionItems(
 }
 
 /**
- * True once a venue has already completed a full multi-page v2 sync (or already has
- * v2 cached papers), so opening Paper Collection does not re-check or re-fetch it.
+ * True once a venue has already been fetched or has cached papers in local state.
  */
 export function isVenueAlreadyLoaded(
 	venue: VenueConfig,
 	items: readonly CollectionPaperItem[],
 ): boolean {
-	if ((venue.syncVersion ?? 0) < CURRENT_VENUE_SYNC_VERSION) {
-		return false;
-	}
 	if (venue.lastFetchedAt) {
 		return true;
 	}
