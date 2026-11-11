@@ -8,7 +8,7 @@ export type VenueKind = "conference" | "journal";
 export type VenueDomain = "PL/SE" | "CR" | "AI";
 export type VenueCcfRank = "CCF-A" | "CCF-B";
 
-export const CURRENT_VENUE_SYNC_VERSION = 3;
+export const CURRENT_VENUE_SYNC_VERSION = 4;
 
 export type VenueConfig = {
 	id: string;
@@ -526,8 +526,18 @@ export function isPlaceholderAbstract(
 export function isFrontmatterTitle(title: string): boolean {
 	const t = title.trim();
 	if (t.length < 8) return true;
-	return /^(frontmatter|title page|table of contents|message from|welcome from|preface|conference organization|program committee|organizing committee|artifact evaluation committee|steering committee|reviewer|author index|keynote|panel:|tutorial:|editorial)\b/i.test(
+	return /^(front\s*matter|back\s*matter|title page|copyright(?:\s+page)?|table of contents|message from|welcome (?:from|message)|foreword|preface|proceedings of\b|companion proceedings\b|adjunct proceedings\b|extended abstracts of\b|conference organization|program committee|organizing committee|artifact evaluation committee|steering committee|external reviewers|additional reviewers|reviewer|author index|index of authors|sponsors?\b|session details\s*:|keynote|panel:|tutorial:|editorial)\b/i.test(
 		t,
+	);
+}
+
+/** Reject co-located workshop, companion, or doctoral symposium sub-venues on main conference portals. */
+export function isWorkshopOrCompanionVenue(venueLabel: string): boolean {
+	const s = venueLabel.trim();
+	if (!s) return false;
+	if (s.includes("@")) return true;
+	return /\b(workshops?|companion|adjunct|doctoral\s+symposium|student\s+research\s+competition|posters?\s+and\s+demos?)\b/i.test(
+		s,
 	);
 }
 
@@ -820,6 +830,7 @@ export async function loadItemsFromIndexedDb(): Promise<
 
 export type OpenAlexWork = {
 	id?: string;
+	type?: string | null;
 	title?: string | null;
 	display_name?: string | null;
 	publication_year?: number | null;
@@ -847,7 +858,7 @@ export type OpenAlexWork = {
 };
 
 export const OPENALEX_SELECT =
-	"id,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,topics,biblio,primary_location,authorships";
+	"id,type,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,topics,biblio,primary_location,authorships";
 export const MAILTO = "agentero@users.noreply.github.com";
 
 export function cleanDoi(raw: string | null | undefined): string | undefined {
@@ -870,7 +881,7 @@ export function buildVenuePaperId(
 	const slug = title
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "")
-		.slice(0, 64);
+		.slice(0, 140);
 	return `venue:${venueId}:${slug || "paper"}`;
 }
 
@@ -930,6 +941,14 @@ export function openAlexWorkToVenueItem(
 	spec: DblpVenueSpec | undefined,
 	targetYear: number,
 ): CollectionPaperItem | null {
+	if (
+		row.type &&
+		/^(paratext|peer-review|erratum|letter|editorial|grant|retraction)$/i.test(
+			row.type.trim(),
+		)
+	) {
+		return null;
+	}
 	const rawTitle = (row.title ?? row.display_name ?? "")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -939,7 +958,19 @@ export function openAlexWorkToVenueItem(
 	const year = row.publication_year ?? targetYear;
 	if (year < targetYear) return null;
 
-	const abstract = reconstructOpenAlexAbstract(row.abstract_inverted_index);
+	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	const sourceDisplayName =
+		row.primary_location?.source?.display_name?.trim() ?? "";
+	if (
+		venueKind === "conference" &&
+		sourceDisplayName &&
+		isWorkshopOrCompanionVenue(sourceDisplayName)
+	) {
+		return null;
+	}
+
+	const rawAbs = reconstructOpenAlexAbstract(row.abstract_inverted_index);
+	const abstract = isPlaceholderAbstract(rawAbs, venue.name) ? "" : rawAbs;
 	const doi = cleanDoi(row.doi);
 	const arxivId = extractArxivIdFromOpenAlex(row);
 	const authors = (row.authorships ?? [])
@@ -947,11 +978,9 @@ export function openAlexWorkToVenueItem(
 		.filter(Boolean);
 	if (authors.length === 0) return null;
 
-	const venueKind = spec?.kind ?? inferVenueKind(venue);
 	const venueDomain = spec?.domain ?? venue.domain;
 	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
-	const venueFull =
-		row.primary_location?.source?.display_name?.trim() || venue.name;
+	const venueFull = sourceDisplayName || venue.name;
 	const categories = [
 		venue.name,
 		...(venueDomain ? [venueDomain] : []),
@@ -995,9 +1024,10 @@ export function openAlexWorkToVenueItem(
 }
 
 /**
- * Fetch 2026 venue papers with full abstracts, citations, and keywords from OpenAlex + Crossref
- * using cursor-based multi-page pagination (lifting the single-page 200 cap) and optional
- * `sinceDate` incremental watermark filtering.
+ * Fetch 2026 venue papers with abstracts (when publicly available), citations, and keywords
+ * from OpenAlex + Crossref using cursor-based multi-page pagination and optional `sinceDate`
+ * incremental watermark filtering. Valid proceedings/journal papers without public abstracts
+ * are retained with `abstract: ""` rather than discarded.
  */
 export async function fetchVenueStructuredPapers(
 	venue: VenueConfig,
@@ -1010,12 +1040,15 @@ export async function fetchVenueStructuredPapers(
 ): Promise<{
 	items: CollectionPaperItem[];
 	remoteTotalCount?: number;
+	hadSuccessfulResponse?: boolean;
 }> {
 	const spec = VENUE_SPEC_BY_ID.get(venue.id);
 	const out: CollectionPaperItem[] = [];
-	const maxPages = options?.maxPages ?? 6;
+	const maxPages = options?.maxPages ?? 25;
 	const sinceDate = options?.sinceDate?.slice(0, 10) || null;
 	let remoteTotalCount: number | undefined;
+	let attemptedRequests = 0;
+	let succeededRequests = 0;
 
 	const filters: string[] = [];
 	const dateFilter = sinceDate
@@ -1040,19 +1073,21 @@ export async function fetchVenueStructuredPapers(
 	for (const filterExpr of filters) {
 		let cursor: string | null = "*";
 		for (let page = 0; page < maxPages && cursor; page++) {
+			attemptedRequests += 1;
 			try {
 				const oaUrl: string = `https://api.openalex.org/works?filter=${encodeURIComponent(filterExpr)}&sort=publication_date:desc&per-page=200&cursor=${encodeURIComponent(cursor)}&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
 				const data = await fetchJson<{
 					meta?: { count?: number; next_cursor?: string | null };
 					results?: OpenAlexWork[];
 				}>(oaUrl);
+				succeededRequests += 1;
 				if (page === 0 && !sinceDate && typeof data.meta?.count === "number") {
 					remoteTotalCount = Math.max(remoteTotalCount ?? 0, data.meta.count);
 				}
 				const batch = data.results ?? [];
 				for (const row of batch) {
 					const item = openAlexWorkToVenueItem(row, venue, spec, year);
-					if (item && !isPlaceholderAbstract(item.abstract, venue.name)) {
+					if (item) {
 						out.push(item);
 					}
 				}
@@ -1071,9 +1106,10 @@ export async function fetchVenueStructuredPapers(
 		const fromDate = sinceDate ?? `${year}-01-01`;
 		const rawCrossrefPendingEnrich: CollectionPaperItem[] = [];
 		let crCursor: string | null = "*";
-		const crMaxPages = Math.min(maxPages, 4);
+		const crMaxPages = Math.min(maxPages, 8);
 
 		for (let page = 0; page < crMaxPages && crCursor; page++) {
+			attemptedRequests += 1;
 			try {
 				const crUrl: string = `https://api.crossref.org/works?filter=issn:${encodeURIComponent(spec.issn)},from-pub-date:${fromDate}&rows=200&cursor=${encodeURIComponent(crCursor)}&sort=published&order=desc&mailto=${MAILTO}`;
 				const crData = await fetchJson<{
@@ -1096,6 +1132,7 @@ export async function fetchVenueStructuredPapers(
 						}>;
 					};
 				}>(crUrl);
+				succeededRequests += 1;
 
 				const rows = crData.message?.items ?? [];
 				if (rows.length === 0) break;
@@ -1104,6 +1141,23 @@ export async function fetchVenueStructuredPapers(
 					const doi = cleanDoi(row.DOI);
 					const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
 					if (!doi || !title || isFrontmatterTitle(title)) continue;
+
+					const containerTitle = (row["container-title"]?.[0] ?? "").trim();
+					if (
+						spec.crossrefContainerMatch &&
+						!containerTitle
+							.toLowerCase()
+							.includes(spec.crossrefContainerMatch.toLowerCase())
+					) {
+						continue;
+					}
+					if (
+						spec.kind === "conference" &&
+						containerTitle &&
+						isWorkshopOrCompanionVenue(containerTitle)
+					) {
+						continue;
+					}
 
 					if (spec.pacmIssue) {
 						const iss = (row.issue ?? "").trim().toUpperCase();
@@ -1128,6 +1182,9 @@ export async function fetchVenueStructuredPapers(
 						.replace(/^abstract[:.\s-]*/i, "")
 						.replace(/\s+/g, " ")
 						.trim();
+					const cleanAbs = isPlaceholderAbstract(rawAbs, venue.name)
+						? ""
+						: rawAbs;
 
 					const categories = [
 						venue.name,
@@ -1138,7 +1195,7 @@ export async function fetchVenueStructuredPapers(
 						id: buildVenuePaperId(venue.id, doi, undefined, title),
 						title,
 						authors,
-						abstract: rawAbs,
+						abstract: cleanAbs,
 						publishedAt: `${y}-${m}-${d}T00:00:00Z`,
 						year: y,
 						sourceType: "venue",
@@ -1150,17 +1207,20 @@ export async function fetchVenueStructuredPapers(
 						venueKind: spec.kind,
 						venueDomain: spec.domain,
 						ccfRank: spec.ccfRank,
-						venueFull: row["container-title"]?.[0] || venue.name,
+						venueFull: containerTitle || venue.name,
 						citationCount: Math.max(0, row["is-referenced-by-count"] ?? 0),
-						keywords: !isPlaceholderAbstract(rawAbs, venue.name)
-							? derivePaperKeywords(title, rawAbs, categories, row.subject)
-							: [],
+						keywords: derivePaperKeywords(
+							title,
+							cleanAbs,
+							categories,
+							row.subject,
+						),
 						volume: row.volume,
 						issue: row.issue,
 						pages: row.page,
 					};
 
-					if (!isPlaceholderAbstract(rawAbs, venue.name)) {
+					if (cleanAbs) {
 						out.push(candidate);
 					} else {
 						rawCrossrefPendingEnrich.push(candidate);
@@ -1187,31 +1247,58 @@ export async function fetchVenueStructuredPapers(
 		}
 	}
 
-	return { items: out, remoteTotalCount };
+	return {
+		items: out,
+		remoteTotalCount,
+		hadSuccessfulResponse: attemptedRequests === 0 || succeededRequests > 0,
+	};
 }
 
 /**
- * Batch-enrich DBLP records with complete abstracts, citation counts, and keywords
- * via OpenAlex DOI batches and title lookup.
+ * Batch-enrich DBLP records with abstracts, citation counts, and keywords
+ * via preloaded OpenAlex/Crossref items first, followed by OpenAlex DOI batches and title lookup.
+ * Retains all valid non-frontmatter papers even when no public abstract is available.
  */
 export async function enrichDblpItemsBatch(
 	items: CollectionPaperItem[],
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
+	preloadedItems?: readonly CollectionPaperItem[],
 ): Promise<CollectionPaperItem[]> {
 	if (items.length === 0) return [];
+
+	const preloadedByDoi = new Map<string, CollectionPaperItem>();
+	const preloadedByTitle = new Map<string, CollectionPaperItem>();
+	if (preloadedItems && preloadedItems.length > 0) {
+		for (const p of preloadedItems) {
+			if (p.doi) preloadedByDoi.set(p.doi.toLowerCase(), p);
+			const tk = normTitleKey(p.title);
+			if (tk) {
+				const prev = preloadedByTitle.get(tk);
+				if (!prev || p.abstract.length > prev.abstract.length) {
+					preloadedByTitle.set(tk, p);
+				}
+			}
+		}
+	}
+
 	const byDoi = new Map<string, OpenAlexWork>();
-	const dois = Array.from(
+	const doisToFetch = Array.from(
 		new Set(
 			items
 				.map((i) => i.doi?.toLowerCase())
-				.filter((d): d is string => Boolean(d)),
+				.filter(
+					(d): d is string =>
+						Boolean(d) && !preloadedByDoi.get(d ?? "")?.abstract,
+				),
 		),
 	);
 
-	const CHUNK = 40;
-	for (let i = 0; i < dois.length; i += CHUNK) {
-		const batch = dois.slice(i, i + CHUNK);
+	// Skip redundant OpenAlex DOI batch calls when `preloadedItems` already covered the DOIs
+	const unmatchedDois = doisToFetch.filter((d) => !preloadedByDoi.has(d));
+	const CHUNK = 45;
+	for (let i = 0; i < unmatchedDois.length; i += CHUNK) {
+		const batch = unmatchedDois.slice(i, i + CHUNK);
 		const filter = `doi:${batch.map((d) => `https://doi.org/${d}`).join("|")}`;
 		try {
 			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=${OPENALEX_SELECT}&mailto=${MAILTO}`;
@@ -1225,12 +1312,18 @@ export async function enrichDblpItemsBatch(
 		}
 	}
 
-	// Batch title lookup in OpenAlex for DOI-less DBLP records (e.g. OpenReview ICLR / USENIX Security)
+	// Batch title lookup in OpenAlex for DOI-less DBLP records or records still missing abstracts
 	const byTitle = new Map<string, OpenAlexWork>();
 	const missingDoiTitles = items
-		.filter((i) => !i.doi || !byDoi.has(i.doi.toLowerCase()))
+		.filter((i) => {
+			const d = i.doi?.toLowerCase();
+			if (d && (preloadedByDoi.get(d)?.abstract || byDoi.has(d))) return false;
+			const tk = normTitleKey(i.title);
+			if (tk && preloadedByTitle.get(tk)?.abstract) return false;
+			return !d || (!preloadedByDoi.has(d) && !byDoi.has(d));
+		})
 		.map((i) => i.title)
-		.slice(0, 360);
+		.slice(0, 240);
 	const TITLE_CHUNK = 12;
 	for (let i = 0; i < missingDoiTitles.length; i += TITLE_CHUNK) {
 		const batch = missingDoiTitles
@@ -1269,12 +1362,18 @@ export async function enrichDblpItemsBatch(
 	const enriched: CollectionPaperItem[] = [];
 	for (const item of items) {
 		if (isFrontmatterTitle(item.title)) continue;
+		const tKey = normTitleKey(item.title);
+		const pre =
+			(item.doi ? preloadedByDoi.get(item.doi.toLowerCase()) : undefined) ??
+			(tKey ? preloadedByTitle.get(tKey) : undefined);
 		const row =
 			(item.doi ? byDoi.get(item.doi.toLowerCase()) : undefined) ??
-			byTitle.get(normTitleKey(item.title));
+			(tKey ? byTitle.get(tKey) : undefined);
+
 		let abstract = item.abstract;
+		let doi = item.doi;
 		let citationCount = item.citationCount ?? 0;
-		let upstreamKw: string[] = item.keywords ?? [];
+		let upstreamKw: string[] = [...(item.keywords ?? [])];
 		let volume = item.volume;
 		let issue = item.issue;
 		let pages = item.pages;
@@ -1283,11 +1382,41 @@ export async function enrichDblpItemsBatch(
 		let pdfUrl = item.pdfUrl;
 		let publishedAt = item.publishedAt;
 
+		if (pre) {
+			if (
+				isPlaceholderAbstract(abstract, venue.name) &&
+				!isPlaceholderAbstract(pre.abstract, venue.name)
+			) {
+				abstract = pre.abstract;
+			}
+			doi = doi || pre.doi;
+			citationCount = Math.max(citationCount, pre.citationCount ?? 0);
+			upstreamKw = [...upstreamKw, ...(pre.keywords ?? [])];
+			volume = volume || pre.volume;
+			issue = issue || pre.issue;
+			pages = pages || pre.pages;
+			venueFull =
+				venueFull && venueFull !== venue.name ? venueFull : pre.venueFull;
+			arxivId = arxivId || pre.arxivId;
+			pdfUrl = pdfUrl || pre.pdfUrl;
+			if (
+				pre.publishedAt &&
+				(publishedAt.endsWith("-01-01T00:00:00Z") ||
+					pre.publishedAt > publishedAt)
+			) {
+				publishedAt = pre.publishedAt;
+			}
+		}
+
 		if (row) {
 			const oaAbs = reconstructOpenAlexAbstract(row.abstract_inverted_index);
-			if (!isPlaceholderAbstract(oaAbs, venue.name)) {
+			if (
+				isPlaceholderAbstract(abstract, venue.name) &&
+				!isPlaceholderAbstract(oaAbs, venue.name)
+			) {
 				abstract = oaAbs;
 			}
+			doi = doi || cleanDoi(row.doi);
 			citationCount = Math.max(citationCount, row.cited_by_count ?? 0);
 			upstreamKw = [...upstreamKw, ...extractOpenAlexUpstreamKeywords(row)];
 			volume = volume || row.biblio?.volume?.trim() || undefined;
@@ -1295,7 +1424,9 @@ export async function enrichDblpItemsBatch(
 			pages =
 				pages || formatPages(row.biblio?.first_page, row.biblio?.last_page);
 			venueFull =
-				venueFull || row.primary_location?.source?.display_name?.trim();
+				(venueFull && venueFull !== venue.name ? venueFull : undefined) ||
+				row.primary_location?.source?.display_name?.trim() ||
+				venueFull;
 			arxivId = arxivId || extractArxivIdFromOpenAlex(row);
 			pdfUrl =
 				pdfUrl ||
@@ -1306,26 +1437,32 @@ export async function enrichDblpItemsBatch(
 			}
 		}
 
-		if (!isPlaceholderAbstract(abstract, venue.name)) {
-			enriched.push({
-				...item,
-				abstract,
-				publishedAt,
-				arxivId,
-				pdfUrl,
-				venueFull,
-				citationCount,
-				volume,
-				issue,
-				pages,
-				keywords: derivePaperKeywords(
-					item.title,
-					abstract,
-					item.categories,
-					upstreamKw,
-				),
-			});
-		}
+		const normalizedAbstract = isPlaceholderAbstract(abstract, venue.name)
+			? ""
+			: abstract;
+
+		enriched.push({
+			...item,
+			id: item.venueId
+				? buildVenuePaperId(item.venueId, doi, arxivId, item.title)
+				: item.id,
+			doi,
+			abstract: normalizedAbstract,
+			publishedAt,
+			arxivId,
+			pdfUrl,
+			venueFull,
+			citationCount,
+			volume,
+			issue,
+			pages,
+			keywords: derivePaperKeywords(
+				item.title,
+				normalizedAbstract,
+				item.categories,
+				upstreamKw,
+			),
+		});
 	}
 
 	return enriched;
@@ -1449,13 +1586,17 @@ export async function enrichSinglePaperOnDemand(
 	) {
 		try {
 			const oaSearch = await fetchJson<{ results?: OpenAlexWork[] }>(
-				`https://api.openalex.org/works?search=${encodeURIComponent(paper.title)}&per-page=3&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
+				`https://api.openalex.org/works?search=${encodeURIComponent(paper.title)}&per-page=5&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
 			);
 			const targetKey = normTitleKey(paper.title);
-			const match = (oaSearch.results ?? []).find(
+			const matches = (oaSearch.results ?? []).filter(
 				(r) => normTitleKey(r.title ?? r.display_name ?? "") === targetKey,
 			);
-			applyOpenAlex(match ?? oaSearch.results?.[0]);
+			if (matches.length > 0) {
+				for (const m of matches) applyOpenAlex(m);
+			} else if (oaSearch.results?.[0]) {
+				applyOpenAlex(oaSearch.results[0]);
+			}
 		} catch {
 			// Fall through to Semantic Scholar.
 		}
@@ -1471,9 +1612,10 @@ export async function enrichSinglePaperOnDemand(
 				const s2 = await fetchJson<{
 					abstract?: string | null;
 					citationCount?: number | null;
+					externalIds?: { ArXiv?: string | null; DOI?: string | null } | null;
 					s2FieldsOfStudy?: Array<{ category?: string | null }> | null;
 				}>(
-					`https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(s2Id)}?fields=abstract,citationCount,s2FieldsOfStudy`,
+					`https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(s2Id)}?fields=abstract,citationCount,externalIds,s2FieldsOfStudy`,
 				);
 				if (
 					s2.abstract &&
@@ -1484,20 +1626,59 @@ export async function enrichSinglePaperOnDemand(
 				if (typeof s2.citationCount === "number") {
 					citationCount = Math.max(citationCount ?? 0, s2.citationCount);
 				}
+				arxivId = arxivId || s2.externalIds?.ArXiv?.trim() || undefined;
 				for (const f of s2.s2FieldsOfStudy ?? []) {
 					if (f?.category) upstreamKw.push(f.category);
 				}
+			}
+		} catch {
+			// Fall through to title search if needed.
+		}
+	}
+
+	if (isPlaceholderAbstract(abstract, paper.sourceLabel)) {
+		try {
+			const s2Search = await fetchJson<{
+				data?: Array<{
+					title?: string | null;
+					abstract?: string | null;
+					citationCount?: number | null;
+					externalIds?: { ArXiv?: string | null } | null;
+				}>;
+			}>(
+				`https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(paper.title)}&limit=3&fields=title,abstract,citationCount,externalIds`,
+			);
+			const targetKey = normTitleKey(paper.title);
+			for (const cand of s2Search.data ?? []) {
+				if (normTitleKey(cand.title ?? "") !== targetKey) continue;
+				if (
+					cand.abstract &&
+					!isPlaceholderAbstract(cand.abstract, paper.sourceLabel)
+				) {
+					abstract = cand.abstract.trim();
+				}
+				if (typeof cand.citationCount === "number") {
+					citationCount = Math.max(citationCount ?? 0, cand.citationCount);
+				}
+				arxivId = arxivId || cand.externalIds?.ArXiv?.trim() || undefined;
 			}
 		} catch {
 			// Best-effort fallback completed.
 		}
 	}
 
+	const finalAbstract = isPlaceholderAbstract(abstract, paper.sourceLabel)
+		? ""
+		: abstract;
+
 	return {
 		...paper,
-		abstract,
+		abstract: finalAbstract,
 		doi,
 		arxivId,
+		pdfUrl:
+			paper.pdfUrl ||
+			(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : undefined),
 		volume,
 		issue,
 		pages,
@@ -1505,7 +1686,7 @@ export async function enrichSinglePaperOnDemand(
 		citationCount: citationCount ?? 0,
 		keywords: derivePaperKeywords(
 			paper.title,
-			abstract,
+			finalAbstract,
 			paper.categories,
 			upstreamKw,
 		),

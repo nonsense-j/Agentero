@@ -217,23 +217,25 @@ export function CollectionPaperDetailDialog({
 					) : null}
 
 					{/* Complete Abstract */}
-					<section className="space-y-1.5">
-						<h4 className="font-medium text-muted-foreground text-xs">
-							{t("plaza.collection.abstract")}
-						</h4>
-						<SelectionSurface
-							source={{
-								sourcePath: active.url,
-								sourceUrl: active.url,
-								sourceTitle: active.title,
-								origin: "markdown",
-								surface: "abstract",
-							}}
-							className="select-text whitespace-pre-line rounded-lg bg-[var(--magpie-surface)] p-3.5 text-foreground text-sm leading-relaxed shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]"
-						>
-							{active.abstract}
-						</SelectionSurface>
-					</section>
+					{active.abstract?.trim() ? (
+						<section className="space-y-1.5">
+							<h4 className="font-medium text-muted-foreground text-xs">
+								{t("plaza.collection.abstract")}
+							</h4>
+							<SelectionSurface
+								source={{
+									sourcePath: active.url,
+									sourceUrl: active.url,
+									sourceTitle: active.title,
+									origin: "markdown",
+									surface: "abstract",
+								}}
+								className="select-text whitespace-pre-line rounded-lg bg-[var(--magpie-surface)] p-3.5 text-foreground text-sm leading-relaxed shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]"
+							>
+								{active.abstract}
+							</SelectionSurface>
+						</section>
+					) : null}
 
 					{/* Citation Info & BibTeX */}
 					<section className="space-y-2">

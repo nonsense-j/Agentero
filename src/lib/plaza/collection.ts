@@ -30,7 +30,9 @@ import {
 	formatPaperBibtex,
 	formatPaperCitationText,
 	inferVenueKind,
+	isFrontmatterTitle,
 	isPlaceholderAbstract,
+	isWorkshopOrCompanionVenue,
 	loadItemsFromIndexedDb,
 	reconstructOpenAlexAbstract,
 	saveItemsToIndexedDb,
@@ -42,6 +44,7 @@ import {
 } from "@/lib/plaza/collection-enrichment";
 import {
 	createPoliteFetchJson,
+	createPoliteFetchText,
 	fetchDblpSparqlVenuePapers,
 	fetchMultiChannelVenuePapers,
 	isConfirmedVenueAcceptance,
@@ -73,7 +76,9 @@ export {
 	formatPaperCitationText,
 	inferVenueKind,
 	isConfirmedVenueAcceptance,
+	isFrontmatterTitle,
 	isPlaceholderAbstract,
+	isWorkshopOrCompanionVenue,
 	parseAcceptedVenueArxivXml,
 	reconstructOpenAlexAbstract,
 	VENUE_SPEC_BY_ID,
@@ -105,6 +110,12 @@ export type ArxivCategoryWatermark = {
 	latestPublishedAt: string;
 	latestArxivId: string;
 	lastSyncedAt: string;
+	/** Oldest `<published>` ISO timestamp contiguously synced during 2026 backfill. */
+	oldestSyncedPublishedAt?: string;
+	/** Upstream 2026 total count reported by `<opensearch:totalResults>`. */
+	remoteTotal?: number;
+	/** True once 2026 backfill has walked all the way back to `2026-01-01`. */
+	historyComplete?: boolean;
 };
 
 export type CollectionState = {
@@ -236,20 +247,31 @@ function sanitizeCachedItems(
 		if (!Array.isArray(item.authors) || item.authors.length === 0) {
 			if (item.sourceType === "venue") continue;
 		}
-		if (isPlaceholderAbstract(item.abstract, item.sourceLabel)) {
-			continue;
-		}
 		const cleanedTitle = item.title
 			.replace(
 				/\s*(?:Distinguished Paper|Virtual Attendance|Artifact Available|Artifact Evaluated)\s*$/gi,
 				"",
 			)
 			.trim();
+		if (!cleanedTitle) continue;
+		if (item.sourceType === "venue" && isFrontmatterTitle(cleanedTitle)) {
+			continue;
+		}
+		const normalizedAbstract = isPlaceholderAbstract(
+			item.abstract,
+			item.sourceLabel,
+		)
+			? ""
+			: item.abstract;
 		const spec = item.venueId ? VENUE_SPEC_BY_ID.get(item.venueId) : undefined;
 		const keywords =
 			item.keywords && item.keywords.length > 0
 				? item.keywords
-				: derivePaperKeywords(cleanedTitle, item.abstract, item.categories);
+				: derivePaperKeywords(
+						cleanedTitle,
+						normalizedAbstract,
+						item.categories,
+					);
 		const normalizedId =
 			item.sourceType === "venue" && item.venueId
 				? buildVenuePaperId(item.venueId, item.doi, item.arxivId, cleanedTitle)
@@ -258,6 +280,7 @@ function sanitizeCachedItems(
 			...item,
 			id: normalizedId,
 			title: cleanedTitle,
+			abstract: normalizedAbstract,
 			venueKind: item.venueKind ?? spec?.kind,
 			venueDomain: item.venueDomain ?? spec?.domain,
 			ccfRank: item.ccfRank ?? spec?.ccfRank,
@@ -593,6 +616,7 @@ export async function plazaFetchJson<T = unknown>(url: string): Promise<T> {
 }
 
 const politePlazaFetchJson = createPoliteFetchJson(plazaFetchJson);
+const politePlazaFetchText = createPoliteFetchText(plazaFetchText);
 
 function normalizeCategoriesKey(categories: readonly string[]): string {
 	return [...categories]
@@ -729,12 +753,54 @@ export function parseArxivAtomXml(
 	}
 
 	if (filterYear !== null) {
-		const yearFiltered = items.filter((item) => item.year >= filterYear);
-		if (yearFiltered.length > 0) {
-			return yearFiltered;
-		}
+		return items.filter((item) => item.year >= filterYear);
 	}
 	return items;
+}
+
+export type ArxivAtomFeedMeta = {
+	rawEntryCount: number;
+	totalResults?: number;
+	oldestPublishedAt?: string;
+	newestPublishedAt?: string;
+};
+
+/**
+ * Extract pagination metadata (`<opensearch:totalResults>`, raw `<entry>` count,
+ * and oldest/newest `<published>` timestamps) from an arXiv Atom XML response.
+ */
+export function parseArxivAtomFeedMeta(xmlText: string): ArxivAtomFeedMeta {
+	const totalMatch =
+		/<opensearch:totalResults[^>]*>(\d+)<\/opensearch:totalResults>/i.exec(
+			xmlText,
+		);
+	const totalResults = totalMatch?.[1] ? Number(totalMatch[1]) : undefined;
+	let rawEntryCount = 0;
+	let newestPublishedAt: string | undefined;
+	let oldestPublishedAt: string | undefined;
+
+	for (const match of xmlText.matchAll(/<entry>([\s\S]*?)<\/entry>/gi)) {
+		rawEntryCount += 1;
+		const block = match[1] ?? "";
+		const published =
+			/<published>([\s\S]*?)<\/published>/i.exec(block)?.[1]?.trim() ||
+			/<updated>([\s\S]*?)<\/updated>/i.exec(block)?.[1]?.trim();
+		if (published) {
+			if (!newestPublishedAt || published > newestPublishedAt) {
+				newestPublishedAt = published;
+			}
+			if (!oldestPublishedAt || published < oldestPublishedAt) {
+				oldestPublishedAt = published;
+			}
+		}
+	}
+
+	return {
+		rawEntryCount,
+		totalResults,
+		oldestPublishedAt,
+		newestPublishedAt,
+	};
 }
 
 /**
@@ -837,6 +903,16 @@ async function fetchArxivRssFast(
 	}
 }
 
+function formatArxivDateStamp(utcMs: number): string {
+	const d = new Date(utcMs);
+	const yyyy = String(d.getUTCFullYear());
+	const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+	const dd = String(d.getUTCDate()).padStart(2, "0");
+	const hh = String(d.getUTCHours()).padStart(2, "0");
+	const min = String(d.getUTCMinutes()).padStart(2, "0");
+	return `${yyyy}${mm}${dd}${hh}${min}`;
+}
+
 function toArxivSubmittedDateStamp(
 	isoString: string,
 	overlapHours = 12,
@@ -846,47 +922,102 @@ function toArxivSubmittedDateStamp(
 	const adjusted = Number.isNaN(parsed)
 		? min2026
 		: Math.max(min2026, parsed - overlapHours * 3_600_000);
-	const d = new Date(adjusted);
-	const yyyy = String(d.getUTCFullYear());
-	const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-	const dd = String(d.getUTCDate()).padStart(2, "0");
-	const hh = String(d.getUTCHours()).padStart(2, "0");
-	const min = String(d.getUTCMinutes()).padStart(2, "0");
-	return `${yyyy}${mm}${dd}${hh}${min}`;
+	return formatArxivDateStamp(adjusted);
 }
 
-async function fetchArxivCategoryWithRetry(
+/**
+ * Convert an oldest-seen `<published>` ISO timestamp into an inclusive upper bound
+ * `YYYYMMDDHHMM` (+1 minute overlap deduplicated by `mergeCollectionItems`) for
+ * sliding `submittedDate:[202601010000 TO toStamp]` backward without deep `start` offsets.
+ */
+function toArxivUpperDateStamp(isoString: string, minusMinutes = 0): string {
+	const parsed = Date.parse(isoString);
+	if (Number.isNaN(parsed)) return "209912312359";
+	const min2026 = Date.UTC(TARGET_YEAR, 0, 1, 0, 0, 0);
+	const roundedUpMinute =
+		Math.floor(parsed / 60_000) * 60_000 + (1 - minusMinutes) * 60_000;
+	return formatArxivDateStamp(Math.max(min2026, roundedUpMinute));
+}
+
+type ArxivCategoryPageResult = {
+	items: CollectionPaperItem[];
+	rawEntryCount: number;
+	totalResults?: number;
+	oldestPublishedAt?: string;
+	newestPublishedAt?: string;
+	historyComplete: boolean;
+};
+
+async function fetchArxivCategoryPageWithRetry(
 	cat: string,
 	cleanCats: readonly string[],
 	maxResults: number,
-	startOffset = 0,
-	fromSubmittedStamp?: string,
-	fetchTextFn: FetchTextFn = plazaFetchText,
-): Promise<CollectionPaperItem[]> {
-	const fromStamp = fromSubmittedStamp || `${TARGET_YEAR}01010000`;
-	const dateBound = `+AND+submittedDate:[${fromStamp}+TO+209912312359]`;
+	options?: {
+		startOffset?: number;
+		fromSubmittedStamp?: string;
+		toSubmittedStamp?: string;
+		fetchTextFn?: FetchTextFn;
+	},
+): Promise<ArxivCategoryPageResult> {
+	const startOffset = options?.startOffset ?? 0;
+	const fromStamp = options?.fromSubmittedStamp || `${TARGET_YEAR}01010000`;
+	const toStamp = options?.toSubmittedStamp || "209912312359";
+	const fetchTextFn = options?.fetchTextFn ?? politePlazaFetchText;
+	const dateBound = `+AND+submittedDate:[${fromStamp}+TO+${toStamp}]`;
 	const apiUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}${dateBound}&sortBy=submittedDate&sortOrder=descending&start=${startOffset}&max_results=${maxResults}`;
+
 	let lastErr: unknown = null;
-	for (let attempt = 0; attempt < 2; attempt++) {
+	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			const xml = await fetchTextFn(
 				apiUrl,
 				"application/atom+xml,text/xml,*/*",
 			);
+			const meta = parseArxivAtomFeedMeta(xml);
 			const parsed = parseArxivAtomXml(xml, TARGET_YEAR, {
 				preferredCategories: cleanCats,
 				defaultCategory: cat,
 			});
-			if (parsed.length > 0 || attempt === 1) {
-				return parsed;
+
+			const isTransientEmpty =
+				meta.rawEntryCount === 0 &&
+				(meta.totalResults === undefined || meta.totalResults > startOffset);
+
+			if (!isTransientEmpty || attempt === 2) {
+				const oldestYearMatch = /^(\d{4})/.exec(meta.oldestPublishedAt ?? "");
+				const oldestYear = oldestYearMatch
+					? Number(oldestYearMatch[1])
+					: TARGET_YEAR;
+				const historyComplete =
+					fromStamp === `${TARGET_YEAR}01010000` &&
+					!isTransientEmpty &&
+					(meta.rawEntryCount < maxResults || oldestYear < TARGET_YEAR);
+
+				return {
+					items: parsed,
+					rawEntryCount: meta.rawEntryCount,
+					totalResults: meta.totalResults,
+					oldestPublishedAt: meta.oldestPublishedAt,
+					newestPublishedAt: meta.newestPublishedAt,
+					historyComplete,
+				};
 			}
 		} catch (err) {
 			lastErr = err;
 		}
-		await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+		if (
+			typeof import.meta === "undefined" ||
+			import.meta.env?.MODE !== "test"
+		) {
+			await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+		}
 	}
 	if (lastErr) throw lastErr;
-	return [];
+	return {
+		items: [],
+		rawEntryCount: 0,
+		historyComplete: false,
+	};
 }
 
 /**
@@ -896,21 +1027,41 @@ async function fetchArxivCategoryWithRetry(
  */
 export async function fetchArxivCollection(
 	categories: readonly string[],
-	maxResultsPerCategory = 200,
+	maxResultsPerCategory = 300,
 	startOffset = 0,
+	transport?: {
+		fetchText?: FetchTextFn;
+		fetchJson?: FetchJsonFn;
+	},
 ): Promise<{
 	items: CollectionPaperItem[];
 	latest: ArxivLatestRecord | null;
+	pageMetaByCategory?: Record<
+		string,
+		{
+			totalResults?: number;
+			oldestPublishedAt?: string;
+			historyComplete: boolean;
+		}
+	>;
 }> {
 	const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
 	if (cleanCats.length === 0) {
-		return { items: [], latest: null };
+		return { items: [], latest: null, pageMetaByCategory: {} };
 	}
+	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
+	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
 
 	const rssPromise =
 		startOffset === 0
 			? Promise.allSettled(
-					cleanCats.map((cat) => fetchArxivRssFast(cat, cleanCats)),
+					cleanCats.map((cat) =>
+						fetchArxivRssFast(
+							cat,
+							cleanCats,
+							transport?.fetchText ?? plazaFetchText,
+						),
+					),
 				)
 			: Promise.resolve([]);
 
@@ -918,12 +1069,10 @@ export async function fetchArxivCollection(
 		rssPromise,
 		Promise.allSettled(
 			cleanCats.map((cat) =>
-				fetchArxivCategoryWithRetry(
-					cat,
-					cleanCats,
-					maxResultsPerCategory,
+				fetchArxivCategoryPageWithRetry(cat, cleanCats, maxResultsPerCategory, {
 					startOffset,
-				),
+					fetchTextFn,
+				}),
 			),
 		),
 	]);
@@ -935,12 +1084,27 @@ export async function fetchArxivCollection(
 		}
 	}
 
+	const pageMetaByCategory: Record<
+		string,
+		{
+			totalResults?: number;
+			oldestPublishedAt?: string;
+			historyComplete: boolean;
+		}
+	> = {};
 	const failedCats: string[] = [];
 	for (let i = 0; i < cleanCats.length; i++) {
 		const outcome = perCatResults[i];
 		const cat = cleanCats[i];
-		if (outcome?.status === "fulfilled" && outcome.value.length > 0) {
-			groups.push(outcome.value);
+		if (outcome?.status === "fulfilled" && cat) {
+			pageMetaByCategory[cat] = {
+				totalResults: outcome.value.totalResults,
+				oldestPublishedAt: outcome.value.oldestPublishedAt,
+				historyComplete: outcome.value.historyComplete,
+			};
+			if (outcome.value.items.length > 0) {
+				groups.push(outcome.value.items);
+			}
 		} else if (cat) {
 			failedCats.push(cat);
 		}
@@ -951,11 +1115,8 @@ export async function fetchArxivCollection(
 			failedCats.length === 1
 				? `cat:${failedCats[0]}`
 				: `(${failedCats.map((c) => `cat:${c}`).join("+OR+")})`;
-		const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}&sortBy=submittedDate&sortOrder=descending&start=${startOffset}&max_results=${maxResultsPerCategory * failedCats.length}`;
-		const xml = await plazaFetchText(
-			apiUrl,
-			"application/atom+xml,text/xml,*/*",
-		);
+		const apiUrl = `https://export.arxiv.org/api/query?search_query=${catQuery}+AND+submittedDate:[${TARGET_YEAR}01010000+TO+209912312359]&sortBy=submittedDate&sortOrder=descending&start=${startOffset}&max_results=${maxResultsPerCategory * failedCats.length}`;
+		const xml = await fetchTextFn(apiUrl, "application/atom+xml,text/xml,*/*");
 		groups.push(
 			parseArxivAtomXml(xml, TARGET_YEAR, {
 				preferredCategories: cleanCats,
@@ -964,11 +1125,7 @@ export async function fetchArxivCollection(
 	}
 
 	const rawMerged = mergeCollectionItems(groups);
-	const items = await enrichArxivItemsBatch(
-		rawMerged,
-		politePlazaFetchJson,
-		180,
-	);
+	const items = await enrichArxivItemsBatch(rawMerged, fetchJsonFn, 180);
 	const newest = items[0] ?? null;
 	const latest: ArxivLatestRecord | null = newest
 		? {
@@ -979,7 +1136,7 @@ export async function fetchArxivCollection(
 				checkedAt: new Date().toISOString(),
 			}
 		: null;
-	return { items, latest };
+	return { items, latest, pageMetaByCategory };
 }
 
 /**
@@ -1007,7 +1164,7 @@ export async function syncArxivCategoriesIncremental(
 	latest: ArxivLatestRecord | null;
 	coldStartCategories: string[];
 }> {
-	const fetchTextFn = transport?.fetchText ?? plazaFetchText;
+	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
 	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
 	const onCategoryStatus = transport?.onCategoryStatus;
 	const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
@@ -1052,11 +1209,12 @@ export async function syncArxivCategoriesIncremental(
 				if (!wm) return;
 				onCategoryStatus?.(cat, "refreshing");
 				try {
-					const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
+					const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}+AND+submittedDate:[${TARGET_YEAR}01010000+TO+209912312359]&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
 					const probeXml = await fetchTextFn(
 						probeUrl,
 						"application/atom+xml,text/xml,*/*",
 					);
+					const probeMeta = parseArxivAtomFeedMeta(probeXml);
 					const probeParsed = parseArxivAtomXml(probeXml, TARGET_YEAR, {
 						preferredCategories: cleanCats,
 						defaultCategory: cat,
@@ -1070,6 +1228,7 @@ export async function syncArxivCategoriesIncremental(
 					) {
 						nextWatermarks[cat] = {
 							...wm,
+							remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
 							lastSyncedAt: nowIso,
 						};
 						onCategoryStatus?.(cat, "done");
@@ -1078,29 +1237,25 @@ export async function syncArxivCategoriesIncremental(
 
 					// Newer timestamp detected -> pull ONLY incremental window since watermark
 					const fromStamp = toArxivSubmittedDateStamp(wm.latestPublishedAt, 12);
-					const [rssItems, deltaWindowItems] = await Promise.all([
+					const [rssItems, deltaPage] = await Promise.all([
 						fetchArxivRssFast(cat, cleanCats, fetchTextFn),
-						fetchArxivCategoryWithRetry(
-							cat,
-							cleanCats,
-							200,
-							0,
-							fromStamp,
+						fetchArxivCategoryPageWithRetry(cat, cleanCats, 300, {
+							startOffset: 0,
+							fromSubmittedStamp: fromStamp,
 							fetchTextFn,
-						),
+						}),
 					]);
-					const combinedCat = mergeCollectionItems([
-						rssItems,
-						deltaWindowItems,
-					]);
+					const combinedCat = mergeCollectionItems([rssItems, deltaPage.items]);
 					const newestCat = combinedCat[0] ?? top;
 					if (newestCat) {
 						nextWatermarks[cat] = {
+							...wm,
 							latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
 							latestPublishedAt:
 								newestCat.publishedAt > wm.latestPublishedAt
 									? newestCat.publishedAt
 									: wm.latestPublishedAt,
+							remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
 							lastSyncedAt: nowIso,
 						};
 					}
@@ -1135,12 +1290,20 @@ export async function syncArxivCategoriesIncremental(
 			onCategoryStatus?.(cat, "refreshing");
 		}
 		try {
-			const coldRes = await fetchArxivCollection(coldStartCategories, 200, 0);
+			const coldRes = await fetchArxivCollection(
+				coldStartCategories,
+				300,
+				0,
+				transport,
+			);
 			coldFetchedItems = coldRes.items;
 			for (const cat of coldStartCategories) {
-				const newestForCat = coldFetchedItems.find(
+				const catItems = coldFetchedItems.filter(
 					(i) => i.sourceLabel === cat || i.categories.includes(cat),
 				);
+				const newestForCat = catItems[0];
+				const oldestForCat = catItems[catItems.length - 1];
+				const pageMeta = coldRes.pageMetaByCategory?.[cat];
 				if (newestForCat) {
 					nextWatermarks[cat] = {
 						latestArxivId: stripVersion(
@@ -1148,6 +1311,18 @@ export async function syncArxivCategoriesIncremental(
 						),
 						latestPublishedAt: newestForCat.publishedAt,
 						lastSyncedAt: nowIso,
+						oldestSyncedPublishedAt:
+							pageMeta?.oldestPublishedAt ?? oldestForCat?.publishedAt,
+						remoteTotal: pageMeta?.totalResults,
+						historyComplete: pageMeta?.historyComplete ?? false,
+					};
+				} else if (pageMeta?.historyComplete) {
+					nextWatermarks[cat] = {
+						latestArxivId: "",
+						latestPublishedAt: `${TARGET_YEAR}-01-01T00:00:00Z`,
+						lastSyncedAt: nowIso,
+						remoteTotal: pageMeta.totalResults ?? 0,
+						historyComplete: true,
 					};
 				}
 				onCategoryStatus?.(cat, "done");
@@ -1184,66 +1359,206 @@ export async function syncArxivCategoriesIncremental(
 let activePreloadRunId = 0;
 
 /**
- * Background preloader that continuously pulls deeper `2026-Now` pages into the
- * preloaded collection pool so clicking "Load 50 more" reveals already-preloaded papers.
+ * Background preloader that walks `2026-Now` arXiv categories backward using
+ * sliding `submittedDate:[202601010000 TO toStamp]` windows (`start=0`, polite rate limit)
+ * until every category reaches `2026-01-01` (`historyComplete: true`).
+ * Persists `oldestSyncedPublishedAt` after each page so interrupted sessions resume seamlessly.
  */
 export async function preloadAll2026ArxivInBackground(
 	categories?: readonly string[],
-	maxPages = 6,
-	perPage = 200,
+	maxPages = 25,
+	perPage = 300,
+	transport?: {
+		fetchText?: FetchTextFn;
+		fetchJson?: FetchJsonFn;
+	},
 ): Promise<void> {
+	const initialSnap = loadCollectionState();
+	const baseCats = (
+		categories && categories.length > 0
+			? [...categories]
+			: initialSnap.categories
+	)
+		.map((c) => c.trim())
+		.filter(Boolean);
+	const pendingCats = baseCats.filter(
+		(cat) => !initialSnap.arxivWatermarks?.[cat]?.historyComplete,
+	);
+	if (pendingCats.length === 0) return;
+
 	const runId = ++activePreloadRunId;
 	setPreloadingFlag(true);
-	try {
-		const baseCats = (
-			categories && categories.length > 0
-				? [...categories]
-				: loadCollectionState().categories
-		)
-			.map((c) => c.trim())
-			.filter(Boolean);
-		if (baseCats.length === 0) return;
+	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
+	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
 
-		let activeCats = [...baseCats];
-		for (let page = 1; page <= maxPages; page++) {
+	type CatCursor = {
+		toStamp: string;
+		startOffset: number;
+		oldestSyncedPublishedAt?: string;
+		remoteTotal?: number;
+	};
+	const cursors = new Map<string, CatCursor>();
+	for (const cat of pendingCats) {
+		const wm = initialSnap.arxivWatermarks?.[cat];
+		// Only resume from `oldestSyncedPublishedAt` if a prior contiguous cursor recorded it;
+		// legacy pre-watermark caches start from `"209912312359"` to heal any mid-year gaps.
+		const resumeIso = wm?.oldestSyncedPublishedAt;
+		cursors.set(cat, {
+			toStamp: resumeIso ? toArxivUpperDateStamp(resumeIso) : "209912312359",
+			startOffset: 0,
+			oldestSyncedPublishedAt: resumeIso,
+			remoteTotal: wm?.remoteTotal,
+		});
+	}
+
+	try {
+		let activeCats = [...pendingCats];
+		for (let page = 1; page <= maxPages && activeCats.length > 0; page++) {
 			if (runId !== activePreloadRunId) return;
-			const startOffset = page * perPage;
 			const stillActive: string[] = [];
 			const pageGroups: CollectionPaperItem[][] = [];
+			const watermarkUpdates: Record<
+				string,
+				Partial<ArxivCategoryWatermark>
+			> = {};
 
-			const outcomes = await Promise.allSettled(
-				activeCats.map((cat) =>
-					fetchArxivCategoryWithRetry(cat, baseCats, perPage, startOffset),
-				),
-			);
-			for (let i = 0; i < activeCats.length; i++) {
-				const out = outcomes[i];
-				const cat = activeCats[i];
-				if (out?.status === "fulfilled" && out.value.length > 0 && cat) {
-					pageGroups.push(out.value);
-					if (out.value.length >= Math.floor(perPage * 0.4)) {
-						stillActive.push(cat);
+			for (const cat of activeCats) {
+				if (runId !== activePreloadRunId) return;
+				const curCursor = cursors.get(cat);
+				if (!curCursor) continue;
+
+				try {
+					const pageRes = await fetchArxivCategoryPageWithRetry(
+						cat,
+						loadCollectionState().categories,
+						perPage,
+						{
+							startOffset: curCursor.startOffset,
+							toSubmittedStamp: curCursor.toStamp,
+							fetchTextFn,
+						},
+					);
+
+					if (pageRes.items.length > 0) {
+						pageGroups.push(pageRes.items);
 					}
+					if (
+						curCursor.toStamp === "209912312359" &&
+						curCursor.startOffset === 0 &&
+						typeof pageRes.totalResults === "number"
+					) {
+						curCursor.remoteTotal = pageRes.totalResults;
+					}
+
+					const nextOldest =
+						pageRes.oldestPublishedAt ??
+						pageRes.items[pageRes.items.length - 1]?.publishedAt ??
+						curCursor.oldestSyncedPublishedAt;
+
+					const newestItem = pageRes.items[0];
+					watermarkUpdates[cat] = {
+						...(newestItem
+							? {
+									latestArxivId: stripVersion(
+										newestItem.arxivId ?? newestItem.id,
+									),
+									latestPublishedAt: newestItem.publishedAt,
+								}
+							: {}),
+						oldestSyncedPublishedAt: nextOldest,
+						remoteTotal: curCursor.remoteTotal,
+						historyComplete: pageRes.historyComplete,
+					};
+
+					if (!pageRes.historyComplete && pageRes.rawEntryCount > 0) {
+						const candidateStamp = nextOldest
+							? toArxivUpperDateStamp(nextOldest)
+							: curCursor.toStamp;
+						if (candidateStamp < curCursor.toStamp) {
+							curCursor.toStamp = candidateStamp;
+							curCursor.startOffset = 0;
+							curCursor.oldestSyncedPublishedAt = nextOldest;
+						} else if (curCursor.startOffset + perPage < 900 && nextOldest) {
+							curCursor.startOffset += perPage;
+						} else if (nextOldest) {
+							curCursor.toStamp = toArxivUpperDateStamp(nextOldest, 2);
+							curCursor.startOffset = 0;
+							curCursor.oldestSyncedPublishedAt = nextOldest;
+						}
+						if (curCursor.toStamp > `${TARGET_YEAR}01010000`) {
+							stillActive.push(cat);
+						} else {
+							watermarkUpdates[cat] = {
+								...watermarkUpdates[cat],
+								historyComplete: true,
+							};
+						}
+					}
+				} catch {
+					// Transient network/rate-limit failure: stop this category for the current run;
+					// persisted `oldestSyncedPublishedAt` lets the next refresh/open resume cleanly.
 				}
 			}
 
-			if (pageGroups.length === 0 || runId !== activePreloadRunId) break;
-			const batchMerged = mergeCollectionItems(pageGroups);
-			const enriched = await enrichArxivItemsBatch(
-				batchMerged,
-				politePlazaFetchJson,
-				135,
-			);
+			if (runId !== activePreloadRunId) break;
 			const cur = loadCollectionState();
-			const nextItems = mergeCollectionItems([cur.items, enriched]);
-			if (nextItems.length === cur.items.length) break;
-			saveCollectionState({
-				...cur,
-				items: nextItems,
-			});
+			const existingIdSet = new Set(cur.items.map((i) => i.id));
+			const batchMerged =
+				pageGroups.length > 0 ? mergeCollectionItems(pageGroups) : [];
+			const unseenBatch = batchMerged.filter((i) => !existingIdSet.has(i.id));
+			const enrichedUnseen =
+				unseenBatch.length > 0
+					? await enrichArxivItemsBatch(unseenBatch, fetchJsonFn, 135)
+					: [];
+
+			const latestCur = loadCollectionState();
+			const nextItems =
+				enrichedUnseen.length > 0
+					? mergeCollectionItems([latestCur.items, enrichedUnseen])
+					: latestCur.items;
+
+			const nextWms: Record<string, ArxivCategoryWatermark> = {
+				...(latestCur.arxivWatermarks ?? {}),
+			};
+			const nowIso = new Date().toISOString();
+			for (const [cat, patch] of Object.entries(watermarkUpdates)) {
+				const prevWm = nextWms[cat];
+				const latestArxivId =
+					prevWm?.latestArxivId || patch.latestArxivId || "";
+				const latestPublishedAt =
+					prevWm?.latestPublishedAt && patch.latestPublishedAt
+						? prevWm.latestPublishedAt >= patch.latestPublishedAt
+							? prevWm.latestPublishedAt
+							: patch.latestPublishedAt
+						: prevWm?.latestPublishedAt ||
+							patch.latestPublishedAt ||
+							`${TARGET_YEAR}-01-01T00:00:00Z`;
+				nextWms[cat] = {
+					...prevWm,
+					latestArxivId,
+					latestPublishedAt,
+					lastSyncedAt: prevWm?.lastSyncedAt ?? nowIso,
+					oldestSyncedPublishedAt:
+						patch.oldestSyncedPublishedAt ?? prevWm?.oldestSyncedPublishedAt,
+					remoteTotal: patch.remoteTotal ?? prevWm?.remoteTotal,
+					historyComplete: Boolean(
+						prevWm?.historyComplete || patch.historyComplete,
+					),
+				};
+			}
+
+			if (
+				enrichedUnseen.length > 0 ||
+				Object.keys(watermarkUpdates).length > 0
+			) {
+				saveCollectionState({
+					...latestCur,
+					items: nextItems,
+					arxivWatermarks: nextWms,
+				});
+			}
 
 			activeCats = stillActive;
-			if (activeCats.length === 0) break;
 		}
 	} finally {
 		if (runId === activePreloadRunId) {
@@ -1253,40 +1568,149 @@ export async function preloadAll2026ArxivInBackground(
 }
 
 /**
- * Paginate deeper into 2026 arXiv submissions across all configured categories
- * and merge them into the persisted Paper Collection state.
+ * Paginate deeper into 2026 arXiv submissions per category using each category's own
+ * `oldestSyncedPublishedAt` cursor (rather than dividing total pool size across categories)
+ * and merge into the persisted Paper Collection state.
  */
 export async function fetchMoreArxivCollection(options?: {
 	categories?: readonly string[];
 	startOffset?: number;
 	maxResultsPerCategory?: number;
+	transport?: {
+		fetchText?: FetchTextFn;
+		fetchJson?: FetchJsonFn;
+	};
 }): Promise<{ state: CollectionState; addedCount: number }> {
 	const current = loadCollectionState();
-	const categories =
+	const categories = (
 		options?.categories && options.categories.length > 0
 			? [...options.categories]
-			: current.categories;
-	const maxPerCat = options?.maxResultsPerCategory ?? 200;
-	const existingArxivCount = current.items.filter(
-		(i) => i.sourceType === "arxiv",
-	).length;
-	const defaultOffset = Math.max(
-		100,
-		Math.floor(existingArxivCount / Math.max(1, categories.length)),
-	);
-	const startOffset = options?.startOffset ?? defaultOffset;
+			: current.categories
+	)
+		.map((c) => c.trim())
+		.filter(Boolean);
+	const maxPerCat = options?.maxResultsPerCategory ?? 300;
+	const fetchTextFn = options?.transport?.fetchText ?? politePlazaFetchText;
+	const fetchJsonFn = options?.transport?.fetchJson ?? politePlazaFetchJson;
 
-	const fetched = await fetchArxivCollection(
-		categories,
-		maxPerCat,
-		startOffset,
-	);
-	const merged = mergeCollectionItems([current.items, fetched.items]);
-	const addedCount = Math.max(0, merged.length - current.items.length);
+	if (typeof options?.startOffset === "number") {
+		const fetched = await fetchArxivCollection(
+			categories,
+			maxPerCat,
+			options.startOffset,
+			options.transport,
+		);
+		const latestSnap = loadCollectionState();
+		const merged = mergeCollectionItems([latestSnap.items, fetched.items]);
+		const addedCount = Math.max(0, merged.length - latestSnap.items.length);
+		const nextState: CollectionState = {
+			...latestSnap,
+			items: merged,
+			lastRefreshedAt: new Date().toISOString(),
+		};
+		saveCollectionState(nextState);
+		return { state: nextState, addedCount };
+	}
+
+	const pageGroups: CollectionPaperItem[][] = [];
+	const wmPatches: Record<string, Partial<ArxivCategoryWatermark>> = {};
+
+	for (const cat of categories) {
+		const wm = current.arxivWatermarks?.[cat];
+		if (wm?.historyComplete) continue;
+
+		let oldestForCat = wm?.oldestSyncedPublishedAt;
+		if (!oldestForCat) {
+			for (const item of current.items) {
+				if (
+					item.sourceType === "arxiv" &&
+					(item.sourceLabel === cat || item.categories.includes(cat))
+				) {
+					if (!oldestForCat || item.publishedAt < oldestForCat) {
+						oldestForCat = item.publishedAt;
+					}
+				}
+			}
+		}
+
+		const toStamp = oldestForCat
+			? toArxivUpperDateStamp(oldestForCat)
+			: "209912312359";
+		const pageRes = await fetchArxivCategoryPageWithRetry(
+			cat,
+			current.categories,
+			maxPerCat,
+			{
+				startOffset: 0,
+				toSubmittedStamp: toStamp,
+				fetchTextFn,
+			},
+		);
+		if (pageRes.items.length > 0) {
+			pageGroups.push(pageRes.items);
+		}
+		wmPatches[cat] = {
+			oldestSyncedPublishedAt:
+				pageRes.oldestPublishedAt ??
+				pageRes.items[pageRes.items.length - 1]?.publishedAt ??
+				oldestForCat,
+			remoteTotal:
+				toStamp === "209912312359"
+					? (pageRes.totalResults ?? wm?.remoteTotal)
+					: wm?.remoteTotal,
+			historyComplete: pageRes.historyComplete,
+		};
+	}
+
+	const latestSnap = loadCollectionState();
+	const existingIds = new Set(latestSnap.items.map((i) => i.id));
+	const rawBatch =
+		pageGroups.length > 0 ? mergeCollectionItems(pageGroups) : [];
+	const unseen = rawBatch.filter((i) => !existingIds.has(i.id));
+	const enriched =
+		unseen.length > 0
+			? await enrichArxivItemsBatch(unseen, fetchJsonFn, 150)
+			: [];
+
+	const merged =
+		enriched.length > 0
+			? mergeCollectionItems([latestSnap.items, enriched])
+			: latestSnap.items;
+	const addedCount = Math.max(0, merged.length - latestSnap.items.length);
+	const nowIso = new Date().toISOString();
+	const nextWatermarks: Record<string, ArxivCategoryWatermark> = {
+		...(latestSnap.arxivWatermarks ?? {}),
+	};
+	for (const [cat, patch] of Object.entries(wmPatches)) {
+		const prev = nextWatermarks[cat];
+		if (prev) {
+			nextWatermarks[cat] = {
+				...prev,
+				...patch,
+				historyComplete: Boolean(prev.historyComplete || patch.historyComplete),
+			};
+		} else {
+			const newestCat = merged.find(
+				(i) =>
+					i.sourceType === "arxiv" &&
+					(i.sourceLabel === cat || i.categories.includes(cat)),
+			);
+			if (newestCat) {
+				nextWatermarks[cat] = {
+					latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
+					latestPublishedAt: newestCat.publishedAt,
+					lastSyncedAt: nowIso,
+					...patch,
+				};
+			}
+		}
+	}
+
 	const nextState: CollectionState = {
-		...current,
+		...latestSnap,
 		items: merged,
-		lastRefreshedAt: new Date().toISOString(),
+		arxivWatermarks: nextWatermarks,
+		lastRefreshedAt: nowIso,
 	};
 	saveCollectionState(nextState);
 	return { state: nextState, addedCount };
@@ -1747,9 +2171,12 @@ async function fetchDblpForVenue(
 		options,
 	);
 
-	const cleaned = multiChannel.items.filter(
-		(item) => !isPlaceholderAbstract(item.abstract, venue.name),
-	);
+	const cleaned = multiChannel.items.map((item) => ({
+		...item,
+		abstract: isPlaceholderAbstract(item.abstract, venue.name)
+			? ""
+			: item.abstract,
+	}));
 
 	let latestPublishedAt = multiChannel.latestPublishedAt;
 	for (const item of cleaned) {
@@ -1971,7 +2398,7 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 	const nowIso = new Date().toISOString();
 
 	const fullBundle = await fetchSingleVenueBundle(venue, false, {
-		maxPages: 6,
+		maxPages: 25,
 	});
 	const combinedCount =
 		fullBundle.items.length >= cachedForVenue.length
@@ -2227,8 +2654,16 @@ export async function refreshArxivCollection(options?: {
 	};
 	saveCollectionState(nextState);
 
-	if (coldStartCats.length > 0) {
-		void preloadAll2026ArxivInBackground(coldStartCats, 6, 200);
+	const incompleteCats = targetCategories
+		.map((c) => c.trim())
+		.filter(
+			(c) => Boolean(c) && !nextState.arxivWatermarks?.[c]?.historyComplete,
+		);
+	if (incompleteCats.length > 0 || coldStartCats.length > 0) {
+		const catsToPreload = Array.from(
+			new Set([...coldStartCats, ...incompleteCats]),
+		);
+		void preloadAll2026ArxivInBackground(catsToPreload);
 	}
 	return loadCollectionState();
 }

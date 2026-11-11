@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/tooltip";
 import {
 	ARXIV_CATEGORY_SUBTITLES,
+	type ArxivCategoryWatermark,
 	type CollectionPaperItem,
 	inferVenueKind,
 	matchesAnyArxivCategory,
@@ -91,6 +92,8 @@ export function CollectionPortalHub({
 	categories,
 	venues,
 	items,
+	arxivWatermarks,
+	preloadingArxiv = false,
 	refreshingArxiv = false,
 	refreshedArxiv = false,
 	refreshingVenue = false,
@@ -107,6 +110,8 @@ export function CollectionPortalHub({
 	categories: string[];
 	venues: VenueConfig[];
 	items: CollectionPaperItem[];
+	arxivWatermarks?: Record<string, ArxivCategoryWatermark>;
+	preloadingArxiv?: boolean;
 	refreshingArxiv?: boolean;
 	refreshedArxiv?: boolean;
 	refreshingVenue?: boolean;
@@ -263,7 +268,9 @@ export function CollectionPortalHub({
 					{categories.map((cat) => {
 						const count = catCounts.get(cat) ?? 0;
 						const subtitle = ARXIV_CATEGORY_SUBTITLES[cat];
-						const catRefreshing = refreshingCategories?.has(cat) ?? false;
+						const catRefreshing =
+							(refreshingCategories?.has(cat) ?? false) ||
+							(preloadingArxiv && !arxivWatermarks?.[cat]?.historyComplete);
 						const catRefreshed =
 							!catRefreshing && (refreshedCategories?.has(cat) ?? false);
 						return (

@@ -26,6 +26,7 @@ import {
 	inferVenueKind,
 	isFrontmatterTitle,
 	isPlaceholderAbstract,
+	isWorkshopOrCompanionVenue,
 	VENUE_SPEC_BY_ID,
 	type VenueConfig,
 } from "@/lib/plaza/collection-enrichment";
@@ -35,10 +36,10 @@ const IS_TEST_ENV =
 
 const HOST_MIN_INTERVAL_MS: Record<string, number> = {
 	"api.openalex.org": 140,
-	"sparql.dblp.org": 180,
+	"sparql.dblp.org": 200,
 	"api.crossref.org": 100,
-	"api.semanticscholar.org": 1500,
-	"export.arxiv.org": 3100,
+	"api.semanticscholar.org": 1400,
+	"export.arxiv.org": 2200,
 };
 
 const hostNextSlotMs = new Map<string, number>();
@@ -70,8 +71,8 @@ export function createPoliteFetchText(rawFetchText: FetchTextFn): FetchTextFn {
 			return await rawFetchText(url, accept);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			if (!IS_TEST_ENV && /\b429\b/.test(msg)) {
-				await new Promise((resolve) => setTimeout(resolve, 1100));
+			if (!IS_TEST_ENV && /\b(?:429|502|503|504)\b/.test(msg)) {
+				await new Promise((resolve) => setTimeout(resolve, 1500));
 				await acquireHostSlot(url);
 				return await rawFetchText(url, accept);
 			}
@@ -87,8 +88,8 @@ export function createPoliteFetchJson(rawFetchJson: FetchJsonFn): FetchJsonFn {
 			return await rawFetchJson<T>(url);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			if (!IS_TEST_ENV && /\b429\b/.test(msg)) {
-				await new Promise((resolve) => setTimeout(resolve, 1100));
+			if (!IS_TEST_ENV && /\b(?:429|502|503|504)\b/.test(msg)) {
+				await new Promise((resolve) => setTimeout(resolve, 1500));
 				await acquireHostSlot(url);
 				return await rawFetchJson<T>(url);
 			}
@@ -399,7 +400,7 @@ export async function fetchSemanticScholarVenuePapers(
 	const venueKind = spec?.kind ?? inferVenueKind(venue);
 	const venueDomain = spec?.domain ?? venue.domain;
 	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
-	const maxPages = options?.maxPages ?? 2;
+	const maxPages = options?.maxPages ?? 5;
 	const sinceDate = options?.sinceDate?.slice(0, 10) || null;
 	const out: CollectionPaperItem[] = [];
 	let totalResults = 0;
@@ -437,8 +438,19 @@ export async function fetchSemanticScholarVenuePapers(
 				const itemYear = row.year ?? year;
 				if (itemYear < year) continue;
 
-				const abstract = (row.abstract ?? "").replace(/\s+/g, " ").trim();
-				if (isPlaceholderAbstract(abstract, venue.name)) continue;
+				const rowVenue = (row.venue ?? "").trim();
+				if (
+					venueKind === "conference" &&
+					rowVenue &&
+					isWorkshopOrCompanionVenue(rowVenue)
+				) {
+					continue;
+				}
+
+				const rawAbstract = (row.abstract ?? "").replace(/\s+/g, " ").trim();
+				const abstract = isPlaceholderAbstract(rawAbstract, venue.name)
+					? ""
+					: rawAbstract;
 
 				const authors = (row.authors ?? [])
 					.map((a) => (a?.name ?? "").trim())
@@ -482,7 +494,7 @@ export async function fetchSemanticScholarVenuePapers(
 					venueKind,
 					venueDomain,
 					ccfRank,
-					venueFull: row.venue?.trim() || venue.name,
+					venueFull: rowVenue || venue.name,
 					citationCount: Math.max(0, row.citationCount ?? 0),
 					keywords: derivePaperKeywords(
 						title,
@@ -503,34 +515,54 @@ export async function fetchSemanticScholarVenuePapers(
 	return { items: out, totalResults };
 }
 
+function isArxivDoi(doi?: string): boolean {
+	return Boolean(doi && /^10\.48550\/arxiv\./i.test(doi));
+}
+
+function pickPreferredDoi(
+	a: string | undefined,
+	b: string | undefined,
+): string | undefined {
+	if (a && !isArxivDoi(a)) return a;
+	if (b && !isArxivDoi(b)) return b;
+	return a || b;
+}
+
 function dedupeVenueChannelItems(
 	groups: readonly CollectionPaperItem[][],
 ): CollectionPaperItem[] {
 	const byId = new Map<string, CollectionPaperItem>();
+	const doiToId = new Map<string, string>();
 	const titleToId = new Map<string, string>();
 
 	for (const group of groups) {
 		for (const item of group) {
+			const normDoi =
+				item.doi && !isArxivDoi(item.doi) ? item.doi.toLowerCase() : "";
 			const normTitle = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
 			const existingId = byId.has(item.id)
 				? item.id
-				: normTitle
-					? titleToId.get(normTitle)
-					: undefined;
+				: normDoi && doiToId.has(normDoi)
+					? doiToId.get(normDoi)
+					: normTitle
+						? titleToId.get(normTitle)
+						: undefined;
 			if (!existingId) {
 				byId.set(item.id, item);
+				if (normDoi) doiToId.set(normDoi, item.id);
 				if (normTitle) titleToId.set(normTitle, item.id);
 				continue;
 			}
 			const prev = byId.get(existingId);
 			if (!prev) continue;
+			const mergedDoi = pickPreferredDoi(prev.doi, item.doi);
 			byId.set(existingId, {
 				...prev,
 				abstract:
 					prev.abstract.length >= item.abstract.length
 						? prev.abstract
 						: item.abstract,
-				doi: prev.doi || item.doi,
+				doi: mergedDoi,
 				arxivId: prev.arxivId || item.arxivId,
 				pdfUrl: prev.pdfUrl || item.pdfUrl,
 				volume: prev.volume || item.volume,
@@ -552,6 +584,9 @@ function dedupeVenueChannelItems(
 					new Set([...prev.categories, ...item.categories]),
 				),
 			});
+			if (mergedDoi && !isArxivDoi(mergedDoi)) {
+				doiToId.set(mergedDoi.toLowerCase(), existingId);
+			}
 		}
 	}
 
@@ -560,10 +595,71 @@ function dedupeVenueChannelItems(
 	);
 }
 
+/**
+ * Backfill missing abstracts, arXiv preprint links, PDF URLs, and citation counts onto an
+ * authoritative proceedings paper list without adding unmatched noisy rows.
+ */
+function backfillMissingMetadataFromChannel(
+	primaryItems: readonly CollectionPaperItem[],
+	supplementItems: readonly CollectionPaperItem[],
+): CollectionPaperItem[] {
+	if (primaryItems.length === 0 || supplementItems.length === 0) {
+		return [...primaryItems];
+	}
+	const suppByDoi = new Map<string, CollectionPaperItem>();
+	const suppByTitle = new Map<string, CollectionPaperItem>();
+	for (const s of supplementItems) {
+		if (s.doi && !isArxivDoi(s.doi)) {
+			suppByDoi.set(s.doi.toLowerCase(), s);
+		}
+		const tk = s.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		if (tk) {
+			const prev = suppByTitle.get(tk);
+			if (!prev || s.abstract.length > prev.abstract.length) {
+				suppByTitle.set(tk, s);
+			}
+		}
+	}
+
+	return primaryItems.map((item) => {
+		const tk = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		const match =
+			(item.doi && !isArxivDoi(item.doi)
+				? suppByDoi.get(item.doi.toLowerCase())
+				: undefined) ?? (tk ? suppByTitle.get(tk) : undefined);
+		if (!match) return item;
+		const bestAbstract =
+			item.abstract.length >= match.abstract.length
+				? item.abstract
+				: match.abstract;
+		const bestArxivId = item.arxivId || match.arxivId;
+		return {
+			...item,
+			abstract: bestAbstract,
+			arxivId: bestArxivId,
+			pdfUrl:
+				item.pdfUrl ||
+				match.pdfUrl ||
+				(bestArxivId ? `https://arxiv.org/pdf/${bestArxivId}.pdf` : undefined),
+			citationCount: Math.max(
+				item.citationCount ?? 0,
+				match.citationCount ?? 0,
+			),
+			keywords: derivePaperKeywords(item.title, bestAbstract, item.categories, [
+				...(item.keywords ?? []),
+				...(match.keywords ?? []),
+			]),
+		};
+	});
+}
+
 type DblpSparqlBinding = {
+	rec?: { value?: string };
 	title?: { value?: string };
 	doi?: { value?: string };
 	ee?: { value?: string };
+	pubIn?: { value?: string };
+	pages?: { value?: string };
 	authors?: { value?: string };
 };
 
@@ -581,111 +677,160 @@ function resolveDblpStreamKey(
 }
 
 /**
- * Official DBLP SPARQL endpoint (`https://sparql.dblp.org/sparql`) fetcher.
+ * Official DBLP SPARQL endpoint (`https://sparql.dblp.org/sparql`) paginated full fetcher.
  * CORS-enabled (`Access-Control-Allow-Origin: *`), free of `dblp.uni-trier.de`'s
- * Anubis HTTP 202 PoW gates, and returns all 2026 stream records in a single JSON call,
- * which are then batch-enriched via OpenAlex DOI & exact-title lookups.
+ * Anubis HTTP 202 PoW gates, paginates `LIMIT/OFFSET` across large venues (up to 8,000 records),
+ * filters out proceedings editorship records and co-located `@` workshops, and batch-enriches
+ * metadata via OpenAlex while keeping every valid main-venue paper.
  */
 export async function fetchDblpSparqlVenuePapers(
 	venue: VenueConfig,
 	year: number,
 	alreadyCoveredTitles: ReadonlySet<string>,
 	fetchJson: FetchJsonFn,
+	options?: {
+		pageSize?: number;
+		maxPages?: number;
+		preloadedItems?: readonly CollectionPaperItem[];
+	},
 ): Promise<{ items: CollectionPaperItem[]; totalResults: number }> {
 	const spec = VENUE_SPEC_BY_ID.get(venue.id);
 	const stream = resolveDblpStreamKey(venue, spec);
 	if (!stream) return { items: [], totalResults: 0 };
 
-	const sparql = `PREFIX dblp: <https://dblp.org/rdf/schema#>
-SELECT ?rec ?title ?doi ?ee (GROUP_CONCAT(DISTINCT ?authorName; separator="||") AS ?authors) WHERE {
+	const pageSize = options?.pageSize ?? 1000;
+	const maxPages = options?.maxPages ?? 8;
+	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	const venueDomain = spec?.domain ?? venue.domain;
+	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
+	const categories = [
+		venue.name,
+		...(venueDomain ? [venueDomain] : []),
+		...(ccfRank ? [ccfRank] : []),
+	];
+
+	const seenRecs = new Set<string>();
+	const seenTitles = new Set<string>(alreadyCoveredTitles);
+	const candidates: CollectionPaperItem[] = [];
+	let totalBindingsObserved = 0;
+
+	for (let page = 0; page < maxPages; page++) {
+		const offset = page * pageSize;
+		const sparql = `PREFIX dblp: <https://dblp.org/rdf/schema#>
+SELECT ?rec ?title (SAMPLE(?d) AS ?doi) (SAMPLE(?e) AS ?ee) (SAMPLE(?v) AS ?pubIn) (SAMPLE(?p) AS ?pages) (GROUP_CONCAT(DISTINCT ?authorName; separator="||") AS ?authors) WHERE {
   ?rec dblp:publishedInStream <https://dblp.org/${stream}> ;
        dblp:yearOfPublication "${year}"^^<http://www.w3.org/2001/XMLSchema#gYear> ;
        dblp:title ?title .
-  OPTIONAL { ?rec dblp:doi ?doi }
-  OPTIONAL { ?rec dblp:primaryElectronicEdition ?ee }
+  FILTER NOT EXISTS { ?rec a dblp:Editorship }
+  OPTIONAL { ?rec dblp:doi ?d }
+  OPTIONAL { ?rec dblp:primaryElectronicEdition ?e }
+  OPTIONAL { ?rec dblp:publishedIn ?v }
+  OPTIONAL { ?rec dblp:pagination ?p }
   OPTIONAL { ?rec dblp:authoredBy ?a . ?a dblp:primaryCreatorName ?authorName }
-} GROUP BY ?rec ?title ?doi ?ee LIMIT 650`;
+} GROUP BY ?rec ?title ORDER BY ?rec LIMIT ${pageSize} OFFSET ${offset}`;
 
-	try {
-		const url = `https://sparql.dblp.org/sparql?query=${encodeURIComponent(sparql)}`;
-		const data = await fetchJson<{
-			results?: { bindings?: DblpSparqlBinding[] };
-		}>(url);
-		const bindings = data.results?.bindings ?? [];
-		if (bindings.length === 0) return { items: [], totalResults: 0 };
+		try {
+			const url = `https://sparql.dblp.org/sparql?query=${encodeURIComponent(sparql)}`;
+			const data = await fetchJson<{
+				results?: { bindings?: DblpSparqlBinding[] };
+			}>(url);
+			const bindings = data.results?.bindings ?? [];
+			if (bindings.length === 0) break;
+			totalBindingsObserved += bindings.length;
 
-		const venueKind = spec?.kind ?? inferVenueKind(venue);
-		const venueDomain = spec?.domain ?? venue.domain;
-		const ccfRank = spec?.ccfRank ?? venue.ccfRank;
-		const categories = [
-			venue.name,
-			...(venueDomain ? [venueDomain] : []),
-			...(ccfRank ? [ccfRank] : []),
-		];
+			for (const row of bindings) {
+				const recUri = row.rec?.value?.trim();
+				if (recUri) {
+					if (seenRecs.has(recUri)) continue;
+					seenRecs.add(recUri);
+				}
 
-		const candidates: CollectionPaperItem[] = [];
-		for (const row of bindings) {
-			const rawTitle = (row.title?.value ?? "")
-				.replace(/\.$/, "")
-				.replace(/\s+/g, " ")
-				.trim();
-			if (!rawTitle || isFrontmatterTitle(rawTitle)) continue;
+				const rawTitle = (row.title?.value ?? "")
+					.replace(/\.$/, "")
+					.replace(/\s+/g, " ")
+					.trim();
+				if (!rawTitle || isFrontmatterTitle(rawTitle)) continue;
 
-			const normTitle = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, "");
-			if (normTitle && alreadyCoveredTitles.has(normTitle)) continue;
+				const pubIn = (row.pubIn?.value ?? "").trim();
+				if (
+					venueKind === "conference" &&
+					pubIn &&
+					isWorkshopOrCompanionVenue(pubIn)
+				) {
+					continue;
+				}
 
-			const authors = (row.authors?.value ?? "")
-				.split("||")
-				.map((s) => s.replace(/\s+\d{4}$/, "").trim())
-				.filter(Boolean);
-			if (authors.length === 0) continue;
+				const normTitle = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, "");
+				if (normTitle && seenTitles.has(normTitle)) continue;
+				if (normTitle) seenTitles.add(normTitle);
 
-			const doi = cleanDoi(row.doi?.value);
-			const ee = row.ee?.value?.trim();
-			const arxivMatch = ee
-				? /arxiv\.org\/abs\/(\d{4}\.\d{4,5})/i.exec(ee)
-				: null;
-			const arxivId = arxivMatch?.[1];
+				const authors = (row.authors?.value ?? "")
+					.split("||")
+					.map((s) => s.replace(/\s+\d{4}$/, "").trim())
+					.filter(Boolean);
+				if (authors.length === 0) continue;
 
-			candidates.push({
-				id: buildVenuePaperId(venue.id, doi, arxivId, rawTitle),
-				title: rawTitle,
-				authors,
-				abstract: "",
-				publishedAt: `${year}-01-01T00:00:00Z`,
-				year,
-				sourceType: "venue",
-				sourceLabel: venue.name,
-				categories,
-				url: ee || (doi ? `https://doi.org/${doi}` : venue.url),
-				pdfUrl: arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : undefined,
-				arxivId,
-				doi,
-				venueId: venue.id,
-				venueKind,
-				venueDomain,
-				ccfRank,
-				venueFull: venue.name,
-				citationCount: 0,
-			});
+				const doi = cleanDoi(row.doi?.value);
+				const ee = row.ee?.value?.trim();
+				const arxivMatch = ee
+					? /arxiv\.org\/abs\/(\d{4}\.\d{4,5})/i.exec(ee)
+					: null;
+				const arxivId = arxivMatch?.[1];
+				const pages = row.pages?.value?.trim() || undefined;
+
+				candidates.push({
+					id: buildVenuePaperId(venue.id, doi, arxivId, rawTitle),
+					title: rawTitle,
+					authors,
+					abstract: "",
+					publishedAt: `${year}-01-01T00:00:00Z`,
+					year,
+					sourceType: "venue",
+					sourceLabel: venue.name,
+					categories,
+					url: ee || (doi ? `https://doi.org/${doi}` : venue.url),
+					pdfUrl: arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : undefined,
+					arxivId,
+					doi,
+					venueId: venue.id,
+					venueKind,
+					venueDomain,
+					ccfRank,
+					venueFull: pubIn || venue.name,
+					citationCount: 0,
+					pages,
+				});
+			}
+
+			if (bindings.length < pageSize) break;
+		} catch {
+			break;
 		}
-
-		if (candidates.length === 0) {
-			return { items: [], totalResults: bindings.length };
-		}
-
-		const enriched = await enrichDblpItemsBatch(candidates, venue, fetchJson);
-		return { items: enriched, totalResults: bindings.length };
-	} catch {
-		return { items: [], totalResults: 0 };
 	}
+
+	if (candidates.length === 0) {
+		return { items: [], totalResults: totalBindingsObserved };
+	}
+
+	const enriched = await enrichDblpItemsBatch(
+		candidates,
+		venue,
+		fetchJson,
+		options?.preloadedItems,
+	);
+	return { items: enriched, totalResults: enriched.length };
 }
 
 /**
- * Fetch complete, multi-page 2026 venue papers (full update per Venue) via a 3-tier waterfall:
- * - Tier 1: OpenAlex + Crossref (`cursor` paginated up to 1,200 papers — fast & complete for ACM/IEEE/LIPIcs/AAAI/ACL),
- * - Tier 2: Official DBLP SPARQL (`sparql.dblp.org` + OpenAlex DOI & exact-title enrichment for OpenReview ICLR / USENIX Security / journals),
- * - Tier 3: Semantic Scholar Bulk + arXiv Confirmed Accepted-Venue Metadata (only when Tiers 1+2 < 25 papers, e.g. NeurIPS / ICML / CCS before proceedings DOIs land).
+ * Fetch complete, multi-page 2026 venue papers (full update per Venue):
+ * 1. Official DBLP SPARQL (`sparql.dblp.org`, paginated `LIMIT/OFFSET` up to 8,000 records,
+ *    excluding proceedings editorships and `@` co-located workshops) + OpenAlex/Crossref
+ *    cursor-paginated full proceedings & journals (up to 5,000 records, retaining abstract-less
+ *    publisher papers rather than dropping them).
+ * 2. Semantic Scholar Bulk abstract & arXiv-preprint backfill onto primary proceedings papers
+ *    when publisher records omit public abstracts (common for ACM/IEEE conferences like ASE/ICSE).
+ * 3. Early pre-proceedings fallback (Semantic Scholar Bulk + arXiv confirmed accepted papers)
+ *    when neither DBLP nor OpenAlex/Crossref has indexed the 2026 proceedings yet (< 25 papers).
  */
 export async function fetchMultiChannelVenuePapers(
 	venue: VenueConfig,
@@ -700,38 +845,99 @@ export async function fetchMultiChannelVenuePapers(
 	remoteTotalCount: number;
 	latestPublishedAt: string | null;
 }> {
-	const fetchJson = createPoliteFetchJson(rawFetchJson);
-	const fetchText = createPoliteFetchText(rawFetchText);
-	const spec = VENUE_SPEC_BY_ID.get(venue.id);
-	const maxPages = options?.maxPages ?? 6;
+	let requestCount = 0;
+	let successCount = 0;
+	let lastError: unknown = null;
 
-	// Tier 1: OpenAlex + Crossref cursor-paginated proceedings & journals
+	const trackedFetchJson: FetchJsonFn = async <T = unknown>(
+		url: string,
+	): Promise<T> => {
+		requestCount += 1;
+		try {
+			const res = await rawFetchJson<T>(url);
+			successCount += 1;
+			return res;
+		} catch (err) {
+			lastError = err;
+			throw err;
+		}
+	};
+
+	const trackedFetchText: FetchTextFn = async (
+		url: string,
+		accept?: string,
+	): Promise<string> => {
+		requestCount += 1;
+		try {
+			const res = await rawFetchText(url, accept);
+			successCount += 1;
+			return res;
+		} catch (err) {
+			lastError = err;
+			throw err;
+		}
+	};
+
+	const fetchJson = createPoliteFetchJson(trackedFetchJson);
+	const fetchText = createPoliteFetchText(trackedFetchText);
+	const spec = VENUE_SPEC_BY_ID.get(venue.id);
+	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	const maxPages = options?.maxPages ?? 25;
+
+	// Tier 1: OpenAlex + Crossref cursor-paginated full proceedings & journals
 	const structured = await fetchVenueStructuredPapers(venue, year, fetchJson, {
 		maxPages,
 	});
 
-	// Tier 2: Official DBLP SPARQL when OpenAlex/Crossref coverage is incomplete (< 80 items)
-	let dblpItems: CollectionPaperItem[] = [];
-	let dblpTotal = 0;
-	if (structured.items.length < 80) {
-		const covered = new Set(
-			structured.items.map((i) =>
-				i.title.toLowerCase().replace(/[^a-z0-9]+/g, ""),
-			),
-		);
-		const dblpRes = await fetchDblpSparqlVenuePapers(
+	// Tier 2: First-class paginated DBLP SPARQL enriched in-memory from `structured.items` first
+	const dblpRes = await fetchDblpSparqlVenuePapers(
+		venue,
+		year,
+		new Set(),
+		fetchJson,
+		{
+			preloadedItems: structured.items,
+		},
+	);
+
+	// When DBLP has indexed a conference, its main-venue paper list is authoritative (excluding
+	// co-located workshops/companion tracks that OpenAlex sometimes bundles under one source ID).
+	// When DBLP lags behind publisher proceedings (e.g. newly published ACM/IEEE volumes) or for
+	// journals, union DBLP + OpenAlex/Crossref so zero published papers are missed.
+	const dblpIsAuthoritativeConference =
+		venueKind === "conference" &&
+		dblpRes.items.length >= 25 &&
+		dblpRes.items.length >= structured.items.length * 0.45;
+
+	let primaryItems = dblpIsAuthoritativeConference
+		? dedupeVenueChannelItems([dblpRes.items])
+		: dedupeVenueChannelItems([dblpRes.items, structured.items]);
+
+	// Backfill missing abstracts & arXiv PDFs via S2 Bulk for proceedings with sparse publisher abstracts
+	const missingAbstractCount = primaryItems.filter((p) => !p.abstract).length;
+	if (
+		primaryItems.length >= 25 &&
+		missingAbstractCount >= 15 &&
+		spec?.s2VenueNames?.length
+	) {
+		const s2Backfill = await fetchSemanticScholarVenuePapers(
 			venue,
 			year,
-			covered,
 			fetchJson,
+			{
+				maxPages: 2,
+			},
 		);
-		dblpItems = dblpRes.items;
-		dblpTotal = dblpRes.totalResults;
+		if (s2Backfill.items.length > 0) {
+			primaryItems = backfillMissingMetadataFromChannel(
+				primaryItems,
+				s2Backfill.items,
+			);
+		}
 	}
 
-	// Tier 3: S2 Bulk + arXiv accepted metadata ONLY when Tiers 1+2 combined < 25 papers
-	const needEarlyPreprintChannels =
-		structured.items.length + dblpItems.length < 25;
+	// Tier 3: S2 Bulk + arXiv accepted metadata ONLY when official proceedings are not indexed yet (< 25 papers)
+	const needEarlyPreprintChannels = primaryItems.length < 25;
 
 	let s2Items: CollectionPaperItem[] = [];
 	let s2Total = 0;
@@ -741,7 +947,7 @@ export async function fetchMultiChannelVenuePapers(
 			year,
 			fetchJson,
 			{
-				maxPages: 2,
+				maxPages: 5,
 			},
 		);
 		s2Items = s2Res.items;
@@ -752,7 +958,7 @@ export async function fetchMultiChannelVenuePapers(
 	let arxivTotal = 0;
 	if (needEarlyPreprintChannels && spec?.arxivVenueAliases?.length) {
 		const arxivRes = await fetchArxivAcceptedForVenue(venue, year, fetchText, {
-			maxPages: 3,
+			maxPages: 4,
 		});
 		arxivTotal = arxivRes.totalResults;
 		if (arxivRes.items.length > 0) {
@@ -764,12 +970,18 @@ export async function fetchMultiChannelVenuePapers(
 		}
 	}
 
-	const merged = dedupeVenueChannelItems([
-		structured.items,
-		dblpItems,
-		s2Items,
-		arxivVenueItems,
-	]);
+	const merged = needEarlyPreprintChannels
+		? dedupeVenueChannelItems([primaryItems, s2Items, arxivVenueItems])
+		: primaryItems;
+
+	if (
+		merged.length === 0 &&
+		requestCount > 0 &&
+		successCount === 0 &&
+		lastError
+	) {
+		throw lastError;
+	}
 
 	let latestPublishedAt: string | null = null;
 	for (const item of merged) {
@@ -778,13 +990,15 @@ export async function fetchMultiChannelVenuePapers(
 		}
 	}
 
-	const remoteTotalCount = Math.max(
-		merged.length,
-		structured.remoteTotalCount ?? 0,
-		dblpTotal,
-		arxivTotal,
-		s2Total,
-	);
+	const remoteTotalCount = dblpIsAuthoritativeConference
+		? merged.length
+		: Math.max(
+				merged.length,
+				structured.remoteTotalCount ?? 0,
+				dblpRes.totalResults,
+				needEarlyPreprintChannels ? arxivTotal : 0,
+				needEarlyPreprintChannels ? s2Total : 0,
+			);
 
 	return {
 		items: merged,

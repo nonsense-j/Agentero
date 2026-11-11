@@ -395,13 +395,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			void handleRefreshArxiv(missingCategories, false, true);
 		} else {
 			void runCheckUpdate(true);
-			const arxivCount = state.items.filter(
-				(i) =>
-					i.sourceType === "arxiv" &&
-					matchesAnyArxivCategory(i, state.categories),
-			).length;
-			if (arxivCount < 200) {
-				void preloadAll2026ArxivInBackground(state.categories);
+			const incompleteCategories = state.categories.filter(
+				(cat) => !state.arxivWatermarks?.[cat]?.historyComplete,
+			);
+			if (incompleteCategories.length > 0) {
+				void preloadAll2026ArxivInBackground(incompleteCategories);
 			}
 		}
 
@@ -417,6 +415,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		handleRefreshVenue,
 		idbReady,
 		runCheckUpdate,
+		state.arxivWatermarks,
 		state.categories,
 		state.items,
 		state.venues,
@@ -588,12 +587,24 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		return { total, map };
 	}, [filteredVenuesForBar, state.items, venueDomainFilter, venueKindFilter]);
 
+	const isActiveArxivHistoryComplete = useMemo(() => {
+		const targetCats = selectedCategory ? [selectedCategory] : state.categories;
+		return (
+			targetCats.length > 0 &&
+			targetCats.every((cat) =>
+				Boolean(state.arxivWatermarks?.[cat]?.historyComplete),
+			)
+		);
+	}, [selectedCategory, state.arxivWatermarks, state.categories]);
+
 	const handleRevealNext50 = useCallback(() => {
 		const nextLimit = displayLimit + LOAD_MORE_STEP;
 		setDisplayLimit(nextLimit);
-		// Keep preloaded pool comfortably ahead when browsing arXiv
+		// Keep preloaded pool comfortably ahead when browsing incomplete 2026 arXiv categories
 		if (
 			activeSource === "arxiv" &&
+			timeRange === "all" &&
+			!isActiveArxivHistoryComplete &&
 			visiblePapers.length - nextLimit < 80 &&
 			!preloading &&
 			!loadingMoreRemote
@@ -604,7 +615,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			setLoadingMoreRemote(true);
 			void fetchMoreArxivCollection({
 				categories: targetCats,
-				maxResultsPerCategory: 150,
+				maxResultsPerCategory: 300,
 			})
 				.then(({ state: next }) => setState(next))
 				.catch(() => undefined)
@@ -613,10 +624,12 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [
 		activeSource,
 		displayLimit,
+		isActiveArxivHistoryComplete,
 		loadingMoreRemote,
 		preloading,
 		selectedCategory,
 		state.categories,
+		timeRange,
 		visiblePapers.length,
 	]);
 
@@ -876,6 +889,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							categories={state.categories}
 							venues={state.venues}
 							items={state.items}
+							arxivWatermarks={state.arxivWatermarks}
+							preloadingArxiv={preloading}
 							refreshingArxiv={refreshingArxiv}
 							refreshedArxiv={isHubArxivRefreshed}
 							refreshingVenue={refreshingVenue || backgroundInitVenues}
@@ -1131,7 +1146,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									</span>
 								</button>
 								{state.categories.map((cat) => {
-									const catRefreshing = refreshingCategories.has(cat);
+									const catRefreshing =
+										refreshingCategories.has(cat) ||
+										(preloading &&
+											!state.arxivWatermarks?.[cat]?.historyComplete);
 									const catRefreshed =
 										!catRefreshing && refreshedCategories.has(cat);
 									return (
@@ -1352,7 +1370,9 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 													total: visiblePapers.length,
 												})}
 											</span>
-											{activeSource === "arxiv" ? (
+											{activeSource === "arxiv" &&
+											timeRange === "all" &&
+											!isActiveArxivHistoryComplete ? (
 												<Button
 													type="button"
 													variant="outline"
