@@ -14,6 +14,8 @@ use crate::features::scholar_api::{
 
 const SOURCE: &str = "s2";
 const API_BASE: &str = "https://api.semanticscholar.org/graph/v1";
+const PAPER_FIELDS: &str =
+    "title,abstract,authors,year,publicationDate,venue,publicationVenue,journal,externalIds,citationCount,url,openAccessPdf";
 
 /// Semantic Scholar metadata source.
 #[derive(Debug, Clone, Default)]
@@ -29,6 +31,7 @@ impl AcademicApi for SemanticScholarApi {
         ApiCapability::SEARCH_BY_TITLE
             | ApiCapability::FETCH_BY_DOI
             | ApiCapability::FETCH_BY_ARXIV
+            | ApiCapability::PROVIDE_ABSTRACT
             | ApiCapability::PROVIDE_CITATION_COUNT
             | ApiCapability::PROVIDE_VENUE
             | ApiCapability::FETCH_REFERENCES
@@ -85,7 +88,7 @@ impl SemanticScholarApi {
     /// trait, so it is exposed as an inherent method.
     pub async fn search_match(&self, title: &str) -> Result<Option<ApiPaper>, ApiError> {
         let url = format!(
-            "{API_BASE}/paper/search/match?query={}&fields=title,authors,year,publicationDate,venue,publicationVenue,journal,externalIds,citationCount,url",
+            "{API_BASE}/paper/search/match?query={}&fields={PAPER_FIELDS}",
             urlencoding::encode(title)
         );
         let value = client::get_json(&url).await?;
@@ -112,12 +115,12 @@ async fn fetch_by_id(paper_id: &str) -> Result<ApiPaper, ApiError> {
     let (prefix, rest) = paper_id.split_once(':').unwrap_or(("", paper_id));
     let url = if prefix.is_empty() {
         format!(
-            "{API_BASE}/paper/{}?fields=title,authors,year,publicationDate,venue,publicationVenue,journal,externalIds,citationCount,url",
+            "{API_BASE}/paper/{}?fields={PAPER_FIELDS}",
             urlencoding::encode(paper_id)
         )
     } else {
         format!(
-            "{API_BASE}/paper/{}:{}?fields=title,authors,year,publicationDate,venue,publicationVenue,journal,externalIds,citationCount,url",
+            "{API_BASE}/paper/{}:{}?fields={PAPER_FIELDS}",
             prefix,
             urlencoding::encode(rest)
         )
@@ -128,7 +131,7 @@ async fn fetch_by_id(paper_id: &str) -> Result<ApiPaper, ApiError> {
 
 async fn search_by_title(title: &str, limit: usize) -> Result<Vec<ApiPaper>, ApiError> {
     let url = format!(
-        "{API_BASE}/paper/search?query={}&limit={}&fields=title,authors,year,publicationDate,venue,publicationVenue,journal,externalIds,citationCount,url",
+        "{API_BASE}/paper/search?query={}&limit={}&fields={PAPER_FIELDS}",
         urlencoding::encode(title),
         (limit * 4).min(100)
     );
@@ -189,9 +192,9 @@ fn map_paper(item: &Value) -> Option<ApiPaper> {
         issue: None,
         pages: None,
         publisher: None,
-        abstract_text: None,
+        abstract_text: str_field(item, "abstract"),
         urls: PaperUrls {
-            pdf: None,
+            pdf: str_field_at(item, "/openAccessPdf/url"),
             html: None,
             landing: str_field(item, "url"),
         },
@@ -429,5 +432,33 @@ mod tests {
             "journal": { "name": "Nature" }
         });
         assert_eq!(venue_from_paper(&paper).as_deref(), Some("Nature"));
+    }
+
+    #[test]
+    fn map_paper_extracts_abstract_and_open_access_pdf() {
+        let item = json!({
+            "title": "Doc2Test: An Industrial Multi-agent Framework",
+            "abstract": "We present Doc2Test for automated end-to-end Selenium testing.",
+            "year": 2026,
+            "citationCount": 5,
+            "externalIds": {
+                "DOI": "10.1145/3832783.3834507",
+                "ArXiv": "2607.01234v1"
+            },
+            "openAccessPdf": {
+                "url": "https://arxiv.org/pdf/2607.01234.pdf"
+            },
+            "url": "https://www.semanticscholar.org/paper/abc"
+        });
+        let mapped = map_paper(&item).expect("mapped");
+        assert_eq!(
+            mapped.abstract_text.as_deref(),
+            Some("We present Doc2Test for automated end-to-end Selenium testing.")
+        );
+        assert_eq!(
+            mapped.urls.pdf.as_deref(),
+            Some("https://arxiv.org/pdf/2607.01234.pdf")
+        );
+        assert_eq!(mapped.identifiers.arxiv_id.as_deref(), Some("2607.01234"));
     }
 }

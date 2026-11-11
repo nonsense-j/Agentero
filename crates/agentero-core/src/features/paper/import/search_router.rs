@@ -95,11 +95,15 @@ pub async fn search_papers(
     query: &str,
     limit: usize,
 ) -> Result<Vec<PaperSearchCandidate>, AppError> {
-    let hits = search_papers_by_title(query, SourceScope::All, limit).await?;
-    Ok(fuse_and_rank_candidates(hits, query, limit)
-        .into_iter()
-        .map(PaperSearchCandidate::from)
-        .collect())
+    let hits = search_papers_by_title(query, SourceScope::Core, limit).await?;
+    Ok(
+        fuse_and_rank_candidates(hits, query, limit.saturating_mul(2).max(limit))
+            .into_iter()
+            .filter(|p| p.identifiers.arxiv_id.is_some() || p.identifiers.doi.is_some())
+            .take(limit)
+            .map(PaperSearchCandidate::from)
+            .collect(),
+    )
 }
 
 /// True when the current `publication` value should be replaced from S2.

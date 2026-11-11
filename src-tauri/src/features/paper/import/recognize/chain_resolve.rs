@@ -22,7 +22,7 @@ pub async fn resolve_metadata_chain(query: &str) -> Result<PaperRecord, AppError
         return Err(AppError::message("empty title query"));
     }
 
-    let best = resolve_best_by_title(query, SourceScope::All)
+    let best = resolve_best_by_title(query, SourceScope::Core)
         .await
         .map_err(|e| AppError::message(format!("could not resolve metadata: {e}")))?;
 

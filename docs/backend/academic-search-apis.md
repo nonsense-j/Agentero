@@ -17,7 +17,7 @@ Agentero Host 端（`src-tauri/src/features/`）在论文识别、入库、引�
 | **arXiv Atom API** | `GET https://export.arxiv.org/api/query` | 按 ID 取元数据 / 按标题搜索 | `features/paper/import/mod.rs`, `features/paper/import/search_router.rs` |
 | **arXiv 二进制端点** | `https://arxiv.org/pdf/{id}` / `https://arxiv.org/e-print/{id}` / `https://arxiv.org/src/{id}` | PDF / TeX 源码下载 | `features/paper/import/download.rs` |
 | **Crossref REST API** | `GET https://api.crossref.org/works/{doi}` | DOI → 元数据 / 参考文献 | `features/paper/import/recognize/pdf_recognize.rs`, `features/paper/analyze/refs/online.rs`, `features/paper/catalog/commands.rs` |
-| **OpenAlex REST API** | `GET https://api.openalex.org/works` | 标题搜索兜底（含 `cited_by_count`） | `features/paper/scholar_api/search.rs`（`SourceScope::All` 兜底源） |
+| **OpenAlex REST API** | `GET https://api.openalex.org/works`、`GET /works/doi:{doi}` | 标题搜索与 DOI 单点补全（还原 `abstract_inverted_index` 摘要、`cited_by_count`、OA PDF / `ids.arxiv`） | `features/paper/scholar_api/sources/openalex.rs`, `features/paper/scholar_api/search.rs`, `features/paper/import/mod.rs` |
 | **Unpaywall** | `GET https://api.unpaywall.org/v2/{doi}` | DOI → 开放获取 PDF | `features/paper/import/download.rs` |
 | **PubMed / NCBI E-utilities** | `GET https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi` / `efetch.fcgi` | 标题/PMID → 医学/生命科学元数据 | `features/paper/scholar_api/sources/pubmed.rs` |
 | **alphaXiv** | `GET https://api.alphaxiv.org/papers/v3/{id}/preview`、`GET /v1/search/paper?q=` | arXiv 元数据/标题搜索的末位备份源（未文档化匿名 JSON API） | `features/paper/scholar_api/sources/alphaxiv.rs` |
@@ -37,15 +37,17 @@ Agentero Host 端（`src-tauri/src/features/`）在论文识别、入库、引�
 
 当前主路径按以下顺序尝试：
 
-1. **标题/关键词搜索**（`features/paper/import/search_router.rs::search_papers`）
-   - Semantic Scholar `GET /graph/v1/paper/search?query=...&fields=title,authors,year,venue,publicationVenue,journal,externalIds,citationCount,url` 与 arXiv Atom `GET export.arxiv.org/api/query?search_query=ti:"..."` **并行**发起。S2 在 5s 预算（`S2_SEARCH_BUDGET`）内返回非空则优先（venue 取 `publicationVenue.name`（跳过 `type=repository`），其次 `journal.name`，再次 `venue`），否则取已在途的 arXiv 结果；最坏耗时 ≈ max(预算, 单请求 20s 超时)。
-   - 仅保留带 DOI 或 arXiv id 的候选；返回结果会按精确标题匹配重新排序。
+1. **标题/关键词搜索**（`features/paper/import/search_router.rs::search_papers`、`recognize/chain_resolve.rs::resolve_metadata_chain`）
+   - 默认采用 `SourceScope::Core`（`SemanticScholarApi`、`CrossrefApi`、`OpenAlexApi`、`ArxivApi` 四路核心源，恰好对齐客户端 `GLOBAL_CONCURRENCY = 4` 并发槽位，不再默认携带生物医学 `PubMed` 与匿名 `alphaXiv`，也不再重复并发发起 S2 `/paper/search/match` 以避免自触发 S2 `1 req/s` 429）。
+   - S2 与 OpenAlex 均提取完整摘要（S2 `abstract`、OpenAlex `abstract_inverted_index`）及开放获取 PDF（`openAccessPdf.url`、`primary_location.pdf_url` / `open_access.oa_url`）。
+   - 仅保留带 DOI 或 arXiv id 的候选；经 RRF + 标题相似度 + 源优先级 + 引用数融合排序返回。
    - `resolve_search_queries` 接收前端 `task_id`：关闭搜索卡片取消任务后，剩余查询直接跳过。
-2. **Translator Runtime**（`features/import/mod.rs::resolve_metadata`）
+2. **Translator Runtime + DOI 摘要/引用补全**（`features/import/mod.rs::resolve_metadata`）
    - 若用户输入被识别为 arXiv id / DOI / URL，会构造 `{base}/web` 或 `{base}/search` 请求。
    - arXiv 的各类输入（`2508.05004`、`arXiv:2508.05004v2`、`https://arxiv.org/pdf/...`、`https://arxiv.org/html/...`）都会被规范化为 `https://arxiv.org/abs/{id}` 再走 `/web`。
    - HTTP 503 与响应体里的 `error code: 1102`（Cloudflare Worker 资源上限）记为 `service_unavailable`，同一请求再试两次（400ms、800ms）后放弃这次调用。
    - Translator 失败时按标识符类型走**直连兜底链**（`scholar_api::identifiers::fallback`，见下）。链没有命中、或链也失败时，`http(s)` URL 改为直接抓取原网页：论文页用 Highwire `citation_*`（有 DOI 再试一次直连链），普通网页用 URL、标题和 `og:` / `<title>` 元数据建成 `html` 条目。翻译服务不可用不会挡住这次导入。没有 DOI / arXiv / PMID、也不是网页的输入仍失败，错误码 `translator_unavailable`，文案带 HTTP 状态和 1102。
+   - **DOI 缺摘要单跳补全（`supplement_missing_doi_metadata`）**：当非 `10.48550/arxiv.*` 的 DOI 条目经 Translator / Crossref 返回后仍缺 `abstract_text`（ACM / IEEE 会议论文常见），自动以 `4s` 预算请求 OpenAlex 0-credit 单点 `GET /works/doi:{doi}`（若仍无摘要再试一次 S2 `DOI:{doi}`），一次性补齐 `abstract_text`、`citation_count`、`arxiv_id` 与开放获取 `pdf_url`。
 3. **直连兜底链**（`features/paper/scholar_api/identifiers/fallback.rs`）
    - arXiv → `ARXIV_CHAIN` = arXiv Atom → S2 `ARXIV:{id}` → alphaXiv `/papers/v3/{id}/preview`。
    - DOI → `DOI_CHAIN` = Crossref `works/{doi}` → S2 `DOI:{doi}` → OpenAlex。

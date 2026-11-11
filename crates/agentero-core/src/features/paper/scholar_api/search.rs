@@ -18,9 +18,6 @@ use crate::features::scholar_api::sources::{
 use crate::features::scholar_api::traits::AcademicApi;
 use crate::features::scholar_api::{normalize_id, ApiError, ApiPaper, ApiQuery};
 
-/// Budget for S2's `/paper/search/match` fast path.
-const MATCH_BUDGET: Duration = Duration::from_secs(3);
-
 /// Budget for a single source's title search.
 const FETCH_BUDGET: Duration = Duration::from_secs(8);
 
@@ -61,6 +58,9 @@ pub enum SourceScope {
     /// All sources capable of title search.
     #[default]
     All,
+    /// High-signal core CS/general sources matching the 4-slot HTTP concurrency budget:
+    /// Semantic Scholar, Crossref, OpenAlex, and arXiv (omits biomedical PubMed and alphaXiv).
+    Core,
     /// General scholarly sources: S2, Crossref, OpenAlex.
     Scholarly,
     /// Open-access-friendly sources: arXiv, S2.
@@ -79,6 +79,7 @@ impl SourceScope {
     fn sources(&self) -> Vec<&'static dyn AcademicApi> {
         match self {
             SourceScope::All => ALL_TITLE_SOURCES.to_vec(),
+            SourceScope::Core => vec![&SemanticScholarApi, &CrossrefApi, &OpenAlexApi, &ArxivApi],
             SourceScope::Scholarly => vec![&SemanticScholarApi, &CrossrefApi, &OpenAlexApi],
             SourceScope::OpenAccess => vec![&ArxivApi, &SemanticScholarApi],
             SourceScope::Preprint => vec![&ArxivApi],
@@ -167,11 +168,10 @@ struct DuplicateGroup {
 
 /// Search papers by title/keyword across the sources selected by `scope`.
 ///
-/// The search is concurrent per source with independent timeouts. S2's
-/// `/paper/search/match` fast path is used when the scope includes S2. The
-/// returned list is unranked and may still contain duplicates; use
-/// [`fuse_and_rank_candidates`] to
-/// order and trim it.
+/// The search is concurrent per source with independent timeouts (one request
+/// per source so Semantic Scholar is not self-throttled by parallel `/search` +
+/// `/search/match` calls). The returned list is unranked and may still contain
+/// duplicates; use [`fuse_and_rank_candidates`] to order and trim it.
 pub async fn search_papers_by_title(
     query: &str,
     scope: SourceScope,
@@ -188,34 +188,6 @@ pub async fn search_papers_by_title(
     }
 
     let mut ranked_hits: Vec<RankedHit> = Vec::new();
-
-    // S2 match fast path: when scope includes S2, try the single-best-match
-    // endpoint concurrently with the broader title searches.
-    let s2_in_scope = sources.iter().any(|s| s.name() == "s2");
-    let match_future = async {
-        if !s2_in_scope {
-            return Vec::new();
-        }
-        match tokio::time::timeout(MATCH_BUDGET, SemanticScholarApi.search_match(query)).await {
-            Ok(Ok(Some(paper))) => vec![RankedHit {
-                paper,
-                source_name: "s2",
-                source_rank: 0,
-            }],
-            Ok(Ok(None)) => Vec::new(),
-            Ok(Err(e)) => {
-                log::warn!("title search: S2 match failed ({e}); continuing with title search");
-                Vec::new()
-            }
-            Err(_) => {
-                log::warn!(
-                    "title search: S2 match exceeded {}s budget",
-                    MATCH_BUDGET.as_secs()
-                );
-                Vec::new()
-            }
-        }
-    };
 
     // Concurrent title search across all scoped sources.
     let fetch_futures = sources.iter().map(|source| {
@@ -255,12 +227,10 @@ pub async fn search_papers_by_title(
         }
     });
 
-    let (match_hits, fetch_results) =
-        tokio::join!(match_future, futures_util::future::join_all(fetch_futures));
+    let fetch_results = futures_util::future::join_all(fetch_futures).await;
 
     let attempted = sources.len();
     let mut failures: Vec<SearchFailure> = Vec::new();
-    ranked_hits.extend(match_hits);
     for outcome in fetch_results {
         match outcome {
             SourceOutcome::Hits(mut hits) => ranked_hits.append(&mut hits),
@@ -487,6 +457,13 @@ mod tests {
 
     #[test]
     fn source_scope_expands_and_sorts_by_priority() {
+        let core = SourceScope::Core.sources();
+        assert_eq!(core.len(), 4);
+        assert_eq!(core[0].name(), "s2");
+        assert_eq!(core[1].name(), "crossref");
+        assert_eq!(core[2].name(), "openalex");
+        assert_eq!(core[3].name(), "arxiv");
+
         let scholarly = SourceScope::Scholarly.sources();
         assert_eq!(scholarly.len(), 3);
         assert_eq!(scholarly[0].name(), "s2");

@@ -1040,6 +1040,7 @@ pub async fn resolve_metadata(
         }
         Err(failure) => webpage::recover_metadata(text, translator_base, task_id, failure).await?,
     };
+    supplement_missing_doi_metadata(&mut resolved.record, task_id).await?;
     if let Some(request) = crate::features::scholar_api::identifiers::extract_arxiv_request(text) {
         resolved.record.arxiv_id = Some(strip_arxiv_version(&request));
         let urls = crate::features::scholar_api::urls::arxiv_canonical_urls(&request);
@@ -1048,6 +1049,120 @@ pub async fn resolve_metadata(
         resolved.record.source_url = Some(urls.abs);
     }
     Ok(resolved)
+}
+
+fn has_non_empty(opt: &Option<String>) -> bool {
+    opt.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
+fn apply_supplement_paper(record: &mut PaperRecord, supp: &crate::features::scholar_api::ApiPaper) {
+    if !has_non_empty(&record.abstract_text) {
+        if let Some(abs) = supp
+            .abstract_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            record.abstract_text = Some(abs.to_string());
+        }
+    }
+    record.citation_count = match (record.citation_count, supp.citation_count) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    if !has_non_empty(&record.arxiv_id) {
+        if let Some(arxiv) = supp
+            .identifiers
+            .arxiv_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            record.arxiv_id = Some(strip_arxiv_version(arxiv));
+        }
+    }
+    if !has_non_empty(&record.pdf_url) {
+        if let Some(pdf) = supp
+            .urls
+            .pdf
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            record.pdf_url = Some(pdf.to_string());
+        }
+    }
+    if !has_non_empty(&record.publication) {
+        if let Some(venue) = supp
+            .venue
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            record.publication = Some(venue.to_string());
+        }
+    }
+    if !has_non_empty(&record.volume) {
+        record.volume = supp.volume.clone().filter(|s| !s.trim().is_empty());
+    }
+    if !has_non_empty(&record.issue) {
+        record.issue = supp.issue.clone().filter(|s| !s.trim().is_empty());
+    }
+    if !has_non_empty(&record.pages) {
+        record.pages = supp.pages.clone().filter(|s| !s.trim().is_empty());
+    }
+    api_mapper::enrich_remote_urls(record);
+}
+
+/// Complete missing `abstract_text` / `citation_count` / OA PDF URLs when a DOI
+/// lookup via Translator or Crossref omits the abstract (common for ACM/IEEE proceedings).
+async fn supplement_missing_doi_metadata(
+    record: &mut PaperRecord,
+    task_id: Option<&str>,
+) -> Result<(), AppError> {
+    use crate::features::scholar_api::sources::{
+        openalex::OpenAlexApi, semantic_scholar::SemanticScholarApi,
+    };
+    use crate::features::scholar_api::traits::AcademicApi;
+    use crate::features::scholar_api::ApiQuery;
+    use std::time::Duration;
+
+    if has_non_empty(&record.abstract_text) {
+        return Ok(());
+    }
+    let Some(doi) = record
+        .doi
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && !d.to_ascii_lowercase().starts_with("10.48550/arxiv."))
+        .map(String::from)
+    else {
+        return Ok(());
+    };
+
+    check_task_not_cancelled(task_id)?;
+    let query = ApiQuery::Doi(doi);
+    const SUPPLEMENT_BUDGET: Duration = Duration::from_secs(4);
+
+    if let Ok(Ok(items)) = tokio::time::timeout(SUPPLEMENT_BUDGET, OpenAlexApi.fetch(&query)).await
+    {
+        if let Some(oa) = items.first() {
+            apply_supplement_paper(record, oa);
+        }
+    }
+
+    if !has_non_empty(&record.abstract_text) {
+        check_task_not_cancelled(task_id)?;
+        if let Ok(Ok(items)) =
+            tokio::time::timeout(SUPPLEMENT_BUDGET, SemanticScholarApi.fetch(&query)).await
+        {
+            if let Some(s2) = items.first() {
+                apply_supplement_paper(record, s2);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn translator_fetch(
@@ -1971,5 +2086,56 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "user template");
 
         let _ = fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_supplement_paper_populates_missing_abstract_and_oa_urls() {
+        use crate::features::scholar_api::{ApiPaper, PaperIdentifiers, PaperUrls};
+
+        let mut record = PaperRecord::local_pdf(
+            "10.1145_3832783.3834507".into(),
+            "Doc2Test: An Industrial Multi-agent Framework".into(),
+        );
+        record.doi = Some("10.1145/3832783.3834507".into());
+
+        let supp = ApiPaper {
+            identifiers: PaperIdentifiers {
+                doi: Some("10.1145/3832783.3834507".into()),
+                arxiv_id: Some("2607.01234v2".into()),
+                isbn: None,
+                pmid: None,
+            },
+            title: "Doc2Test".into(),
+            authors: vec!["Lin Chen".into()],
+            year: Some(2026),
+            date: Some("2026-10-12".into()),
+            venue: Some("ASE 2026".into()),
+            volume: None,
+            issue: None,
+            pages: Some("101--112".into()),
+            publisher: None,
+            abstract_text: Some(
+                "Industrial end-to-end Selenium test generation from requirements documents."
+                    .into(),
+            ),
+            urls: PaperUrls::default(),
+            citation_count: Some(7),
+            language: None,
+            source: "openalex",
+            raw: None,
+        };
+
+        apply_supplement_paper(&mut record, &supp);
+        assert_eq!(
+            record.abstract_text.as_deref(),
+            Some("Industrial end-to-end Selenium test generation from requirements documents.")
+        );
+        assert_eq!(record.citation_count, Some(7));
+        assert_eq!(record.arxiv_id.as_deref(), Some("2607.01234"));
+        assert_eq!(
+            record.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2607.01234")
+        );
+        assert_eq!(record.pages.as_deref(), Some("101--112"));
     }
 }
