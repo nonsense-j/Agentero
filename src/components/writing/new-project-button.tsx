@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { TreeRowActionButton } from "@/components/sidebar/tree-row-action-button";
 import {
@@ -7,7 +7,10 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "@/components/ui/popover";
-import { NewProjectForm } from "./new-project-form";
+
+const NewProjectForm = lazy(() =>
+	import("./new-project-form").then((m) => ({ default: m.NewProjectForm })),
+);
 
 export function NewProjectButton({ vaultPath }: { vaultPath: string }) {
 	const { t } = useTranslation("sidebar");
@@ -20,13 +23,17 @@ export function NewProjectButton({ vaultPath }: { vaultPath: string }) {
 			>
 				<Plus className="size-3.5" aria-hidden />
 			</TreeRowActionButton>
-			<PopoverContent align="start" className="w-72">
-				<NewProjectForm
-					vaultPath={vaultPath}
-					startOpen
-					onCreated={() => setOpen(false)}
-				/>
-			</PopoverContent>
+			{open && (
+				<PopoverContent align="start" className="w-72">
+					<Suspense fallback={null}>
+						<NewProjectForm
+							vaultPath={vaultPath}
+							startOpen
+							onCreated={() => setOpen(false)}
+						/>
+					</Suspense>
+				</PopoverContent>
+			)}
 		</Popover>
 	);
 }

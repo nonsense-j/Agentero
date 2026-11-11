@@ -48,6 +48,9 @@ overrides:
   # shadcn 4.13 pins zod 3.25.76, which is below the patched 4.6.6.
   zod@<4.6.6: '>=4.6.6 <5'
   undici@<7.30.1: '>=7.30.1 <8'
+  # Deduplicate @streamdown/code's shiki ^3.19.0 against top-level shiki ^4.3.1
+  # so Vite does not bundle two copies of @shikijs/langs (~8.2 MB / 240 chunks).
+  'shiki@<4': '^4.3.1'
   # Keep re-installs (e.g. pnpm patch-commit) from drifting the pinned types.
   '@types/react-dom': 19.2.3
   # deepmerge has no patched release yet (GHSA-gcqx-w48m-w2h4); it only reaches
