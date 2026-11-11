@@ -21,7 +21,6 @@ import {
 	Plus,
 	Quote,
 	RefreshCw,
-	Search,
 	Settings2,
 	Sparkles,
 	Square,
@@ -66,11 +65,9 @@ import {
 	inferVenueKind,
 	isPreloadingCollection,
 	loadCollectionState,
-	mergeCollectionItems,
 	preloadAll2026ArxivInBackground,
 	refreshPaperCollection,
 	saveCollectionState,
-	searchArxivCollection,
 	subscribeCollectionState,
 	subscribePreloadingCollection,
 	type VenueConfig,
@@ -101,7 +98,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		useState<DomainFilter>("all");
 	const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
 	const [timeRange, setTimeRange] = useState<TimeRangeFilter>("all");
-	const [query, setQuery] = useState("");
 	const [displayLimit, setDisplayLimit] = useState(INITIAL_DISPLAY_COUNT);
 
 	const [busy, setBusy] = useState(false);
@@ -119,7 +115,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 
 	const mountedRef = useRef(false);
-	const checkTimerRef = useRef<number | null>(null);
 
 	// Subscribe to reactive collection state & background preloader updates
 	useEffect(() => {
@@ -243,37 +238,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		[],
 	);
 
-	const handleQueryChange = useCallback(
-		(nextQuery: string) => {
-			setQuery(nextQuery);
-			setDisplayLimit(INITIAL_DISPLAY_COUNT);
-			if (checkTimerRef.current) {
-				window.clearTimeout(checkTimerRef.current);
-			}
-			const trimmed = nextQuery.trim();
-			if (trimmed.length >= 2) {
-				checkTimerRef.current = window.setTimeout(() => {
-					if (activeSource === "arxiv") {
-						void runCheckUpdate(true);
-						void searchArxivCollection(trimmed, state.categories)
-							.then((found) => {
-								if (found.length === 0) return;
-								setState((prev) => {
-									const merged = mergeCollectionItems([prev.items, found]);
-									if (merged.length === prev.items.length) return prev;
-									const next = { ...prev, items: merged };
-									saveCollectionState(next);
-									return next;
-								});
-							})
-							.catch(() => undefined);
-					}
-				}, 550);
-			}
-		},
-		[activeSource, runCheckUpdate, state.categories],
-	);
-
 	const updateConfig = useCallback(
 		(updater: (prev: CollectionState) => CollectionState) => {
 			setState((prev) => {
@@ -299,8 +263,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const visiblePapers = useMemo(() => {
 		const now = Date.now();
-		const q = query.trim().toLowerCase();
-		const qTokens = q ? q.split(/\s+/).filter(Boolean) : [];
 
 		return state.items.filter((paper: CollectionPaperItem) => {
 			if (paper.sourceType !== activeSource) return false;
@@ -339,16 +301,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				}
 			}
 
-			if (qTokens.length > 0) {
-				const hay =
-					`${paper.title} ${paper.abstract} ${paper.authors.join(" ")} ${(paper.keywords ?? []).join(" ")} ${paper.sourceLabel} ${paper.categories.join(" ")} ${paper.arxivId ?? ""} ${paper.doi ?? ""}`.toLowerCase();
-				if (!qTokens.every((tok) => hay.includes(tok))) return false;
-			}
 			return true;
 		});
 	}, [
 		activeSource,
-		query,
 		selectedCategory,
 		selectedVenueId,
 		state.items,
@@ -692,34 +648,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									</div>
 								</>
 							)}
-
-							{/* Search box */}
-							<div className="relative min-w-[180px] flex-1">
-								<Search
-									className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-									aria-hidden
-								/>
-								<input
-									type="search"
-									value={query}
-									onChange={(e) => handleQueryChange(e.target.value)}
-									placeholder={t("plaza.collection.searchPlaceholder")}
-									className="h-7 w-full rounded-lg bg-[var(--magpie-surface)] pr-7 pl-8 text-xs shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-brand/60"
-								/>
-								{query ? (
-									<button
-										type="button"
-										onClick={() => {
-											setQuery("");
-											setDisplayLimit(INITIAL_DISPLAY_COUNT);
-										}}
-										className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-										aria-label={t("plaza.collection.clearSearch")}
-									>
-										<X className="size-3" />
-									</button>
-								) : null}
-							</div>
 
 							{/* Right actions */}
 							<div className="ml-auto flex items-center gap-1.5">
