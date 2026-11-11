@@ -42,6 +42,7 @@ import {
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
 import { scheduleCollectionSnapshotSync } from "@/lib/plaza/collection-sync";
+import { importPlazaPaper } from "@/lib/plaza/import";
 import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
 
 type DiscoverStage = "hub" | "fast" | "deep";
@@ -51,6 +52,9 @@ function checkPaperImported(
 	importedSet: ReadonlySet<string>,
 ): boolean {
 	if (importedSet.has(paper.id)) return true;
+	if (paper.coolPapersId && importedSet.has(paper.coolPapersId.toLowerCase())) {
+		return true;
+	}
 	if (paper.arxivId) {
 		const bare = bareArxivId(paper.arxivId);
 		if (bare && importedSet.has(bare)) return true;
@@ -155,7 +159,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	const importBatchPapers = useCallback(
 		async (papers: CollectionPaperItem[]) => {
 			if (papers.length === 0) return;
-			const identifiers = papers
+			const coolTargets = papers.filter((p) => !p.arxivId && p.coolPapersId);
+			const lookupTargets = papers.filter((p) => p.arxivId || !p.coolPapersId);
+			const identifiers = lookupTargets
 				.map((p) =>
 					p.arxivId
 						? `arXiv:${p.arxivId}`
@@ -164,25 +170,41 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 							: p.url || p.title,
 				)
 				.filter(Boolean);
-			if (identifiers.length === 0) return;
-			try {
-				await lookupSubmit(identifiers, {
-					onComplete: () => {
-						setImportedIds((prev) => {
-							const next = new Set(prev);
-							for (const p of papers) {
-								next.add(p.id);
-								if (p.arxivId) {
-									next.add(p.arxivId);
-									const bare = bareArxivId(p.arxivId);
-									if (bare) next.add(bare);
-								}
-								if (p.doi) next.add(p.doi.toLowerCase());
-							}
-							return next;
-						});
-					},
+			if (coolTargets.length === 0 && identifiers.length === 0) return;
+
+			const markImported = (done: CollectionPaperItem[]) => {
+				if (done.length === 0) return;
+				setImportedIds((prev) => {
+					const next = new Set(prev);
+					for (const p of done) {
+						next.add(p.id);
+						if (p.coolPapersId) next.add(p.coolPapersId.toLowerCase());
+						if (p.arxivId) {
+							next.add(p.arxivId);
+							const bare = bareArxivId(p.arxivId);
+							if (bare) next.add(bare);
+						}
+						if (p.doi) next.add(p.doi.toLowerCase());
+					}
+					return next;
 				});
+			};
+
+			try {
+				for (const p of coolTargets) {
+					const ok = await importPlazaPaper({
+						id: p.coolPapersId ?? p.id,
+						branch: "venue",
+						url: p.url,
+						title: p.title,
+					});
+					if (ok) markImported([p]);
+				}
+				if (identifiers.length > 0) {
+					await lookupSubmit(identifiers, {
+						onComplete: () => markImported(lookupTargets),
+					});
+				}
 			} catch (err) {
 				notifyError(errorText(err));
 			}

@@ -81,6 +81,7 @@ import {
 	type VenueDomain,
 } from "@/lib/plaza/collection";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
+import { importPlazaPaper } from "@/lib/plaza/import";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
 type ViewStage = "hub" | "list";
@@ -790,7 +791,9 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const importPapers = useCallback(
 		async (targets: CollectionPaperItem[]) => {
 			if (targets.length === 0 || batchImporting) return;
-			const identifiers = targets
+			const coolTargets = targets.filter((p) => !p.arxivId && p.coolPapersId);
+			const lookupTargets = targets.filter((p) => p.arxivId || !p.coolPapersId);
+			const identifiers = lookupTargets
 				.map((p) =>
 					p.arxivId
 						? `arXiv:${p.arxivId}`
@@ -799,24 +802,43 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							: p.url || p.title,
 				)
 				.filter(Boolean);
-			if (identifiers.length === 0) return;
+			if (coolTargets.length === 0 && identifiers.length === 0) return;
+
+			const markTargetsDone = (done: CollectionPaperItem[]) => {
+				if (done.length === 0) return;
+				setImportedIds((prev) => {
+					const next = new Set(prev);
+					for (const p of done) next.add(p.id);
+					return next;
+				});
+				setSelectedIds((prev) => {
+					const next = new Set(prev);
+					for (const p of done) next.delete(p.id);
+					return next;
+				});
+			};
+
 			setBatchImporting(true);
 			try {
-				await lookupSubmit(identifiers, {
-					onComplete: () => {
-						setImportedIds((prev) => {
-							const next = new Set(prev);
-							for (const p of targets) next.add(p.id);
-							return next;
-						});
-						setSelectedIds((prev) => {
-							const next = new Set(prev);
-							for (const p of targets) next.delete(p.id);
-							return next;
-						});
-						setBatchImporting(false);
-					},
-				});
+				for (const p of coolTargets) {
+					const ok = await importPlazaPaper({
+						id: p.coolPapersId ?? p.id,
+						branch: "venue",
+						url: p.url,
+						title: p.title,
+					});
+					if (ok) markTargetsDone([p]);
+				}
+				if (identifiers.length > 0) {
+					await lookupSubmit(identifiers, {
+						onComplete: () => {
+							markTargetsDone(lookupTargets);
+							setBatchImporting(false);
+						},
+					});
+				} else {
+					setBatchImporting(false);
+				}
 			} catch (err) {
 				notifyError(errorText(err));
 				setBatchImporting(false);

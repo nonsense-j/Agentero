@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { writeJsonStorage } from "@/lib/core/storage";
 import {
+	applyFreshVenueItems,
+	backfillSpringerAbstracts,
 	type CollectionPaperItem,
 	CURRENT_VENUE_SYNC_VERSION,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	extractSpringerHtmlAbstract,
+	fetchCsdlVenuePapers,
+	fetchDataCiteLipicsPapers,
 	fetchDblpSparqlVenuePapers,
 	fetchMoreArxivCollection,
 	fetchMultiChannelVenuePapers,
@@ -16,6 +21,8 @@ import {
 	mergeCollectionItems,
 	parseAcceptedVenueArxivXml,
 	parseArxivAtomXml,
+	parseCoolPapersVenueHtml,
+	parseOfficialVenueProgramHtml,
 	preloadAll2026ArxivInBackground,
 	refreshVenueCollection,
 	resetCollectionMemoryForTests,
@@ -25,16 +32,16 @@ import {
 } from "@/lib/plaza/collection";
 
 describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sync", () => {
-	it("paginates OpenAlex cursor pages beyond 200 items in fetchVenueStructuredPapers", async () => {
+	it("paginates OpenAlex page=1..N beyond 200 items without API-key cursor 401s and excludes ICSE-Companion DOIs", async () => {
 		const venue = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "icse-2026");
 		if (!venue) throw new Error("Missing icse-2026");
 
-		const makeWork = (idx: number) => ({
+		const makeWork = (idx: number, doiPrefix = "10.1145/3744916") => ({
 			id: `https://openalex.org/W${idx}`,
 			title: `Automated Software Engineering Study Part ${idx}`,
 			publication_year: 2026,
 			publication_date: "2026-04-02",
-			doi: `https://doi.org/10.1145/3770000.${idx}`,
+			doi: `https://doi.org/${doiPrefix}.${3780000 + idx}`,
 			cited_by_count: idx % 7,
 			abstract_inverted_index: {
 				We: [0],
@@ -50,10 +57,11 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			},
 			authorships: [{ author: { display_name: `Author ${idx}` } }],
 			primary_location: {
-				landing_page_url: `https://doi.org/10.1145/3770000.${idx}`,
+				landing_page_url: `https://doi.org/${doiPrefix}.${3780000 + idx}`,
 				source: {
 					id: "https://openalex.org/S4210203175",
-					display_name: "ICSE 2026",
+					// OpenAlex mislabels S4210203175 with Companion in display_name even for main-track 3744916 DOIs
+					display_name: "ICSE-Companion Proceedings",
 				},
 			},
 		});
@@ -61,20 +69,39 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		const calls: string[] = [];
 		const mockFetchJson = async <T = unknown>(url: string): Promise<T> => {
 			calls.push(url);
-			if (url.includes("cursor=*")) {
+			const decoded = decodeURIComponent(url);
+			if (
+				decoded.includes("locations.source.id:") &&
+				url.includes("&page=1&")
+			) {
 				return {
-					meta: { count: 245, next_cursor: "page2_tok" },
+					meta: { count: 245 },
 					results: Array.from({ length: 200 }, (_, i) => makeWork(i + 1)),
 				} as T;
 			}
+			if (
+				decoded.includes("locations.source.id:") &&
+				url.includes("&page=2&")
+			) {
+				return {
+					meta: { count: 245 },
+					results: [
+						...Array.from({ length: 45 }, (_, i) => makeWork(201 + i)),
+						// Excluded ICSE-Companion volume 3774748 must be dropped
+						makeWork(999, "10.1145/3774748"),
+					],
+				} as T;
+			}
 			return {
-				meta: { count: 245, next_cursor: null },
-				results: Array.from({ length: 45 }, (_, i) => makeWork(201 + i)),
+				meta: { count: 0 },
+				results: [],
 			} as T;
 		};
 
 		const res = await fetchVenueStructuredPapers(venue, 2026, mockFetchJson);
-		expect(calls).toHaveLength(2);
+		expect(calls.some((u) => u.includes("&page=1&"))).toBe(true);
+		expect(calls.some((u) => u.includes("&page=2&"))).toBe(true);
+		expect(calls.every((u) => !u.includes("cursor="))).toBe(true);
 		expect(res.items).toHaveLength(245);
 		expect(res.remoteTotalCount).toBe(245);
 	});
@@ -436,22 +463,22 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(sparqlRes.items[0]?.citationCount).toBe(4);
 	});
 
-	it("treats v4-synced Venues as immutable on open, upgrades pre-v4 caches once, and does not toggle preloading flag during Venue refresh", async () => {
+	it("treats v5-synced Venues as immutable on open, upgrades pre-v5 caches once, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		expect(CURRENT_VENUE_SYNC_VERSION).toBe(4);
+		expect(CURRENT_VENUE_SYNC_VERSION).toBe(5);
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v3 truncated venue -> requires one-time v4 upgrade
+		// Legacy v4 venue -> requires one-time v5 upgrade
 		expect(
 			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 3, lastFetchedAt: "2026-06-01T00:00:00Z" },
+				{ ...ase, syncVersion: 4, lastFetchedAt: "2026-06-01T00:00:00Z" },
 				[],
 			),
 		).toBe(false);
 
-		// Once v4 synced, opening Paper Collection never re-checks or re-fetches it
+		// Once v5 synced, opening Paper Collection never re-checks or re-fetches it
 		const loadedVenues = DEFAULT_COLLECTION_VENUES.map((v) => ({
 			...v,
 			syncVersion: CURRENT_VENUE_SYNC_VERSION,
@@ -876,5 +903,326 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		} finally {
 			vi.unstubAllGlobals();
 		}
+	});
+
+	it("parses papers.cool venues, CCS/ISSRE official programs, Springer abstracts, retains multi-issue OOPSLA, and purges stale workshop cache on refresh", async () => {
+		const icml = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "icml-2026");
+		const acl = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "acl-2026");
+		const ccs = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ccs-2026");
+		const issre = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "issre-2026");
+		const oopsla = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "oopsla-2026",
+		);
+		if (!icml || !acl || !ccs || !issre || !oopsla) {
+			throw new Error("Missing target venues");
+		}
+
+		// 1. papers.cool venue list HTML (ICML OpenReview + ACL Anthology DOI derivation)
+		const coolHtml = `
+			<div id="aIH1jyU37z@OpenReview" class="panel paper" keywords="equivariant,sheaf,neural">
+				<h2 class="title">
+					<a href="https://openreview.net/forum?id=aIH1jyU37z" target="_blank" title="1/6554"><span class="index">#1</span></a>
+					<a id="title-aIH1jyU37z@OpenReview" class="title-link" href="/venue/aIH1jyU37z@OpenReview">Foundations of Equivariant Deep Learning</a>
+					<a id="pdf-aIH1jyU37z@OpenReview" class="title-pdf" data="https://openreview.net/pdf?id=aIH1jyU37z||md5=cf3eecf">[PDF]</a>
+				</h2>
+				<p id="authors-aIH1jyU37z@OpenReview" class="metainfo authors">
+					<a class="author">Yoshihiro Maruyama</a>
+				</p>
+				<p id="summary-aIH1jyU37z@OpenReview" class="summary">Symmetry is everywhere in nature and geometric deep learning exploits symmetries in data.</p>
+			</div>`;
+		const icmlParsed = parseCoolPapersVenueHtml(
+			coolHtml,
+			icml,
+			VENUE_SPEC_BY_ID.get("icml-2026"),
+			2026,
+		);
+		expect(icmlParsed.remoteTotalCount).toBe(6554);
+		expect(icmlParsed.items).toHaveLength(1);
+		expect(icmlParsed.items[0]?.coolPapersId).toBe("aIH1jyU37z@OpenReview");
+		expect(icmlParsed.items[0]?.pdfUrl).toBe(
+			"https://openreview.net/pdf?id=aIH1jyU37z",
+		);
+		expect(icmlParsed.items[0]?.abstract).toContain(
+			"geometric deep learning exploits symmetries",
+		);
+
+		const aclHtml = `
+			<div id="2026.acl-long.12@ACL" class="panel paper" keywords="llm,reasoning">
+				<h2 class="title">
+					<a href="https://aclanthology.org/2026.acl-long.12/" target="_blank" title="12/4813"><span class="index">#12</span></a>
+					<a id="title-2026.acl-long.12@ACL" class="title-link" href="/venue/2026.acl-long.12@ACL">Compositional Semantic Parsing at Scale</a>
+					<a id="pdf-2026.acl-long.12@ACL" class="title-pdf" data="https://aclanthology.org/2026.acl-long.12.pdf||md5=111">[PDF]</a>
+				</h2>
+				<p id="authors-2026.acl-long.12@ACL" class="metainfo authors"><a class="author">Jane Doe</a></p>
+				<p id="summary-2026.acl-long.12@ACL" class="summary">We introduce a compositional semantic parser evaluated across twelve multilingual benchmarks.</p>
+			</div>`;
+		const aclParsed = parseCoolPapersVenueHtml(
+			aclHtml,
+			acl,
+			VENUE_SPEC_BY_ID.get("acl-2026"),
+			2026,
+		);
+		expect(aclParsed.items[0]?.doi).toBe("10.18653/v1/2026.acl-long.12");
+
+		// 2. Official CCS 2026 schedule HTML (comma inside parenthetical affiliation + duplicate slot dedupe)
+		const ccsHtml = `
+			<ul>
+				<li class="schedule-paper" data-paper-id="A#777">
+					<p class="schedule-paper-title"><span class="schedule-paper-id">(A#777)</span> Expose Your Disguise: Recovering Source Speaker Identity</p>
+					<p class="schedule-authors">Hanlei Zhang (University of California, Berkeley), Yanjiao Chen (Zhejiang University)</p>
+				</li>
+				<li class="schedule-paper" data-paper-id="A#777">
+					<p class="schedule-paper-title"><span class="schedule-paper-id">(A#777)</span> Expose Your Disguise: Recovering Source Speaker Identity</p>
+					<p class="schedule-authors">Hanlei Zhang (University of California, Berkeley), Yanjiao Chen (Zhejiang University)</p>
+				</li>
+			</ul>`;
+		const ccsItems = parseOfficialVenueProgramHtml(
+			ccsHtml,
+			"https://www.sigsac.org/ccs/CCS2026/program/schedule.html",
+			ccs,
+			VENUE_SPEC_BY_ID.get("ccs-2026"),
+			2026,
+		);
+		expect(ccsItems).toHaveLength(1);
+		expect(ccsItems[0]?.title).toBe(
+			"Expose Your Disguise: Recovering Source Speaker Identity",
+		);
+		expect(ccsItems[0]?.authors).toEqual(["Hanlei Zhang", "Yanjiao Chen"]);
+
+		// 3. Official ISSRE 2026 accepted-papers embedded tracks JSON (excludes doctoral & fast-abstracts)
+		const issreHtml = `<script>const tracks = [
+			{"id":"research-track","label":"Research Track","papers":[{"title":"Fault Localization in Microservices","authors":"Alice Lee, Bob Chen and Carol Wu"}]},
+			{"id":"doctoral-symposium","label":"Doctoral Symposium","papers":[{"title":"PhD Plan on Fuzzing","authors":"Student One"}]}
+		];</script>`;
+		const issreItems = parseOfficialVenueProgramHtml(
+			issreHtml,
+			"https://cyprusconferences.org/issre2026/accepted-papers/",
+			issre,
+			VENUE_SPEC_BY_ID.get("issre-2026"),
+			2026,
+		);
+		expect(issreItems).toHaveLength(1);
+		expect(issreItems[0]?.authors).toEqual([
+			"Alice Lee",
+			"Bob Chen",
+			"Carol Wu",
+		]);
+
+		// 4. Springer #Abs1-content backfill
+		const springerHtml = `<section data-title="Abstract"><div id="Abs1-content"><p>Modular relational abstract interpretation scales sound verification to industrial embedded C codebases.</p></div></section>`;
+		expect(extractSpringerHtmlAbstract(springerHtml)).toContain(
+			"Modular relational abstract interpretation",
+		);
+		const backfilled = await backfillSpringerAbstracts(
+			[
+				{
+					id: "venue:sas-2026:doi:10.1007/978-3-032-40374-2_5",
+					title: "Relational Abstract Interpretation",
+					authors: ["Patrick Cousot"],
+					abstract: "",
+					publishedAt: "2026-10-01T00:00:00Z",
+					year: 2026,
+					sourceType: "venue",
+					sourceLabel: "SAS 2026",
+					categories: ["SAS 2026"],
+					url: "https://doi.org/10.1007/978-3-032-40374-2_5",
+					doi: "10.1007/978-3-032-40374-2_5",
+					venueId: "sas-2026",
+				},
+			],
+			async () => springerHtml,
+		);
+		expect(backfilled[0]?.abstract).toContain(
+			"Modular relational abstract interpretation",
+		);
+
+		// 5. OOPSLA1 + OOPSLA2 union: DBLP having only OOPSLA1 (30) must NOT discard OOPSLA2 (35) from OpenAlex
+		const oopslaBundle = await fetchMultiChannelVenuePapers(
+			oopsla,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						meta: { count: 65 },
+						results: Array.from({ length: 65 }, (_, i) => ({
+							id: `https://openalex.org/W_oopsla_${i + 1}`,
+							type: "article",
+							title: `Type-Directed Synthesis Paper ${i + 1}`,
+							publication_year: 2026,
+							publication_date: "2026-04-15",
+							doi: `https://doi.org/10.1145/3798${200 + i}`,
+							biblio: {
+								volume: "10",
+								issue: i < 30 ? "OOPSLA1" : "OOPSLA2",
+							},
+							abstract_inverted_index: {
+								Sound: [0],
+								gradual: [1],
+								typing: [2],
+								with: [3],
+								zero: [4],
+								overhead: [5],
+								guarantees: [6],
+							},
+							authorships: [{ author: { display_name: `PL Author ${i + 1}` } }],
+							primary_location: {
+								source: {
+									id: "https://openalex.org/S4210216081",
+									display_name:
+										"Proceedings of the ACM on Programming Languages",
+								},
+							},
+						})),
+					} as T;
+				}
+				if (url.includes("sparql.dblp.org")) {
+					return {
+						results: {
+							bindings: Array.from({ length: 30 }, (_, i) => ({
+								rec: { value: `https://dblp.org/rec/journals/pacmpl/p${i}` },
+								title: { value: `Type-Directed Synthesis Paper ${i + 1}` },
+								doi: { value: `10.1145/3798${200 + i}` },
+								authors: { value: `PL Author ${i + 1}` },
+								pubIn: { value: "Proc. ACM Program. Lang." },
+							})),
+						},
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+			async () => "",
+		);
+		expect(oopslaBundle.items).toHaveLength(65);
+
+		// 6. applyFreshVenueItems replaces stale workshop-polluted cache (e.g. 3 -> 2 clean items)
+		const baseCcs = ccsItems[0];
+		if (!baseCcs) throw new Error("Expected parsed CCS item");
+		const stalePool: CollectionPaperItem[] = [
+			{ ...baseCcs, id: "venue:ccs-2026:p1", title: "Clean Paper One" },
+			{ ...baseCcs, id: "venue:ccs-2026:p2", title: "Clean Paper Two" },
+			{
+				...baseCcs,
+				id: "venue:ccs-2026:ws",
+				title: "Stale Workshop Paper",
+			},
+		];
+		const replaced = applyFreshVenueItems(
+			stalePool,
+			"ccs-2026",
+			stalePool.slice(0, 2),
+		);
+		expect(replaced).toHaveLength(2);
+		expect(replaced.some((p) => p.title === "Stale Workshop Paper")).toBe(
+			false,
+		);
+	});
+
+	it("fetches 100% abstracts from IEEE CSDL GraphQL and DataCite LIPIcs while excluding workshops and .0 frontmatter", async () => {
+		const sp = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sp-2026");
+		const esem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "esem-2026");
+		if (!sp || !esem) throw new Error("Missing sp/esem venues");
+
+		const csdlRes = await fetchCsdlVenuePapers(
+			sp,
+			2026,
+			async <T>(url: string) => {
+				const decoded = decodeURIComponent(url);
+				if (decoded.includes("proceedings(")) {
+					return {
+						data: {
+							proceedings: [
+								{
+									id: "sp-main-2026",
+									title: "2026 IEEE Symposium on Security and Privacy (SP)",
+								},
+								{
+									id: "spw-2026",
+									title: "2026 IEEE Security and Privacy Workshops (SPW)",
+								},
+							],
+						},
+					} as T;
+				}
+				if (
+					decoded.includes('articlesByProceeding(proceedingId: "sp-main-2026")')
+				) {
+					return {
+						data: {
+							articlesByProceeding: [
+								{
+									id: "p1",
+									title: "Formal Verification of Post-Quantum TLS Handshakes",
+									abstract:
+										"We present a mechanized cryptographic proof for post-quantum hybrid key exchange in TLS 1.3 implementations.",
+									doi: "10.1109/SP63933.2026.00042",
+									contentType: "paper",
+									year: "2026",
+									pubDate: "2026-05-18",
+									authors: [{ fullName: "Ada Lovelace" }],
+								},
+								{
+									id: "toc1",
+									title: "Table of Contents",
+									contentType: "toc",
+									doi: "10.1109/SP63933.2026.00001",
+									authors: [{ fullName: "Committee" }],
+								},
+							],
+						},
+					} as T;
+				}
+				throw new Error(`Unexpected CSDL query: ${decoded}`);
+			},
+		);
+		expect(csdlRes.items).toHaveLength(1);
+		expect(csdlRes.items[0]?.doi).toBe("10.1109/SP63933.2026.00042");
+		expect(csdlRes.items[0]?.abstract).toContain(
+			"mechanized cryptographic proof",
+		);
+
+		const lipicsRes = await fetchDataCiteLipicsPapers(
+			esem,
+			2026,
+			async <T>() => {
+				return {
+					data: [
+						{
+							id: "10.4230/lipics.esem.2026.0",
+							attributes: {
+								titles: [{ title: "Front Matter, Table of Contents, Preface" }],
+								creators: [{ name: "Editors" }],
+							},
+						},
+						{
+							id: "10.4230/lipics.esem.2026.14",
+							attributes: {
+								titles: [
+									{
+										title:
+											"Empirical Study of LLM-Assisted Code Review in Open Source",
+									},
+								],
+								creators: [{ givenName: "Linus", familyName: "Torvalds" }],
+								descriptions: [
+									{
+										descriptionType: "Abstract",
+										description:
+											"We conduct a controlled empirical study across 42 repositories measuring review latency and defect escape rates.",
+									},
+								],
+								contentUrl:
+									"https://drops.dagstuhl.de/storage/00lipics/lipics-vol355-esem2026/LIPIcs.ESEM.2026.14.pdf",
+							},
+						},
+					],
+				} as T;
+			},
+		);
+		expect(lipicsRes.items).toHaveLength(1);
+		expect(lipicsRes.items[0]?.doi).toBe("10.4230/lipics.esem.2026.14");
+		expect(lipicsRes.items[0]?.abstract).toContain(
+			"controlled empirical study across 42 repositories",
+		);
+		expect(lipicsRes.items[0]?.pdfUrl).toContain("LIPIcs.ESEM.2026.14.pdf");
 	});
 });

@@ -14,6 +14,7 @@ import { commands } from "@/lib/core/bindings";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import {
 	ARXIV_CATEGORY_SUBTITLES,
+	backfillSpringerAbstracts,
 	buildVenuePaperId,
 	type CollectionPaperItem,
 	type CollectionSourceType,
@@ -24,12 +25,14 @@ import {
 	enrichArxivItemsBatch,
 	enrichDblpItemsBatch,
 	enrichSinglePaperOnDemand,
+	extractSpringerHtmlAbstract,
 	type FetchJsonFn,
 	type FetchTextFn,
 	fetchVenueStructuredPapers,
 	formatPaperBibtex,
 	formatPaperCitationText,
 	inferVenueKind,
+	isExcludedByDoiPrefix,
 	isFrontmatterTitle,
 	isPlaceholderAbstract,
 	isWorkshopOrCompanionVenue,
@@ -45,10 +48,16 @@ import {
 import {
 	createPoliteFetchJson,
 	createPoliteFetchText,
+	fetchCoolPapersVenuePapers,
+	fetchCsdlVenuePapers,
+	fetchDataCiteLipicsPapers,
 	fetchDblpSparqlVenuePapers,
 	fetchMultiChannelVenuePapers,
+	fetchOfficialVenueProgramPapers,
 	isConfirmedVenueAcceptance,
 	parseAcceptedVenueArxivXml,
+	parseCoolPapersVenueHtml,
+	parseOfficialVenueProgramHtml,
 } from "@/lib/plaza/collection-venue-channels";
 import { resolveConfiguredTranslateAgent } from "@/lib/translate/resolve-agent";
 import { getVaultPath } from "@/lib/vault/store";
@@ -65,12 +74,18 @@ export type {
 };
 export {
 	ARXIV_CATEGORY_SUBTITLES,
+	backfillSpringerAbstracts,
 	CURRENT_VENUE_SYNC_VERSION,
 	DBLP_2026_VENUE_SPECS,
 	derivePaperKeywords,
 	enrichDblpItemsBatch,
+	extractSpringerHtmlAbstract,
+	fetchCoolPapersVenuePapers,
+	fetchCsdlVenuePapers,
+	fetchDataCiteLipicsPapers,
 	fetchDblpSparqlVenuePapers,
 	fetchMultiChannelVenuePapers,
+	fetchOfficialVenueProgramPapers,
 	fetchVenueStructuredPapers,
 	formatPaperBibtex,
 	formatPaperCitationText,
@@ -80,6 +95,8 @@ export {
 	isPlaceholderAbstract,
 	isWorkshopOrCompanionVenue,
 	parseAcceptedVenueArxivXml,
+	parseCoolPapersVenueHtml,
+	parseOfficialVenueProgramHtml,
 	reconstructOpenAlexAbstract,
 	VENUE_SPEC_BY_ID,
 };
@@ -264,6 +281,12 @@ function sanitizeCachedItems(
 			? ""
 			: item.abstract;
 		const spec = item.venueId ? VENUE_SPEC_BY_ID.get(item.venueId) : undefined;
+		if (
+			item.sourceType === "venue" &&
+			isExcludedByDoiPrefix(item.doi, spec?.excludeDoiPrefixes)
+		) {
+			continue;
+		}
 		const keywords =
 			item.keywords && item.keywords.length > 0
 				? item.keywords
@@ -437,8 +460,10 @@ function hasTauriRuntime(): boolean {
 const CORS_OPEN_HOSTS = new Set([
 	"api.openalex.org",
 	"api.crossref.org",
+	"api.datacite.org",
 	"api.semanticscholar.org",
 	"sparql.dblp.org",
+	"www.computer.org",
 ]);
 
 function isDblpHost(hostname: string): boolean {
@@ -455,6 +480,22 @@ const DBLP_MIN_INTERVAL_MS =
 		: 1_600;
 
 let dblpCircuitOpenUntil = 0;
+const allowedWebProxyHosts = new Set<string>();
+
+async function ensureWebProxyAllowed(hostname: string): Promise<void> {
+	if (!hostname) return;
+	const companions =
+		hostname === "link.springer.com"
+			? ["link.springer.com", "idp.springer.com", "www.nature.com"]
+			: hostname === "sigsac.org" || hostname === "www.sigsac.org"
+				? ["sigsac.org", "www.sigsac.org"]
+				: [hostname];
+	for (const h of companions) {
+		if (allowedWebProxyHosts.has(h)) continue;
+		await commands.webProxyAllowHost({ host: h });
+		allowedWebProxyHosts.add(h);
+	}
+}
 let dblpNextSlotMs = 0;
 
 async function acquireDblpSlot(): Promise<void> {
@@ -519,9 +560,7 @@ export async function plazaFetchText(
 
 	if (hasTauriRuntime()) {
 		try {
-			if (hostname) {
-				await commands.webProxyAllowHost({ host: hostname });
-			}
+			await ensureWebProxyAllowed(hostname);
 			const proxied = webViewProxyUrl(cleanUrl);
 			const res = await fetch(proxied, {
 				headers: { Accept: accept },
@@ -2364,7 +2403,7 @@ export async function fetchSingleVenuePapers(
 	return bundle.items;
 }
 
-function applyFreshVenueItems(
+export function applyFreshVenueItems(
 	pool: readonly CollectionPaperItem[],
 	venueId: string,
 	freshVenueItems: CollectionPaperItem[],
@@ -2372,16 +2411,10 @@ function applyFreshVenueItems(
 	if (freshVenueItems.length === 0) {
 		return [...pool];
 	}
-	const cachedForVenue = pool.filter(
-		(i) => i.sourceType === "venue" && i.venueId === venueId,
+	const rest = pool.filter(
+		(i) => !(i.sourceType === "venue" && i.venueId === venueId),
 	);
-	if (freshVenueItems.length >= cachedForVenue.length) {
-		const rest = pool.filter(
-			(i) => !(i.sourceType === "venue" && i.venueId === venueId),
-		);
-		return mergeCollectionItems([freshVenueItems, rest]);
-	}
-	return mergeCollectionItems([freshVenueItems, [...pool]]);
+	return mergeCollectionItems([freshVenueItems, rest]);
 }
 
 /**
@@ -2401,9 +2434,9 @@ async function syncVenueFull(venue: VenueConfig): Promise<{
 		maxPages: 25,
 	});
 	const combinedCount =
-		fullBundle.items.length >= cachedForVenue.length
+		fullBundle.items.length > 0
 			? fullBundle.items.length
-			: mergeCollectionItems([fullBundle.items, cachedForVenue]).length;
+			: cachedForVenue.length;
 
 	return {
 		venuePatch: {
@@ -2478,7 +2511,11 @@ export async function ensurePaperFullDetails(
 		paper.keywords.length === 0;
 	if (!needsEnrich) return paper;
 
-	const enriched = await enrichSinglePaperOnDemand(paper, politePlazaFetchJson);
+	const enriched = await enrichSinglePaperOnDemand(
+		paper,
+		politePlazaFetchJson,
+		politePlazaFetchText,
+	);
 	const cur = loadCollectionState();
 	const idx = cur.items.findIndex((i) => i.id === paper.id);
 	if (idx >= 0) {
@@ -2543,6 +2580,7 @@ export function mergeCollectionItems(
 						pdfUrl: prev.pdfUrl || item.pdfUrl,
 						doi: prev.doi || item.doi,
 						arxivId: prev.arxivId || item.arxivId,
+						coolPapersId: prev.coolPapersId || item.coolPapersId,
 						venueId: prev.venueId || item.venueId,
 						venueKind: prev.venueKind || item.venueKind,
 						venueDomain: prev.venueDomain || item.venueDomain,
