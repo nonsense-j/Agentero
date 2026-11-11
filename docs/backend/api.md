@@ -229,43 +229,6 @@ type VaultTreeNode = {
   - 忽略名（`.git` / `.venv` / `node_modules` / `*.egg-info` / 其它 dot 名，白名单 `.agents` / `.env.example`）与深度上限 12 同前端规则。
   - 排序仍在前端（`sortNodes`，locale 感知）。
 - **局部刷新**：`vault:file-changed`（非 `modify`）携带的路径经 `collectTreeRefreshTargets`（`src/lib/vault/tree.ts`）映射到已加载的最近祖先目录节点，防抖 400ms 后仅对这些目录调 `vault_tree_children` 打补丁；根级变化 / 目标过多（>8）/ 无路径信息时回退整树 `vault_tree_build`。
-
-#### 远程 Vault（SSH/SFTP，MVP 已实现）
-
-设计见 [`remote.md`](remote.md)。前端伪路径 `remote:<sessionId>`；文件权威在远端。
-
-| Command | 说明 |
-|---|---|
-| `remote_connect` | `{ host, user?, remotePath }` → `RemoteSessionInfo`（含 `vaultHandle`、`caps`） |
-| `remote_ssh_config_hosts` | `()` → `[{ alias, user?, hostname?, port? }]`，解析 `~/.ssh/config`（含 `Include`），供连接对话框联想 |
-| `remote_disconnect` | flush catalog + 拆会话 |
-| `remote_list` | 列目录 |
-| `remote_read_text` / `remote_write_text` / `remote_write_bytes` | 读写 |
-| `remote_mkdir` / `remote_remove` | 建目录 / 删除（可 recursive） |
-| `remote_paper_list` / `remote_paper_get` | catalog 工作副本 |
-| `remote_paper_rescan` / `remote_paper_set_tags` / `remote_paper_set_is_read` | mutation 后 PUT 远端 |
-| `remote_cache_file` | PDF 等缓存到本机 ephemeral 路径（mtime 键 + LRU 2 GiB） |
-| `remote_cache_clear` | `{ sessionId? }` → `{ freedBytes }` 清除 blob 缓存 |
-| `remote_agent_scan` | 目录模板 + 远端 PATH 扫描 → `CatalogEntry[]`（设置页远端 Agent） |
-| `remote_agent_probe` | `{ sessionId, templateId }` → 远端 ACP `initialize`（应用 Agent 代理 env） |
-| `remote_agent_open_install_terminal` | 本机终端确认后 `ssh -t` 在远端执行模板 `install_command`（如 Claude ACP 适配器） |
-| `remote_vault_ensure` | `{ sessionId }` → 通过 SFTP 补种 bundled skills，并按相同 frontmatter `version` 规则安全升级第一方 Skill |
-
-Host 还支持 `__local_sim__` host（本机目录当远端，单测/开发用）。
-
-**远程超时与保活**：SSH/SFTP 建连、SFTP subsystem 启动和远端根目录校验默认最多 15 秒；每次 SFTP 文件操作默认最多 30 秒。SSH 使用 `ServerAliveInterval=30` 和 `ServerAliveCountMax=3`，约 90 秒无响应后判定连接失效。远端 Agent `which` 探测最多 30 秒；远端 ACP Agent 仅限制 15 秒建连，不限制正常运行时长。当前不自动重连、不重放写操作，详见 [`remote.md`](remote.md) §2.1。
-
-**入库入口与远程 Vault**：
-
-| 入口 | Command | 远程 `remote:…` |
-|---|---|---|
-| 魔棒标识符 | `lookup_import_batch` | ✅ staging → SFTP → catalog PUT |
-| 魔棒 Skill 导入 | `skill_install` / `skill_discard` | ❌ 仅本地 Vault |
-| 补资源 Download | `job_download_assets_enqueue` | ❌ 仅本地 Vault |
-| 本地 PDF | `paper_import_local_pdf` | ✅ 本机选 PDF → 上传远端 |
-| Bib/RIS 库导入 | `paper_import` | ✅ Translator → 上传远端 |
-| Zotero 桌面迁移 | `zotero_migrate` | ❌ 仅本地路径 |
-| Zotero Connector | HTTP `saveItems` / `saveAttachment` | ✅ 绑定 `remote:<sessionId>`；stage → SFTP → catalog PUT |
 | CLI import | `agentero import` | ❌ 仅本地 vault 路径 |
 | 回收站 | `path_trash` / `path_list_trash` / restore / purge | ✅ 经 `trash_bridge` 写远端 `.agentero/.trash/` |
 
@@ -2353,11 +2316,11 @@ UI 入口见 `settings_window_open`：Settings 现为独立原生单例窗口，
 
 ### 3.10.3 使用记录（XDG `usage.sqlite`）
 
-设备本地活动日志，**不在 Vault 内**。schema v2、列定义与 `kind`/`facet` 对照见 [usage.md](usage.md)。本地记录始终开启（无开关）；非移动端还会按 `telemetry_projection` 白名单把登记的 kind 脱敏投影到 PostHog（受 `telemetryEnabled` 约束，见 [telemetry.md](telemetry.md)）。
+设备本地活动日志，**不在 Vault 内**。schema v2、列定义与 `kind`/`facet` 对照见 [usage.md](usage.md)。本地记录始终开启、不上报云端。
 
 #### `activity_record_events`（已实现）
 
-前端 `track()` 缓冲后批量写入。Host 从 `path` / `mode` / `extra` 推导 `paper_path`、`facet`、`qty`、`status`，并同事务 upsert `usage_daily` / `usage_vaults`；写库前先把登记的 kind 脱敏转发到 PostHog。
+前端 `track()` 缓冲后批量写入。Host 从 `path` / `mode` / `extra` 推导 `paper_path`、`facet`、`qty`、`status`，并同事务 upsert `usage_daily` / `usage_vaults`。
 
 - **参数**（`args`）：`{ events: ActivityRecord[] }`
 - **`ActivityRecord`**：`{ ts?, vault?, kind, path?, mode?, durMs?, extra? }`。调用方不要自己填 `paper_path` / `facet` / `qty` / `status`。

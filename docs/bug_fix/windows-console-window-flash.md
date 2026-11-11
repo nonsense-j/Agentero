@@ -10,7 +10,7 @@
 - `src-tauri/src/features/agent/commands/doctor.rs` — `doctor_check_host` / `doctor_check_agents`
 - `src/components/settings/panes/doctor-pane.tsx` — 面板挂载即触发探测
 - 对照实现（均已带该 flag）：`features/agent/registry/lifecycle.rs`、`features/agent/registry/version_check.rs`、`integration/mcp/tunnel.rs`
-- 文档：[`../backend/doctor.md`](../backend/doctor.md)、[`../backend/telemetry.md`](../backend/telemetry.md)
+- 文档：[`../backend/doctor.md`](../backend/doctor.md)
 
 ---
 

@@ -17,7 +17,7 @@
 
 ## 开关
 
-本地活动记录**始终开启**、无独立开关：`activity_record_events` 无条件写库。是否投影到 PostHog 由 `telemetryEnabled` 单独控制（见 [telemetry.md](telemetry.md)）。
+本地活动记录**始终开启**、无独立开关：`activity_record_events` 无条件写本机 `usage.sqlite`，不上报云端。
 
 设置页可一键清除全部记录。
 

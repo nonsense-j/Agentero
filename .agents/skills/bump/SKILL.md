@@ -24,9 +24,6 @@ description: >-
    - `crates/agentero-core/Cargo.toml` 的 package `version`（`agentero_core::http` 用 `CARGO_PKG_VERSION` 拼 User-Agent，必须与主 crate 锁步）。
    - `cli/Cargo.toml` 的 package `version`。
    - `crates/agentero-mcp/Cargo.toml` 的 package `version`（MCP `Implementation` 用 `CARGO_PKG_VERSION` 对外报告服务版本，必须与主 crate 锁步）。
-   - `src-tauri/ios-project.yml` 的 `CFBundleShortVersionString` 与 `CFBundleVersion`。
-
-   Android 不需要手动修改：`tauri android build` 会从 `tauri.conf.json` 的 `version` 重新生成 `src-tauri/gen/android/app/tauri.properties`（gitignored）中的 `versionName` 与 `versionCode`。
 4. 如果 Cargo manifest 版本变化，运行必要的 Cargo 元数据/检查命令并确认 `Cargo.lock` 没有保留旧的本地 package 版本。
 5. 检查版本字段全部等于目标版本，并检查 `agentero --version` 的来源仍然是 CLI package version。
 6. 检查 `AGENTS.md` 和 `docs/test/release.md` 中的发布规则仍与实现一致；只有规则变化时才修改文档，不要伪造版本说明或变更日志。

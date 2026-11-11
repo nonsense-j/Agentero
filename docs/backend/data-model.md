@@ -74,10 +74,6 @@ marks/
 
 `{mdDir}/assets/` + 相对路径 `![](./assets/…)`；前端 GC 无引用文件。
 
-## 远程
-
-逻辑模型相同；物理 IO 为 SFTP，catalog 有 work mirror。见 [remote.md](remote.md)。
-
 ## 类型
 
 时间戳 ISO 8601 字符串。运行时 TS/Rust 类型以代码与 [api.md](api.md) 为准。  

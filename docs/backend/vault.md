@@ -2,7 +2,7 @@
 
 ## 职责
 
-打开/创建 Vault；读写文本与二进制；目录树；回收站；文件监听；终端打开。本地或远程 session（远程见 [remote.md](remote.md)）。
+打开/创建本地 Vault；读写文本与二进制；目录树；回收站；文件监听；终端打开。
 
 桌面命令与 Vault session 的路径参数校验共用 `app/command_util.rs::vault_path_arg`：去除首尾空白并拒绝空路径，再由各调用方执行对应的解析与访问检查。
 

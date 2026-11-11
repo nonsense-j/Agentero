@@ -45,7 +45,7 @@ Agentero 使用 **BYOA**（Bring Your Own Agent）：Agent 由你安装和登录
 6. 选择默认 Agent。
 7. 发起一次测试对话，确认能访问当前 Vault。
 
-若终端里能跑、应用内探测不到：图形应用的 PATH 可能与 shell 不同，请填写**绝对路径**。远程 Vault 时，Agent 装在**服务器**上，见 [打开远程 Vault](remote-vault.md)。
+若终端里能跑、应用内探测不到：图形应用的 PATH 可能与 shell 不同，请填写**绝对路径**。
 
 ## 卸载 Agent
 
@@ -151,4 +151,3 @@ Settings → Agent → **精读论文** 可单独指定「精读 Agent」与「�
 ## 下一步
 
 - [阅读、标注与整理](read-and-organize.md)（划词提问与翻译）
-- [打开远程 Vault](remote-vault.md)

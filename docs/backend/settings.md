@@ -7,12 +7,10 @@
 | `institution_access_detect` | 无痕 WebView 探测当前网络是否可直连 IEEE Xplore / ACM DL 全文 |
 | `institution_proxy_probe` | 探测已保存或指定（`prefix_override`）机构网关 / CARSI 出版商会话 |
 
-- 路径：`$XDG_CONFIG_HOME/agentero/settings.json`（macOS 通常 `~/.config/agentero/`）。同目录的 `plugins.json` 不是 `AppSettings` 的字段：`schemaVersion` 1，`plugins` 是尚未解释的 JSON 数组（缺文件时为空），未知键保留，启动时不读取，设置页没有插件开关。见 [plugin-api.md](../development/plugin-api.md)。
-- `telemetryEnabled`：是否把行为事件脱敏投影到 PostHog（见 [telemetry.md](telemetry.md)）。本地 `usage.sqlite` 记录始终开启、无开关。
+- 路径：`$XDG_CONFIG_HOME/agentero/settings.json`（macOS 通常 `~/.config/agentero/`）。
 - `plazaEnabled`：是否显示并加载广场（默认开）。关闭后侧栏不渲染广场节点，已开的广场 tab 关闭，且不挂载 `PlazaView`（含站点代理 iframe / 订阅轮询）。
 - `plazaHiddenSources`：被隐藏的广场来源 id 列表（默认空）。侧栏广场子行按此过滤；右键广场父节点逐条勾选显隐。
 - `mcpEnabled` / `mcpPort`：内置 loopback Streamable HTTP MCP server 开关与端口（默认关、8765）。
-- `mcpTunnelId` / `mcpTunnelApiKey`：ChatGPT Secure MCP Tunnel 凭据；key 与 translate API key 同样走 mask/keep-previous，不回流 WebView。
 - `onboardingDone` / `featureTourDone`：首次运行向导与 Vault 打开后的功能导引是否已完成（默认 `false`）。前端完成/跳过后写入；Host schema 必须保留这两个字段，否则 `settings_set` 会静默丢掉，下次启动再次弹出（#398）。
 - `wikiEmbedFontSize` / `markdownMaxWidth`：双链嵌入正文字号（12–20，默认 13）和 Markdown 编辑列最大宽度（`0` 或 640 / 720 / 800 / 960 / 1120，默认 `0` 全宽）。Host schema 必须保留这两个字段，否则保存时会丢掉，下次启动回到默认值（#733）。
 - 网络代理（`networkProxyEnabled` / `networkProxyUrl`）：作用于 Host 全部 reqwest 客户端（广场站点代理、订阅、检索、翻译、模型下载）与 Agent 流量。**开关关闭时自动回退 Windows 系统代理**（读注册表 `Internet Settings` 的 `ProxyEnable`/`ProxyServer`，30s TTL 缓存以跟随代理软件开关）。reqwest 0.12 的 `system-proxy` feature 已有 Windows/macOS 检测，但不提供将选中 URL 导出给子进程的公开接口；本项目保留动态检测与统一优先级，URL 校验、代理连接交给上游 `Proxy::all`，不额外开启 feature 改变 macOS / 分协议路由策略。`network_system_proxy` 命令暴露检测结果：更新器插件用它做代理回退，设置页在开关关闭时显示“检测到系统代理”。共享 HTTP client 与缓存键使用同一代理快照，避免设置更新时标错缓存。

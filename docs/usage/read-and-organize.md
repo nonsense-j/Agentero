@@ -164,7 +164,6 @@ PDF 嵌入按容器页宽显示，备注卡片在页内悬停或编辑时出现�
 ## 下一步
 
 - [接入 Agent](agents.md)
-- [打开远程 Vault](remote-vault.md)
 
 ### 编辑 PDF 书签
 

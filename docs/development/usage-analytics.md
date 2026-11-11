@@ -1,7 +1,7 @@
 # 使用记录、Memory 与产品分析
 
 > 状态：**P0 存储已落地**（XDG `usage.sqlite` schema v2 + `track()`），漏斗与画像仍按本文推进。关联 [\#239](https://github.com/poco-ai/Agentero/issues/239)。实现契约见 [`../backend/usage.md`](../backend/usage.md)。
-> 相关：[`../backend/catalog.md`](../backend/catalog.md)、[`../backend/agent.md`](../backend/agent.md)、[`../backend/telemetry.md`](../backend/telemetry.md)、[`../backend/translate.md`](../backend/translate.md)、[`../backend/skill-import.md`](../backend/skill-import.md)、[`../frontend/pdf.md`](../frontend/pdf.md)、[`../frontend/pdf-layout-analysis.md`](../frontend/pdf-layout-analysis.md)、[`plaza.md`](plaza.md)
+> 相关：[`../backend/catalog.md`](../backend/catalog.md)、[`../backend/agent.md`](../backend/agent.md)、[`../backend/translate.md`](../backend/translate.md)、[`../backend/skill-import.md`](../backend/skill-import.md)、[`../frontend/pdf.md`](../frontend/pdf.md)、[`../frontend/pdf-layout-analysis.md`](../frontend/pdf-layout-analysis.md)、[`plaza.md`](plaza.md)
 
 ## 1. 目标与非目标
 
@@ -384,7 +384,7 @@ iOS / TestFlight 仍无遥测。debug / 无 key 构建不上报。
 | 阶段 | 内容 | 可验证 |
 |---|---|---|
 | **P0** | Registry + `track()` + usage.sqlite v2 + 双开关 | **已落地**（漏斗见 [usage.md](../backend/usage.md)「前端漏斗」；翻译 / 版面 / 批注尚未接线） |
-| **P0 余** | 补翻译 / 版面 / 批注漏斗；`Telemetry::capture_activity` 投影 | 已接线行为事件投影（[telemetry.md](../backend/telemetry.md) 映射表）；关 `telemetryEnabled` 停投影但本地照记；cache hit 与逐 region 翻译不刷屏；翻译 / 版面 / 批注漏斗仍待接线 |
+| **P0 余** | 补翻译 / 版面 / 批注漏斗 | 本机 `usage.sqlite` 持续记录；cache hit 与逐 region 翻译不刷屏；翻译 / 版面 / 批注漏斗仍待接线 |
 | **P1** | Profile（含 `toolAffinity`）+ 继续阅读 | 顶栏能跳对页 |
 | **P2** | `build_prompt` 注入 | 问答能提到工具习惯；关本地后注入消失 |
 | **P3** | usage-reviewer、周回顾、推荐、可选 memories | `Reviews/YYYY-WW.md`；CLI 不再提供 usage 查询入口 |

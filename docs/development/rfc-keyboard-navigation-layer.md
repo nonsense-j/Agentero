@@ -422,4 +422,4 @@ type Settings = {
 - Zathura：`j/k` 滚动、`J/K` 翻页、`gg/G` 首尾。
 - Sioyek：面向论文阅读的键盘优先设计、引用/图表跳转与返回栈。
 - 现有实现：`src/components/viewer/pdf/viewport/keyboard-scroll-handler.tsx`、`page-turn-handler.tsx`、`src/hooks/use-app-shortcuts.ts`、`src/lib/core/overlay-stack.ts`、`src/lib/shell/commands/registry.ts`。
-- 相关文档：[`frontend/pdf.md`](../frontend/pdf.md)、[`frontend/shell.md`](../frontend/shell.md)、[`frontend/settings.md`](../frontend/settings.md)、[`development/plugin-api.md`](plugin-api.md)。
+- 相关文档：[`frontend/pdf.md`](../frontend/pdf.md)、[`frontend/shell.md`](../frontend/shell.md)、[`frontend/settings.md`](../frontend/settings.md)。
