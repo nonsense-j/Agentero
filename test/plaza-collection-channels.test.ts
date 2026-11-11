@@ -6,6 +6,8 @@ import {
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
 	fetchDblpSparqlVenuePapers,
+	fetchMoreArxivCollection,
+	fetchMultiChannelVenuePapers,
 	fetchVenueStructuredPapers,
 	isConfirmedVenueAcceptance,
 	isPreloadingCollection,
@@ -13,6 +15,8 @@ import {
 	loadCollectionState,
 	mergeCollectionItems,
 	parseAcceptedVenueArxivXml,
+	parseArxivAtomXml,
+	preloadAll2026ArxivInBackground,
 	refreshVenueCollection,
 	resetCollectionMemoryForTests,
 	saveCollectionState,
@@ -432,22 +436,22 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(sparqlRes.items[0]?.citationCount).toBe(4);
 	});
 
-	it("treats v3-synced Venues as immutable on open, upgrades pre-v3 caches once, and does not toggle preloading flag during Venue refresh", async () => {
+	it("treats v4-synced Venues as immutable on open, upgrades pre-v4 caches once, and does not toggle preloading flag during Venue refresh", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		if (!ase) throw new Error("Missing ase-2026");
 
-		expect(CURRENT_VENUE_SYNC_VERSION).toBe(3);
+		expect(CURRENT_VENUE_SYNC_VERSION).toBe(4);
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
-		// Legacy v2 truncated venue -> requires one-time v3 upgrade
+		// Legacy v3 truncated venue -> requires one-time v4 upgrade
 		expect(
 			isVenueAlreadyLoaded(
-				{ ...ase, syncVersion: 2, lastFetchedAt: "2026-06-01T00:00:00Z" },
+				{ ...ase, syncVersion: 3, lastFetchedAt: "2026-06-01T00:00:00Z" },
 				[],
 			),
 		).toBe(false);
 
-		// Once v3 synced, opening Paper Collection never re-checks or re-fetches it
+		// Once v4 synced, opening Paper Collection never re-checks or re-fetches it
 		const loadedVenues = DEFAULT_COLLECTION_VENUES.map((v) => ({
 			...v,
 			syncVersion: CURRENT_VENUE_SYNC_VERSION,
@@ -465,5 +469,412 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		const stateAfterOpen = await refreshVenueCollection({ skipLoaded: true });
 		expect(stateAfterOpen.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
 		expect(isPreloadingCollection()).toBe(false);
+	});
+
+	it("retains ASE 2026 proceedings papers without public abstracts, excludes workshops/frontmatter, backfills S2 abstracts, and paginates DBLP SPARQL", async () => {
+		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
+		if (!ase) throw new Error("Missing ase-2026");
+
+		// 1. Multi-page DBLP SPARQL (`OFFSET`) + workshop/editorship exclusion + abstract-less retention
+		const sparqlCalls: string[] = [];
+		const pagedDblp = await fetchDblpSparqlVenuePapers(
+			ase,
+			2026,
+			new Set(),
+			async <T>(url: string) => {
+				if (url.includes("sparql.dblp.org")) {
+					sparqlCalls.push(decodeURIComponent(url));
+					if (decodeURIComponent(url).includes("OFFSET 0")) {
+						return {
+							results: {
+								bindings: [
+									{
+										rec: { value: "https://dblp.org/rec/conf/kbse/ase2026" },
+										title: {
+											value:
+												"Proceedings of the 41st IEEE/ACM International Conference on Automated Software Engineering, ASE 2026",
+										},
+										authors: { value: "Chair One" },
+										pubIn: { value: "ASE" },
+									},
+									{
+										rec: { value: "https://dblp.org/rec/conf/kbse/ws1" },
+										title: {
+											value: "Prompting Notes at LLM4Code Workshop",
+										},
+										authors: { value: "Workshop Author" },
+										pubIn: { value: "LLM4Code@ASE" },
+									},
+									{
+										rec: { value: "https://dblp.org/rec/conf/kbse/p1" },
+										title: {
+											value:
+												"Sound Concolic Execution for Rust Smart Contracts.",
+										},
+										doi: { value: "10.1145/3832783.3832801" },
+										authors: { value: "Ada Lovelace" },
+										pubIn: { value: "ASE" },
+									},
+									{
+										rec: { value: "https://dblp.org/rec/conf/kbse/p2" },
+										title: {
+											value:
+												"Differential Compiler Fuzzing Across WASM Runtimes.",
+										},
+										doi: { value: "10.1145/3832783.3832802" },
+										authors: { value: "Ken Thompson" },
+										pubIn: { value: "ASE" },
+									},
+								],
+							},
+						} as T;
+					}
+					return {
+						results: {
+							bindings: [
+								{
+									rec: { value: "https://dblp.org/rec/conf/kbse/p3" },
+									title: {
+										value:
+											"Modular Abstract Interpretation for Heap-Manipulating Programs.",
+									},
+									doi: { value: "10.1145/3832783.3832803" },
+									authors: { value: "Patrick Cousot" },
+									pubIn: { value: "ASE" },
+								},
+							],
+						},
+					} as T;
+				}
+				// OpenAlex returns null `abstract_inverted_index` (typical for ACM proceedings)
+				return { results: [] } as T;
+			},
+			{ pageSize: 4, maxPages: 4 },
+		);
+
+		expect(sparqlCalls).toHaveLength(2);
+		expect(sparqlCalls[1]).toContain("OFFSET 4");
+		expect(pagedDblp.items).toHaveLength(3);
+		expect(pagedDblp.items.every((p) => p.abstract === "")).toBe(true);
+
+		// 2. Full `fetchMultiChannelVenuePapers` when OpenAlex has 30 ACM papers (all without abstracts)
+		//    and S2 Bulk supplies preprint abstracts for matched papers without inflating count
+		const store = new Map<string, string>();
+		vi.stubGlobal("localStorage", {
+			getItem: (k: string) => store.get(k) ?? null,
+			setItem: (k: string, v: string) => {
+				store.set(k, v);
+			},
+			removeItem: (k: string) => {
+				store.delete(k);
+			},
+		});
+
+		try {
+			const bundle = await fetchMultiChannelVenuePapers(
+				ase,
+				2026,
+				async <T>(url: string) => {
+					if (url.includes("api.openalex.org/works")) {
+						return {
+							meta: { count: 31, next_cursor: null },
+							results: [
+								{
+									id: "https://openalex.org/W_paratext",
+									type: "paratext",
+									title: "ASE 2026 Front Matter and Organization",
+									publication_year: 2026,
+									publication_date: "2026-10-07",
+									authorships: [{ author: { display_name: "ACM Staff" } }],
+								},
+								...Array.from({ length: 30 }, (_, idx) => ({
+									id: `https://openalex.org/W_ase_${idx + 1}`,
+									type: "article",
+									title: `Automated Program Analysis Technique Number ${idx + 1}`,
+									publication_year: 2026,
+									publication_date: "2026-10-07",
+									doi: `https://doi.org/10.1145/3832783.${3832900 + idx}`,
+									cited_by_count: idx,
+									abstract_inverted_index: null,
+									authorships: [
+										{ author: { display_name: `Researcher ${idx + 1}` } },
+									],
+									primary_location: {
+										landing_page_url: `https://doi.org/10.1145/3832783.${3832900 + idx}`,
+										source: {
+											id: "https://openalex.org/S4363608212",
+											display_name:
+												"Proceedings of the IEEE/ACM International Conference on Automated Software Engineering",
+										},
+									},
+								})),
+							],
+						} as T;
+					}
+					if (url.includes("sparql.dblp.org")) {
+						// Simulate DBLP lagging behind ACM DL publication
+						return { results: { bindings: [] } } as T;
+					}
+					if (
+						url.includes("api.semanticscholar.org/graph/v1/paper/search/bulk")
+					) {
+						return {
+							total: 2,
+							token: null,
+							data: [
+								{
+									title: "Automated Program Analysis Technique Number 1",
+									abstract:
+										"We introduce a scalable static and dynamic program analysis technique evaluated across thirty real-world repositories.",
+									year: 2026,
+									externalIds: {
+										DOI: "10.1145/3832783.3832900",
+										ArXiv: "2608.12345",
+									},
+									authors: [{ name: "Researcher 1" }],
+								},
+								{
+									title: "Unrelated Noisy Workshop Entry",
+									abstract:
+										"This noisy workshop abstract does not belong to the main proceedings and must not inflate primary count.",
+									year: 2026,
+									authors: [{ name: "Someone Else" }],
+								},
+							],
+						} as T;
+					}
+					return { results: [] } as T;
+				},
+				async () => "<feed></feed>",
+			);
+
+			expect(bundle.items).toHaveLength(30);
+			const enrichedFirst = bundle.items.find(
+				(p) => p.doi === "10.1145/3832783.3832900",
+			);
+			expect(enrichedFirst?.abstract).toContain(
+				"scalable static and dynamic program analysis",
+			);
+			expect(enrichedFirst?.arxivId).toBe("2608.12345");
+
+			// Reload from storage must NOT strip the remaining 29 abstract-less ASE 2026 papers
+			resetCollectionMemoryForTests();
+			saveCollectionState({
+				categories: ["cs.SE", "cs.CR", "cs.PL"],
+				venues: [...DEFAULT_COLLECTION_VENUES],
+				items: bundle.items,
+				lastRefreshedAt: "2026-10-10T00:00:00Z",
+				latestArxiv: null,
+			});
+			resetCollectionMemoryForTests();
+			const reloaded = loadCollectionState();
+			expect(
+				reloaded.items.filter((i) => i.venueId === "ase-2026"),
+			).toHaveLength(30);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("backfills complete 2026 arXiv history via sliding timestamp windows, drops pre-2026 pages cleanly, and cursors fetchMore per category", async () => {
+		// 1. All-2025 page must return [] rather than leaking 2025 entries
+		const xml2025Only = `<feed xmlns="http://www.w3.org/2005/Atom">
+			<entry>
+				<id>http://arxiv.org/abs/2512.99999v1</id>
+				<published>2025-12-30T10:00:00Z</published>
+				<title>Late 2025 Paper That Must Not Leak Into 2026 Pool</title>
+				<summary>We present a December 2025 software engineering study that predates 2026.</summary>
+				<author><name>Alice</name></author>
+			</entry>
+		</feed>`;
+		expect(parseArxivAtomXml(xml2025Only, 2026)).toEqual([]);
+
+		// 2. Sliding timestamp-window backfill heals incomplete cache and marks `historyComplete: true`
+		const store = new Map<string, string>();
+		vi.stubGlobal("localStorage", {
+			getItem: (k: string) => store.get(k) ?? null,
+			setItem: (k: string, v: string) => {
+				store.set(k, v);
+			},
+			removeItem: (k: string) => {
+				store.delete(k);
+			},
+		});
+
+		try {
+			resetCollectionMemoryForTests();
+			// Seed with 2 already-cached top `cs.SE` papers (simulating an incomplete pre-watermark cache)
+			saveCollectionState({
+				categories: ["cs.SE"],
+				venues: [...DEFAULT_COLLECTION_VENUES],
+				items: [
+					{
+						id: "arxiv:2610.00004",
+						arxivId: "2610.00004",
+						title: "Newest Cached SE Paper Four",
+						authors: ["Author 4"],
+						abstract:
+							"We present automated software verification technique four with complete empirical evaluation.",
+						publishedAt: "2026-10-04T12:00:00Z",
+						year: 2026,
+						sourceType: "arxiv",
+						sourceLabel: "cs.SE",
+						categories: ["cs.SE"],
+						url: "https://arxiv.org/abs/2610.00004",
+					},
+					{
+						id: "arxiv:2609.00003",
+						arxivId: "2609.00003",
+						title: "Cached SE Paper Three",
+						authors: ["Author 3"],
+						abstract:
+							"We present automated software verification technique three with complete empirical evaluation.",
+						publishedAt: "2026-09-03T12:00:00Z",
+						year: 2026,
+						sourceType: "arxiv",
+						sourceLabel: "cs.SE",
+						categories: ["cs.SE"],
+						url: "https://arxiv.org/abs/2609.00003",
+					},
+				],
+				lastRefreshedAt: "2026-10-05T00:00:00Z",
+				latestArxiv: null,
+				arxivWatermarks: {
+					"cs.SE": {
+						latestArxivId: "2610.00004",
+						latestPublishedAt: "2026-10-04T12:00:00Z",
+						lastSyncedAt: "2026-10-05T00:00:00Z",
+					},
+				},
+			});
+
+			const windowUrls: string[] = [];
+			await preloadAll2026ArxivInBackground(["cs.SE"], 5, 2, {
+				fetchText: async (url) => {
+					windowUrls.push(url);
+					if (url.includes("TO+209912312359]")) {
+						// Page 1 returns the 2 already-cached items! Old implementation broke early here.
+						return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+							<opensearch:totalResults>4</opensearch:totalResults>
+							<entry>
+								<id>http://arxiv.org/abs/2610.00004v1</id>
+								<published>2026-10-04T12:00:00Z</published>
+								<title>Newest Cached SE Paper Four</title>
+								<summary>We present automated software verification technique four with complete empirical evaluation.</summary>
+								<author><name>Author 4</name></author>
+							</entry>
+							<entry>
+								<id>http://arxiv.org/abs/2609.00003v1</id>
+								<published>2026-09-03T12:00:00Z</published>
+								<title>Cached SE Paper Three</title>
+								<summary>We present automated software verification technique three with complete empirical evaluation.</summary>
+								<author><name>Author 3</name></author>
+							</entry>
+						</feed>`;
+					}
+					if (url.includes("TO+202609031201]")) {
+						return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+							<opensearch:totalResults>2</opensearch:totalResults>
+							<entry>
+								<id>http://arxiv.org/abs/2605.00002v1</id>
+								<published>2026-05-02T09:30:00Z</published>
+								<title>Earlier Backfilled SE Paper Two</title>
+								<summary>We present automated software verification technique two with complete empirical evaluation.</summary>
+								<author><name>Author 2</name></author>
+							</entry>
+							<entry>
+								<id>http://arxiv.org/abs/2601.00001v1</id>
+								<published>2026-01-10T08:15:00Z</published>
+								<title>Earliest January 2026 SE Paper One</title>
+								<summary>We present automated software verification technique one with complete empirical evaluation.</summary>
+								<author><name>Author 1</name></author>
+							</entry>
+						</feed>`;
+					}
+					// Final window before 2026-01-10 returns 0 remaining entries (`totalResults=0`) -> `historyComplete = true`
+					return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+						<opensearch:totalResults>0</opensearch:totalResults>
+					</feed>`;
+				},
+				fetchJson: async <T>() => ({ results: [] }) as T,
+			});
+
+			const completedState = loadCollectionState();
+			expect(completedState.items.map((i) => i.arxivId)).toEqual([
+				"2610.00004",
+				"2609.00003",
+				"2605.00002",
+				"2601.00001",
+			]);
+			expect(completedState.arxivWatermarks?.["cs.SE"]?.remoteTotal).toBe(4);
+			expect(completedState.arxivWatermarks?.["cs.SE"]?.historyComplete).toBe(
+				true,
+			);
+			expect(windowUrls).toHaveLength(3);
+
+			// Calling `fetchMoreArxivCollection` for an incomplete single category uses THAT category's oldest timestamp
+			saveCollectionState({
+				...completedState,
+				categories: ["cs.SE", "cs.CR"],
+				items: [
+					...completedState.items,
+					{
+						id: "arxiv:2608.00099",
+						arxivId: "2608.00099",
+						title: "Recent Security Paper",
+						authors: ["Sec Author"],
+						abstract:
+							"We analyze cryptographic protocol security with mechanized proofs across modern implementations.",
+						publishedAt: "2026-08-20T15:10:00Z",
+						year: 2026,
+						sourceType: "arxiv",
+						sourceLabel: "cs.CR",
+						categories: ["cs.CR"],
+						url: "https://arxiv.org/abs/2608.00099",
+					},
+				],
+				arxivWatermarks: {
+					...completedState.arxivWatermarks,
+					"cs.CR": {
+						latestArxivId: "2608.00099",
+						latestPublishedAt: "2026-08-20T15:10:00Z",
+						oldestSyncedPublishedAt: "2026-08-20T15:10:00Z",
+						lastSyncedAt: "2026-10-05T00:00:00Z",
+						historyComplete: false,
+					},
+				},
+			});
+
+			const moreUrls: string[] = [];
+			const moreRes = await fetchMoreArxivCollection({
+				categories: ["cs.CR"],
+				maxResultsPerCategory: 50,
+				transport: {
+					fetchText: async (url) => {
+						moreUrls.push(url);
+						return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+							<opensearch:totalResults>1</opensearch:totalResults>
+							<entry>
+								<id>http://arxiv.org/abs/2603.00055v1</id>
+								<published>2026-03-12T10:00:00Z</published>
+								<title>Older Security Paper From March 2026</title>
+								<summary>We present an earlier March 2026 cryptographic analysis for zero-knowledge systems.</summary>
+								<author><name>Sec Author Two</name></author>
+							</entry>
+						</feed>`;
+					},
+					fetchJson: async <T>() => ({ results: [] }) as T,
+				},
+			});
+
+			expect(moreUrls).toHaveLength(1);
+			expect(moreUrls[0]).toContain("TO+202608201511]");
+			expect(moreRes.addedCount).toBe(1);
+			expect(moreRes.state.arxivWatermarks?.["cs.CR"]?.historyComplete).toBe(
+				true,
+			);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });
