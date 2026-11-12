@@ -355,7 +355,6 @@ export const SUGGESTION_KEYS = [
 	"summarizePaper",
 	"askLibrary",
 	"listClaims",
-	"draftRelatedWork",
 ] as const;
 
 export type SuggestionKey = (typeof SUGGESTION_KEYS)[number];
@@ -369,7 +368,6 @@ export const SUGGESTION_WORKFLOW: Record<SuggestionKey, string> = {
 	summarizePaper: "summary",
 	askLibrary: "qa",
 	listClaims: "qa",
-	draftRelatedWork: "related_work",
 };
 
 export function suggestionItems(): {

@@ -208,17 +208,6 @@ pub async fn accept_run_once(
     let log_session_id = session_id.clone();
     let log_agent_id = desc.id.clone();
     let session_agent_id = log_agent_id.clone();
-    let attach_delegate = request.workflow.as_deref() != Some("translate");
-    let delegate_mcp = if attach_delegate {
-        window
-            .app_handle()
-            .try_state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
-            .and_then(|bridge| bridge.mcp_server(&session_id, window.label()))
-            .into_iter()
-            .collect()
-    } else {
-        Vec::new()
-    };
     tauri::async_runtime::spawn(async move {
         let run_result = run_once(RunOnceParams {
             app: events.clone(),
@@ -248,12 +237,6 @@ pub async fn accept_run_once(
             warm_pool: Some(warm_pool),
             context: request.context,
             resume_transcript: request.resume_transcript,
-            delegate_mcp,
-            delegate_hint: None,
-            suppress_transcript: false,
-            permission_host: None,
-            progress: None,
-            user_wait: None,
         })
         .await;
         if run_result.is_ok() {

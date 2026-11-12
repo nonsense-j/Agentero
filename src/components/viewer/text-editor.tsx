@@ -17,7 +17,6 @@ import {
 } from "@/components/viewer/text-editor-theme";
 import { TextEditorToolbar } from "@/components/viewer/text-editor-toolbar";
 import { useTextEditorSelection } from "@/components/viewer/use-text-editor-selection";
-import { registerTextEditorFlusher } from "@/lib/workspace/text-editor-flush";
 
 interface TextEditorProps {
 	seed: string;
@@ -149,9 +148,6 @@ export function TextEditor({
 		path,
 		active,
 	});
-
-	// Expose the flush to lib actions that read disk bytes directly.
-	useEffect(() => registerTextEditorFlusher(path, flush), [path, flush]);
 
 	// Editor owns its state: mount once, reconfigure language/theme in place.
 	useEffect(() => {

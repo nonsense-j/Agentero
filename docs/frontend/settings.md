@@ -67,7 +67,7 @@
   3. 标题行「全选 / 修复」应用选中项；
   4. 下方 Agent 提示词（随 UI 语言 en/zh）：复制，或「在 Agent 中打开」（关设置、打开主窗 Agent 并预填 composer）。
 
-主窗口把未保存的 Markdown 路径同步到 Host，因此独立设置 Webview 发起修复时仍能在任何写入前拒绝脏文件。远程 Vault 首版只显示不可用。
+主窗口把未保存的 Markdown 路径同步到 Host，因此独立设置 Webview 发起修复时仍能在任何写入前拒绝脏文件。
 
 相关代码：`src/lib/doctor/`、`src/lib/agent/composer-seed.ts`。诊断页外壳 `src/components/settings/panes/doctor-pane.tsx` 只做报告拉取与分区编排，各检查项在同目录拆分：`doctor-backfill-section.tsx`、`doctor-host-runtime-section.tsx`、`doctor-network-section.tsx`、`doctor-agent-section.tsx`、`doctor-vault-catalog-sections.tsx`、`doctor-wikilink-section.tsx`、`doctor-alias-section.tsx`、`doctor-visual-marks-section.tsx`；共用展示件（小标题、问题行、git 风格 diff）在 `doctor-sections.tsx`，整行 diff 的文本测量与窗口化在 `doctor-line-fit.ts`（单测 `test/doctor-line-fit.test.ts`）。
 
@@ -133,8 +133,3 @@
 - 状态：`src/lib/settings/`
 - 更新服务：`src/lib/update/`
 
-## 账户入口
-
-账户页在桌面显示当前用户、云同步用量和团队列表；资料编辑与团队管理分别打开 Web 应用的 `/account` 与 `/teams`。登录、退出及会话事件仍经 `tauri-plugin-better-auth` 处理。`src/features/account/` 只保留客户端、会话/团队查询、错误映射和头像组件；旧本地账户管理 UI 及其专用 mutation hooks 已移除。
-
-账户入口默认隐藏，由 `src/features/account/visibility.ts` 的 `accountSurfaceEnabled` 控制（与 `pluginsSurfaceEnabled` 同一模式）：为 `false` 时不显示设置侧栏的「账户」分区和 Vault 欢迎页的账户按钮，`?section=account` 回落到「通用」。后端鉴权与会话逻辑不受影响。

@@ -58,7 +58,6 @@
 - 进度沿用左下角后台任务条（`job:progress`）。
 - 当前实现先返回 `LookupImportBatchResult.skillCandidates`，前端打开多选 Dialog。`--skill <name>`、GitHub tree 子目录会缩小候选范围。
 - 用户取消时删除 discovery 临时包；确认后调用 `skill_install`，再 `refreshTree` + toast 汇总安装结果。**不** `openPaper`、不进补资产队列。论文和 Skill 可混合提交。
-- 远程 Vault：首版禁用（提示暂不支持），后续经 remote bridge + SFTP 镜像（`features/remote/launch.rs` 已有 skills 镜像逻辑）。
 
 ## 5. 安全
 
@@ -83,4 +82,4 @@
 | 阶段 | 内容 |
 |---|---|
 | P2 | 已装 Skill 的「检查更新 / 重装」（基于 `agentero-skill.json`）；`#ref` pin；多候选选择对话框 |
-| P3 | 私有 repo（gh / git 回退）、GitLab、`.well-known` 源、远程 Vault |
+| P3 | 私有 repo（gh / git 回退）、GitLab、`.well-known` 源 |

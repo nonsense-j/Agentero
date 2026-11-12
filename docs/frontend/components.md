@@ -57,8 +57,7 @@ Agent / Reasoning 消息里的 Markdown：`Streamdown` + `PlainTable` / `PlainCo
 | 目录 | 职责 |
 |---|---|
 | `components/shell/` | 三栏壳、标题栏、对话框挂载 |
-| `components/sidebar/` | 文件树、Paper Info、LaTeX 面板、魔棒 |
-| `components/writing/` | 写作工作面：阅读 / 写作切换、项目列表、源码与 PDF |
+| `components/sidebar/` | 文件树、Paper Info、魔棒 |
 | `components/workspace/` | Dockview 宿主与 panel 内容 |
 | `components/library/` | 论文库表 |
 | `components/editor/` | Plate Markdown |

@@ -30,7 +30,7 @@
 | 发表 / 投稿 | 原 Publication 列。单元格由 `publication`、`#submitted:` 和 `#easyscholar:` 聚合：真实 publication → 「已发表」+ venue 名 + 指标；仅有 `#submitted:` → 「投稿」+ 目标 + 「模板推断」；仓库类 publication（arXiv/bioRxiv 等）→ 「预印本」+ 仓库短名。支持双击复制完整值 |
 | 阅读热力 | 标题列左侧显示该论文阅读进度热力条；基于 `marks/` 中逐页标注与阅读位置聚合。激活 Library 时经 `paper_reading_activity_batch` 一次批量 IPC 刷新全部活动点（缓存保温，不再逐论文 3 次 IPC）；PDF 页数走 catalog `pdf_page_counts` 缓存，缺缓存时仅对可视行懒加载并回写 |
 | Rescan | 右键左侧 `papers/` 论文库节点 →「重新扫描 papers/」；空库仍保留中央按钮，扫描期间禁用重复操作。`paper_rescan` 补齐盘上有、catalog 无的论文目录，并修复旧 `id=paper` 本地条目；不负责导入任意裸 PDF |
-| 行右键 | 打开 / 编辑元数据（远程 Vault 隐藏编辑项）/ 添加到对话 / 在 Finder 中显示（仅本地）/ 删除；单击打开、双击复制。文件夹还在时整夹进回收站并去掉 catalog 行；文件夹已经没了（列表上仍可能显示「本地无 PDF」）时直接去掉 catalog 行，论文从库里消失 |
+| 行右键 | 打开 / 编辑元数据/ 添加到对话 / 在 Finder 中显示（仅本地）/ 删除；单击打开、双击复制。文件夹还在时整夹进回收站并去掉 catalog 行；文件夹已经没了（列表上仍可能显示「本地无 PDF」）时直接去掉 catalog 行，论文从库里消失 |
 | Download | 库内任一篇缺资源时批量补下 |
 | 导入/导出 | Library 工具栏；导出 BibTeX 亦可在 `papers/` 论文库节点右键 |
 | 发现引用 | `papers/` 论文库节点右键「发现引用我的新论文」→ 后台扫描全库反向引用 → 候选清单勾选入库；见 [../backend/citation-parsing.md](../backend/citation-parsing.md) §7 |
@@ -72,7 +72,7 @@
 - Library 表格行右键"编辑元数据"；
 - 文件树论文行右键"编辑元数据"。
 
-核心字段（标题/作者/日期/DOI/arXiv/期刊）直接展示，卷期页、出版社、摘要、URL、代码仓库（`code_repo`）和 OpenReview 链接（`openreview_url`）折叠在"更多字段"。`code_repo` 在主 PDF 入库时若为空且用户没改过，按摘要、首页脚注、文末的顺序自动填入论文自己的 GitHub 仓库，参考文献里的仓库不写入；已经在库里的论文在下一次打开时补扫一次。手改或清空后不再自动覆盖。`openreview_url` 仅手动填写，无自动查找。作者每行一位；日期接受 `YYYY` / `YYYY-MM` / `YYYY-MM-DD`（也容忍 `2017-06-12T00:00:00Z`、`Spring 2017` 这类松散串，由 Host 规范化），年份由日期派生；仅提交变更字段（patch）→ `paper_update_meta` → 返回完整记录替换 Library 与打开 tab 的 metadata（`paperMetaChange`，仅保留列表的 `has_pdf` 探测结果），确保清空的可选字段立即移除。OpenReview 字段可设置或清空，保存后在 Paper Info 链接区展示；标识符刷新保留该手工值，有效 HTTP(S) 地址才展示按钮。远程 Vault 暂不支持，入口隐藏。后端语义见 [../backend/catalog.md](../backend/catalog.md)。
+核心字段（标题/作者/日期/DOI/arXiv/期刊）直接展示，卷期页、出版社、摘要、URL、代码仓库（`code_repo`）和 OpenReview 链接（`openreview_url`）折叠在"更多字段"。`code_repo` 在主 PDF 入库时若为空且用户没改过，按摘要、首页脚注、文末的顺序自动填入论文自己的 GitHub 仓库，参考文献里的仓库不写入；已经在库里的论文在下一次打开时补扫一次。手改或清空后不再自动覆盖。`openreview_url` 仅手动填写，无自动查找。作者每行一位；日期接受 `YYYY` / `YYYY-MM` / `YYYY-MM-DD`（也容忍 `2017-06-12T00:00:00Z`、`Spring 2017` 这类松散串，由 Host 规范化），年份由日期派生；仅提交变更字段（patch）→ `paper_update_meta` → 返回完整记录替换 Library 与打开 tab 的 metadata（`paperMetaChange`，仅保留列表的 `has_pdf` 探测结果），确保清空的可选字段立即移除。OpenReview 字段可设置或清空，保存后在 Paper Info 链接区展示；标识符刷新保留该手工值，有效 HTTP(S) 地址才展示按钮。后端语义见 [../backend/catalog.md](../backend/catalog.md)。
 
 DOI 旁有 **刷新** 按钮：按当前 DOI（或 arXiv ID）拉取权威元数据（`paper_resolve_identifier` → Translator/Crossref/arXiv Atom，再用 S2 `publicationVenue` 补期刊/会议名），只填充表单供确认，保存仍走 patch。venue 源优先级见 [../backend/academic-search-apis.md](../backend/academic-search-apis.md) §2.5。
 

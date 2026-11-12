@@ -84,11 +84,6 @@ pub fn build_prompt(
              (follow vault AGENTS.md; read only what you need)."
                 .to_string()
         }
-        "related_work" => {
-            "Draft a Related Work section from local papers in this Vault \
-             (prefer each paper's NOTES.md; follow vault AGENTS.md)."
-                .to_string()
-        }
         _ => {
             "You are an assistant working inside a Agentero research Vault (cwd is the vault root). \
              Follow vault AGENTS.md."
@@ -314,7 +309,7 @@ mod tests {
     #[test]
     fn free_and_qa_omit_skill_follow_hint_when_skills_selected() {
         let skills = ["paper-reader".into()];
-        for workflow in ["free", "qa", "summary", "related_work"] {
+        for workflow in ["free", "qa", "summary"] {
             let p = build_prompt(
                 Some(workflow),
                 "hello",
@@ -482,7 +477,7 @@ mod tests {
 
     #[test]
     fn ui_blocks_guidance_is_injected_for_non_translate_workflows() {
-        for workflow in ["free", "qa", "summary", "related_work", "paper_reader"] {
+        for workflow in ["free", "qa", "summary", "paper_reader"] {
             let p = build_prompt(
                 Some(workflow),
                 "hello",

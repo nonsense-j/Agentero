@@ -244,7 +244,7 @@ export function NodeTreeRow({
 	}
 	if (node.kind === "directory") {
 		// `papers/` doubles as the library entry: library icon + title.
-		// Vault-root notes/thesis/data, and `.agents`, get an icon + label.
+		// Vault-root notes/data, and `.agents`, get an icon + label.
 		// Disk names stay unchanged.
 		const isLibraryRoot = isPapersRoot(node.path);
 		const isAgentRoot = isVaultAgentRoot(vaultPath, node.path);
@@ -394,8 +394,7 @@ function SkillTreeRow({
 }
 
 function VaultRootIcon({ face }: { face: VaultRootFace }) {
-	const Icon =
-		face === "notes" ? Notebook : face === "thesis" ? ScrollText : Database;
+	const Icon = face === "notes" ? Notebook : Database;
 	return <Icon className="size-4 text-muted-foreground" aria-hidden />;
 }
 

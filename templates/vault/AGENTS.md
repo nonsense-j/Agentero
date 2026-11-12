@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 
 # AGENTS.md
@@ -29,8 +29,7 @@ papers/<id>/
   empty `attachments/` folders.
 
 - `notes/` — free-form concept notes (`[[wikilinks]]`, embeds, Mermaid, callouts).
-- `data/` — datasets and artifacts synced from a remote server; keep them out of `papers/`.
-- `thesis/` — LaTeX manuscript workspace; `thesis/main.tex` is a minimal starter.
+- `data/` — datasets and research artifacts; keep them out of `papers/`.
 - `.agents/` — vault-local skills (`skills/<id>/SKILL.md`).
 
 ## Paper reading order

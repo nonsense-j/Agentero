@@ -44,8 +44,7 @@ settings 只提供读/写/持久化/广播能力，**不 import 任何域 featur
   - agent：`set_proxy`（网络代理同步）
   - import：`refresh_parser_config`（正文解析引擎凭据快照，桌面端）
   - connector：`set_port`（端口变更重绑监听）
-  - mcp：`set_port` + translator / note-mode 快照（端口变更重绑监听；端口变化时自动停掉内置 ChatGPT tunnel，用户需再点 Start）
-  - tunnel：与 MCP 同域，但凭据从 settings store 原值读取（不通过 redacted 快照传递），启动/停止由 `mcp_tunnel_start` / `mcp_tunnel_stop` 命令驱动
+  - mcp：`set_port` + translator / note-mode 快照（端口变更重绑监听）
   - jobs：`apply_layout_backend` + `apply_import_concurrency` + `drain_and_spawn`（layout / 导入并发上限）
 - 反序列化期需要的域默认值（如 `DEFAULT_CONNECTOR_PORT`）定义在 settings，由属主域 re-export（方向 `connector → settings`，不成环）。
 - **一处反向例外**：`BUILTIN_PROVIDER_ID` 由 settings `pub use agentero_core::features::translate::BUILTIN_PROVIDER_ID`，方向是 `settings → translate`（与上一条相反），目的是让 Host 不再手打这个字面量。它是纯常量、没有函数调用，因此不成环。另外 settings 会调 `crate::features::system::builtin`（`available()` / `api_key()` / `status()`）——那是 `system` 域内的兄弟模块，不是跨域出边。

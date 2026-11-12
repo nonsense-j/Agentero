@@ -37,7 +37,6 @@ npx skills add https://github.com/anthropics/skills --skill pptx
 3. 确认后仅安装选中 Skill 到 `.agents/skills/<name>/`；已存在的 Skill 不会覆盖。
 4. 取消或关闭窗口会清理本次解析的临时包，不会修改 Vault。
 
-Skill 导入当前**仅支持本地 Vault**，远程 Vault 会提示暂不支持。
 
 ```text
 papers/<paper-id>/

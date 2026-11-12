@@ -12,8 +12,8 @@ type DocumentTabProps = Omit<ComponentProps<"div">, "title"> & {
 };
 
 /**
- * Inner tab chrome shared by the Dockview workspace tabs and the writing file
- * tabs. Styling comes from Dockview's `dv-default-tab*` rules.
+ * Inner tab chrome for the Dockview workspace tabs. Styling comes from
+ * Dockview's `dv-default-tab*` rules.
  */
 export function DocumentTab({
 	title,

@@ -1,5 +1,5 @@
 /**
- * Path actions shared by the reading tree and the writing rail/tabs.
+ * Path actions for the vault file tree and document tabs.
  * Reveal and terminal reject with a user-facing message so each surface can
  * present the failure inline or as a toast.
  */

@@ -964,8 +964,7 @@ html[data-linux-scrollbars]:has(
 	--dv-tab-divider-color: var(--border);
 	--dv-separator-border: var(--border);
 	/* IDE-style sash: the sash itself stays invisible; the 1px separator
-	 * line is the divider and darkens in place on hover/drag, like the
-	 * writing split handle. */
+	 * line is the divider and darkens in place on hover/drag. */
 	--dv-sash-color: transparent;
 	--dv-active-sash-color: transparent;
 	--dv-drag-over-background-color: color-mix(
@@ -1060,7 +1059,7 @@ html[data-linux-scrollbars]:has(
 }
 
 /*
- * Sash feedback matches the writing split handle: keep the 1px separator as
+ * Sash feedback: keep the 1px separator as
  * the divider and recolor that line in place (hover 25%, drag 35%) instead of
  * painting a band over it.
  */

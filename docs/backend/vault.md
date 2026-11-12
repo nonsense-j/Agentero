@@ -11,9 +11,8 @@
 ```text
 用户选择目录（dialog）
   → vault_create / 打开已有
-  → papers/ notes/ data/ thesis/ .agents/skills/ AGENTS.md
+  → papers/ notes/ data/ .agents/skills/ AGENTS.md
   → notes/ 下三篇本地化新手教程（缺失时才写入）
-  → thesis/ 缺失时写入 LaTeX 起手稿 thesis/main.tex
   → .agentero/catalog.sqlite
   → 检测到 claude CLI 时：.claude/skills → ../.agents/skills
   → 前端加载树（Create 后自动打开 notes/01 ...）

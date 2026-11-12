@@ -147,7 +147,7 @@ hint 文案不在 wire 类型里，前端按分类映射 `doctor.agent.hints.*` 
 
 ## 入口
 
-- 桌面：设置 → 知识库诊断；远程 Vault 当前显示不可用。
+- 桌面：设置 → 知识库诊断。
 - CLI：`agentero doctor`、`agentero doctor fix aliases`、`agentero doctor fix visual-marks`、`agentero doctor fix catalog-duplicates`、`agentero -y doctor fix …`（CLI 诊断同样尊重 `.agentero/doctor.json` 忽略列表）。
 - Host：`doctor_check`、`doctor_apply_aliases`、`doctor_ignore_aliases`、`doctor_set_dirty_paths`、`doctor_plan_wikilinks`、`doctor_apply_wikilinks`、`doctor_apply_visual_marks`、`doctor_fix_catalog_duplicates`；host 级：`doctor_check_host`、`doctor_check_agents`、`doctor_check_network`。
 

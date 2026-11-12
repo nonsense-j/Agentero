@@ -189,7 +189,7 @@ Agentero 作为 **ACP Client**，stdio JSON-RPC 连接用户本机或远端 Agen
   的 warm 连接（排队中的 warm 也取消），下一轮冷启动后加载项目资源。warm 池的
   key 还包含 Pi 的**有效信任决策**（`pi-trust:trusted|untrusted`）：pi 只在进程启动时
   读取 trust，因此即使信任是在 pi 自己的 TUI 里授予或通过改 `settings.json` 生效，
-  下一轮也会因变体不匹配而冷启动，不会复用启动时未信任的旧进程。远程 Vault 拒绝该操作。
+  下一轮也会因变体不匹配而冷启动，不会复用启动时未信任的旧进程。
 - **内置 ACP 适配器（bundled 兜底层）**：`@agentclientprotocol/claude-agent-acp` 与
   `@agentclientprotocol/codex-acp` 的纯 JS 依赖树（平台二进制裁掉，~39MB 未压缩）作为应用
   资源随包分发，离线开箱即用。Host CLI（`claude` / `codex`）**永不内置**，仍由用户 PATH

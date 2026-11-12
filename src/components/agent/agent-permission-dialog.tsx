@@ -61,11 +61,6 @@ export function AgentPermissionDialog({
 							<DialogTitle>{t("permission.title")}</DialogTitle>
 							<DialogDescription>{permissionRequest.title}</DialogDescription>
 						</DialogHeader>
-						{permissionRequest.host ? (
-							<p className="text-xs text-muted-foreground">
-								{t("permission.remoteHost", { host: permissionRequest.host })}
-							</p>
-						) : null}
 						{permissionRequest.paths.length ? (
 							<div className="flex flex-col gap-1">
 								{permissionRequest.paths.map((p) => (

@@ -13,14 +13,12 @@ describe("seededSkillIdsFromCreated", () => {
 			".agents/skills/idea-evaluator/SKILL.md",
 			".agents/skills/paper-reader/SKILL.md",
 			".agents/skills/paper-reader/author-lookup.md",
-			".agents/skills/research-paper-writing/references/method.md",
 		]);
 		expect(ids).toEqual([
 			"acdemic-drawing",
 			"deep-research",
 			"idea-evaluator",
 			"paper-reader",
-			"research-paper-writing",
 		]);
 	});
 

@@ -92,7 +92,7 @@ Pi 只有在信任 Vault 后才会加载项目内的 `.agents/skills` 和 `.pi/*
 
 1. 打开一篇论文（默认 PDF | NOTES 分屏）。
 2. 打开右侧 **Agent** 面板。
-3. 直接提问，或点空状态建议 chips（Summarize、Ask library、Draft Related Work 等）。
+3. 直接提问，或点空状态建议 chips（Summarize、Ask library、List claims 等）。
 4. 当前论文默认加入上下文（可 X 移除）；也可用 `@` 提及路径，或从文件树拖入。
 5. 运行中仍可继续输入：后续消息进队列，当前回复结束后自动发送。
 6. 若 Agent 改了笔记，在统一 Diff 中选择 Keep 或 Revert。
@@ -138,7 +138,7 @@ Settings → Agent → **精读论文** 可单独指定「精读 Agent」与「�
 
 ### 能回答但不能写 NOTES.md
 
-检查权限模式与工作目录。远程 Vault 上 Agent 必须以远端 Vault 根为 cwd。
+检查权限模式与工作目录。
 
 ### 不想让 Agent 改笔记
 

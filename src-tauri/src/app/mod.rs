@@ -121,7 +121,6 @@ pub fn run() {
         .manage(crate::features::agent::PermissionGate::new())
         .manage(crate::features::agent::ElicitationGate::new())
         .manage(crate::features::agent::AskUserGate::new())
-        .manage(crate::features::agent::delegate::DelegateBridge::new())
         .manage(
             crate::features::jobs::JobCenter::with_layout_backend(&layout_backend)
                 .with_import_concurrency(import_concurrency),
@@ -159,8 +158,6 @@ pub fn run() {
         // Bundled ACP adapter tier (offline fallback): record the packaged
         // adapters root before any catalog scan / spawn path can consult it.
         crate::features::agent::registry::bundled::init(app.handle());
-        app.state::<std::sync::Arc<crate::features::agent::delegate::DelegateBridge>>()
-            .start(app.handle().clone());
         // JobCenter runner registry: business domains own their executors and
         // register them here at assembly time (P2 runner-registry refactor).
         // JobCenter itself lives in features/jobs, alongside the domains it
@@ -477,8 +474,6 @@ pub fn run() {
             ) {
                 app.state::<Arc<crate::features::agent::session::pool::AgentWarmPool>>()
                     .shutdown();
-                app.state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
-                    .shutdown();
                 app.state::<Arc<ConnectorController>>().stop();
                 // Stop the MCP HTTP listener so port 8765 is released when the app quits.
                 app.state::<Arc<McpController>>().stop_server();
@@ -486,7 +481,7 @@ pub fn run() {
             // Best-effort final push (bounded); only on Exit so it runs once.
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<crate::integration::sync::SyncService>()
-                    .flush_on_exit(app);
+                    .flush_on_exit();
             }
         });
 }

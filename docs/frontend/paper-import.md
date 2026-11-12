@@ -37,7 +37,6 @@
 - Skill 解析后先弹出多选窗口，展示名称、描述、来源和已安装状态；只有点击确认后才安装到 `.agents/skills/<name>/`，并保留 `SKILL.md`、`scripts/`、`references/`、`assets/`。
 - 取消窗口会删除本次解析产生的临时 discovery，不会修改 Vault。
 - 已存在的 Skill 不覆盖；成功后仅刷新树并显示汇总 Toast，不打开 paper。
-- 远程 Vault 当前不支持 Skill 导入。
 
 ## 本地 PDF
 

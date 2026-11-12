@@ -8,7 +8,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Agentero inserts and refreshes citations in Microsoft Word when you use the Word integration.</string>
+	<string>Agentero opens folders and sessions in your preferred macOS terminal application.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

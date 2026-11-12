@@ -61,7 +61,7 @@ export function shouldIgnoreTreeName(name: string): boolean {
 /**
  * Whether a directory under the vault should be fully walked on open.
  * - Under `papers/` / `notes/` / `.agents/`: always eager (markers, skills).
- * - Other vault-root trees (`src/`, `thesis/`, …): shallow only until user expands.
+ * - Other vault-root trees (`src/`, `data/`, …): shallow only until user expands.
  */
 export function isEagerTreeRel(rel: string): boolean {
 	const r = rel.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -340,7 +340,7 @@ export function collectWikiTargetRelPaths(
  * Build the vault file tree.
  *
  * - Eager recursive: `papers/`, `notes/`, `.agents/`
- * - Shallow elsewhere: vault-root extras (`src/`, `thesis/`, …) appear as
+ * - Shallow elsewhere: vault-root extras (`src/`, `data/`, …) appear as
  *   one level with `childrenPending`; expand via {@link listVaultDirChildren}.
  * - Ignored names ({@link TREE_IGNORE_NAMES} / dots / `*.egg-info`) are never listed.
  */

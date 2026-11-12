@@ -10,7 +10,7 @@ Host 在 **`127.0.0.1:23119`** 模拟 Zotero 桌面 Connector HTTP，官方浏�
 - 支持 **`saveStandaloneAttachment`**（在 PDF 标签页直接保存，无父书目条目）。
 - 支持 **`hasAttachmentResolvers`** / **`saveAttachmentFromResolver`**：浏览器直连 PDF
   失败时，用 DOI/arXiv 走 Crossref + Unpaywall 再尝试 OA 副本。
-- 绑定当前 Vault（本地路径或 `remote:<sessionId>`）。
+- 绑定当前 Vault（本地路径）。
 - `saveItems` 只在 session 创建时记录的 Library 作用域中写 paper 壳与 catalog；Chrome
   先通过 `saveAttachment` 上传 PDF，只有浏览器未取得附件时才进入 DOI/arXiv fallback。
 - 路径术语：`parent_dir` 是初始父目录；`desired_parent` 是请求父目录（该 session 最近一次
@@ -21,7 +21,6 @@ Host 在 **`127.0.0.1:23119`** 模拟 Zotero 桌面 Connector HTTP，官方浏�
   现有 open/reconcile 流程再按需启动 backend parser。Connector 本身不主动解析。
 - Connector 返回的 Zotero 标签会以 `@zotero:` 前缀保存在 catalog 中，用于保留来源信息；
   arXiv 学科分类标签则走 `@arxiv:`。两类内部标签都不会显示在 Library、Paper Info 或标签筛选中。
-- 远程：stage 后 SFTP；catalog 经 work mirror。
 - PDF 保存失败会通过 `connector:progress` 报错，但仍无条件进入 finalizer，使已有 paper
   壳和资源到达 `desired_parent`。移动失败时保留 `desired_parent`；错误与回滚语义沿用共享
   `paper_move` 事务。

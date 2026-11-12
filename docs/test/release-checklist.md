@@ -223,7 +223,6 @@ cargo test -p agentero-core -p agentero-cli
 | 6.1.8.3 | 魔棒 | 粘贴 `npx skills add https://github.com/anthropics/skills --skill pptx` | 窗口只显示匹配的 `pptx`，确认后保留其附属目录 | ☐ |
 | 6.1.8.4 | Skill 选择窗口 | 点击取消或关闭 | 不写入 `.agents/skills/`，临时 discovery 被清理 | ☐ |
 | 6.1.8.5 | 魔棒 | 重复导入同一 Skill | 选择窗口标记已安装；确认后跳过且不覆盖已有 `SKILL.md` | ☐ |
-| 6.1.8.6 | 远程 Vault | 粘贴任一 Skill 来源 | 明确提示远程 Vault 暂不支持 Skill 导入 | ☐ |
 
 ### 6.2 本地 PDF
 
@@ -417,7 +416,7 @@ cargo test -p agentero-core -p agentero-cli
 
 | # | 界面 | 操作 | 预期 | 结果 |
 |---|---|---|---|---|
-| 11.3.1 | 右栏·Agent（空态） | 点 Summarize / Ask library / Draft Related Work | 对**当前聚焦 paper** 发起对应 workflow | ☐ |
+| 11.3.1 | 右栏·Agent（空态） | 点 Summarize / Ask library / List claims | 对**当前聚焦 paper** 发起对应 workflow | ☐ |
 | 11.3.2 | 左栏·树 | 找资源齐全且未读 paper，点 **精读图标** | 任务条 paper-reader 进度；写/更新 `NOTES.md`；`is_read` 变已读；图标消失 | ☐ |
 | 11.3.3 | 设置 → Agent | 打开 **入库后自动精读**；魔棒再入一篇未读 | 入库/下载完成后**自动**精读；任务条可见 | ☐ |
 | 11.3.4 | 魔棒 | 批量多 ID 入库（自动精读开着） | **不**对批量每篇连跑精读 | ☐ |
@@ -425,24 +424,6 @@ cargo test -p agentero-core -p agentero-cli
 
 ---
 
-## 12. 远程 Vault（macOS / Linux）
-
-本轮不测远程则整节 N/A。Windows 只测 12.9。
-
-| # | 界面 | 操作 | 预期 | 结果 |
-|---|---|---|---|---|
-| 12.1 | 欢迎页 | 点 **Open remote…**，填 host / user / 远端绝对路径，连接 | 成功则进工作台；树显示远端内容 | ☐ |
-| 12.2 | 欢迎页 | 故意填错密码或路径 | 可读错误；不白屏 | ☐ |
-| 12.3 | 中间栏·MD | 改远端 NOTES 并保存 | 远端磁盘更新（本机不是第二权威库） | ☐ |
-| 12.4 | 中间栏·PDF | 打开远端 paper PDF | 可预览（经缓存） | ☐ |
-| 12.5 | 魔棒 | 入库一篇到远程库 | 文件与 catalog 在**远端** | ☐ |
-| 12.6 | 欢迎页 Recent | 看远程条目 | 显示 host:path + **远程**徽章；不是 `remote:uuid` 伪路径刷屏 | ☐ |
-| 12.7 | 系统 | 退出再启动，点远程 Recent | **需重新 SSH**，不能当本地路径直接打开 | ☐ |
-| 12.8 | 设置 → Agent（远程会话） | 远端探测 Agent，发对话 | Agent 在**服务器**跑，cwd 为远端 Vault | ☐ |
-| 12.9 | Windows 客户端 | 尝试 Open remote | **明确不支持**错误，不崩溃 | ☐ |
-| 12.10 | 远程会话 | 右键 Finder / 终端打开 | 禁用或明确不可用 | ☐ |
-
----
 
 ## 13. CLI（终端）
 
@@ -506,7 +487,6 @@ agentero --vault /tmp/agentero-cli-vault paper list --json
 | 魔棒关键词/自然语言候选 | 未交付 |
 | 打开杂乱文件夹自动整理 | Vault 采纳未交付 |
 | 与 Zotero 桌面同时占 23119 | 端口互斥 |
-| Windows 远程 Vault | 不支持 |
 | 应用内填 **Agent** 的模型 API Key | BYOA，不收集；Agent 的 Key 由 Agent CLI 自己持有。（翻译 / 版面 / embedding 的 BYOK Key 与构建期内置 provider 凭证是另外两条路径，见 [release.md](release.md) §内置 Provider 构建期注入） |
 | 删除时确认框 / Undo toast | 产品设计为无确认进回收站 |
 

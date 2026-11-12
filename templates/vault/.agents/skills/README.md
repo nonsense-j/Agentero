@@ -11,7 +11,6 @@ Create Vault seeds these when missing. Pick with `$` in Composer.
 | `acdemic-drawing` | 生成学术场景 Excalidraw 图 |
 | `idea-evaluator` | 研究 idea 评审 |
 | `deep-research` | 综述级文献调研 |
-| `research-paper-writing` | 论文写作与审稿前自查 |
 
 ## Versioning & upgrades
 

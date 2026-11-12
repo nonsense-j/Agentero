@@ -164,7 +164,7 @@ describe("isEagerTreeRel", () => {
 	it("treats other vault-root trees as lazy", () => {
 		expect(isEagerTreeRel("src")).toBe(false);
 		expect(isEagerTreeRel("src/agents")).toBe(false);
-		expect(isEagerTreeRel("thesis")).toBe(false);
+		expect(isEagerTreeRel("data")).toBe(false);
 		expect(isEagerTreeRel("plans")).toBe(false);
 		expect(isEagerTreeRel("scripts")).toBe(false);
 	});

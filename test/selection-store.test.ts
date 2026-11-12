@@ -102,7 +102,7 @@ describe("selection-store PDF anchor", () => {
 	it("prompt block carries the line span of code-editor selections", () => {
 		publishSelection({
 			text: "\\section{Introduction}",
-			sourcePath: "thesis/main.tex",
+			sourcePath: "papers/demo/source/main.tex",
 			origin: "markdown",
 			lineFrom: 7,
 			lineTo: 7,
@@ -110,14 +110,14 @@ describe("selection-store PDF anchor", () => {
 		pinActiveSelection();
 		publishSelection({
 			text: "line a\nline b\nline c",
-			sourcePath: "thesis/main.tex",
+			sourcePath: "papers/demo/source/main.tex",
 			origin: "markdown",
 			lineFrom: 12,
 			lineTo: 14,
 		});
 		pinActiveSelection();
 		const block = selectionsPromptBlock(consumeSelections());
-		expect(block).toContain("from thesis/main.tex (lines 7):");
-		expect(block).toContain("from thesis/main.tex (lines 12-14):");
+		expect(block).toContain("from papers/demo/source/main.tex (lines 7):");
+		expect(block).toContain("from papers/demo/source/main.tex (lines 12-14):");
 	});
 });

@@ -68,7 +68,7 @@ Host 通过 Tauri event 向前端推送事件。文件系统、任务和菜单�
 | `agent:elicitation-request` | form elicitation（Codex request_user_input） | `{ requestId, sessionId, message, toolCallId?, fields: { id, title, description?, required, kind, options[] }[] }` |
 | `agent:ask-user-request` | Grok `_x.ai/ask_user_question` | `{ requestId, sessionId, toolCallId?, mode, questions: { question, options[{label,description?}], multiSelect, allowOther }[] }` |
 | `job:progress` | 下载/解析任务字节与计数进度（`taskId` = JobCenter job id，投影行消费） | `{ taskId, phase, downloadedBytes, totalBytes?, progress?, currentCount?, totalCount? }`；PDF 与 TeX 并发下载，Host 把两条流的字节合并成**一个**总体进度后再 emit（两条流同时跑时 `phase` = `assets`，只有一条时为 `pdf` / `tex`），前端只做 clamp 不再按阶段加权；任一流仍在下载且 `Content-Length` 未知时 `totalBytes` / `progress` 为空（面板转不确定态），解析阶段显示为处理中，任务完成时为 100%。Host 对字节级进度做节流：百分比变化 ≥1 个点或距上次 emit ≥100ms 才发事件，流结束时必发最终值 |
-| `paper:imported`（已实现） | `paper_commit` 成功（catalog 已写入、NOTES 已建）；本地与远程导入路径统一发；`DownloadAssets` 后台任务为孤儿文件夹补建 catalog 行时也发 | `{ vaultId, paperId, timestamp }`（`vaultId` 为 vault 根路径，远程为 `remote:<sessionId>`） |
+| `paper:imported`（已实现） | `paper_commit` 成功（catalog 已写入、NOTES 已建）；`DownloadAssets` 后台任务为孤儿文件夹补建 catalog 行时也发 | `{ vaultId, paperId, timestamp }`（`vaultId` 为 vault 根路径） |
 | `paper:assets-ready`（已实现） | 论文资产就绪：同步下载完成 / 本地 PDF 拷贝完成 / `DownloadAssets` job 成功 | `{ vaultId, paperId, timestamp }` |
 | `job:completed`（已实现） | job 状态机真实迁移到 `Succeeded` 时由 `job:changed` 单点派生 | `{ jobId, kind, vaultId, paperId?, timestamp }`（`vaultId` = `JobSnapshot.vault_id`：**发起方传入的 vault 路径串**。前端直连的流程与 `getVaultPath()` 逐字一致；经 offer 中继或 Host 内部发起的流程为 Host 持有的形式（通常 canonical）—— Windows 上带 `\\?\` 前缀，消费端比较需容忍两种拼写，见 [../development/lifecycle-events.md](../development/lifecycle-events.md) 已知限制） |
 | `job:failed`（已实现） | job 状态机真实迁移到 `Failed` 时由 `job:changed` 单点派生 | `{ jobId, kind, vaultId, paperId?, error?, timestamp }`（`vaultId` 同上） |
@@ -118,7 +118,6 @@ Host 通过 Tauri event 向前端推送事件。文件系统、任务和菜单�
   另有 `event_names_match_emit_literals` 测试断言事件名与 emit 常量一致。改任何命令签名 / 事件 payload 后必须重新生成并提交 bindings.ts。Rust 类型的文档注释也会导出并参与一致性校验，因此只修改这些注释时同样需要重新生成。
   `scanned_emit_event_names_match_registered_contract` 扫描桌面 Host、`agentero-core` 与 `agentero-mcp` 的 Rust 源码，解析跨 crate 的事件常量并核对注册集合；抽取共享事件定义时需同步维护扫描范围。
   新增事件须同时登记 `events_contract.rs` 的类型和 `registered_event_names()` 集合，以及 `bindings_test.rs` 的导出列表；仅生成 TypeScript bindings 不会覆盖事件扫描检查。
-  插件事件也纳入生成契约：`plugins:changed` 的 payload 为 `null`，`plugins:data-changed` 为 Vault 路径字符串。
 - **`_Serialize` / `_Deserialize` 拆分**：specta 对 serde 不对称表示的忠实拆分——`X_Deserialize` 是 **TS→Rust 入参**形态（`#[serde(default)]` 字段可省略），`X_Serialize` 是 **Rust→TS 出参**形态（`skip_serializing_if` 字段可缺省）。二者一致时只生成单一 `X`。命令函数与 `events.*` 的签名已内嵌正确方向的类型，**调用点无需手写这些类型名**。
 - **论文域的派生范式**：`src/lib/paper/types.ts` 不再手写 `PaperRecord` 的孪生类型，而是 `PaperMetadata = Omit<PaperRecord_Serialize, …>`、`PaperLibraryRow = PaperMetadata & { has_pdf }`（源自 `PaperListRow_Serialize`）。只窄化四处：`status` / `body_source` / `body_quality`（Rust 侧仍是 `String` 列）与 `tags`（`PaperTag` 的序列化在无色时是裸字符串）。IPC → 域模型的唯一 unchecked 折叠点是 `src/lib/paper/wire.ts::paperFromWire`。给那三列加 Rust enum（照 `PaperKind` 先例：enum + `From<&str>` + `FromSql` + 未知值兜底）即可去掉窄化，列都是 TEXT，**不需要 schema migration**；代价清单见 [../development/import-api-abstraction.md](../development/import-api-abstraction.md) §11。
 - **前端调用形态（迁移说明）**：bindings 导出 `commands`（camelCase 命令函数）与 `events`（`events.jobChanged.listen(cb)` 等，payload 已按事件名类型化）。返回值有两种信封：
@@ -166,7 +165,6 @@ Host 通过 Tauri event 向前端推送事件。文件系统、任务和菜单�
   - 确保目录存在；脚手架 `papers/`、`notes/`、`data/`、`.agentero/`、**`.agents/`**、**`.agents/skills/`**。
   - 初始化 `.agentero/catalog.sqlite`（schema 当前版本，含 Translator 元数据列）。详见 [`catalog.md`](catalog.md)。
   - 写入默认 `AGENTS.md`（若不存在）。
-  - 当 `thesis/` 不存在时写入 LaTeX 起手稿 `thesis/main.tex`（现有 `thesis/` 目录保持原样）；`data/` 为远端服务器数据预留的空目录。
   - 写入 **`.agents/README.md`**（若不存在；内容来自仓库 `templates/vault/.agents/`）。
   - 种子 **bundled skills**：构建时自动发现 `templates/vault/.agents/skills/<id>/` 下的 Skill package 并内嵌，创建 Vault 时写入缺失文件；`agentero-cli` 按平台把 POSIX / Windows 模板映射到同一 `.agents/skills/agentero-cli/SKILL.md`。另写 `skills/README.md`。
   - **不**创建根级 `PAPERS.md` / `library.bib`；已有第一方 `SKILL.md` 按 frontmatter 整数 `version` 升级（见 `vault_ensure`）；用户去掉/抬高 `version` 的修改与其它 `.agents/**` 文件保持原样。
@@ -232,9 +230,7 @@ type VaultTreeNode = {
 | CLI import | `agentero import` | ❌ 仅本地 vault 路径 |
 | 回收站 | `path_trash` / `path_list_trash` / restore / purge | ✅ 经 `trash_bridge` 写远端 `.agentero/.trash/` |
 
-返回的 `paperDir`（远程）为 `remote:<sessionId>/papers/…`。
 
-Agent：`agent_run_once` / `agent_warm` 在 vault 为 `remote:…` 时经 SSH `bash -lc` 启动远端 ACP（含 Codex，经 `codex-acp` 适配器）。
 
 #### `path_open_in_terminal`（已实现）
 

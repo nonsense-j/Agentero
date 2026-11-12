@@ -1,5 +1,4 @@
-//! Vault sync over official Agentero cloud, S3-compatible object storage,
-//! WebDAV, or a Git remote.
+//! Vault sync over S3-compatible object storage, WebDAV, or a Git remote.
 //!
 //! Design doc: `docs/development/cloud-sync-s3.md`. S3/WebDAV use a
 //! state-based engine: content-addressed blobs + immutable manifests + a CAS
@@ -11,7 +10,6 @@
 //! and the headless CLI (`agentero sync …`), so both sides get the same
 //! merge, conflict and failure-recovery semantics.
 
-mod agentero;
 pub mod config;
 pub mod engine;
 pub mod git;

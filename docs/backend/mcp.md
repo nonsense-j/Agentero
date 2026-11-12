@@ -118,7 +118,7 @@ cargo test -p agentero-core ops::tests
 cargo test -p agentero-core pdf::layout_index
 ```
 
-`vault_search_protocol_round_trip_reads_fixture_hits` 使用 `test/fixtures/mcp-search` 测试资料，实际运行内存 JSON-RPC 的 initialize、tools/list、tools/call 与 file_read 回读；不启动 listener，不代表 Streamable HTTP / App UI / Tunnel 的端到端验收。
+`vault_search_protocol_round_trip_reads_fixture_hits` 使用 `test/fixtures/mcp-search` 测试资料，实际运行内存 JSON-RPC 的 initialize、tools/list、tools/call 与 file_read 回读；不启动 listener，不代表 Streamable HTTP / App UI 的端到端验收。
 
 `paper_notes_write`：
 

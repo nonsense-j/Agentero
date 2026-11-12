@@ -62,7 +62,6 @@ import {
 	visibleRowIndexes,
 } from "@/lib/research-table/view";
 import { notifyWikiEmbedTargets } from "@/lib/wiki/embed-refresh";
-import { registerTextEditorFlusher } from "@/lib/workspace/text-editor-flush";
 
 type Props = {
 	path: string;
@@ -220,7 +219,6 @@ export function TableViewer({
 			if (saving.current === attempt) saving.current = null;
 		}
 	}, []);
-	useEffect(() => registerTextEditorFlusher(path, flush), [path, flush]);
 	useEffect(() => {
 		if (
 			(seed === saved.current && lastReload.current === reloadKey) ||

@@ -30,7 +30,6 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::Manager;
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -141,12 +140,7 @@ pub async fn warm_agent(
     };
     let registry = new_registry();
     let terminals = acp_terminals(Some(cwd.clone()));
-    let mcp_servers = app
-        .app_handle()
-        .try_state::<Arc<crate::features::agent::delegate::DelegateBridge>>()
-        .and_then(|bridge| bridge.mcp_server(&session_id, app.window_label()))
-        .into_iter()
-        .collect();
+    let mcp_servers = Vec::new();
     let (setup_tx, setup_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let task = pool.start_warm(&key);
     let cancellation = task.cancellation.clone();

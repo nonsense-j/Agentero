@@ -88,7 +88,7 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 - **一次 pass**：按 scope 更新 `.gitignore` 并取消跟踪 → `git status` → 有改动则 `git add -A` + commit（`agentero sync: <RFC3339>`）→ `ls-remote` → 需要时 fetch → `merge origin/<branch>`（允许 unrelated histories）→ push。远端无分支时直接推送；空 Vault 加入已有远端时 `reset --hard` 采纳远端。push 被非 fast-forward 拒绝时重试 fetch/merge/push（最多 3 次）。
 - **冲突**：使用 Git 原生三方合并；有冲突时收集 `--diff-filter=U` 路径、`git merge --abort` 并返回 `sync_conflict`，**不 push、不 auto-resolve**。本地提交保留，用户用 Git/编辑器解决后再同步。
 - **认证**：不把 token 写入 `sync.json`；使用系统 credential helper / SSH agent。子进程设置 `GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=never`、`SSH_ASKPASS_REQUIRE=never`（Unix 未自定义 `GIT_SSH_COMMAND` 时加 `ssh -o BatchMode=yes`），非交互环境失败而不是挂起。HTTPS URL 内嵌凭据、`ext::`、`git://` 一律拒绝。
-- **Windows 进程回收**：每次 Git 命令经 `process::command_output` 先暂停创建、加入独立 Job Object 后恢复运行，避免 Git 启动器派生的 HTTPS / SSH 后代逃逸。命令正常结束、超时（网络命令 600s）或同步任务取消时均关闭 Job，终止该次命令留下的完整进程树；不按进程名清理，不影响其它仓库的 Git。同一守卫也用于写作目录同步、Doctor / 安装器、编译工具和 MCP tunnel。非 Windows 保持原有执行方式。全局 `http.postBuffer` 等用户 Git 配置仍由 Git 自身读取，本修复不会修改；过大的上传缓冲可能放大单次 HTTPS 推送内存占用。
+- **Windows 进程回收**：每次 Git 命令经 `process::command_output` 先暂停创建、加入独立 Job Object 后恢复运行，避免 Git 启动器派生的 HTTPS / SSH 后代逃逸。命令正常结束、超时（网络命令 600s）或同步任务取消时均关闭 Job，终止该次命令留下的完整进程树；不按进程名清理，不影响其它仓库的 Git。同一守卫也用于 Doctor / 安装器。非 Windows 保持原有执行方式。全局 `http.postBuffer` 等用户 Git 配置仍由 Git 自身读取，本修复不会修改；过大的上传缓冲可能放大单次 HTTPS 推送内存占用。
 - **触发**：复用自动同步调度（打开 Vault、静置 30s、定时间隔）。退出 flush 跳过 Git——5s 预算可能中断 commit/push 并留下 `index.lock`，下次启动补推。`.git` 与 `.agentero` 已被 watcher 忽略，不会事件回环。
 - **限制**：关掉的类别不再进入新提交；已经在 Git 历史里的 PDF/TeX 不会被清掉（未接 Git LFS）。没有按论文按需拉取；该能力依赖 partial clone + sparse-checkout，见 [../development/cloud-sync-s3.md](../development/cloud-sync-s3.md) 的 Git Phase 2。
 
@@ -108,7 +108,7 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 
 ## 前端
 
-设置窗口「同步」pane：`src/components/settings/panes/sync-pane.tsx`；命令封装 `src/lib/sync/api.ts`。仅本地 Vault 可配置（`remote:` 句柄显示提示）。标题旁用小色点展示连接状态（灰=未连接，绿=已连接，蓝=同步中，红=最近一次同步/连接失败）。后端选择为与服务商 logo 同行的下拉框（对象存储 / WebDAV / Git；已配置时禁用并提示先解绑），随后按后端渲染表单（S3：endpoint/bucket/AK/SK + 高级项；WebDAV：服务器地址/用户名/密码；Git：仓库地址/分支 + 系统凭据提示）。服务商 logo 按钮按后端分组（S3：AWS/R2/MinIO/OSS/BOS；WebDAV：坚果云/Nextcloud；Git：GitHub/GitLab），打开官方配置指南，不会通过外链自动创建或回填凭据。同步范围（见上）在同一 pane：小标题 + 逐类开关（行内显示本地体积，默认全开）。Git 下说明改为写入 `.gitignore`。
+设置窗口「同步」pane：`src/components/settings/panes/sync-pane.tsx`；命令封装 `src/lib/sync/api.ts`。标题旁用小色点展示连接状态（灰=未连接，绿=已连接，蓝=同步中，红=最近一次同步/连接失败）。后端选择为与服务商 logo 同行的下拉框（对象存储 / WebDAV / Git；已配置时禁用并提示先解绑），随后按后端渲染表单（S3：endpoint/bucket/AK/SK + 高级项；WebDAV：服务器地址/用户名/密码；Git：仓库地址/分支 + 系统凭据提示）。服务商 logo 按钮按后端分组（S3：AWS/R2/MinIO/OSS/BOS；WebDAV：坚果云/Nextcloud；Git：GitHub/GitLab），打开官方配置指南，不会通过外链自动创建或回填凭据。同步范围（见上）在同一 pane：小标题 + 逐类开关（行内显示本地体积，默认全开）。Git 下说明改为写入 `.gitignore`。
 
 ## 自动同步
 

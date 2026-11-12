@@ -12,25 +12,12 @@
 	},
 	"permission": {
 		"title": "Agent permission",
-		"remoteHost": "Remote host: {{host}}",
 		"deny": "Deny",
 		"kind": {
 			"allowOnce": "Allow once",
 			"allowAlways": "Always allow",
 			"rejectOnce": "Reject once",
 			"rejectAlways": "Always reject"
-		}
-	},
-	"delegate": {
-		"targets": "Remote vaults",
-		"result": "Remote result",
-		"cancel": "Cancel remote run",
-		"run": "{{host}} · {{agent}} · {{status}}",
-		"status": {
-			"running": "Running",
-			"completed": "Done",
-			"failed": "Failed",
-			"cancelled": "Cancelled"
 		}
 	},
 	"piTrust": {
@@ -46,8 +33,7 @@
 	"suggestions": {
 		"summarizePaper": "Summarize the open paper",
 		"askLibrary": "Ask a question across my library",
-		"listClaims": "List key claims and evidence",
-		"draftRelatedWork": "Draft a Related Work section"
+		"listClaims": "List key claims and evidence"
 	},
 	"history": {
 		"aria": "Open chat history",

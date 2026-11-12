@@ -10,7 +10,6 @@
 
 export type SkillThemeId =
 	| "reading"
-	| "writing"
 	| "figures"
 	| "ppt"
 	| "reproduce"
@@ -68,29 +67,6 @@ export const SKILL_THEMES: readonly SkillTheme[] = [
 				"paper-craft-skills",
 				1028,
 				"论文精读、要点速览与讲解图，arXiv 链接触发。",
-			),
-		],
-	},
-	{
-		id: "writing",
-		repos: [
-			github(
-				"Imbad0202",
-				"academic-research-skills",
-				42400,
-				"检索 → 写作 → 审稿 → 改稿的完整学术写作流水线。",
-			),
-			github(
-				"Master-cai",
-				"Research-Paper-Writing-Skills",
-				6023,
-				"ML / CV / NLP 论文段落级写法，改编自彭思达公开笔记。",
-			),
-			github(
-				"zLanqing",
-				"codex-claude-academic-skills",
-				2872,
-				"中文科研流：读文献报告、写作润色、科学计算与出图。",
 			),
 		],
 	},

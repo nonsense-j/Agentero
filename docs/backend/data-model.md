@@ -19,8 +19,6 @@ Vault/
 ├── papers/
 ├── notes/
 ├── data/             # 远端服务器数据/产物的落位目录（非论文）
-├── thesis/
-│   └── main.tex      # LaTeX 起手稿（仅新建 Vault 时写入）
 ├── .agents/skills/
 ├── .claude/skills -> ../.agents/skills   # 探测到 claude CLI 时由 Host 创建（见 vault.md）
 └── .agentero/

@@ -78,7 +78,6 @@
 		},
 		"vaultRoot": {
 			"notes": "笔记",
-			"thesis": "写作",
 			"data": "数据",
 			"agents": "Agent"
 		}
@@ -405,7 +404,6 @@
 			"import": "导入 {{name}} 的 Skill",
 			"themes": {
 				"reading": "论文阅读",
-				"writing": "论文写作",
 				"figures": "绘图",
 				"ppt": "PPT制作",
 				"reproduce": "复现",

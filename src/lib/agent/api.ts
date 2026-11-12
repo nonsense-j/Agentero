@@ -377,8 +377,6 @@ export type PermissionRequest = {
 	kind?: string | null;
 	paths: string[];
 	options: PermissionOption[];
-	/** Remote host when the request came from a delegated run. */
-	host?: string | null;
 };
 
 /** Shared non-Tauri guard message for every agent Host call. */
