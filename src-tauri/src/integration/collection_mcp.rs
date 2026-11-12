@@ -1,18 +1,18 @@
 //! Session-scoped `agentero-collection` stdio MCP server for Plaza Paper Discover (Deep Search).
 //!
 //! Re-executes the desktop binary with [`COLLECTION_MCP_WORKER_ARG`] and the
-//! `<cache>/agentero/plaza-collection` directory path, exposing read-only
-//! discovery, uniform random sampling, citation/co-citation snowballing, and
-//! candidate curation strictly bounded to the user's `Paper Collection`.
+//! `collection.sqlite` path under `agentero_data_dir()`, reading directly over
+//! SQLite WAL for zero-copy discovery, uniform random sampling, citation/co-citation
+//! snowballing, and candidate curation strictly bounded to the user's `Paper Collection`.
 
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
-use agentero_core::features::paper::discovery::collection_pool::{
-    collection_cache_dir, compute_overview, curate_collection, read_snapshot_in, search_collection,
-    snowball_citations_in_collection, CollectionCitationsOut, CollectionCitationsParams,
-    CollectionCurateOut, CollectionCurateParams, CollectionOverviewOut, CollectionSearchOut,
-    CollectionSearchParams, COLLECTION_MCP_WORKER_ARG,
+use agentero_core::features::paper::discovery::collection::{
+    collection_db_path, curate_collection_at, ensure_collection, overview_at, search_collection_at,
+    snowball_citations_at, CollectionCitationsOut, CollectionCitationsParams, CollectionCurateOut,
+    CollectionCurateParams, CollectionOverviewOut, CollectionSearchOut, CollectionSearchParams,
+    COLLECTION_MCP_WORKER_ARG,
 };
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
@@ -22,26 +22,17 @@ use crate::core::error::AppError;
 
 #[derive(Clone)]
 struct CollectionMcp {
-    cache_dir: PathBuf,
+    db_path: PathBuf,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
 impl CollectionMcp {
-    fn new(cache_dir: PathBuf) -> Self {
+    fn new(db_path: PathBuf) -> Self {
         Self {
-            cache_dir,
+            db_path,
             tool_router: Self::tool_router(),
         }
-    }
-
-    fn load_snapshot(
-        &self,
-    ) -> Result<
-        agentero_core::features::paper::discovery::collection_pool::CollectionSnapshot,
-        AppError,
-    > {
-        read_snapshot_in(&self.cache_dir)
     }
 }
 
@@ -55,8 +46,12 @@ impl CollectionMcp {
         description = "Inspect summary statistics of the local Paper Collection pool: total papers, arXiv vs Venue counts, date range, CCF-A/CCF-B distribution, arXiv categories, and configured conferences/journals."
     )]
     async fn collection_overview(&self) -> Result<Json<CollectionOverviewOut>, CallToolResult> {
-        let snapshot = self.load_snapshot().map_err(tool_err)?;
-        Ok(Json(compute_overview(&snapshot)))
+        let db = self.db_path.clone();
+        let out = tokio::task::spawn_blocking(move || overview_at(&db))
+            .await
+            .map_err(tool_err)?
+            .map_err(tool_err)?;
+        Ok(Json(out))
     }
 
     #[tool(
@@ -66,8 +61,12 @@ impl CollectionMcp {
         &self,
         Parameters(args): Parameters<CollectionSearchParams>,
     ) -> Result<Json<CollectionSearchOut>, CallToolResult> {
-        let snapshot = self.load_snapshot().map_err(tool_err)?;
-        Ok(Json(search_collection(&snapshot, &args)))
+        let db = self.db_path.clone();
+        let out = tokio::task::spawn_blocking(move || search_collection_at(&db, &args))
+            .await
+            .map_err(tool_err)?
+            .map_err(tool_err)?;
+        Ok(Json(out))
     }
 
     #[tool(
@@ -77,8 +76,9 @@ impl CollectionMcp {
         &self,
         Parameters(args): Parameters<CollectionCitationsParams>,
     ) -> Result<Json<CollectionCitationsOut>, CallToolResult> {
-        let snapshot = self.load_snapshot().map_err(tool_err)?;
-        let out = snowball_citations_in_collection(&self.cache_dir, &snapshot, &args).await;
+        let out = snowball_citations_at(&self.db_path, &args)
+            .await
+            .map_err(tool_err)?;
         Ok(Json(out))
     }
 
@@ -89,8 +89,12 @@ impl CollectionMcp {
         &self,
         Parameters(args): Parameters<CollectionCurateParams>,
     ) -> Result<Json<CollectionCurateOut>, CallToolResult> {
-        let snapshot = self.load_snapshot().map_err(tool_err)?;
-        Ok(Json(curate_collection(&snapshot, args)))
+        let db = self.db_path.clone();
+        let out = tokio::task::spawn_blocking(move || curate_collection_at(&db, args))
+            .await
+            .map_err(tool_err)?
+            .map_err(tool_err)?;
+        Ok(Json(out))
     }
 }
 
@@ -99,7 +103,7 @@ impl ServerHandler for CollectionMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "agentero-collection is a read-only MCP server over the user's local Plaza Paper Collection. \
+                "agentero-collection is a SQLite-backed MCP server over the user's local Plaza Paper Collection. \
                  All searches (`collection_search`), citation/co-citation snowballs (`collection_citations`), \
                  and curated recommendations (`collection_curate`) are strictly bounded to papers in this pool. \
                  Never fabricate paper IDs or search outside this server.",
@@ -113,20 +117,19 @@ impl ServerHandler for CollectionMcp {
 
 /// Build the ACP stdio descriptor for attaching `agentero-collection` to a local Deep Search session.
 pub fn collection_mcp_server() -> Result<McpServer, AppError> {
-    let dir = collection_cache_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::message(format!("prepare plaza-collection cache dir: {e}")))?;
+    let _conn = ensure_collection()?;
+    let db_path = collection_db_path();
     let exe = std::env::current_exe().map_err(|error| {
         AppError::message(format!("locate agentero for collection mcp: {error}"))
     })?;
     let stdio = McpServerStdio::new("agentero-collection", exe).args(vec![
         COLLECTION_MCP_WORKER_ARG.to_string(),
-        dir.display().to_string(),
+        db_path.display().to_string(),
     ]);
     Ok(McpServer::Stdio(stdio))
 }
 
-/// Exit into the stdio server when spawned with `--agentero-collection-mcp <cache_dir>`.
+/// Exit into the stdio server when spawned with `--agentero-collection-mcp <db_path>`.
 /// Returns `None` on normal desktop launch.
 pub fn try_run_collection_mcp() -> Option<i32> {
     let mut args = std::env::args();
@@ -134,15 +137,15 @@ pub fn try_run_collection_mcp() -> Option<i32> {
     if args.next().as_deref() != Some(COLLECTION_MCP_WORKER_ARG) {
         return None;
     }
-    let Some(cache_dir) = args.next() else {
-        eprintln!("agentero-collection: missing cache directory path");
+    let Some(db_path) = args.next() else {
+        eprintln!("agentero-collection: missing collection.sqlite path");
         return Some(2);
     };
     if args.next().is_some() {
         eprintln!("agentero-collection: unexpected extra arguments");
         return Some(2);
     }
-    match serve(PathBuf::from(cache_dir)) {
+    match serve(PathBuf::from(db_path)) {
         Ok(()) => Some(0),
         Err(error) => {
             eprintln!("agentero-collection: {error}");
@@ -151,13 +154,13 @@ pub fn try_run_collection_mcp() -> Option<i32> {
     }
 }
 
-fn serve(cache_dir: PathBuf) -> Result<(), String> {
+fn serve(db_path: PathBuf) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("start collection mcp runtime: {error}"))?;
     runtime.block_on(async move {
-        let server = CollectionMcp::new(cache_dir)
+        let server = CollectionMcp::new(db_path)
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|error| format!("collection mcp handshake: {error}"))?;

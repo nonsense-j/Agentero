@@ -431,11 +431,34 @@ export const commands = {
 	plazaScratchPrepare: (args: PlazaScratchPrepareArgs) => __TAURI_INVOKE<ApiResult<PlazaScratchEntry[]>>("plaza_scratch_prepare", { args }),
 	plazaScratchStats: () => __TAURI_INVOKE<ApiResult<ScratchStats>>("plaza_scratch_stats"),
 	plazaScratchClear: () => __TAURI_INVOKE<ApiResult<ScratchClearResult>>("plaza_scratch_clear"),
-	/**
-	 *  Persist the frontend Paper Collection pool to `<cache>/agentero/plaza-collection/snapshot.json`
-	 *  so Deep Search's `agentero-collection` MCP server can query and snowball over it.
-	 */
-	plazaCollectionSyncSnapshot: (snapshot: CollectionSnapshot_Deserialize) => __TAURI_INVOKE<ApiResult<CollectionSyncStatus>>("plaza_collection_sync_snapshot", { snapshot }),
+	/**  Read lightweight Paper Collection configuration, watermarks, venues, and portal counts. */
+	plazaCollectionStateGet: () => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_state_get"),
+	/**  Compute aggregate Paper Collection overview statistics (categories, venues, CCF distribution, date span). */
+	plazaCollectionOverview: () => __TAURI_INVOKE<ApiResult<CollectionOverviewOut>>("plaza_collection_overview"),
+	/**  Update Paper Collection categories, venues, arXiv watermarks, or refresh timestamps. */
+	plazaCollectionConfigUpdate: (args: CollectionConfigUpdateArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_config_update", { args }),
+	/**  Upsert a batch of arXiv or Venue papers into `collection.sqlite` (optionally replacing a venue atomically). */
+	plazaCollectionUpsertPapers: (args: CollectionUpsertPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_upsert_papers", { args }),
+	/**  Apply incremental metadata patches (abstract, citations, keywords, BibTeX, `recommendedAt`) to existing papers. */
+	plazaCollectionPatchPapers: (args: CollectionPatchPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_patch_papers", { args }),
+	/**  List a filtered, sorted page of lightweight Paper Collection summaries. */
+	plazaCollectionListPapers: (args: CollectionListPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionPapersPage>>("plaza_collection_list_papers", { args }),
+	/**  Load complete paper details (including formatted BibTeX and citation string) for a single paper ID. */
+	plazaCollectionPaperGet: (args: CollectionPaperIdArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperDetail | null>>("plaza_collection_paper_get", { args }),
+	/**  Batch-fetch lightweight paper summaries by IDs while preserving requested ID order. */
+	plazaCollectionPapersByIds: (args: CollectionPaperIdsArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperSummary[]>>("plaza_collection_papers_by_ids", { args }),
+	/**  Execute SQLite FTS5 + weighted boolean search with combinable range/rank/venue filters. */
+	plazaCollectionSearch: (args: CollectionSearchArgs) => __TAURI_INVOKE<ApiResult<CollectionSearchResult>>("plaza_collection_search", { args }),
+	/**  Read persisted Paper Recommend keyword chips, selected cloud terms, and Top-N configuration. */
+	plazaCollectionRecommendStateGet: () => __TAURI_INVOKE<ApiResult<RecommendPoolStateDto>>("plaza_collection_recommend_state_get"),
+	/**  Persist Paper Recommend keyword chips, selected cloud terms, or Top-N configuration. */
+	plazaCollectionRecommendStateSet: (args: RecommendPoolStateInput) => __TAURI_INVOKE<ApiResult<RecommendPoolStateDto>>("plaza_collection_recommend_state_set", { args }),
+	/**  Compute Top-N word cloud keywords (`count`, `unrecommendedCount`, best display casing) over in-scope papers. */
+	plazaCollectionWordCloud: (args: CollectionWordCloudArgs) => __TAURI_INVOKE<ApiResult<WordCloudOut>>("plaza_collection_word_cloud", { args }),
+	/**  Score unrecommended in-scope papers against active keywords, atomically stamp `recommendedAt`, and return the batch. */
+	plazaCollectionRecommendNext: (args: RecommendNextArgs) => __TAURI_INVOKE<ApiResult<RecommendNextOut>>("plaza_collection_recommend_next", { args }),
+	/**  Reset or clear Paper Collection data (`all`, `papers`, `venue`, `recommended`, or `citations`). */
+	plazaCollectionClear: (args: CollectionClearArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_clear", { args }),
 	feedsSetPinned: (args: FeedsSetPinnedArgs) => __TAURI_INVOKE<ApiResult<FeedSub>>("feeds_set_pinned", { args }),
 	feedsResolveBody: (args: FeedsIdArgs) => __TAURI_INVOKE<ApiResult<FeedItem>>("feeds_resolve_body", { args }),
 	/**
@@ -1876,6 +1899,11 @@ export type Bbox = {
 	h: number | null,
 };
 
+export type BucketCount = {
+	label: string,
+	count: number,
+};
+
 /**  Non-secret snapshot for Host-side consumers resolving built-in credentials. */
 export type BuiltinProviderStatus = {
 	available: boolean,
@@ -2123,6 +2151,12 @@ export type CatalogUpdatePropertyArgs_Serialize = {
 	property: CustomProperty_Serialize,
 };
 
+export type CcfDistribution = {
+	ccfA: number,
+	ccfB: number,
+	arxivPreprint: number,
+};
+
 export type ChatImportExtractArgs = {
 	/**  Pasted chat text, or a bare AI-chat share URL (chatgpt.com/share/...). */
 	text: string,
@@ -2366,20 +2400,179 @@ export type CliInstallStatus = {
 	message: string | null,
 };
 
-export type CollectionSnapshot = CollectionSnapshot_Serialize | CollectionSnapshot_Deserialize;
+export type CollectionArxivLatest = {
+	arxivId: string,
+	title: string,
+	publishedAt: string,
+	categoriesKey: string,
+	checkedAt: string,
+};
 
-export type CollectionSnapshotPaper = CollectionSnapshotPaper_Serialize | CollectionSnapshotPaper_Deserialize;
+export type CollectionArxivWatermark = {
+	latestPublishedAt: string,
+	latestArxivId: string,
+	lastSyncedAt: string,
+	oldestSyncedPublishedAt: string | null,
+	remoteTotal: number | null,
+	historyComplete: boolean,
+};
 
-export type CollectionSnapshotPaper_Deserialize = {
+export type CollectionArxivWatermarkInput = {
+	latestPublishedAt: string,
+	latestArxivId: string,
+	lastSyncedAt: string,
+	oldestSyncedPublishedAt?: string | null,
+	remoteTotal?: number | null,
+	historyComplete?: boolean | null,
+};
+
+export type CollectionClearArgs = {
+	scope: string,
+	venueId?: string | null,
+};
+
+export type CollectionConfigUpdateArgs = {
+	categories?: string[] | null,
+	venues?: CollectionVenueInput[] | null,
+	arxivWatermarks?: { [key in string]: CollectionArxivWatermarkInput } | null,
+	lastRefreshedAt?: string | null,
+	latestArxiv?: CollectionArxivLatest | null,
+};
+
+export type CollectionListPapersArgs = {
+	sourceType?: string | null,
+	category?: string | null,
+	timePreset?: string | null,
+	dateFrom?: string | null,
+	dateTo?: string | null,
+	venueKind?: string | null,
+	venueDomain?: string | null,
+	venueId?: string | null,
+	ccfRanks?: string[],
+	sort?: string | null,
+	limit?: number | null,
+	offset?: number | null,
+};
+
+export type CollectionOverviewOut = {
+	totalPapers: number,
+	arxivCount: number,
+	venueCount: number,
+	updatedAt: string,
+	earliestDate: string | null,
+	latestDate: string | null,
+	ccfDistribution: CcfDistribution,
+	categories: BucketCount[],
+	venues: VenueBucketCount[],
+};
+
+/**  Complete paper record for the detail dialog and BibTeX / academic citation copy actions. */
+export type CollectionPaperDetail = {
+	id: string,
+	title: string,
+	authors: string[],
+	abstract: string,
+	publishedAt: string,
+	year: number,
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	url: string,
+	pdfUrl: string | null,
+	arxivId: string | null,
+	doi: string | null,
+	venueId: string | null,
+	venueKind: string | null,
+	venueDomain: string | null,
+	ccfRank: string | null,
+	venueFull: string | null,
+	citationCount: number,
+	keywords: string[],
+	volume: string | null,
+	issue: string | null,
+	pages: string | null,
+	coolPapersId: string | null,
+	recommendedAt: string | null,
+	bibtex: string | null,
+	citationText: string,
+};
+
+export type CollectionPaperIdArgs = {
+	id: string,
+};
+
+export type CollectionPaperIdsArgs = {
+	ids: string[],
+};
+
+export type CollectionPaperPatch = {
+	id: string,
+	title?: string | null,
+	authors?: string[] | null,
+	abstract?: string | null,
+	publishedAt?: string | null,
+	year?: number | null,
+	categories?: string[] | null,
+	url?: string | null,
+	pdfUrl?: string | null,
+	arxivId?: string | null,
+	doi?: string | null,
+	venueId?: string | null,
+	venueKind?: string | null,
+	venueDomain?: string | null,
+	ccfRank?: string | null,
+	venueFull?: string | null,
+	citationCount?: number | null,
+	keywords?: string[] | null,
+	volume?: string | null,
+	issue?: string | null,
+	pages?: string | null,
+	bibtex?: string | null,
+	coolPapersId?: string | null,
+	recommendedAt?: string | null,
+};
+
+/**
+ *  Lightweight paper record returned in paginated lists, search hits, and recommend batches.
+ *  Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory.
+ */
+export type CollectionPaperSummary = {
+	id: string,
+	title: string,
+	authors: string[],
+	abstract: string,
+	publishedAt: string,
+	year: number,
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	url: string,
+	pdfUrl: string | null,
+	arxivId: string | null,
+	doi: string | null,
+	venueId: string | null,
+	venueKind: string | null,
+	venueDomain: string | null,
+	ccfRank: string | null,
+	venueFull: string | null,
+	citationCount: number,
+	keywords: string[],
+	volume: string | null,
+	issue: string | null,
+	pages: string | null,
+	coolPapersId: string | null,
+	recommendedAt: string | null,
+};
+
+export type CollectionPaperUpsertInput = {
 	id: string,
 	title: string,
 	authors?: string[],
 	abstract?: string,
 	publishedAt?: string,
 	year?: number,
-	/**  `"arxiv"` or `"venue"`. */
-	sourceType?: string,
-	sourceLabel?: string,
+	sourceType: string,
+	sourceLabel: string,
 	categories?: string[],
 	url?: string,
 	pdfUrl?: string | null,
@@ -2390,60 +2583,111 @@ export type CollectionSnapshotPaper_Deserialize = {
 	venueDomain?: string | null,
 	ccfRank?: string | null,
 	venueFull?: string | null,
-	citationCount?: number,
+	citationCount?: number | null,
 	keywords?: string[],
+	volume?: string | null,
+	issue?: string | null,
+	pages?: string | null,
+	bibtex?: string | null,
+	coolPapersId?: string | null,
+	recommendedAt?: string | null,
 };
 
-export type CollectionSnapshotPaper_Serialize = {
-	id: string,
-	title: string,
-	authors: string[],
-	abstract: string,
-	publishedAt: string,
-	year: number,
-	/**  `"arxiv"` or `"venue"`. */
-	sourceType: string,
-	sourceLabel: string,
-	categories: string[],
-	url: string,
-	pdfUrl?: string | null,
-	arxivId?: string | null,
-	doi?: string | null,
-	venueId?: string | null,
+export type CollectionPapersPage = {
+	items: CollectionPaperSummary[],
+	total: number,
+	hasMore: boolean,
+};
+
+export type CollectionPatchPapersArgs = {
+	patches: CollectionPaperPatch[],
+};
+
+export type CollectionSearchArgs = {
+	query?: string | null,
+	timePreset?: string | null,
+	dateFrom?: string | null,
+	dateTo?: string | null,
+	sourceType?: string | null,
+	categories?: string[],
+	venues?: string[],
 	venueKind?: string | null,
 	venueDomain?: string | null,
-	ccfRank?: string | null,
-	venueFull?: string | null,
-	citationCount: number,
-	keywords: string[],
+	ccfRanks?: string[],
+	fields?: string[],
+	sort?: string | null,
+	limit?: number | null,
+	offset?: number | null,
 };
 
-export type CollectionSnapshot_Deserialize = {
-	updatedAt?: string,
-	categories?: string[],
-	venues?: CollectionVenueMeta[],
-	items?: CollectionSnapshotPaper_Deserialize[],
+export type CollectionSearchResult = {
+	items: ScoredCollectionPaperDto[],
+	totalMatched: number,
 };
 
-export type CollectionSnapshot_Serialize = {
-	updatedAt: string,
+export type CollectionStateSummary = {
 	categories: string[],
-	venues: CollectionVenueMeta[],
-	items: CollectionSnapshotPaper_Serialize[],
+	venues: CollectionVenueRecord[],
+	arxivWatermarks: { [key in string]: CollectionArxivWatermark },
+	lastRefreshedAt: string | null,
+	latestArxiv: CollectionArxivLatest | null,
+	totalCount: number,
+	arxivCount: number,
+	venueCount: number,
+	conferenceCount: number,
+	journalCount: number,
+	categoryCounts: { [key in string]: number },
 };
 
-export type CollectionSyncStatus = {
-	dir: string,
-	totalPapers: number,
-	updatedAt: string,
+export type CollectionUpsertPapersArgs = {
+	items?: CollectionPaperUpsertInput[],
+	replaceVenueId?: string | null,
+	replaceSourceLabel?: string | null,
+	venueUpdate?: CollectionVenueWatermarkUpdate | null,
+	arxivWatermarks?: { [key in string]: CollectionArxivWatermarkInput } | null,
+	lastRefreshedAt?: string | null,
+	latestArxiv?: CollectionArxivLatest | null,
 };
 
-export type CollectionVenueMeta = {
+export type CollectionVenueInput = {
 	id: string,
 	name: string,
+	url: string,
+	mode?: string | null,
 	kind?: string | null,
 	domain?: string | null,
 	ccfRank?: string | null,
+	dblpStream?: string | null,
+	lastFetchedAt?: string | null,
+	latestPublishedAt?: string | null,
+	remoteTotalCount?: number | null,
+	paperCount?: number | null,
+};
+
+export type CollectionVenueRecord = {
+	id: string,
+	name: string,
+	url: string,
+	mode: string,
+	kind: string | null,
+	domain: string | null,
+	ccfRank: string | null,
+	dblpStream: string | null,
+	lastFetchedAt: string | null,
+	latestPublishedAt: string | null,
+	remoteTotalCount: number | null,
+	paperCount: number,
+};
+
+export type CollectionVenueWatermarkUpdate = {
+	venueId: string,
+	lastFetchedAt?: string | null,
+	latestPublishedAt?: string | null,
+	remoteTotalCount?: number | null,
+};
+
+export type CollectionWordCloudArgs = {
+	topN?: number | null,
 };
 
 export type CommitStatus = 
@@ -4528,6 +4772,43 @@ export type RecommendItem = {
 	score: number | null,
 };
 
+export type RecommendKeywordChipDto = {
+	id: string,
+	term: string,
+	enabled: boolean,
+};
+
+export type RecommendKeywordChipInput = {
+	id?: string | null,
+	term: string,
+	enabled?: boolean,
+};
+
+export type RecommendNextArgs = {
+	maxBatchSize?: number | null,
+};
+
+export type RecommendNextOut = {
+	items: RecommendedPaperDto[],
+	state: RecommendPoolStateDto,
+	exhausted: boolean,
+	remainingUnrecommended: number,
+};
+
+export type RecommendPoolStateDto = {
+	keywords: RecommendKeywordChipDto[],
+	selectedCloudTerms: string[],
+	wordCloudTopN: number,
+	lastRecommendedAt: string | null,
+};
+
+export type RecommendPoolStateInput = {
+	keywords?: RecommendKeywordChipInput[] | null,
+	selectedCloudTerms?: string[] | null,
+	wordCloudTopN?: number | null,
+	lastRecommendedAt?: string | null,
+};
+
 export type RecommendResult = {
 	items: RecommendItem[],
 	/**  RFC3339 timestamp of the run that produced `items`. */
@@ -4536,6 +4817,12 @@ export type RecommendResult = {
 	corpusSize: number,
 	/**  True when `items` came from the stored same-day run. */
 	reusedCache: boolean,
+};
+
+export type RecommendedPaperDto = {
+	paper: CollectionPaperSummary,
+	matchedKeywords: string[],
+	score: number | null,
 };
 
 export type ResearchTableBacklink = {
@@ -4743,6 +5030,12 @@ export type RunOnceRequest_Serialize = {
 	 *  contains that transcript.
 	 */
 	resumeTranscript?: string | null,
+};
+
+export type ScoredCollectionPaperDto = {
+	paper: CollectionPaperSummary,
+	score: number | null,
+	matchedFields: string[],
 };
 
 export type ScratchClearResult = {
@@ -5412,6 +5705,15 @@ export type VaultTreeNode_Serialize = {
 	needsSource?: boolean | null,
 };
 
+export type VenueBucketCount = {
+	id: string,
+	name: string,
+	kind: string | null,
+	domain: string | null,
+	ccfRank: string | null,
+	count: number,
+};
+
 /**  Result of one publication sync over a Library scope. */
 export type VenueSyncReport = {
 	/**  Papers whose tag projection changed (submission, legacy cleanup, metrics). */
@@ -5875,6 +6177,20 @@ export type WindowClosedEvent_Deserialize = {
 export type WindowClosedEvent_Serialize = {
 	kind: string,
 	view?: string | null,
+};
+
+export type WordCloudKeywordDto = {
+	term: string,
+	normalized: string,
+	count: number,
+	unrecommendedCount: number,
+};
+
+export type WordCloudOut = {
+	keywords: WordCloudKeywordDto[],
+	totalUniqueKeywords: number,
+	totalCandidatePapers: number,
+	unrecommendedPaperCount: number,
 };
 
 /**  A Zotero collection surfaced in the scan preview (for the folder picker). */

@@ -75,6 +75,12 @@ impl DbMsgs {
         read: "feeds ",
         upgrade_hint: "",
     };
+    pub const COLLECTION: Self = Self {
+        name: "collection",
+        scope: "collection ",
+        read: "collection ",
+        upgrade_hint: "; upgrade Agentero",
+    };
 }
 
 /// Open `db_path` and apply [`STANDARD_PRAGMAS`].
