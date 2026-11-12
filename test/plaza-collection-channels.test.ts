@@ -11,15 +11,17 @@ import {
 	ensurePaperFullDetails,
 	extractSpringerHtmlAbstract,
 	fetchCollectionStateSummary,
+	fetchCoolPapersVenuePapers,
 	fetchCsdlVenuePapers,
 	fetchDataCiteLipicsPapers,
-	fetchDblpSparqlVenuePapers,
 	fetchMoreArxivCollection,
 	fetchMultiChannelVenuePapers,
+	fetchOfficialTrackRoster,
 	fetchVenueStructuredPapers,
 	getCollectionPapersByIds,
 	getCollectionSummarySnapshot,
 	isConfirmedVenueAcceptance,
+	isNonResearchJournalItem,
 	isPreloadingCollection,
 	isVenueAlreadyLoaded,
 	listCollectionPapers,
@@ -29,6 +31,7 @@ import {
 	parseCoolPapersVenueHtml,
 	parseOfficialVenueProgramHtml,
 	preloadAll2026ArxivInBackground,
+	refreshArxivCollection,
 	refreshVenueCollection,
 	resetCollectionMemoryForTests,
 	subscribeCollectionSummary,
@@ -37,6 +40,7 @@ import {
 	updateCollectionConfig,
 	upsertCollectionPapers,
 	VENUE_SPEC_BY_ID,
+	VENUE_SPECS,
 } from "@/lib/plaza/collection";
 import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
 
@@ -382,13 +386,19 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("fetches DOI-less DBLP 2026 papers via official SPARQL and enriches abstracts via OpenAlex title search, plus lowercase LIPIcs DOI prefixes", async () => {
-		const usenix = DEFAULT_COLLECTION_VENUES.find(
-			(v) => v.id === "usenix-sec-2026",
-		);
+	it("configures VENUE_SPECS without DBLP dependencies, queries lowercase LIPIcs DOI prefixes, and supports Venue add/edit/delete management without resurrection", async () => {
+		expect(VENUE_SPECS).toHaveLength(28);
+		for (const spec of VENUE_SPECS) {
+			expect(spec.url).toMatch(/^https:\/\//);
+			expect(spec.url).not.toContain("dblp");
+			for (const trackUrl of spec.tracks) {
+				expect(trackUrl).toMatch(/^https:\/\//);
+				expect(trackUrl).not.toContain("dblp");
+			}
+		}
+
 		const ecoop = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ecoop-2026");
-		if (!usenix || !ecoop)
-			throw new Error("Missing usenix-sec-2026 or ecoop-2026");
+		if (!ecoop) throw new Error("Missing ecoop-2026");
 
 		const ecoopUrls: string[] = [];
 		await fetchVenueStructuredPapers(ecoop, 2026, async <T>(url: string) => {
@@ -401,73 +411,90 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			),
 		).toBe(true);
 
-		const sparqlRes = await fetchDblpSparqlVenuePapers(
-			usenix,
-			2026,
-			new Set(),
-			async <T>(url: string) => {
-				if (url.includes("sparql.dblp.org")) {
-					return {
-						results: {
-							bindings: [
-								{
-									title: {
-										value:
-											"Kernel Isolation Against Speculative Side Channels.",
-									},
-									ee: {
-										value:
-											"https://www.usenix.org/conference/usenixsecurity26/presentation/alice",
-									},
-									authors: { value: "Alice Security 0001||Bob Systems" },
-								},
-							],
-						},
-					} as T;
-				}
-				if (decodeURIComponent(url).includes("title.search:")) {
-					return {
-						results: [
-							{
-								id: "https://openalex.org/W999",
-								title: "Kernel Isolation Against Speculative Side Channels",
-								publication_year: 2026,
-								publication_date: "2026-08-12",
-								cited_by_count: 4,
-								abstract_inverted_index: {
-									We: [0],
-									design: [1],
-									a: [2],
-									practical: [3],
-									kernel: [4],
-									isolation: [5],
-									mechanism: [6],
-									against: [7],
-									speculative: [8],
-									side: [9],
-									channels: [10],
-								},
-								authorships: [
-									{ author: { display_name: "Alice Security" } },
-									{ author: { display_name: "Bob Systems" } },
-								],
-							},
-						],
-					} as T;
-				}
-				return { results: [] } as T;
-			},
-		);
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			venues: [...DEFAULT_COLLECTION_VENUES],
+			items: [
+				{
+					id: "venue:sas-2026:doi:10.1007/978-3-032-40374-2_1",
+					title: "Abstract Interpretation Paper to Cascade Delete",
+					authors: ["Patrick Cousot"],
+					abstract: "Sound static analysis abstract.",
+					publishedAt: "2026-10-01T00:00:00Z",
+					year: 2026,
+					sourceType: "venue",
+					sourceLabel: "SAS 2026",
+					venueId: "sas-2026",
+					venueKind: "conference",
+					venueDomain: "PL/SE",
+					ccfRank: "CCF-B",
+					categories: ["SAS 2026"],
+					url: "https://doi.org/10.1007/978-3-032-40374-2_1",
+				},
+			],
+		});
 
-		expect(sparqlRes.items).toHaveLength(1);
-		expect(sparqlRes.items[0]?.authors).toEqual([
-			"Alice Security",
-			"Bob Systems",
-		]);
-		expect(sparqlRes.items[0]?.abstract).toContain(
-			"practical kernel isolation mechanism",
-		);
-		expect(sparqlRes.items[0]?.citationCount).toBe(4);
+		try {
+			// Delete built-in `sas-2026`, edit built-in `icse-2026` (url + tracks + notes + agent mode),
+			// and add a custom user venue `msr-2026` with `tracks` + `notes`.
+			const nextVenues = DEFAULT_COLLECTION_VENUES.filter(
+				(v) => v.id !== "sas-2026",
+			).map((v) =>
+				v.id === "icse-2026"
+					? {
+							...v,
+							url: "https://conf.researchr.org/home/icse-2026-custom",
+							tracks: [
+								"https://conf.researchr.org/track/icse-2026/icse-2026-research-track?#event-overview",
+							],
+							notes: "Only extract ICSE Research Track accepted full papers.",
+							mode: "agent" as const,
+						}
+					: v,
+			);
+			nextVenues.push({
+				id: "msr-2026",
+				name: "MSR 2026",
+				url: "https://2026.msrconf.org/",
+				tracks: [
+					"https://2026.msrconf.org/track/msr-2026-technical-papers?#event-overview",
+				],
+				notes:
+					"Keep Technical Papers only; exclude Data Showcase and Mining Challenge.",
+				mode: "agent",
+				kind: "conference",
+				domain: "PL/SE",
+				ccfRank: "CCF-B",
+			});
+
+			await updateCollectionConfig({ venues: nextVenues });
+			resetCollectionMemoryForTests();
+
+			const reloaded = await fetchCollectionStateSummary();
+			// Deleted built-in `sas-2026` is NOT resurrected and its papers were cascade-deleted
+			expect(reloaded.venues.some((v) => v.id === "sas-2026")).toBe(false);
+			expect(reloaded.venueCount).toBe(0);
+
+			// Edited built-in `icse-2026` preserves user overrides
+			const editedIcse = reloaded.venues.find((v) => v.id === "icse-2026");
+			expect(editedIcse?.url).toBe(
+				"https://conf.researchr.org/home/icse-2026-custom",
+			);
+			expect(editedIcse?.notes).toBe(
+				"Only extract ICSE Research Track accepted full papers.",
+			);
+			expect(editedIcse?.mode).toBe("agent");
+
+			// Newly added `msr-2026` persists `tracks` and `notes`
+			const addedMsr = reloaded.venues.find((v) => v.id === "msr-2026");
+			expect(addedMsr?.tracks).toEqual([
+				"https://2026.msrconf.org/track/msr-2026-technical-papers?#event-overview",
+			]);
+			expect(addedMsr?.notes).toContain("Keep Technical Papers only");
+		} finally {
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
 	});
 
 	it("marks Venues with lastFetchedAt or cached items as loaded without version tracking, and does not toggle preloading flag during Venue refresh", async () => {
@@ -502,94 +529,32 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("retains ASE 2026 proceedings papers without public abstracts, excludes workshops/frontmatter, backfills S2 abstracts, and paginates DBLP SPARQL", async () => {
+	it("enforces strict Research Track roster purity on combined-volume ASE/ESEM 2026 (including fuzzy camera-ready matching and fail-closed roster errors)", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
-		if (!ase) throw new Error("Missing ase-2026");
+		const esem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "esem-2026");
+		if (!ase || !esem) throw new Error("Missing ase-2026 or esem-2026");
 
-		// 1. Multi-page DBLP SPARQL (`OFFSET`) + workshop/editorship exclusion + abstract-less retention
-		const sparqlCalls: string[] = [];
-		const pagedDblp = await fetchDblpSparqlVenuePapers(
-			ase,
-			2026,
-			new Set(),
-			async <T>(url: string) => {
-				if (url.includes("sparql.dblp.org")) {
-					sparqlCalls.push(decodeURIComponent(url));
-					if (decodeURIComponent(url).includes("OFFSET 0")) {
-						return {
-							results: {
-								bindings: [
-									{
-										rec: { value: "https://dblp.org/rec/conf/kbse/ase2026" },
-										title: {
-											value:
-												"Proceedings of the 41st IEEE/ACM International Conference on Automated Software Engineering, ASE 2026",
-										},
-										authors: { value: "Chair One" },
-										pubIn: { value: "ASE" },
-									},
-									{
-										rec: { value: "https://dblp.org/rec/conf/kbse/ws1" },
-										title: {
-											value: "Prompting Notes at LLM4Code Workshop",
-										},
-										authors: { value: "Workshop Author" },
-										pubIn: { value: "LLM4Code@ASE" },
-									},
-									{
-										rec: { value: "https://dblp.org/rec/conf/kbse/p1" },
-										title: {
-											value:
-												"Sound Concolic Execution for Rust Smart Contracts.",
-										},
-										doi: { value: "10.1145/3832783.3832801" },
-										authors: { value: "Ada Lovelace" },
-										pubIn: { value: "ASE" },
-									},
-									{
-										rec: { value: "https://dblp.org/rec/conf/kbse/p2" },
-										title: {
-											value:
-												"Differential Compiler Fuzzing Across WASM Runtimes.",
-										},
-										doi: { value: "10.1145/3832783.3832802" },
-										authors: { value: "Ken Thompson" },
-										pubIn: { value: "ASE" },
-									},
-								],
-							},
-						} as T;
-					}
-					return {
-						results: {
-							bindings: [
-								{
-									rec: { value: "https://dblp.org/rec/conf/kbse/p3" },
-									title: {
-										value:
-											"Modular Abstract Interpretation for Heap-Manipulating Programs.",
-									},
-									doi: { value: "10.1145/3832783.3832803" },
-									authors: { value: "Patrick Cousot" },
-									pubIn: { value: "ASE" },
-								},
-							],
-						},
-					} as T;
-				}
-				// OpenAlex returns null `abstract_inverted_index` (typical for ACM proceedings)
-				return { results: [] } as T;
-			},
-			{ pageSize: 4, maxPages: 4 },
-		);
+		// 1. Fail-closed: if conf.researchr.org fails or returns 0 papers for `trackRosterMode: "required"`, throw instead of leaking combined-volume papers
+		await expect(
+			fetchOfficialTrackRoster(
+				esem,
+				2026,
+				async () => "<html><body>No table rows yet</body></html>",
+			),
+		).rejects.toThrow("returned 0 papers");
 
-		expect(sparqlCalls).toHaveLength(2);
-		expect(sparqlCalls[1]).toContain("OFFSET 4");
-		expect(pagedDblp.items).toHaveLength(3);
-		expect(pagedDblp.items.every((p) => p.abstract === "")).toBe(true);
+		const researchrRows = Array.from({ length: 30 }, (_, idx) => {
+			// Entry 2 tests camera-ready British/US spelling variation (`Modelling` on Researchr vs `Modeling` on ACM DL)
+			const title =
+				idx === 1
+					? "Automated Threat Modelling for Stateful Cloud Microservices"
+					: `Automated Program Analysis Technique Number ${idx + 1}`;
+			return `<tr><td><a href="#" class="event-title">${title}</a><div class="performers"><a href="#">Researcher ${idx + 1}</a></div></td></tr>`;
+		}).join("\n");
+		const researchrHtml = `<table>${researchrRows}</table>`;
 
-		// 2. Full `fetchMultiChannelVenuePapers` when OpenAlex has 30 ACM papers (all without abstracts)
-		//    and S2 Bulk supplies preprint abstracts for matched papers without inflating count
+		// 2. Full `fetchMultiChannelVenuePapers`: OpenAlex has 30 Research Track ACM papers (entry 2 spelled `Modeling`)
+		//    PLUS 1 NIER/Workshop paper sharing the combined volume `10.1145/3832783.*` -> strictly filtered to 30!
 		resetCollectionMemoryForTests();
 		const ipc = installMockCollectionIpc({
 			categories: ["cs.SE", "cs.CR", "cs.PL"],
@@ -603,7 +568,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				async <T>(url: string) => {
 					if (url.includes("api.openalex.org/works")) {
 						return {
-							meta: { count: 31, next_cursor: null },
+							meta: { count: 32, next_cursor: null },
 							results: [
 								{
 									id: "https://openalex.org/W_paratext",
@@ -613,10 +578,32 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 									publication_date: "2026-10-07",
 									authorships: [{ author: { display_name: "ACM Staff" } }],
 								},
+								{
+									id: "https://openalex.org/W_nier_leak",
+									type: "article",
+									title:
+										"Early Vision Note in Combined ASE NIER and Industry Volume",
+									publication_year: 2026,
+									publication_date: "2026-10-07",
+									doi: "https://doi.org/10.1145/3832783.3832999",
+									abstract_inverted_index: { Early: [0], vision: [1] },
+									authorships: [{ author: { display_name: "NIER Author" } }],
+									primary_location: {
+										landing_page_url: "https://doi.org/10.1145/3832783.3832999",
+										source: {
+											id: "https://openalex.org/S4363608212",
+											display_name:
+												"Proceedings of the IEEE/ACM International Conference on Automated Software Engineering",
+										},
+									},
+								},
 								...Array.from({ length: 30 }, (_, idx) => ({
 									id: `https://openalex.org/W_ase_${idx + 1}`,
 									type: "article",
-									title: `Automated Program Analysis Technique Number ${idx + 1}`,
+									title:
+										idx === 1
+											? "Automated Threat Modeling for Stateful Cloud Microservices"
+											: `Automated Program Analysis Technique Number ${idx + 1}`,
 									publication_year: 2026,
 									publication_date: "2026-10-07",
 									doi: `https://doi.org/10.1145/3832783.${3832900 + idx}`,
@@ -636,10 +623,6 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 								})),
 							],
 						} as T;
-					}
-					if (url.includes("sparql.dblp.org")) {
-						// Simulate DBLP lagging behind ACM DL publication
-						return { results: { bindings: [] } } as T;
 					}
 					if (
 						url.includes("api.semanticscholar.org/graph/v1/paper/search/bulk")
@@ -671,10 +654,21 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					}
 					return { results: [] } as T;
 				},
-				async () => "<feed></feed>",
+				async (url: string) => {
+					if (url.includes("conf.researchr.org")) return researchrHtml;
+					return "<feed></feed>";
+				},
 			);
 
+			expect(bundle.authoritativeMainTrack).toBe(true);
 			expect(bundle.items).toHaveLength(30);
+			expect(
+				bundle.items.some((p) => p.doi === "10.1145/3832783.3832999"),
+			).toBe(false);
+			// Entry 2 matched fuzzily (`Modelling` <-> `Modeling` + shared surname `2` / `Researcher 2`) and acquired its ACM DOI
+			expect(
+				bundle.items.some((p) => p.doi === "10.1145/3832783.3832901"),
+			).toBe(true);
 			const enrichedFirst = bundle.items.find(
 				(p) => p.doi === "10.1145/3832783.3832900",
 			);
@@ -988,9 +982,11 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		);
 		expect(ccsItems[0]?.authors).toEqual(["Hanlei Zhang", "Yanjiao Chen"]);
 
-		// 3. Official ISSRE 2026 accepted-papers embedded tracks JSON (excludes doctoral & fast-abstracts)
+		// 3. Official ISSRE 2026 accepted-papers embedded tracks JSON (strictly keeps Research Track only; excludes industry, J1C2, replication, doctoral & fast-abstracts)
 		const issreHtml = `<script>const tracks = [
 			{"id":"research-track","label":"Research Track","papers":[{"title":"Fault Localization in Microservices","authors":"Alice Lee, Bob Chen and Carol Wu"}]},
+			{"id":"industry-track","label":"Industry Track","papers":[{"title":"Industrial Logging Case Study","authors":"Industry Author"}]},
+			{"id":"j1c2-track","label":"Journal First / Conference Second (J1C2)","papers":[{"title":"Prior Journal Paper Presentation","authors":"Journal Author"}]},
 			{"id":"doctoral-symposium","label":"Doctoral Symposium","papers":[{"title":"PhD Plan on Fuzzing","authors":"Student One"}]}
 		];</script>`;
 		const issreItems = parseOfficialVenueProgramHtml(
@@ -1035,56 +1031,65 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"Modular relational abstract interpretation",
 		);
 
-		// 5. OOPSLA1 + OOPSLA2 union: DBLP having only OOPSLA1 (30) must NOT discard OOPSLA2 (35) from OpenAlex
+		// 5. OOPSLA1 + OOPSLA2 union while strictly rejecting non-OOPSLA PACMPL issues (e.g. POPL / ICFP)
 		const oopslaBundle = await fetchMultiChannelVenuePapers(
 			oopsla,
 			2026,
 			async <T>(url: string) => {
 				if (url.includes("api.openalex.org/works")) {
 					return {
-						meta: { count: 65 },
-						results: Array.from({ length: 65 }, (_, i) => ({
-							id: `https://openalex.org/W_oopsla_${i + 1}`,
-							type: "article",
-							title: `Type-Directed Synthesis Paper ${i + 1}`,
-							publication_year: 2026,
-							publication_date: "2026-04-15",
-							doi: `https://doi.org/10.1145/3798${200 + i}`,
-							biblio: {
-								volume: "10",
-								issue: i < 30 ? "OOPSLA1" : "OOPSLA2",
-							},
-							abstract_inverted_index: {
-								Sound: [0],
-								gradual: [1],
-								typing: [2],
-								with: [3],
-								zero: [4],
-								overhead: [5],
-								guarantees: [6],
-							},
-							authorships: [{ author: { display_name: `PL Author ${i + 1}` } }],
-							primary_location: {
-								source: {
-									id: "https://openalex.org/S4210216081",
-									display_name:
-										"Proceedings of the ACM on Programming Languages",
+						meta: { count: 66 },
+						results: [
+							...Array.from({ length: 65 }, (_, i) => ({
+								id: `https://openalex.org/W_oopsla_${i + 1}`,
+								type: "article",
+								title: `Type-Directed Synthesis Paper ${i + 1}`,
+								publication_year: 2026,
+								publication_date: "2026-04-15",
+								doi: `https://doi.org/10.1145/3798${200 + i}`,
+								biblio: {
+									volume: "10",
+									issue: i < 30 ? "OOPSLA1" : "OOPSLA2",
+								},
+								abstract_inverted_index: {
+									Sound: [0],
+									gradual: [1],
+									typing: [2],
+									with: [3],
+									zero: [4],
+									overhead: [5],
+									guarantees: [6],
+								},
+								authorships: [
+									{ author: { display_name: `PL Author ${i + 1}` } },
+								],
+								primary_location: {
+									source: {
+										id: "https://openalex.org/S4210216081",
+										display_name:
+											"Proceedings of the ACM on Programming Languages",
+									},
+								},
+							})),
+							{
+								id: "https://openalex.org/W_popl_spill",
+								type: "article",
+								title: "POPL Issue Paper That Must Not Enter OOPSLA",
+								publication_year: 2026,
+								publication_date: "2026-01-15",
+								doi: "https://doi.org/10.1145/3776699",
+								biblio: { volume: "10", issue: "POPL" },
+								abstract_inverted_index: { POPL: [0] },
+								authorships: [{ author: { display_name: "POPL Author" } }],
+								primary_location: {
+									source: {
+										id: "https://openalex.org/S4210216081",
+										display_name:
+											"Proceedings of the ACM on Programming Languages",
+									},
 								},
 							},
-						})),
-					} as T;
-				}
-				if (url.includes("sparql.dblp.org")) {
-					return {
-						results: {
-							bindings: Array.from({ length: 30 }, (_, i) => ({
-								rec: { value: `https://dblp.org/rec/journals/pacmpl/p${i}` },
-								title: { value: `Type-Directed Synthesis Paper ${i + 1}` },
-								doi: { value: `10.1145/3798${200 + i}` },
-								authors: { value: `PL Author ${i + 1}` },
-								pubIn: { value: "Proc. ACM Program. Lang." },
-							})),
-						},
+						],
 					} as T;
 				}
 				return { results: [] } as T;
@@ -1277,16 +1282,15 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"sound symbolic execution engine for concurrent Rust async kernels",
 		);
 
-		// If OpenAlex & Crossref fail while DBLP SPARQL returns 200 OK with 0 rows,
+		// If OpenAlex & Crossref fail on a non-roster venue (`icse-2026`) while S2 returns 0 rows,
 		// fetchMultiChannelVenuePapers must throw instead of silently returning 0 items.
+		const icse = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "icse-2026");
+		if (!icse) throw new Error("Missing icse-2026");
 		await expect(
 			fetchMultiChannelVenuePapers(
-				ase,
+				icse,
 				2026,
 				async <T>(url: string) => {
-					if (url.includes("sparql.dblp.org")) {
-						return { results: { bindings: [] } } as T;
-					}
 					if (url.includes("semanticscholar.org")) {
 						return { total: 0, data: [] } as T;
 					}
@@ -1578,6 +1582,278 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		} finally {
 			unsub();
 			vi.unstubAllGlobals();
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
+	});
+
+	it("enforces main-track purity across ACL/AAAI/ICML papers.cool, SAS <25 LNCS proceedings, NeurIPS prior-year spillover, and Journal non-research items", async () => {
+		const acl = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "acl-2026");
+		const aaai = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "aaai-2026");
+		const icml = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "icml-2026");
+		const sas = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sas-2026");
+		const neurips = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "neurips-2026",
+		);
+		const tosem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "tosem-2026");
+		if (!acl || !aaai || !icml || !sas || !neurips || !tosem) {
+			throw new Error("Missing built-in venues");
+		}
+
+		// 1. ACL 2026 queries direct `?group=Long%20Papers` & `?group=Short%20Papers` and drops Findings
+		const aclUrls: string[] = [];
+		const aclRes = await fetchCoolPapersVenuePapers(
+			acl,
+			2026,
+			async (url: string) => {
+				aclUrls.push(url);
+				if (url.includes("group=Long%20Papers")) {
+					return `<div id="2026.acl-long.1@ACL" class="panel paper">
+						<h2 class="title"><a href="https://aclanthology.org/2026.acl-long.1/" title="1/1"></a><a id="title-1">Long Track Semantic Parser</a></h2>
+						<p class="metainfo authors"><a class="author">Alice</a></p>
+						<p class="metainfo subjects"><a href="/venue/ACL.2026?group=Long%20Papers">ACL.2026 - Long Papers</a></p>
+						<p id="summary-1" class="summary">Full long paper abstract.</p>
+					</div>`;
+				}
+				if (url.includes("group=Short%20Papers")) {
+					return `<div id="2026.acl-short.2@ACL" class="panel paper">
+						<h2 class="title"><a href="https://aclanthology.org/2026.acl-short.2/" title="1/1"></a><a id="title-2">Short Track Probing Study</a></h2>
+						<p class="metainfo authors"><a class="author">Bob</a></p>
+						<p class="metainfo subjects"><a href="/venue/ACL.2026?group=Short%20Papers">ACL.2026 - Short Papers</a></p>
+						<p id="summary-2" class="summary">Concise short paper abstract.</p>
+					</div>
+					<div id="2026.findings-acl.9@ACL" class="panel paper">
+						<h2 class="title"><a href="https://aclanthology.org/2026.findings-acl.9/" title="1/1"></a><a id="title-9">Findings Paper Must Be Excluded</a></h2>
+						<p class="metainfo authors"><a class="author">Eve</a></p>
+						<p class="metainfo subjects"><a href="/venue/ACL.2026?group=Findings">ACL.2026 - Findings</a></p>
+						<p id="summary-9" class="summary">Findings paper abstract.</p>
+					</div>`;
+				}
+				return "";
+			},
+		);
+		expect(aclUrls.some((u) => u.includes("group=Long%20Papers"))).toBe(true);
+		expect(aclUrls.some((u) => u.includes("group=Short%20Papers"))).toBe(true);
+		expect(aclRes.items.map((p) => p.title)).toEqual([
+			"Long Track Semantic Parser",
+			"Short Track Probing Study",
+		]);
+
+		// 2. AAAI excludes Student Abstract / IAAI; ICML excludes `Position: ...`
+		const aaaiParsed = parseCoolPapersVenueHtml(
+			`<div id="p1@AAAI" class="panel paper">
+				<h2 class="title"><a href="https://ojs.aaai.org/1" title="1/2"></a><a id="title-p1">Verified Neuro-Symbolic Planning</a></h2>
+				<p class="metainfo authors"><a class="author">Carol</a></p>
+				<p class="metainfo subjects"><a href="/venue/AAAI.2026?group=Planning%2C%20Routing%2C%20and%20Scheduling">AAAI.2026 - Planning, Routing, and Scheduling</a></p>
+				<p id="summary-p1" class="summary">Technical track abstract.</p>
+			</div>
+			<div id="p2@AAAI" class="panel paper">
+				<h2 class="title"><a href="https://ojs.aaai.org/2" title="2/2"></a><a id="title-p2">Two-Page Student Abstract Note</a></h2>
+				<p class="metainfo authors"><a class="author">Student</a></p>
+				<p class="metainfo subjects"><a href="/venue/AAAI.2026?group=Student%20Abstract%20and%20Poster%20Program">AAAI.2026 - Student Abstract and Poster Program</a></p>
+				<p id="summary-p2" class="summary">Student abstract.</p>
+			</div>`,
+			aaai,
+			VENUE_SPEC_BY_ID.get("aaai-2026"),
+			2026,
+		);
+		expect(aaaiParsed.items.map((p) => p.title)).toEqual([
+			"Verified Neuro-Symbolic Planning",
+		]);
+
+		const icmlParsed = parseCoolPapersVenueHtml(
+			`<div id="pos1@OpenReview" class="panel paper">
+				<h2 class="title"><a href="https://openreview.net/forum?id=pos1" title="1/2"></a><a id="title-pos1">Position: Benchmarks Should Stop Rewarding Memorization</a></h2>
+				<p class="metainfo authors"><a class="author">Author A</a></p>
+				<p class="metainfo subjects"><a href="/venue/ICML.2026?group=Poster">ICML.2026 - Poster</a></p>
+				<p id="summary-pos1" class="summary">Position track paper.</p>
+			</div>
+			<div id="res1@OpenReview" class="panel paper">
+				<h2 class="title"><a href="https://openreview.net/forum?id=res1" title="2/2"></a><a id="title-res1">Optimal Transport for Diffusion Samplers</a></h2>
+				<p class="metainfo authors"><a class="author">Author B</a></p>
+				<p class="metainfo subjects"><a href="/venue/ICML.2026?group=Oral">ICML.2026 - Oral</a></p>
+				<p id="summary-res1" class="summary">Main conference oral paper.</p>
+			</div>`,
+			icml,
+			VENUE_SPEC_BY_ID.get("icml-2026"),
+			2026,
+		);
+		expect(icmlParsed.items.map((p) => p.title)).toEqual([
+			"Optimal Transport for Diffusion Samplers",
+		]);
+
+		// 3. SAS 2026 with 21 LNCS papers must NOT trigger `< 25` arXiv fallback noise
+		let arxivFallbackCalled = false;
+		const sasBundle = await fetchMultiChannelVenuePapers(
+			sas,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.crossref.org/works")) {
+					return {
+						message: {
+							items: Array.from({ length: 21 }, (_, idx) => ({
+								DOI: `10.1007/978-3-032-40374-2_${idx + 1}`,
+								type: "book-chapter",
+								title: [`Relational Static Analysis Chapter ${idx + 1}`],
+								abstract: `<jats:p>Sound abstract interpretation technique ${idx + 1}.</jats:p>`,
+								"container-title": ["Static Analysis"],
+								author: [{ given: "Author", family: `${idx + 1}` }],
+								published: { "date-parts": [[2026, 10, 1]] },
+							})),
+						},
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+			async (url: string) => {
+				if (url.includes("export.arxiv.org")) {
+					arxivFallbackCalled = true;
+				}
+				return "";
+			},
+		);
+		expect(sasBundle.items).toHaveLength(21);
+		expect(arxivFallbackCalled).toBe(false);
+
+		// 4. NeurIPS 2026 drops 2024/2025 `10.52202/079017|085713` spillover & position papers
+		const neuripsStructured = await fetchVenueStructuredPapers(
+			neurips,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						meta: { count: 2 },
+						results: [
+							{
+								id: "https://openalex.org/W_nips25_spill",
+								type: "article",
+								title: "Late Indexed NeurIPS 2025 Proceedings Paper",
+								publication_year: 2026,
+								publication_date: "2026-01-15",
+								doi: "https://doi.org/10.52202/085713-0123",
+								abstract_inverted_index: { Late: [0], indexed: [1] },
+								authorships: [{ author: { display_name: "Author 2025" } }],
+								primary_location: {
+									source: {
+										id: "https://openalex.org/S4306420609",
+										display_name:
+											"Advances in Neural Information Processing Systems",
+									},
+								},
+							},
+						],
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+		);
+		expect(neuripsStructured.items).toHaveLength(0);
+
+		// 5. Journal non-research filter: drops RCR Report, Guest Editorial, Corrigendum, 1-4p; keeps Springer single-integer article number "93"
+		expect(
+			isNonResearchJournalItem(
+				"Automated Bug Localization via Graph Neural Networks — RCR Report",
+				"1-6",
+			),
+		).toBe(true);
+		expect(
+			isNonResearchJournalItem(
+				"Guest Editorial: Special Issue on Trustworthy AI4SE",
+				"1-5",
+			),
+		).toBe(true);
+		expect(
+			isNonResearchJournalItem(
+				"Corrigendum to 'Sound Static Taint Analysis'",
+				"12-13",
+			),
+		).toBe(true);
+		expect(
+			isNonResearchJournalItem(
+				"Short Commentary on Software Metrics",
+				"101-104",
+			),
+		).toBe(true);
+		expect(
+			isNonResearchJournalItem(
+				"A Comprehensive Survey and Empirical Study of Fuzzing Rust Unsafe Blocks",
+				"93",
+			),
+		).toBe(false);
+		expect(tosem.tracks).toEqual([]);
+	});
+
+	it("recovers from transient empty arXiv Atom feeds, throws on persistent empty truncation, and awaits full 2026 backfill in refreshArxivCollection", async () => {
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.SE"],
+			venues: [...DEFAULT_COLLECTION_VENUES],
+		});
+
+		try {
+			// 1. Transient empty feed (`totalResults=2` with 0 entries on attempt 1) recovers on retry
+			let transientCalls = 0;
+			const statuses: string[] = [];
+			const refreshed = await refreshArxivCollection({
+				categories: ["cs.SE"],
+				onCategoryStatus: (cat, st) => statuses.push(`${cat}:${st}`),
+				transport: {
+					fetchText: async (url) => {
+						if (url.includes("rss.arxiv.org")) return "<rss></rss>";
+						transientCalls += 1;
+						if (transientCalls === 1) {
+							return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+								<opensearch:totalResults>2</opensearch:totalResults>
+							</feed>`;
+						}
+						if (url.includes("TO+209912312359]")) {
+							return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+								<opensearch:totalResults>2</opensearch:totalResults>
+								<entry>
+									<id>http://arxiv.org/abs/2604.00002v1</id>
+									<published>2026-04-10T10:00:00Z</published>
+									<title>April 2026 SE Paper Two</title>
+									<summary>Full software engineering abstract two.</summary>
+									<author><name>Author Two</name></author>
+								</entry>
+								<entry>
+									<id>http://arxiv.org/abs/2601.00001v1</id>
+									<published>2026-01-05T09:00:00Z</published>
+									<title>January 2026 SE Paper One</title>
+									<summary>Full software engineering abstract one.</summary>
+									<author><name>Author One</name></author>
+								</entry>
+							</feed>`;
+						}
+						return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+							<opensearch:totalResults>0</opensearch:totalResults>
+						</feed>`;
+					},
+					fetchJson: async <T>() => ({ results: [] }) as T,
+				},
+			});
+
+			expect(transientCalls).toBeGreaterThanOrEqual(2);
+			expect(refreshed.arxivCount).toBe(2);
+			expect(refreshed.arxivWatermarks["cs.SE"]?.historyComplete).toBe(true);
+			expect(statuses[0]).toBe("cs.SE:refreshing");
+			expect(statuses[statuses.length - 1]).toBe("cs.SE:done");
+
+			// 2. Persistent transient empty feed (`totalResults=7054` with 0 entries across all retries) throws instead of marking historyComplete
+			await expect(
+				fetchMoreArxivCollection({
+					categories: ["cs.PL"],
+					maxResultsPerCategory: 100,
+					transport: {
+						fetchText: async () =>
+							`<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+								<opensearch:totalResults>7054</opensearch:totalResults>
+							</feed>`,
+						fetchJson: async <T>() => ({ results: [] }) as T,
+					},
+				}),
+			).rejects.toThrow("transient empty feed");
+		} finally {
 			ipc.restore();
 			resetCollectionMemoryForTests();
 		}

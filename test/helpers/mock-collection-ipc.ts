@@ -101,11 +101,12 @@ function defaultVenueRecords(): CollectionVenueRecord[] {
 		id: v.id,
 		name: v.name,
 		url: v.url,
+		tracks: [...(v.tracks ?? [])],
+		notes: v.notes?.trim() ? v.notes.trim() : null,
 		mode: v.mode,
 		kind: v.kind ?? null,
 		domain: v.domain ?? null,
 		ccfRank: v.ccfRank ?? null,
-		dblpStream: v.dblpStream ?? null,
 		lastFetchedAt: v.lastFetchedAt ?? null,
 		latestPublishedAt: v.latestPublishedAt ?? null,
 		remoteTotalCount: v.remoteTotalCount ?? null,
@@ -222,11 +223,12 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					id: v.id,
 					name: v.name,
 					url: v.url,
+					tracks: [...(v.tracks ?? [])],
+					notes: v.notes?.trim() ? v.notes.trim() : null,
 					mode: v.mode,
 					kind: v.kind ?? null,
 					domain: v.domain ?? null,
 					ccfRank: v.ccfRank ?? null,
-					dblpStream: v.dblpStream ?? null,
 					lastFetchedAt: v.lastFetchedAt ?? null,
 					latestPublishedAt: v.latestPublishedAt ?? null,
 					remoteTotalCount: v.remoteTotalCount ?? null,
@@ -323,20 +325,43 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					categories = [...args.categories];
 				}
 				if (args.venues) {
-					venues = args.venues.map((v) => ({
-						id: v.id,
-						name: v.name,
-						url: v.url,
-						mode: v.mode ?? "auto",
-						kind: v.kind ?? null,
-						domain: v.domain ?? null,
-						ccfRank: v.ccfRank ?? null,
-						dblpStream: v.dblpStream ?? null,
-						lastFetchedAt: v.lastFetchedAt ?? null,
-						latestPublishedAt: v.latestPublishedAt ?? null,
-						remoteTotalCount: v.remoteTotalCount ?? null,
-						paperCount: v.paperCount ?? 0,
-					}));
+					const prevById = new Map(venues.map((prev) => [prev.id, prev]));
+					venues = args.venues.map((v) => {
+						const prev = prevById.get(v.id);
+						const nextNotes =
+							v.notes !== undefined && v.notes !== null
+								? v.notes.trim()
+									? v.notes.trim()
+									: null
+								: (prev?.notes ?? null);
+						return {
+							id: v.id,
+							name: v.name,
+							url: v.url,
+							tracks: v.tracks ? [...v.tracks] : [...(prev?.tracks ?? [])],
+							notes: nextNotes,
+							mode: v.mode ?? prev?.mode ?? "auto",
+							kind: v.kind ?? prev?.kind ?? null,
+							domain: v.domain ?? prev?.domain ?? null,
+							ccfRank: v.ccfRank ?? prev?.ccfRank ?? null,
+							lastFetchedAt: v.lastFetchedAt ?? prev?.lastFetchedAt ?? null,
+							latestPublishedAt:
+								v.latestPublishedAt ?? prev?.latestPublishedAt ?? null,
+							remoteTotalCount:
+								v.remoteTotalCount ?? prev?.remoteTotalCount ?? null,
+							paperCount: v.paperCount ?? prev?.paperCount ?? 0,
+						};
+					});
+					const keepVenueIds = new Set(venues.map((v) => v.id));
+					for (const [id, item] of itemsById.entries()) {
+						if (
+							item.sourceType === "venue" &&
+							item.venueId &&
+							!keepVenueIds.has(item.venueId)
+						) {
+							itemsById.delete(id);
+						}
+					}
 				}
 				if (args.arxivWatermarks) {
 					for (const [cat, wm] of Object.entries(args.arxivWatermarks)) {

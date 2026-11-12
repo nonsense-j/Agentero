@@ -724,4 +724,149 @@ mod tests {
         assert_eq!(out.items[1].paper.id, "arxiv:2603.00012");
         assert_eq!(out.items[1].relation_type, "references");
     }
+
+    #[test]
+    fn legacy_dblp_schema_auto_reset_and_venue_management_crud_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        // 1. Pre-populate a legacy `venues(dblp_stream)` table and verify `ensure_collection_at` resets cleanly
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE venues (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, dblp_stream TEXT);
+                 INSERT INTO venues VALUES ('ase-2026', 'ASE 2026', 'https://dblp.uni-trier.de/db/conf/kbse/ase2026.html', 'conf/kbse');",
+            )
+            .unwrap();
+        }
+
+        let initial = state_get_at(&db).unwrap();
+        assert_eq!(initial.venues.len(), 28);
+        assert!(initial
+            .venues
+            .iter()
+            .all(|v| !v.url.contains("dblp") && v.tracks.iter().all(|t| !t.contains("dblp"))));
+
+        // 2. Upsert a venue paper for `sas-2026`, then delete `sas-2026`, edit `icse-2026` notes, and add `msr-2026`
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "venue:sas-2026:doi:10.1007/978-3-032-40374-2_1".into(),
+                    title: "Static Analysis Paper".into(),
+                    authors: vec!["Patrick Cousot".into()],
+                    abstract_text: "Sound static analysis.".into(),
+                    published_at: "2026-10-01T00:00:00Z".into(),
+                    year: 2026,
+                    source_type: "venue".into(),
+                    source_label: "SAS 2026".into(),
+                    categories: vec!["SAS 2026".into()],
+                    url: "https://doi.org/10.1007/978-3-032-40374-2_1".into(),
+                    venue_id: Some("sas-2026".into()),
+                    venue_kind: Some("conference".into()),
+                    venue_domain: Some("PL/SE".into()),
+                    ccf_rank: Some("CCF-B".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(state_get_at(&db).unwrap().venue_count, 1);
+
+        let mut next_venues: Vec<CollectionVenueInput> = initial
+            .venues
+            .into_iter()
+            .filter(|v| v.id != "sas-2026")
+            .map(|v| CollectionVenueInput {
+                notes: (v.id == "icse-2026").then(|| "Research Track full papers only.".into()),
+                id: v.id,
+                name: v.name,
+                url: v.url,
+                tracks: Some(v.tracks),
+                mode: Some(v.mode),
+                kind: v.kind,
+                domain: v.domain,
+                ccf_rank: v.ccf_rank,
+                last_fetched_at: v.last_fetched_at,
+                latest_published_at: v.latest_published_at,
+                remote_total_count: v.remote_total_count,
+                paper_count: Some(v.paper_count),
+            })
+            .collect();
+        next_venues.push(CollectionVenueInput {
+            id: "msr-2026".into(),
+            name: "MSR 2026".into(),
+            url: "https://2026.msrconf.org/".into(),
+            tracks: Some(vec![
+                "https://2026.msrconf.org/track/msr-2026-technical-papers?#event-overview".into(),
+            ]),
+            notes: Some("Exclude Data Showcase and Mining Challenge.".into()),
+            mode: Some("agent".into()),
+            kind: Some("conference".into()),
+            domain: Some("PL/SE".into()),
+            ccf_rank: Some("CCF-B".into()),
+            ..Default::default()
+        });
+
+        let updated = config_update_at(
+            &db,
+            CollectionConfigUpdateArgs {
+                venues: Some(next_venues),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.venues.len(), 28); // 28 - 1 (`sas-2026`) + 1 (`msr-2026`)
+        assert!(!updated.venues.iter().any(|v| v.id == "sas-2026"));
+        assert_eq!(updated.venue_count, 0); // `sas-2026` papers cascade-deleted
+        let msr = updated.venues.iter().find(|v| v.id == "msr-2026").unwrap();
+        assert_eq!(
+            msr.notes.as_deref(),
+            Some("Exclude Data Showcase and Mining Challenge.")
+        );
+        assert_eq!(msr.tracks.len(), 1);
+
+        // Clearing `notes` with `Some("")` sets `notes` back to `None`
+        let cleared_inputs: Vec<CollectionVenueInput> = updated
+            .venues
+            .into_iter()
+            .map(|v| CollectionVenueInput {
+                notes: if v.id == "icse-2026" {
+                    Some(String::new())
+                } else {
+                    v.notes
+                },
+                id: v.id,
+                name: v.name,
+                url: v.url,
+                tracks: Some(v.tracks),
+                mode: Some(v.mode),
+                kind: v.kind,
+                domain: v.domain,
+                ccf_rank: v.ccf_rank,
+                last_fetched_at: v.last_fetched_at,
+                latest_published_at: v.latest_published_at,
+                remote_total_count: v.remote_total_count,
+                paper_count: Some(v.paper_count),
+            })
+            .collect();
+        let after_clear = config_update_at(
+            &db,
+            CollectionConfigUpdateArgs {
+                venues: Some(cleared_inputs),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            after_clear
+                .venues
+                .iter()
+                .find(|v| v.id == "icse-2026")
+                .unwrap()
+                .notes,
+            None
+        );
+    }
 }

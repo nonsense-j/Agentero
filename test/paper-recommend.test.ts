@@ -4,7 +4,7 @@ import {
 	applyFreshVenueItems,
 	type CollectionPaperItem,
 	DEFAULT_COLLECTION_VENUES,
-	enrichDblpItemsBatch,
+	enrichVenueItemsBatch,
 	getCollectionPaperDetail,
 	getCollectionSummarySnapshot,
 	listCollectionPapers,
@@ -362,7 +362,7 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 			(v) => v.id === "icse-2026",
 		);
 		if (!icseVenue) throw new Error("Missing icse-2026");
-		const enriched = await enrichDblpItemsBatch(
+		const enriched = await enrichVenueItemsBatch(
 			freshFromUpstream.slice(0, 2),
 			icseVenue,
 			async <T>() => ({ results: [] }) as T,

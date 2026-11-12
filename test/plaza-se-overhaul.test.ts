@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { PLAZA_SOURCES } from "@/lib/plaza";
 import {
 	type CollectionPaperItem,
-	DBLP_2026_VENUE_SPECS,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
 	derivePaperKeywords,
@@ -14,6 +13,7 @@ import {
 	parseResearchrHtml,
 	reconstructOpenAlexAbstract,
 	resetCollectionMemoryForTests,
+	VENUE_SPECS,
 } from "@/lib/plaza/collection";
 import { ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
 import {
@@ -51,12 +51,19 @@ describe("Plaza AI & SE overhaul", () => {
 		]);
 	});
 
-	it("configures all 28 DBLP 2026 venues across PL/SE (CCF-A/B Conf & Journal), CR (CCF-A), and AI (CCF-A)", () => {
-		expect(DBLP_2026_VENUE_SPECS).toHaveLength(28);
+	it("configures all 28 built-in 2026 venues with official URLs and tracks across PL/SE, CR, and AI", () => {
+		expect(VENUE_SPECS).toHaveLength(28);
 		expect(DEFAULT_COLLECTION_VENUES).toHaveLength(28);
 
 		for (const v of DEFAULT_COLLECTION_VENUES) {
-			expect(v.url).toContain("dblp.uni-trier.de/db/");
+			expect(v.url).toMatch(/^https:\/\//);
+			expect(v.url).not.toContain("dblp");
+			expect(Array.isArray(v.tracks)).toBe(true);
+			if (v.kind === "journal") {
+				expect(v.tracks).toEqual([]);
+			} else {
+				expect(v.tracks.length).toBeGreaterThan(0);
+			}
 			expect(v.name).toContain("2026");
 		}
 
