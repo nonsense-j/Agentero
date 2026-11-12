@@ -5,6 +5,7 @@
 
 import {
 	ensureOpenAlexRuntimeKeyLoaded,
+	hasCachedOpenAlexApiKey,
 	withOpenAlexApiKey,
 } from "@/lib/openalex";
 
@@ -1696,10 +1697,26 @@ async function fetchOpenAlexSingletonsByDoi(
 	);
 }
 
+function formatTitleSearchClause(rawTitle: string): string {
+	let cleaned = rawTitle
+		.replace(/[|,"'():[\]{}!?]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (cleaned.length > 115) {
+		const wordBoundary = cleaned.lastIndexOf(" ", 115);
+		cleaned =
+			wordBoundary > 40
+				? cleaned.slice(0, wordBoundary).trim()
+				: cleaned.slice(0, 115).trim();
+	}
+	return cleaned;
+}
+
 /**
  * Hydrate proceedings/journal records by DOI using preloaded items first, then OpenAlex
  * `filter=doi:...` chunks (fast path when daily credits exist), automatically falling back
- * to OpenAlex's 0-credit singleton endpoint (`/works/doi:{doi}`) when list credits are exhausted.
+ * to OpenAlex's 0-credit singleton endpoint (`/works/doi:{doi}`) when list credits are exhausted,
+ * plus batched `title.search` lookup for DOI-less proceedings (`USENIX Security`, `CCS`, etc.).
  */
 export async function enrichVenueItemsBatch(
 	items: CollectionPaperItem[],
@@ -1708,6 +1725,7 @@ export async function enrichVenueItemsBatch(
 	preloadedItems?: readonly CollectionPaperItem[],
 	options?: {
 		skipOpenAlexFilter?: boolean;
+		maxDoiLessLookups?: number;
 	},
 ): Promise<CollectionPaperItem[]> {
 	if (items.length === 0) return [];
@@ -1728,11 +1746,17 @@ export async function enrichVenueItemsBatch(
 		}
 	}
 
+	const resolveLookupDoi = (item: CollectionPaperItem): string | undefined =>
+		item.doi?.toLowerCase() ||
+		(item.arxivId
+			? `10.48550/arxiv.${stripArxivVersion(item.arxivId).toLowerCase()}`
+			: undefined);
+
 	const byDoi = new Map<string, OpenAlexWork>();
 	const unmatchedDois = Array.from(
 		new Set(
 			items
-				.map((i) => i.doi?.toLowerCase())
+				.map(resolveLookupDoi)
 				.filter((d): d is string => Boolean(d) && !preloadedByDoi.has(d ?? "")),
 		),
 	);
@@ -1757,7 +1781,10 @@ export async function enrichVenueItemsBatch(
 				}
 				for (const row of res.results ?? []) {
 					const d = cleanDoi(row.doi)?.toLowerCase();
-					if (d) byDoi.set(d, row);
+					if (d) mergeOpenAlexRowIntoMap(byDoi, d, row);
+					for (const aid of extractAllArxivIdsFromOpenAlex(row)) {
+						mergeOpenAlexRowIntoMap(byDoi, `10.48550/arxiv.${aid}`, row);
+					}
 				}
 			} catch {
 				openAlexFilterFailed = true;
@@ -1772,43 +1799,71 @@ export async function enrichVenueItemsBatch(
 		await fetchOpenAlexSingletonsByDoi(unmatchedDois, fetchJson, byDoi);
 	}
 
-	// Strictly for DOI-less proceedings records (e.g. USENIX / official program schedules),
-	// run a small bounded title lookup when OpenAlex list credits are healthy.
+	// Batched OpenAlex `title.search` lookup for DOI-less proceedings records
+	// (e.g. `USENIX Security 2026`, `CCS 2026`, `ISSRE 2026` before publisher DOIs are minted).
 	const byTitle = new Map<string, OpenAlexWork>();
 	if (!openAlexFilterFailed) {
+		const maxDoiLess =
+			options?.maxDoiLessLookups ?? (hasCachedOpenAlexApiKey() ? 1800 : 600);
 		const doiLessItems = items
-			.filter((i) => !i.doi && !preloadedByTitle.has(normTitleKey(i.title)))
-			.slice(0, 24);
-		const TITLE_CHUNK = 6;
+			.filter(
+				(i) =>
+					!resolveLookupDoi(i) && !preloadedByTitle.has(normTitleKey(i.title)),
+			)
+			.slice(0, Math.max(0, maxDoiLess));
+		const targetTitleKeys = new Set(
+			doiLessItems.map((i) => normTitleKey(i.title)).filter(Boolean),
+		);
+		const TITLE_CHUNK = 15;
+		const batches: CollectionPaperItem[][] = [];
 		for (let i = 0; i < doiLessItems.length; i += TITLE_CHUNK) {
-			const batch = doiLessItems.slice(i, i + TITLE_CHUNK);
-			const clauses = batch
-				.map((item) =>
-					item.title
-						.replace(/[|,"'():[\]{}]/g, " ")
-						.replace(/\s+/g, " ")
-						.trim()
-						.slice(0, 110),
-				)
-				.filter((t) => t.length > 8);
-			if (clauses.length === 0) continue;
-			const filter = `title.search:${clauses.map((t) => `"${t}"`).join("|")},from_publication_date:2025-01-01`;
-			try {
-				const url = withOpenAlexApiKey(
-					`https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=25&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
-				);
-				const res = await fetchJson<{
-					error?: string;
-					results?: OpenAlexWork[];
-				}>(url);
-				if (res.error) break;
-				for (const row of res.results ?? []) {
-					const tk = normTitleKey(row.title || row.display_name || "");
-					if (tk && !byTitle.has(tk)) byTitle.set(tk, row);
+			batches.push(doiLessItems.slice(i, i + TITLE_CHUNK));
+		}
+
+		if (batches.length > 0) {
+			const CONCURRENCY = 4;
+			let batchCursor = 0;
+			let aborted = false;
+
+			const worker = async () => {
+				while (!aborted && batchCursor < batches.length) {
+					const batch = batches[batchCursor++];
+					if (!batch) break;
+					const clauses = batch
+						.map((item) => formatTitleSearchClause(item.title))
+						.filter((t) => t.length > 8);
+					if (clauses.length === 0) continue;
+					const filter = `title.search:${clauses.map((t) => `"${t}"`).join("|")},from_publication_date:2023-01-01`;
+					try {
+						const url = withOpenAlexApiKey(
+							`https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=80&select=${OPENALEX_SELECT}&mailto=${MAILTO}`,
+						);
+						const res = await fetchJson<{
+							error?: string;
+							results?: OpenAlexWork[];
+						}>(url);
+						if (res.error) {
+							aborted = true;
+							break;
+						}
+						for (const row of res.results ?? []) {
+							const tk = normTitleKey(row.title || row.display_name || "");
+							if (tk && targetTitleKeys.has(tk)) {
+								mergeOpenAlexRowIntoMap(byTitle, tk, row);
+							}
+						}
+					} catch {
+						aborted = true;
+						break;
+					}
 				}
-			} catch {
-				break;
-			}
+			};
+
+			await Promise.all(
+				Array.from({ length: Math.min(CONCURRENCY, batches.length) }, () =>
+					worker(),
+				),
+			);
 		}
 	}
 
@@ -1816,11 +1871,12 @@ export async function enrichVenueItemsBatch(
 	for (const item of items) {
 		if (isFrontmatterTitle(item.title)) continue;
 		const tKey = normTitleKey(item.title);
+		const lookupDoi = resolveLookupDoi(item);
 		const pre =
 			(item.doi ? preloadedByDoi.get(item.doi.toLowerCase()) : undefined) ??
 			(tKey ? preloadedByTitle.get(tKey) : undefined);
 		const row =
-			(item.doi ? byDoi.get(item.doi.toLowerCase()) : undefined) ??
+			(lookupDoi ? byDoi.get(lookupDoi) : undefined) ??
 			(tKey ? byTitle.get(tKey) : undefined);
 
 		let abstract = item.abstract;
@@ -2103,9 +2159,24 @@ function mergeOpenAlexRowIntoMap(
 		map.set(key, next);
 		return;
 	}
+	const prevDoi = cleanDoi(prev.doi);
+	const nextDoi = cleanDoi(next.doi);
+	const preferredDoi =
+		prevDoi && !prevDoi.toLowerCase().startsWith("10.48550/arxiv.")
+			? prev.doi
+			: nextDoi && !nextDoi.toLowerCase().startsWith("10.48550/arxiv.")
+				? next.doi
+				: prev.doi || next.doi;
 	map.set(key, {
 		...prev,
-		doi: prev.doi || next.doi,
+		doi: preferredDoi,
+		publication_date: prev.publication_date || next.publication_date,
+		abstract_inverted_index:
+			prev.abstract_inverted_index ?? next.abstract_inverted_index,
+		biblio: prev.biblio ?? next.biblio,
+		primary_location: prev.primary_location ?? next.primary_location,
+		locations: [...(prev.locations ?? []), ...(next.locations ?? [])],
+		open_access: prev.open_access ?? next.open_access,
 		cited_by_count: Math.max(
 			prev.cited_by_count ?? 0,
 			next.cited_by_count ?? 0,

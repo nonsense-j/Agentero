@@ -2263,4 +2263,84 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			setCachedOpenAlexApiKeyForTests(null);
 		}
 	});
+
+	it("enriches DOI-less USENIX Security 2026 papers beyond the former 24-paper cap when OpenAlex proceedings source is still empty", async () => {
+		const usenix = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "usenix-sec-2026",
+		);
+		if (!usenix) throw new Error("Missing usenix-sec-2026");
+
+		const totalPapers = 110;
+		const targetIdx = 104;
+		const targetTitle =
+			"HasteBoots! Proving TFHE Programmable Bootstrapping in Seconds Across Heterogeneous Cryptographic Accelerators and Edge Enclaves";
+
+		const coolPanels = Array.from({ length: totalPapers }, (_, idx) => {
+			const title =
+				idx === targetIdx
+					? targetTitle
+					: `Cryptographic Protocol Verification Study Number ${idx + 1}`;
+			return `
+				<div id="paper-${idx + 1}@usenixsecurity26@USENIX" class="panel paper" keywords="tfhe,bootstrapping">
+					<h2 class="title">
+						<a href="https://www.usenix.org/conference/usenixsecurity26/presentation/paper-${idx + 1}" title="${idx + 1}/${totalPapers}">#${idx + 1}</a>
+						<a id="title-paper-${idx + 1}@usenixsecurity26@USENIX" class="title-link" href="/venue/paper-${idx + 1}@usenixsecurity26@USENIX">${title}</a>
+						<a id="pdf-paper-${idx + 1}@usenixsecurity26@USENIX" class="title-pdf" data="https://www.usenix.org/system/files/usenixsecurity26-paper-${idx + 1}.pdf">[PDF]</a>
+					</h2>
+					<p class="metainfo authors"><a class="author" href="#">Alice Researcher</a></p>
+					<p id="summary-paper-${idx + 1}@usenixsecurity26@USENIX">We present a formal security analysis and implementation evaluated across realistic adversarial workloads.</p>
+				</div>`;
+		}).join("\n");
+
+		const titleSearchUrls: string[] = [];
+		const bundle = await fetchMultiChannelVenuePapers(
+			usenix,
+			2026,
+			async <T>(url: string) => {
+				const decoded = decodeURIComponent(url);
+				if (decoded.includes("primary_location.source.id:S4306421123")) {
+					return { meta: { count: 0, next_cursor: null }, results: [] } as T;
+				}
+				if (decoded.includes("title.search:")) {
+					titleSearchUrls.push(decoded);
+					if (decoded.includes("HasteBoots")) {
+						return {
+							results: [
+								{
+									id: "https://openalex.org/W4411223344",
+									title: targetTitle,
+									publication_year: 2025,
+									publication_date: "2025-11-18",
+									doi: "https://doi.org/10.48550/arxiv.2511.12345",
+									cited_by_count: 7,
+									keywords: [
+										{ display_name: "Homomorphic Encryption", score: 0.94 },
+										{ display_name: "Zero-Knowledge Proofs", score: 0.89 },
+									],
+								},
+							],
+						} as T;
+					}
+					return { results: [] } as T;
+				}
+				return { results: [] } as T;
+			},
+			async (url) => {
+				if (url.includes("papers.cool/venue/USENIX-Sec.2026")) {
+					return coolPanels;
+				}
+				return "";
+			},
+		);
+
+		expect(bundle.items).toHaveLength(totalPapers);
+		expect(titleSearchUrls.length).toBeGreaterThanOrEqual(7);
+		const hit = bundle.items.find((p) => p.title === targetTitle);
+		expect(hit?.keywords).toEqual([
+			"Homomorphic Encryption",
+			"Zero-Knowledge Proofs",
+		]);
+		expect(hit?.citationCount).toBe(7);
+		expect(hit?.arxivId).toBe("2511.12345");
+	});
 });

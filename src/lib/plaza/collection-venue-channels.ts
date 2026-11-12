@@ -2203,16 +2203,17 @@ export async function fetchMultiChannelVenuePapers(
 	let structuredRemoteTotal = 0;
 	let authoritativeMainTrack = false;
 
-	if (coolRes.items.length >= 1000) {
-		primaryItems = dedupeVenueChannelItems([coolRes.items]);
-		authoritativeMainTrack = true;
-	} else if (coolRes.items.length >= 100) {
+	if (coolRes.items.length >= 100) {
+		const structuredBudget = Math.min(
+			maxPages,
+			Math.max(4, Math.ceil(coolRes.items.length / 200) + 2),
+		);
 		const structured = await fetchVenueStructuredPapers(
 			venue,
 			year,
 			fetchJson,
 			{
-				maxPages: Math.min(maxPages, 4),
+				maxPages: structuredBudget,
 			},
 		);
 		structuredRemoteTotal = structured.remoteTotalCount ?? 0;
@@ -2220,6 +2221,38 @@ export async function fetchMultiChannelVenuePapers(
 			dedupeVenueChannelItems([coolRes.items]),
 			structured.items,
 		);
+
+		const missingKwIndices: number[] = [];
+		for (let idx = 0; idx < primaryItems.length; idx++) {
+			if ((primaryItems[idx]?.keywords?.length ?? 0) === 0) {
+				missingKwIndices.push(idx);
+			}
+		}
+		if (missingKwIndices.length > 0) {
+			const subset = missingKwIndices
+				.map((idx) => primaryItems[idx])
+				.filter((x): x is CollectionPaperItem => Boolean(x));
+			const enrichedSubset = await enrichVenueItemsBatch(
+				subset,
+				venue,
+				fetchJson,
+				structured.items,
+			);
+			if (enrichedSubset.length === missingKwIndices.length) {
+				for (let k = 0; k < missingKwIndices.length; k++) {
+					const targetIdx = missingKwIndices[k];
+					const enrichedItem = enrichedSubset[k];
+					if (targetIdx !== undefined && enrichedItem) {
+						primaryItems[targetIdx] = enrichedItem;
+					}
+				}
+			} else {
+				primaryItems = backfillMissingMetadataFromChannel(
+					primaryItems,
+					enrichedSubset,
+				);
+			}
+		}
 		authoritativeMainTrack = true;
 	} else if (spec?.trackRosterMode === "required") {
 		// Strict Main / Research / Technical Track roster required (`ASE`, `ICPC`, `RE`, `SANER`, `ICSME`, `ESEM`)
