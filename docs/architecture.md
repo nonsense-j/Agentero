@@ -95,6 +95,8 @@ Plate + `@platejs/markdown`。普通文本粘贴默认按 Markdown 解析。`\$a
 | 引用解析 | 参考文献元数据 | `{paper}/source/agentero-cite.json` |
 | 设置 | UI/Agent 偏好 | XDG `~/.config/agentero/settings.json` |
 | 使用记录 | 打开 / 下载 / Agent 等 | XDG `~/.local/share/agentero/usage.sqlite` |
+| 广场订阅 | RSS / Atom / JSON Feed 订阅源与条目缓存 | XDG `~/.local/share/agentero/feeds.sqlite` |
+| 广场论文池 | Paper Collection 2026 论文池、FTS5 检索、推荐词云状态与引用边 | XDG `~/.local/share/agentero/collection.sqlite` |
 | 索引 | 双链图（编辑器/反链） | 内存，可重建 |
 | 引用图 | 文献 cites（sidecar + localMatch） | 按需扫描 sidecar，可重建 |
 

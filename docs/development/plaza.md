@@ -220,9 +220,9 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 
 | 维度 | 机制 |
 |---|---|
-| 论文级元数据标记 | 已推荐状态直接记录在 `CollectionPaperItem.recommendedAt?: string`（ISO 时间戳），移除旧版 `RecommendPoolState.history` / `pushedIds` 列表膨胀；旧版 `v1` `pushedIds` 首次加载自动迁移至池内论文 `recommendedAt` 并清理 `localStorage`。论文池刷新/合并/详情补全时始终保留既有 `recommendedAt` |
-| IndexedDB 增量写回 | 每次推荐 15 篇时调用 `markCollectionPapersRecommended` → `patchItemsInIndexedDb`，在单个 `readwrite` 事务内仅 `store.put` 这 15 条记录，避免 `store.clear()` 全量重写数千篇论文；`saveCollectionState` 同步写入 `localStorage` 热备份时剥离派生的 `bibtex` 大字段并收敛条数，消除主线程 JSON 序列化卡顿 |
-| 内存词云与倒排索引 | `recommend-pool.ts` 按论文池快照缓存归一词频表（预排序，拖动 `Slider` 切片 Top-N 为 $O(1)$）与词元/关键词倒排索引，数千篇论文打分在数毫秒内完成 |
+| 论文级元数据与词表持久化 | 已推荐状态直接记录在 `collection.sqlite` `papers.recommended_at`（前端映射为 `CollectionPaperItem.recommendedAt?: string`，ISO 时间戳），常用/已选词与滑块规模持久化于 `recommend_keywords` + `collection_config` 表；论文池刷新、合并与详情补全时始终保留既有 `recommended_at`，启动时由 `purgeLegacyCollectionBrowserStorage()` 自动清理旧版 `localStorage` 与 `IndexedDB` 遗留数据 |
+| SQLite 原子推荐与零全量驻留 | 点击推荐或换一批时调用 `plaza_collection_recommend_next`，在 `collection.sqlite`（WAL）单事务内排除已推荐与已入库论文、按关键词精确/短语/词元与发表新近度打分，仅返回当前批次 15 篇并原子写入 `recommended_at`，无需前端在 JS 堆内常驻数万篇全量论文池 |
+| SQLite 词频聚合与 $O(1)$ 切片 | 词云由 `plaza_collection_word_cloud(topN: 150)` 直接基于 `paper_keywords` 归一表聚合返回预排序 Top-150 词频，前端拖动 `Slider`（15–150）本地切片为 $O(1)$，毫秒级响应且零全池遍历 |
 
 > **附：后台 arXiv Daily 向量管线（供 `@` 引用预热）**：Host 侧 `src-tauri/src/features/recommend/mod.rs`（`recommend_arxiv` / `recommend_arxiv_last`，缓存表 `catalog.sqlite` `embed_cache` + `discovery_runs`）仍保留给 `vault:opened` 后台当日预热及 Agent `@` 引用广场条目使用；与命令行的无状态词法发现 `agentero discover arxiv`（见 [../backend/cli.md](../backend/cli.md#discover)）互不干扰。
 
@@ -301,15 +301,15 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 
 ### 3.8 Paper Collection（已实现）
 
-**主内容**：原生双入口面板（`arXiv` 与 `Venue` 独立门户），维护本地优先的 2026 论文池（`IndexedDB` 全量池 + `localStorage` 热切片），零 PDF 自动下载。
+**主内容**：原生双入口面板（`arXiv` 与 `Venue` 独立门户），维护本地优先的 2026 论文池（统一持久化于 XDG data `collection.sqlite`，WAL + 外置内容 FTS5 `papers_fts` + `citation_edges`），前端 `collection-store.ts` 仅持有轻量统计摘要（`CollectionStateSummary`）与当前分页切片，零 PDF 自动下载。
 
 | 维度 | 机制 |
 |---|---|
-| 打开策略（纯手动刷新） | 打开 `Paper Collection`（以及进入 `arXiv` / `Venue` 或切换子栏目）时仅从 `localStorage` 与 `IndexedDB` 水合本地缓存，**默认不触发任何网络探测、预加载或同步请求**；仅当用户显式点击 `arXiv` / `Venue` / 当前子栏目的刷新按钮（或列表底部「加载更多 arXiv 论文」）时才执行更新 |
+| 打开策略（纯手动刷新） | 打开 `Paper Collection`（以及进入 `arXiv` / `Venue` 或切换子栏目）时仅通过 `plaza_collection_state_get` / `plaza_collection_list_papers` 读取本地 `collection.sqlite` 摘要与首屏分页（列表行省略 `bibtex` 大字段，点击详情时再由 `plaza_collection_paper_get` 按需读取），**默认不触发任何网络探测、预加载或同步请求**；仅当用户显式点击 `arXiv` / `Venue` / 当前子栏目的刷新按钮（或列表底部「加载更多 arXiv 论文」）时才执行更新 |
 | `arXiv` 全量回填与增量同步 | 默认启用 `cs.SE`、`cs.CR`、`cs.PL`（`cs.AI` 可按需开启）。手动点击刷新时，已有水位线的分区先发单条 `max_results=1` 增量水位线探测（无更新零拉取，有更新仅拉取 `submittedDate` 差异窗口并补全元数据）；尚未完成历史回填（`!historyComplete`）时，`preloadAll2026ArxivInBackground` 通过 `politePlazaFetchText` 串行限速请求 `export.arxiv.org`，以 `submittedDate:[202601010000 TO toStamp]`（`start=0`）按最旧 `<published>` 时间戳向后滑动窗口直至抵达 `2026-01-01`，实时持久化每类 `oldestSyncedPublishedAt`、`remoteTotal` 与 `historyComplete` |
 | `Venue` 多渠道全量同步 | 覆盖 28 个 2026 顶会/顶刊（单一 schema，不维护历史 `VENUE_SYNC_VERSION`），手动点击刷新时多渠道分级协同：(1) `papers.cool/venue/{slug}?skip=...&show=500` 完整目录（`ICML`、`ICLR`、`ACL`、`AAAI`、`USENIX Security`、`NDSS`，按原始面板数分页，自带 100% 摘要、作者、关键词与 PDF 直链）；(2) IEEE Computer Society CSDL GraphQL（`/csdl/api/v1/graphql`，覆盖 `TSE`、`S&P`、`RE`、`SANER`、`ICSME` 100% 官方摘要）与 DataCite REST（`10.4230/lipics.*`，覆盖 `ECOOP`、`ESEM` 100% 摘要与 OA 链接）；(3) OpenAlex `page=1..N`（规避无 Key 游标第 2 页 HTTP 401，支持多卷集 `OOPSLA1+OOPSLA2` / `ISSTA`、精确 DOI 前缀白名单与 `ICSE-Companion` 等附属卷排除）+ Crossref 游标分页（移除不兼容 `cursor` 的 `sort=published` 并支持 LNCS ISBN 过滤如 `SAS 2026`）+ 官方 `https://sparql.dblp.org/sparql`（`dblpAllowedPubIn` 主会过滤）并集；(4) 尚未分配 DOI 的顶会官方录用日程页（`CCS 2026`、`ISSRE 2026`）+ `NeurIPS 2026` arXiv 录用全量分页检索 |
-| 摘要最大化获取与 CARSI 兜底 | 主会池缺摘要时依次通过 OpenAlex 倒排索引、Crossref、Semantic Scholar Bulk + 标题匹配、arXiv 预印本回填，以及 Springer 公开落地页（`link.springer.com/article|chapter/<doi>` `#Abs1-content`）补齐摘要；点击详情时再由 `ensurePaperFullDetails` 按需补全；入库与全文 PDF 获取除 `papers.cool` 直链与 Unpaywall OA 外，支持 `设置 -> 通用 -> 网络 -> 机构代理 -> CARSI` 多出版商教育网联邦登录及本机 `paper-search` CLI 兜底 |
-| 落点 | `src/lib/plaza/collection.ts`、`src/lib/plaza/collection-enrichment.ts`、`src/lib/plaza/collection-venue-channels.ts`、`src/components/plaza/plaza-collection-view.tsx`、`src/components/plaza/collection-portal-hub.tsx` |
+| 摘要最大化获取与 CARSI 兜底 | 主会池缺摘要时依次通过 OpenAlex 倒排索引、Crossref、Semantic Scholar Bulk + 标题匹配、arXiv 预印本回填，以及 Springer 公开落地页（`link.springer.com/article|chapter/<doi>` `#Abs1-content`）补齐摘要；点击详情时再由 `ensurePaperFullDetails` 按需补全并经 `plaza_collection_patch_papers` 写回；入库与全文 PDF 获取除 `papers.cool` 直链与 Unpaywall OA 外，支持 `设置 -> 通用 -> 网络 -> 机构代理 -> CARSI` 多出版商教育网联邦登录及本机 `paper-search` CLI 兜底 |
+| 落点 | `crates/agentero-core/src/features/paper/discovery/collection/`、`src-tauri/src/features/paper/discovery/collection_commands.rs`、`src/lib/plaza/collection-store.ts`、`src/lib/plaza/collection.ts`、`src/lib/plaza/collection-enrichment.ts`、`src/lib/plaza/collection-venue-channels.ts`、`src/components/plaza/plaza-collection-view.tsx`、`src/components/plaza/collection-portal-hub.tsx` |
 
 ## 4. 与其它模块
 
@@ -318,6 +318,7 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 | Library | arXiv Daily 读 `paper_list` 当语料；缓存表 `embed_cache` / `discovery_runs` 落在 catalog（v6 + v8），不动 `papers` 表 |
 | 魔棒 / 入库 | **已复用** `lookup_import_batch`：喂上游 URL，见 §3.2.1。订阅论文卡走同一条 |
 | 订阅 | 独立 XDG `feeds.sqlite`，不进 catalog；见 [`plaza-feeds.md`](plaza-feeds.md) |
+| 论文池 / 发现 / 推荐 | 独立 XDG `collection.sqlite`（WAL + FTS5 `papers_fts` + `citation_edges`），不进 catalog；`Fast Search`、关键词推荐与 `agentero-collection` Stdio MCP 直连同一 SQLite，零 `snapshot.json` 导出或 `IndexedDB` 副本 |
 | PDF\|NOTES | 推荐打开本地论文时走现有阅读布局 |
 | Agent | 订阅详情与 arXiv Daily 远程 PDF 均支持划词提问 / 加入对话（#421；远程 ephemeral，不写 `marks/`）；Agent `@` 可引用广场条目（arXiv Daily 当日 + Feeds 最近条目，元数据 + Vault 外全文临时副本展开进 prompt，见 [agent.md](../frontend/agent.md)） |
 | 命令面板 | P1：`Plaza: Cool Papers` 等 |
@@ -372,6 +373,7 @@ DocTab：`kind: "plaza"`（或 `file` + mode `plaza` + path 虚拟 URI——实�
 | 站点内嵌 | `src/components/plaza/plaza-web-frame.tsx`（代理 iframe，两个站点来源共用；没有 Tauri 子 webview 封装） |
 | arXiv Daily | `src-tauri/src/features/recommend/`（管线 + 命令）、`src/lib/recommend/index.ts`、`src/components/plaza/plaza-arxiv-rec-view.tsx`；缓存表见 `catalog/schema.rs` v6 |
 | CCF 截稿 | `src/lib/plaza/ccf-deadlines.ts`、`src/components/plaza/plaza-ccf-deadlines-view.tsx`（只读上游 JSON，无 Host 侧代码） |
+| Paper Collection / Discover | `crates/agentero-core/src/features/paper/discovery/collection/`（`collection.sqlite` + MCP 查询引擎）、`src-tauri/src/features/paper/discovery/collection_commands.rs`、`src-tauri/src/integration/collection_mcp.rs`、`src/lib/plaza/collection-store.ts`、`src/lib/plaza/collection.ts`、`src/lib/plaza/paper-search.ts`、`src/lib/plaza/recommend-pool.ts` |
 | 订阅 | [`plaza-feeds.md`](plaza-feeds.md) §6 |
 | i18n | `sidebar` / 独立 `plaza` ns |
 | Roadmap / Todo | 增加「广场 P0」条目 |
@@ -410,3 +412,4 @@ DocTab：`kind: "plaza"`（或 `file` + mode `plaza` + path 虚拟 URI——实�
   2. **Paper Discover (`agentero:plaza/discover`)**：移植 `dr-dumpling/PaperSearch` 的多源纯元数据检索器（`DBLP`、`ACM`、`USENIX`、`OpenReview`、`IACR ePrint`、`arXiv`、`Semantic Scholar`、`OpenAlex`，检索阶段零 PDF 下载），提供「快速检索」与「Grill-Me 式交互式 Agent 深度检索」（动态拆分检索词芯片 + 逐个澄清问题 + 随时一键「立即开始检索 / 不再追问」）。
   3. **Paper Recommend (`agentero:plaza/arxiv-rec`)**：两阶段无重复推荐面板（见 §3.4）。首屏居中展示 `Recent Keywords` 胶囊芯片（可自由点选/取消至 0 选中、自定义增删）与汇总池内全部论文关键词的 `All Keywords` 词云（默认 Top 50，下方 `Slider` 支持 15–150 动态调节）；点击 `Recommend` 进入结果页，顶部展示已选关键词并推送 15 篇未推荐论文，已推荐状态直接记录在论文池元数据 `CollectionPaperItem.recommendedAt` 并以 IndexedDB 单事务增量落盘（不维护冗余历史列表）。
   4. **CCF Deadline (`agentero:plaza/ccf-deadlines`)**：从 `ccfddl` 同步截稿日程，原生列表默认联动 `Paper Collection` 仅展示所关注会议的截稿倒计时，支持与内嵌 `https://ccfddl.com/` 网页视图一键切换。
+*修订：2026-11-12 — Paper Collection 存储统一收敛至 XDG data `collection.sqlite`（WAL + FTS5 `papers_fts` + `citation_edges`）：移除前端 `IndexedDB` / `localStorage` 双写与 MCP `snapshot.json` 全量快照导出，前端改为轻量 `collection-store.ts` 分页读取，`agentero-collection` Stdio MCP 直连 `collection.sqlite` 读取与写回 `citation_edges`，启动时一次性清理遗留浏览器存储。*

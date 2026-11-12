@@ -86,6 +86,7 @@ ACP / SSH 子进程由 Rust 与 ACP SDK 启动，不注册 Tauri shell 插件。
 | 应用设置 | UI / Agent 注册表 / 偏好 | XDG `~/.config/agentero/` |
 | 使用记录 | 打开 / 下载 / Agent 等活动 | XDG data `~/.local/share/agentero/usage.sqlite` |
 | 广场订阅 | 订阅名单 + 条目缓存 | XDG data `feeds.sqlite`（不进 catalog） |
+| 广场论文池 | 2026 arXiv 与顶会/顶刊论文池、FTS5 检索、推荐状态与引用边 | XDG data `collection.sqlite`（不进 catalog） |
 | 可重建索引 | 双链图 | 内存 / 可重建缓存，非业务权威 |
 
 原则：Store/设置不存论文 meta；`PAPERS.md` / `library.bib` 默认不生成，仅导出。
