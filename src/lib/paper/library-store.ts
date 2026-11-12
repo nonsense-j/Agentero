@@ -27,6 +27,8 @@ export type { LocalPdfImportEntry };
 type LibraryStore = {
 	papers: PaperLibraryRow[];
 	loading: boolean;
+	/** Vault path whose catalog has completed at least one load (including empty `[]`). */
+	loadedVaultPath: string | null;
 	/** Title search query for the papers library view. */
 	query: string;
 	/**
@@ -58,6 +60,7 @@ function indexByRelPath(papers: PaperMetadata[]): Map<string, PaperMetadata> {
 export const libraryStore = createStore<LibraryStore>(() => ({
 	papers: [],
 	loading: false,
+	loadedVaultPath: null,
 	query: "",
 	scopePath: null,
 	rescanning: false,
@@ -172,15 +175,25 @@ export async function refreshLibrary(): Promise<void> {
 	const vaultPath = getVaultPath();
 	if (!vaultPath || !isTauri()) {
 		setLibraryPapers([]);
+		libraryStore.setState({ loadedVaultPath: null });
 		return;
 	}
 	libraryStore.setState({ loading: true });
 	try {
-		setLibraryPapers(await listPapers(vaultPath));
+		const papers = await listPapers(vaultPath);
+		if (getVaultPath() === vaultPath) {
+			setLibraryPapers(papers);
+			libraryStore.setState({ loadedVaultPath: vaultPath, loading: false });
+		} else {
+			libraryStore.setState({ loading: false });
+		}
 	} catch {
-		setLibraryPapers([]);
-	} finally {
-		libraryStore.setState({ loading: false });
+		if (getVaultPath() === vaultPath) {
+			setLibraryPapers([]);
+			libraryStore.setState({ loadedVaultPath: vaultPath, loading: false });
+		} else {
+			libraryStore.setState({ loading: false });
+		}
 	}
 }
 
@@ -209,6 +222,7 @@ export async function runLibraryRefresh(): Promise<void> {
 	const vaultPath = getVaultPath();
 	if (!vaultPath || !isTauri()) {
 		setLibraryPapers([]);
+		libraryStore.setState({ loadedVaultPath: null });
 		return;
 	}
 	try {
@@ -217,9 +231,15 @@ export async function runLibraryRefresh(): Promise<void> {
 		// sidecars first so titles/metadata follow the new paths, then list.
 		await rescanPapers(vaultPath);
 		const papers = await listPapers(vaultPath);
-		if (getVaultPath() === vaultPath) setLibraryPapers(papers);
+		if (getVaultPath() === vaultPath) {
+			setLibraryPapers(papers);
+			libraryStore.setState({ loadedVaultPath: vaultPath });
+		}
 	} catch {
-		setLibraryPapers([]);
+		if (getVaultPath() === vaultPath) {
+			setLibraryPapers([]);
+			libraryStore.setState({ loadedVaultPath: vaultPath });
+		}
 	}
 }
 
@@ -255,6 +275,7 @@ export function clearLibraryVaultState(): void {
 		editMetaDraft: null,
 		citingScanDraft: null,
 		loading: false,
+		loadedVaultPath: null,
 		rescanning: false,
 		ioBusy: null,
 	});

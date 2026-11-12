@@ -1,5 +1,6 @@
 import { normalizeArxivId } from "@/lib/paper/arxiv";
 import { libraryStore, refreshLibrary } from "@/lib/paper/library-store";
+import { getVaultPath } from "@/lib/vault/store";
 
 /** Bare arXiv id, without a version suffix. ModelScope and the catalog disagree on `vN`. */
 export function bareArxivId(raw: string): string | null {
@@ -50,15 +51,26 @@ function waitUntilLibraryIdle(): Promise<void> {
 	});
 }
 
-/** Answer a ModelScope frame that wants to label rows already in the library. */
-export async function importedIdsInLibrary(ids: string[]): Promise<string[]> {
-	const queried = ids
-		.filter((id) => typeof id === "string" && id.trim())
-		.slice(0, 200);
+/** Answer a Plaza panel or ModelScope frame that wants to label rows already in the library. */
+export async function importedIdsInLibrary(
+	ids: string[],
+	options?: { limit?: number },
+): Promise<string[]> {
+	const limit = options?.limit ?? 200;
+	const filtered = ids.filter((id) => typeof id === "string" && id.trim());
+	const queried = Number.isFinite(limit) ? filtered.slice(0, limit) : filtered;
 	if (!queried.length) return [];
 	if (libraryStore.getState().papers.length === 0) {
 		if (libraryStore.getState().loading) await waitUntilLibraryIdle();
-		if (libraryStore.getState().papers.length === 0) await refreshLibrary();
+		const vaultPath = getVaultPath();
+		const state = libraryStore.getState();
+		if (
+			vaultPath &&
+			state.papers.length === 0 &&
+			state.loadedVaultPath !== vaultPath
+		) {
+			await refreshLibrary();
+		}
 	}
 	return matchingImportedIds(queried, libraryStore.getState().papers);
 }
