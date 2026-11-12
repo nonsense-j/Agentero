@@ -2,6 +2,7 @@
 //! and in-collection citation snowballing for Plaza Paper Collection & Discover.
 
 pub mod citations;
+pub mod keywords;
 pub mod models;
 pub mod recommend;
 pub mod schema;
@@ -12,6 +13,11 @@ pub mod store;
 pub const COLLECTION_MCP_WORKER_ARG: &str = "--agentero-collection-mcp";
 
 pub use citations::snowball_citations_at;
+pub use keywords::{
+    build_keyword_lookup_key, canonicalize_keyword, canonicalize_keywords, clean_keyword_surface,
+    normalize_keyword_key, singularize_keyword_token, union_canonical_keywords,
+    KeywordSynonymGroup, KEYWORD_SYNONYM_MAP, SYNONYM_GROUPS,
+};
 pub use models::*;
 pub use recommend::{
     recommend_next, recommend_next_at, recommend_state_get, recommend_state_get_at,
@@ -218,7 +224,7 @@ mod tests {
         assert_eq!(
             detail.keywords,
             vec![
-                "LLM Agent".to_string(),
+                "AI Agent".to_string(),
                 "Vulnerability Detection".to_string()
             ]
         );
@@ -566,9 +572,24 @@ mod tests {
             &db,
             CollectionUpsertPapersArgs {
                 items: vec![
-                    make_arxiv_input(1, "cs.SE", "Paper One", vec!["llm agent", "ebpf"]),
-                    make_arxiv_input(2, "cs.SE", "Paper Two", vec!["LLM Agent", "eBPF"]),
-                    make_arxiv_input(3, "cs.SE", "Paper Three", vec!["LLM AGENT", "eBPF"]),
+                    make_arxiv_input(
+                        1,
+                        "cs.SE",
+                        "Paper One",
+                        vec!["llm agent", "ebpf", "langgraph"],
+                    ),
+                    make_arxiv_input(
+                        2,
+                        "cs.SE",
+                        "Paper Two",
+                        vec!["LLM Agent", "eBPF", "LangGraph"],
+                    ),
+                    make_arxiv_input(
+                        3,
+                        "cs.SE",
+                        "Paper Three",
+                        vec!["LLM AGENT", "eBPF", "LangGraph"],
+                    ),
                 ],
                 ..Default::default()
             },
@@ -576,17 +597,24 @@ mod tests {
         .unwrap();
 
         let wc = word_cloud_at(&db, &CollectionWordCloudArgs { top_n: Some(20) }).unwrap();
-        let llm_chip = wc
+        let agent_chip = wc
             .keywords
             .iter()
-            .find(|k| k.normalized == "llm agent")
+            .find(|k| k.normalized == "ai agent")
             .unwrap();
-        assert_eq!(llm_chip.term, "LLM Agent");
-        assert_eq!(llm_chip.count, 3);
-        assert_eq!(llm_chip.unrecommended_count, 3);
+        assert_eq!(agent_chip.term, "AI Agent");
+        assert_eq!(agent_chip.count, 3);
+        assert_eq!(agent_chip.unrecommended_count, 3);
 
         let ebpf_chip = wc.keywords.iter().find(|k| k.normalized == "ebpf").unwrap();
         assert_eq!(ebpf_chip.term, "eBPF");
+
+        let langgraph_chip = wc
+            .keywords
+            .iter()
+            .find(|k| k.normalized == "langgraph")
+            .unwrap();
+        assert_eq!(langgraph_chip.term, "LangGraph");
 
         let cleared = recommend_state_set_at(
             &db,
@@ -741,26 +769,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dblp_schema_auto_reset_and_venue_management_crud_work() {
+    fn clean_v1_schema_defaults_and_venue_management_crud_work() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("collection.sqlite");
 
-        // 1. Pre-populate a legacy `venues(dblp_stream)` table and verify `ensure_collection_at` resets cleanly
-        {
-            let conn = rusqlite::Connection::open(&db).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE venues (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, dblp_stream TEXT);
-                 INSERT INTO venues VALUES ('ase-2026', 'ASE 2026', 'https://dblp.uni-trier.de/db/conf/kbse/ase2026.html', 'conf/kbse');",
-            )
-            .unwrap();
-        }
-
+        assert_eq!(SCHEMA_VERSION, 1);
         let initial = state_get_at(&db).unwrap();
         assert_eq!(initial.venues.len(), 28);
         assert!(initial
             .venues
             .iter()
             .all(|v| !v.url.contains("dblp") && v.tracks.iter().all(|t| !t.contains("dblp"))));
+
+        let rec_defaults = recommend_state_get_at(&db).unwrap();
+        assert_eq!(rec_defaults.keywords[0].id, "kw-ai-agent");
+        assert_eq!(rec_defaults.keywords[0].term, "AI Agent");
 
         // 2. Upsert a venue paper for `sas-2026`, then delete `sas-2026`, edit `icse-2026` notes, and add `msr-2026`
         upsert_papers_at(
@@ -1168,5 +1191,189 @@ mod tests {
         .unwrap();
         assert!(rec2.items.is_empty());
         assert!(rec2.exhausted);
+    }
+
+    #[test]
+    fn synonym_canonicalization_dedupes_store_recommend_and_search_across_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        // 1. Upsert papers whose titles/abstracts avoid raw alias tokens, testing pure keyword canonicalization.
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2604.00001".into(),
+                        title: "Sound Static Taint Flow for C Binaries".into(),
+                        authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+                        abstract_text:
+                            "We present an interprocedural analysis for memory corruption.".into(),
+                        published_at: "2026-04-01T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        url: "https://arxiv.org/abs/2604.00001".into(),
+                        arxiv_id: Some("2604.00001".into()),
+                        keywords: vec![
+                            "Defect Detection".into(),
+                            "Bug Detection".into(),
+                            "Software Vulnerability Detection".into(),
+                            "Fuzz Testing".into(),
+                            "APR".into(),
+                        ],
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:doi:10.1145/9990001".into(),
+                        title: "Sound Static Taint Flow for C Binaries".into(),
+                        authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+                        abstract_text:
+                            "We present an interprocedural analysis for memory corruption.".into(),
+                        published_at: "2026-04-15T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        url: "https://doi.org/10.1145/9990001".into(),
+                        doi: Some("10.1145/9990001".into()),
+                        venue_id: Some("icse-2026".into()),
+                        venue_kind: Some("conference".into()),
+                        venue_domain: Some("PL/SE".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        keywords: vec!["Flaw Detection".into(), "LLM Agent".into()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let arxiv_detail = paper_get_at(&db, "arxiv:2604.00001").unwrap().unwrap();
+        assert_eq!(
+            arxiv_detail.keywords,
+            vec!["Vulnerability Detection", "Fuzzing", "Program Repair"]
+        );
+
+        // 2. Patching synonym variants onto the venue paper never introduces duplicate tags.
+        patch_papers_at(
+            &db,
+            CollectionPatchPapersArgs {
+                patches: vec![CollectionPaperPatch {
+                    id: "venue:icse-2026:doi:10.1145/9990001".into(),
+                    keywords: Some(vec![
+                        "Bug Finding".into(),
+                        "Autonomous Agents".into(),
+                        "Agentic AI".into(),
+                    ]),
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+
+        let venue_detail = paper_get_at(&db, "venue:icse-2026:doi:10.1145/9990001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            venue_detail.keywords,
+            vec!["Vulnerability Detection", "AI Agent"]
+        );
+
+        // 3. Word cloud collapses all synonyms across both rows into canonical buckets.
+        let wc = word_cloud_at(&db, &CollectionWordCloudArgs { top_n: Some(20) }).unwrap();
+        let vuln_bucket = wc
+            .keywords
+            .iter()
+            .find(|k| k.normalized == "vulnerability detection")
+            .unwrap();
+        assert_eq!(vuln_bucket.term, "Vulnerability Detection");
+        assert_eq!(vuln_bucket.count, 2);
+        assert!(wc
+            .keywords
+            .iter()
+            .all(|k| k.normalized != "defect detection"
+                && k.normalized != "llm agent"
+                && k.normalized != "fuzz testing"));
+
+        // 4. Keyword-field search via alias queries ("Defect Detection", "\"defect detection\"",
+        //    "LLM Agent", "Fuzz Testing", "APR") hits canonical stored keywords & enriches twin.
+        for alias_query in [
+            "Defect Detection",
+            "\"defect detection\"",
+            "LLM Agent",
+            "\"llm agent\"",
+            "Fuzz Testing",
+            "APR",
+        ] {
+            let res = search_fast_at(
+                &db,
+                &CollectionSearchArgs {
+                    query: Some(alias_query.into()),
+                    fields: vec!["keywords".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(res.total_matched, 1, "failed search_fast for {alias_query}");
+            assert_eq!(res.items[0].paper.id, "venue:icse-2026:doi:10.1145/9990001");
+            assert_eq!(
+                res.items[0].paper.keywords,
+                vec![
+                    "Vulnerability Detection",
+                    "AI Agent",
+                    "Fuzzing",
+                    "Program Repair"
+                ]
+            );
+        }
+
+        // 5. User-added recommend chips canonicalize & deduplicate synonyms and score +5.0 on paper_keywords.
+        let rec_state = recommend_state_set_at(
+            &db,
+            RecommendPoolStateInput {
+                keywords: Some(vec![
+                    RecommendKeywordChipInput {
+                        id: None,
+                        term: "Defect Detection".into(),
+                        enabled: true,
+                    },
+                    RecommendKeywordChipInput {
+                        id: None,
+                        term: "Bug Detection".into(),
+                        enabled: true,
+                    },
+                    RecommendKeywordChipInput {
+                        id: None,
+                        term: "LLM Agents".into(),
+                        enabled: false,
+                    },
+                ]),
+                selected_cloud_terms: Some(vec!["Autonomous Agent".into()]),
+                word_cloud_top_n: Some(30),
+                last_recommended_at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rec_state.keywords.len(), 2);
+        assert_eq!(rec_state.keywords[0].term, "Vulnerability Detection");
+        assert_eq!(rec_state.keywords[1].term, "AI Agent");
+        assert_eq!(rec_state.selected_cloud_terms, vec!["AI Agent"]);
+
+        let rec_next = recommend_next_at(
+            &db,
+            &RecommendNextArgs {
+                max_batch_size: Some(5),
+            },
+        )
+        .unwrap();
+        assert_eq!(rec_next.items.len(), 1);
+        assert_eq!(
+            rec_next.items[0].matched_keywords,
+            vec!["Vulnerability Detection", "AI Agent"]
+        );
+        assert!(rec_next.items[0].score >= 10.0);
     }
 }

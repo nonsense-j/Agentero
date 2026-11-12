@@ -8,6 +8,9 @@ use rusqlite::{params, params_from_iter, Connection, TransactionBehavior};
 
 use crate::error::AppError;
 
+use super::keywords::{
+    canonicalize_keyword, canonicalize_query_term, normalize_keyword_key, union_canonical_keywords,
+};
 use super::models::{
     CollectionWordCloudArgs, RecommendKeywordChipDto, RecommendKeywordChipInput, RecommendNextArgs,
     RecommendNextOut, RecommendPoolStateDto, RecommendPoolStateInput, RecommendedPaperDto,
@@ -32,20 +35,12 @@ const MINOR_TITLE_WORDS: &[&str] = &[
     "via", "with",
 ];
 
-fn clean_term_display(raw: &str) -> String {
-    raw.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn normalize_term_key(raw: &str) -> String {
-    clean_term_display(raw).to_lowercase()
-}
-
 fn clamp_word_cloud_top_n(n: usize) -> usize {
     n.clamp(MIN_WORD_CLOUD_TOP_N, MAX_WORD_CLOUD_TOP_N)
 }
 
 fn build_keyword_chip_id(term: &str, existing_ids: &HashSet<String>) -> String {
-    let norm = normalize_term_key(term);
+    let norm = normalize_keyword_key(term);
     let mut slug = String::new();
     let mut prev_dash = false;
     for ch in norm.chars() {
@@ -178,12 +173,17 @@ fn sanitize_keyword_chips(inputs: &[RecommendKeywordChipInput]) -> Vec<Recommend
     let mut used_ids: HashSet<String> = HashSet::new();
 
     for raw in inputs {
-        let term = clean_term_display(&raw.term);
-        let key = normalize_term_key(&term);
+        let Some(term) = canonicalize_query_term(&raw.term) else {
+            continue;
+        };
+        let key = normalize_keyword_key(&term);
         if key.is_empty() {
             continue;
         }
         if let Some(&idx) = seen_terms.get(&key) {
+            if casing_quality(&term) > casing_quality(&result[idx].term) {
+                result[idx].term = term;
+            }
             if raw.enabled && !result[idx].enabled {
                 result[idx].enabled = true;
             }
@@ -220,13 +220,15 @@ fn sanitize_selected_cloud_terms(
     let enabled_keys: HashSet<String> = keywords
         .iter()
         .filter(|k| k.enabled)
-        .map(|k| normalize_term_key(&k.term))
+        .map(|k| normalize_keyword_key(&k.term))
         .collect();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for entry in raw_terms {
-        let cleaned = clean_term_display(entry);
-        let key = normalize_term_key(&cleaned);
+        let Some(cleaned) = canonicalize_query_term(entry) else {
+            continue;
+        };
+        let key = normalize_keyword_key(&cleaned);
         if key.is_empty() || enabled_keys.contains(&key) || !seen.insert(key) {
             continue;
         }
@@ -302,7 +304,7 @@ fn persist_recommend_state_tx(
                 chip.id,
                 pos as i64,
                 chip.term,
-                normalize_term_key(&chip.term),
+                normalize_keyword_key(&chip.term),
                 i64::from(chip.enabled),
             ],
         )?;
@@ -454,14 +456,23 @@ pub(crate) fn word_cloud_conn(
             let (norm, display, cnt_raw, unrec_cnt_raw) = entry?;
             let cnt = cnt_raw.max(0) as usize;
             let unrec_cnt = unrec_cnt_raw.max(0) as usize;
-            let bucket = buckets.entry(norm).or_insert_with(|| KwBucket {
+            let canon_display = canonicalize_keyword(&display).unwrap_or(display);
+            let bucket_key = {
+                let k = normalize_keyword_key(&canon_display);
+                if k.is_empty() {
+                    norm
+                } else {
+                    k
+                }
+            };
+            let bucket = buckets.entry(bucket_key).or_insert_with(|| KwBucket {
                 count: 0,
                 unrecommended_count: 0,
                 variants: HashMap::new(),
             });
             bucket.count += cnt;
             bucket.unrecommended_count += unrec_cnt;
-            *bucket.variants.entry(display).or_insert(0) += cnt;
+            *bucket.variants.entry(canon_display).or_insert(0) += cnt;
         }
     }
 
@@ -502,14 +513,16 @@ fn merge_cloud_terms_into_recent_keywords(state: &RecommendPoolStateDto) -> Reco
 
     let mut keywords = state.keywords.clone();
     for cloud_term in &state.selected_cloud_terms {
-        let cleaned = clean_term_display(cloud_term);
-        let key = normalize_term_key(&cleaned);
+        let Some(cleaned) = canonicalize_query_term(cloud_term) else {
+            continue;
+        };
+        let key = normalize_keyword_key(&cleaned);
         if key.is_empty() {
             continue;
         }
         if let Some(chip) = keywords
             .iter_mut()
-            .find(|c| normalize_term_key(&c.term) == key)
+            .find(|c| normalize_keyword_key(&c.term) == key)
         {
             if casing_quality(&cleaned) > casing_quality(&chip.term) {
                 chip.term = cleaned;
@@ -562,8 +575,10 @@ fn prepare_query_keywords(chips: &[RecommendKeywordChipDto]) -> Vec<PreparedQuer
         if !chip.enabled {
             continue;
         }
-        let term = clean_term_display(&chip.term);
-        let phrase = term.to_lowercase();
+        let Some(term) = canonicalize_query_term(&chip.term) else {
+            continue;
+        };
+        let phrase = normalize_keyword_key(&term);
         if phrase.is_empty() || !seen.insert(phrase.clone()) {
             continue;
         }
@@ -870,7 +885,7 @@ pub(crate) fn recommend_next_conn(
             v.sibling_row_ids.push(a.row_id);
             v.abstract_text =
                 choose_better_abstract(&v.abstract_text, &a.abstract_text, &v.source_label);
-            v.keywords = union_strings_case_insensitive(&v.keywords, &a.keywords);
+            v.keywords = union_canonical_keywords(&v.keywords, &a.keywords);
             v.categories = union_strings_case_insensitive(&v.categories, &a.categories);
         } else {
             standalone_arxiv.push(a);
@@ -894,7 +909,7 @@ pub(crate) fn recommend_next_conn(
         let mut norm_kws: Vec<String> = Vec::with_capacity(row.keywords.len());
         let mut norm_kw_set: HashSet<String> = HashSet::with_capacity(row.keywords.len());
         for kw in &row.keywords {
-            let norm = normalize_term_key(kw);
+            let norm = normalize_keyword_key(kw);
             if norm.chars().count() >= 2 && norm_kw_set.insert(norm.clone()) {
                 norm_kws.push(norm);
             }

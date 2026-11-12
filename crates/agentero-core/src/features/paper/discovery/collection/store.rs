@@ -8,6 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 
 use crate::error::AppError;
 
+use super::keywords::{canonicalize_keywords, normalize_keyword_key, union_canonical_keywords};
 use super::models::{
     CollectionArxivLatest, CollectionArxivWatermark, CollectionArxivWatermarkInput,
     CollectionClearArgs, CollectionConfigUpdateArgs, CollectionListPapersArgs,
@@ -169,7 +170,7 @@ pub(crate) fn merge_arxiv_into_venue_summary(
         &arxiv.abstract_text,
         &venue.source_label,
     );
-    venue.keywords = union_strings_case_insensitive(&venue.keywords, &arxiv.keywords);
+    venue.keywords = union_canonical_keywords(&venue.keywords, &arxiv.keywords);
     venue.citation_count = venue.citation_count.max(arxiv.citation_count);
 }
 
@@ -1023,14 +1024,9 @@ fn sync_paper_relations(
     }
 
     conn.execute("DELETE FROM paper_keywords WHERE paper_id = ?1", [paper_id])?;
-    let mut kw_seen = HashSet::new();
-    for kw in keywords {
-        let display = kw.split_whitespace().collect::<Vec<_>>().join(" ");
-        if display.chars().count() < 2 {
-            continue;
-        }
-        let norm = display.to_lowercase();
-        if kw_seen.insert(norm.clone()) {
+    for display in canonicalize_keywords(keywords) {
+        let norm = normalize_keyword_key(&display);
+        if !norm.is_empty() {
             conn.execute(
                 "INSERT OR IGNORE INTO paper_keywords (paper_id, normalized, display) VALUES (?1, ?2, ?3)",
                 params![paper_id, norm, display],
@@ -1129,7 +1125,7 @@ fn upsert_single_paper_tx(
     let in_title = input.title.trim();
     let in_authors = clean_string_vec(&input.authors);
     let in_cats = clean_string_vec(&input.categories);
-    let in_kws = clean_string_vec(&input.keywords);
+    let in_kws = canonicalize_keywords(&input.keywords);
     let in_pub = input.published_at.trim();
     let in_year = if input.year > 0 { input.year } else { 2026 };
     let in_source_type = input.source_type.trim();
@@ -1172,7 +1168,7 @@ fn upsert_single_paper_tx(
         let published_ymd: String = published_at.chars().take(10).collect();
         let year = if input.year > 0 { input.year } else { ex.year };
         let categories = union_strings_case_insensitive(&ex_cats, &in_cats);
-        let keywords = union_strings_case_insensitive(&ex_kws, &in_kws);
+        let keywords = union_canonical_keywords(&ex_kws, &in_kws);
         let url = if !in_url.is_empty() {
             in_url.to_string()
         } else {
@@ -1505,8 +1501,8 @@ pub(crate) fn patch_papers_conn(
             None => ex_cats,
         };
         let keywords = match &patch.keywords {
-            Some(k) => union_strings_case_insensitive(&ex_kws, k),
-            None => ex_kws,
+            Some(k) => union_canonical_keywords(&ex_kws, k),
+            None => canonicalize_keywords(&ex_kws),
         };
         let url = patch
             .url

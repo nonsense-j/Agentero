@@ -8,6 +8,7 @@ use rusqlite::{params_from_iter, Connection};
 
 use crate::error::AppError;
 
+use super::keywords::canonicalize_keyword;
 use super::models::{
     BucketCount, CcfDistribution, CollectionCurateOut, CollectionCurateParams,
     CollectionOverviewOut, CollectionPaperHit, CollectionPaperSummary, CollectionSearchArgs,
@@ -196,6 +197,7 @@ pub(crate) fn compute_overview_conn(conn: &Connection) -> Result<CollectionOverv
 #[derive(Debug, Clone)]
 struct QueryTerm {
     text: String,
+    canonical_alt: Option<String>,
     phrase: bool,
     negated: bool,
 }
@@ -269,8 +271,17 @@ fn parse_boolean_query(raw: &str) -> ParsedBooleanQuery {
         if !is_phrase && !negated && (raw_tok == "AND" || raw_tok == "&") {
             continue;
         }
+        let text = raw_tok.to_lowercase();
+        let canonical_alt = if !negated {
+            canonicalize_keyword(&raw_tok)
+                .map(|c| c.to_lowercase())
+                .filter(|c| c != &text)
+        } else {
+            None
+        };
         let term = QueryTerm {
-            text: raw_tok.to_lowercase(),
+            text,
+            canonical_alt,
             phrase: is_phrase || raw_tok.contains(' ') || raw_tok.contains('-'),
             negated,
         };
@@ -290,7 +301,60 @@ fn parse_boolean_query(raw: &str) -> ParsedBooleanQuery {
         }
     }
 
+    // Expand multi-word conjunction branches whose combined phrase maps to a distinct
+    // canonical synonym (e.g., unquoted `Defect Detection` -> `"vulnerability detection"`,
+    // `LLM Agent` -> `"ai agent"`, `Fuzz Testing` -> `"fuzzing"`).
+    let mut extra_branches: Vec<Vec<QueryTerm>> = Vec::new();
+    for b in &branches {
+        let pos: Vec<&QueryTerm> = b.iter().filter(|t| !t.negated).collect();
+        if pos.len() >= 2 {
+            let joined = pos
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(canon) = canonicalize_keyword(&joined) {
+                let canon_lc = canon.to_lowercase();
+                if canon_lc != joined {
+                    let mut canon_branch = Vec::with_capacity(1 + b.len() - pos.len());
+                    canon_branch.push(QueryTerm {
+                        text: canon_lc,
+                        canonical_alt: None,
+                        phrase: true,
+                        negated: false,
+                    });
+                    canon_branch.extend(b.iter().filter(|t| t.negated).cloned());
+                    extra_branches.push(canon_branch);
+                }
+            }
+        }
+    }
+    branches.extend(extra_branches);
+
     ParsedBooleanQuery { branches }
+}
+
+fn fts_words_conjunction(s: &str) -> Option<String> {
+    if !s.is_ascii() {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::new();
+    for w in s.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if w.is_empty() {
+            continue;
+        }
+        if w.len() < 2 {
+            return None;
+        }
+        words.push(format!("\"{w}\"*"));
+    }
+    if words.is_empty() {
+        None
+    } else if words.len() == 1 {
+        words.pop()
+    } else {
+        Some(format!("({})", words.join(" AND ")))
+    }
 }
 
 /// Build an FTS5 prefix disjunction over positive ASCII alphanumeric tokens when every
@@ -307,17 +371,12 @@ fn build_fts5_match_expr(parsed: &ParsedBooleanQuery) -> Option<String> {
             if term.negated {
                 continue;
             }
-            if !term.text.is_ascii() {
-                return None;
-            }
-            for w in term.text.split(|c: char| !c.is_ascii_alphanumeric()) {
-                if w.is_empty() {
-                    continue;
-                }
-                if w.len() < 2 {
-                    return None;
-                }
-                word_exprs.push(format!("\"{w}\"*"));
+            let primary = fts_words_conjunction(&term.text)?;
+            if let Some(ref alt) = term.canonical_alt {
+                let alt_expr = fts_words_conjunction(alt)?;
+                word_exprs.push(format!("({primary} OR {alt_expr})"));
+            } else {
+                word_exprs.push(primary);
             }
         }
         if word_exprs.is_empty() {
@@ -416,6 +475,14 @@ fn score_candidate_doc(
     let mut best_score: Option<f64> = None;
     let mut best_fields: Vec<String> = Vec::new();
 
+    let term_matches = |field_lc: &str, term: &QueryTerm| -> bool {
+        field_lc.contains(&term.text)
+            || term
+                .canonical_alt
+                .as_deref()
+                .is_some_and(|alt| field_lc.contains(alt))
+    };
+
     for branch in &parsed.branches {
         let mut branch_ok = true;
         let mut score = 0.0f64;
@@ -425,9 +492,9 @@ fn score_candidate_doc(
         let mut hit_abs = false;
 
         for term in branch {
-            let in_title = mask.title && title_lc.contains(&term.text);
-            let in_kw = mask.keywords && kw_lc.contains(&term.text);
-            let in_abs = mask.abstract_text && abs_lc.contains(&term.text);
+            let in_title = mask.title && term_matches(&title_lc, term);
+            let in_kw = mask.keywords && term_matches(&kw_lc, term);
+            let in_abs = mask.abstract_text && term_matches(&abs_lc, term);
             let matched = in_title || in_kw || in_abs;
 
             if term.negated {
@@ -1227,10 +1294,16 @@ fn build_broadened_or_query(raw: &str) -> Option<ParsedBooleanQuery> {
         })
         .map(|s| s.trim().to_lowercase())
         .filter(|s| s.chars().count() >= 3 && !stop.contains(&s.as_str()))
-        .map(|text| QueryTerm {
-            text,
-            phrase: false,
-            negated: false,
+        .map(|text| {
+            let canonical_alt = canonicalize_keyword(&text)
+                .map(|c| c.to_lowercase())
+                .filter(|c| c != &text);
+            QueryTerm {
+                text,
+                canonical_alt,
+                phrase: false,
+                negated: false,
+            }
         })
         .collect();
     if terms.len() < 2 {

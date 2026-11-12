@@ -1,8 +1,7 @@
-//! XDG `collection.sqlite` schema, migrations, default seeds, and legacy cache cleanup.
+//! XDG `collection.sqlite` schema, migrations, and default seeds.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 
 use rusqlite::{params, Connection};
 
@@ -292,7 +291,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
 ];
 
 pub const DEFAULT_RECOMMEND_KEYWORDS: &[(&str, &str, bool)] = &[
-    ("kw-llm-agent", "LLM Agent", true),
+    ("kw-ai-agent", "AI Agent", true),
     ("kw-program-analysis", "Program Analysis", true),
     ("kw-vuln", "Vulnerability Detection", true),
     ("kw-fuzzing", "Fuzzing", true),
@@ -485,16 +484,13 @@ pub fn seed_defaults(conn: &Connection) -> Result<(), AppError> {
         .unwrap_or(0);
     if kw_count == 0 {
         for (pos, (id, term, enabled)) in DEFAULT_RECOMMEND_KEYWORDS.iter().enumerate() {
+            let canon =
+                super::keywords::canonicalize_keyword(term).unwrap_or_else(|| (*term).to_string());
+            let norm = super::keywords::normalize_keyword_key(&canon);
             conn.execute(
                 "INSERT OR IGNORE INTO recommend_keywords (id, position, term, normalized, enabled)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    id,
-                    pos as i64,
-                    term,
-                    term.to_lowercase(),
-                    i64::from(*enabled)
-                ],
+                params![id, pos as i64, canon, norm, i64::from(*enabled)],
             )
             .map_err(|e| AppError::message(format!("collection seed keyword {id}: {e}")))?;
         }
@@ -516,52 +512,12 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
     )
 }
 
-static LEGACY_CACHE_PURGED: Once = Once::new();
-
-fn purge_legacy_cache_once() {
-    LEGACY_CACHE_PURGED.call_once(|| {
-        let legacy_dir = paths::agentero_cache_dir().join("plaza-collection");
-        let _ = fs::remove_dir_all(legacy_dir);
-    });
-}
-
 pub fn collection_db_path() -> PathBuf {
     paths::collection_db_path()
 }
 
 pub fn ensure_collection() -> Result<Connection, AppError> {
-    purge_legacy_cache_once();
     ensure_collection_at(&collection_db_path())
-}
-
-fn reset_legacy_dblp_schema_if_needed(conn: &Connection) -> Result<(), AppError> {
-    let has_legacy_dblp: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('venues') WHERE name = 'dblp_stream')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
-    if !has_legacy_dblp {
-        return Ok(());
-    }
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS citation_edges;
-         DROP TRIGGER IF EXISTS papers_fts_ai;
-         DROP TRIGGER IF EXISTS papers_fts_ad;
-         DROP TRIGGER IF EXISTS papers_fts_au;
-         DROP TABLE IF EXISTS papers_fts;
-         DROP TABLE IF EXISTS paper_keywords;
-         DROP TABLE IF EXISTS paper_categories;
-         DROP TABLE IF EXISTS papers;
-         DROP TABLE IF EXISTS recommend_keywords;
-         DROP TABLE IF EXISTS arxiv_watermarks;
-         DROP TABLE IF EXISTS venues;
-         DROP TABLE IF EXISTS collection_config;
-         DROP TABLE IF EXISTS schema_meta;",
-    )
-    .map_err(|e| AppError::message(format!("collection reset legacy dblp schema: {e}")))?;
-    Ok(())
 }
 
 pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
@@ -571,7 +527,6 @@ pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
         }
     }
     let conn = crate::sqlite::open_standard(db_path, DbMsgs::COLLECTION)?;
-    reset_legacy_dblp_schema_if_needed(&conn)?;
     migrate(&conn)?;
     Ok(conn)
 }
