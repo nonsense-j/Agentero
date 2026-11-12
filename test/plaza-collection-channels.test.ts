@@ -7,8 +7,11 @@ import {
 	clearCollection,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	enrichArxivItemsBatch,
+	enrichSinglePaperOnDemand,
 	ensureCollectionSummaryHydrated,
 	ensurePaperFullDetails,
+	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	fetchCollectionStateSummary,
 	fetchCoolPapersVenuePapers,
@@ -34,6 +37,7 @@ import {
 	refreshArxivCollection,
 	refreshVenueCollection,
 	resetCollectionMemoryForTests,
+	shouldEnrichPaperOnDemand,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 	syncArxivCategoriesIncremental,
@@ -1853,6 +1857,284 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					},
 				}),
 			).rejects.toThrow("transient empty feed");
+		} finally {
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
+	});
+
+	it("enriches full arXiv batches beyond 180 items, matches merged publisher locations, falls back to 0-credit singletons + arxiv HTML keywords, and backfills existing SQLite rows on refresh", async () => {
+		// 1. `extractArxivHtmlKeywords` parses LaTeX `\keywords{...}` / `Index Terms` and strips broad buckets
+		const sampleHtml = `
+			<div class="ltx_keywords">
+				<h6 class="ltx_title ltx_title_keywords">Keywords: </h6>
+				Static Application Security Testing, Software Security, Computer Science, cs.SE, Software and its engineering → Formal software verification.
+			</div>`;
+		expect(extractArxivHtmlKeywords(sampleHtml)).toEqual([
+			"Static Application Security Testing",
+			"Software Security",
+			"Formal software verification",
+		]);
+
+		// 2. `enrichArxivItemsBatch` enriches all 210 items across 80-DOI chunks (no 180 truncation),
+		//    including works merged into publisher DOIs (`locations` retains `arxiv.org/abs/...`).
+		const largeBatch: CollectionPaperItem[] = Array.from(
+			{ length: 210 },
+			(_, idx) => {
+				const aid = `2606.${String(10001 + idx)}`;
+				return {
+					id: `arxiv:${aid}`,
+					arxivId: aid,
+					doi: `10.48550/arxiv.${aid}`,
+					title: `Scalable Program Analysis Study ${idx + 1}`,
+					authors: [`Author ${idx + 1}`],
+					abstract: `Complete abstract for scalable program analysis study ${idx + 1}.`,
+					publishedAt: "2026-06-15T10:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: `https://arxiv.org/abs/${aid}`,
+				};
+			},
+		);
+
+		const openAlexBatchUrls: string[] = [];
+		const enriched210 = await enrichArxivItemsBatch(
+			largeBatch,
+			async <T>(url: string) => {
+				openAlexBatchUrls.push(url);
+				const decoded = decodeURIComponent(url);
+				const m = /doi:([^&]+)/.exec(decoded);
+				const dois = (m?.[1] ?? "").split("|").filter(Boolean);
+				const results = dois.map((d, idx) => {
+					const aid = d.replace(/^10\.48550\/arxiv\./i, "");
+					// Simulate merged publisher DOI (no `ids.arxiv`, publisher `doi`, arXiv only in `locations`) on every 5th paper
+					if (idx % 5 === 0) {
+						return {
+							doi: `https://doi.org/10.1145/3888888.${aid.replace(".", "")}`,
+							title: `Scalable Program Analysis Study`,
+							cited_by_count: 9,
+							keywords: [
+								{ display_name: "Symbolic Execution", score: 0.88 },
+								{ display_name: "Program Repair", score: 0.76 },
+							],
+							locations: [
+								{ landing_page_url: `https://arxiv.org/abs/${aid}v2` },
+							],
+						};
+					}
+					return {
+						doi: `https://doi.org/10.48550/arXiv.${aid}`,
+						ids: { arxiv: `https://arxiv.org/abs/${aid}` },
+						cited_by_count: 4,
+						keywords: [
+							{ display_name: "Fuzz Testing", score: 0.91 },
+							{ display_name: "LLM Agents", score: 0.72 },
+						],
+					};
+				});
+				return { results } as T;
+			},
+		);
+
+		expect(openAlexBatchUrls).toHaveLength(3); // ceil(210 / 80) = 3
+		expect(enriched210.every((p) => (p.keywords?.length ?? 0) >= 2)).toBe(true);
+		expect(enriched210[209]?.keywords).toEqual(["Fuzz Testing", "LLM Agents"]);
+		expect(enriched210[0]?.keywords).toEqual([
+			"Symbolic Execution",
+			"Program Repair",
+		]);
+		expect(enriched210[0]?.citationCount).toBe(9);
+
+		// 3. Rate-limited OpenAlex `works?filter=` (`429`) falls back to 0-credit `/works/doi:...` singletons,
+		//    and recent (`< 10d`) unmatched preprints fall back to `arxiv.org/html/<id>` author keywords.
+		const recentIso = new Date(Date.now() - 2 * 86_400_000).toISOString();
+		const mixedRecentBatch: CollectionPaperItem[] = [
+			{
+				id: "arxiv:2610.50001",
+				arxivId: "2610.50001",
+				doi: "10.48550/arxiv.2610.50001",
+				title: "Indexed Singleton Preprint",
+				authors: ["Alice"],
+				abstract: "Indexed preprint abstract with singleton OpenAlex match.",
+				publishedAt: "2026-10-01T10:00:00Z",
+				year: 2026,
+				sourceType: "arxiv",
+				sourceLabel: "cs.CR",
+				categories: ["cs.CR"],
+				url: "https://arxiv.org/abs/2610.50001",
+			},
+			{
+				id: "arxiv:2611.90002",
+				arxivId: "2611.90002",
+				doi: "10.48550/arxiv.2611.90002",
+				title: "Brand New Day-2 Preprint Not Yet In OpenAlex",
+				authors: ["Bob"],
+				abstract: "Brand new preprint abstract with LaTeX keywords in HTML.",
+				publishedAt: recentIso,
+				year: 2026,
+				sourceType: "arxiv",
+				sourceLabel: "cs.CR",
+				categories: ["cs.CR"],
+				url: "https://arxiv.org/abs/2611.90002",
+			},
+		];
+
+		const fallbackRes = await enrichArxivItemsBatch(
+			mixedRecentBatch,
+			async <T>(url: string) => {
+				if (url.includes("/works?filter=")) {
+					throw new Error("HTTP 429 Too Many Requests");
+				}
+				if (url.includes("2610.50001")) {
+					return {
+						id: "https://openalex.org/W_singleton_1",
+						doi: "https://doi.org/10.48550/arxiv.2610.50001",
+						cited_by_count: 6,
+						keywords: [{ display_name: "Zero-Knowledge Proofs", score: 0.94 }],
+					} as T;
+				}
+				throw new Error("HTTP 404 Not Found");
+			},
+			mixedRecentBatch.length,
+			{
+				maxHtmlFallback: 5,
+				fetchText: async (url) => {
+					if (url.includes("arxiv.org/html/2611.90002")) {
+						return `<div class="ltx_keywords">Index Terms: Homomorphic Encryption; Side-Channel Analysis</div>`;
+					}
+					return "";
+				},
+			},
+		);
+
+		expect(fallbackRes[0]?.keywords).toEqual(["Zero-Knowledge Proofs"]);
+		expect(fallbackRes[0]?.citationCount).toBe(6);
+		expect(fallbackRes[1]?.keywords).toEqual([
+			"Homomorphic Encryption",
+			"Side-Channel Analysis",
+		]);
+
+		// 4. On-demand detail check triggers for keyword-less `arxivId` papers & heals via `arxiv.org/html/<id>`
+		const bareArxivCard: CollectionPaperItem = {
+			id: "arxiv:2611.90003",
+			arxivId: "2611.90003",
+			title: "Card Clicked Before OpenAlex Indexing",
+			authors: ["Carol"],
+			abstract:
+				"Complete abstract already present from arXiv Atom feed for card click test.",
+			publishedAt: recentIso,
+			year: 2026,
+			sourceType: "arxiv",
+			sourceLabel: "cs.PL",
+			categories: ["cs.PL"],
+			citationCount: 0,
+			keywords: [],
+			url: "https://arxiv.org/abs/2611.90003",
+		};
+		expect(shouldEnrichPaperOnDemand(bareArxivCard)).toBe(true);
+		const onDemandEnriched = await enrichSinglePaperOnDemand(
+			bareArxivCard,
+			async () => {
+				throw new Error("HTTP 404");
+			},
+			async (url) =>
+				url.includes("arxiv.org/html/2611.90003")
+					? `<div class="ltx_keywords">Keywords: Gradual Typing, Dependent Types</div>`
+					: "",
+		);
+		expect(onDemandEnriched.keywords).toEqual([
+			"Gradual Typing",
+			"Dependent Types",
+		]);
+
+		// 5. `refreshArxivCollection` heals already-cached `historyComplete: true` SQLite arXiv rows lacking keywords
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.SE"],
+			venues: [...DEFAULT_COLLECTION_VENUES],
+			items: [
+				{
+					id: "arxiv:2607.12345",
+					arxivId: "2607.12345",
+					doi: "10.48550/arxiv.2607.12345",
+					title: "Previously Synced Unenriched SE Preprint",
+					authors: ["Edsger Dijkstra"],
+					abstract:
+						"We present a deductive verification framework previously cached without keywords.",
+					publishedAt: "2026-07-20T10:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					citationCount: 0,
+					keywords: [],
+					url: "https://arxiv.org/abs/2607.12345",
+				},
+			],
+			arxivWatermarks: {
+				"cs.SE": {
+					latestArxivId: "2607.12345",
+					latestPublishedAt: "2026-07-20T10:00:00Z",
+					oldestSyncedPublishedAt: "2026-01-02T00:00:00Z",
+					remoteTotal: 1,
+					historyComplete: true,
+					lastSyncedAt: "2026-07-21T00:00:00Z",
+				},
+			},
+			lastRefreshedAt: "2026-07-21T00:00:00Z",
+		});
+
+		try {
+			const statusSeq: string[] = [];
+			await refreshArxivCollection({
+				categories: ["cs.SE"],
+				onCategoryStatus: (cat, st) => statusSeq.push(`${cat}:${st}`),
+				transport: {
+					fetchText: async () =>
+						`<feed xmlns="http://www.w3.org/2005/Atom">
+							<entry>
+								<id>http://arxiv.org/abs/2607.12345v1</id>
+								<published>2026-07-20T10:00:00Z</published>
+								<title>Previously Synced Unenriched SE Preprint</title>
+								<summary>We present a deductive verification framework previously cached without keywords.</summary>
+								<author><name>Edsger Dijkstra</name></author>
+							</entry>
+						</feed>`,
+					fetchJson: async <T>(url: string) => {
+						if (decodeURIComponent(url).includes("10.48550/arxiv.2607.12345")) {
+							return {
+								results: [
+									{
+										doi: "https://doi.org/10.48550/arxiv.2607.12345",
+										ids: { arxiv: "https://arxiv.org/abs/2607.12345" },
+										cited_by_count: 11,
+										keywords: [
+											{ display_name: "Deductive Verification", score: 0.93 },
+											{ display_name: "Hoare Logic", score: 0.87 },
+										],
+									},
+								],
+							} as T;
+						}
+						return { results: [] } as T;
+					},
+				},
+			});
+
+			const healedPage = await listCollectionPapers({
+				sourceType: "arxiv",
+				category: "cs.SE",
+			});
+			expect(healedPage.items).toHaveLength(1);
+			expect(healedPage.items[0]?.keywords).toEqual([
+				"Deductive Verification",
+				"Hoare Logic",
+			]);
+			expect(healedPage.items[0]?.citationCount).toBe(11);
+			expect(statusSeq[0]).toBe("cs.SE:refreshing");
+			expect(statusSeq[statusSeq.length - 1]).toBe("cs.SE:done");
 		} finally {
 			ipc.restore();
 			resetCollectionMemoryForTests();
