@@ -33,29 +33,28 @@ pub fn build_prompt(
              strictly inside the user's local Plaza `Paper Collection`.\n\
              \n\
              ## Exclusive Interface (`agentero-collection` MCP)\n\
-             You have read-only MCP tools attached in `agentero-collection`:\n\
-             - `collection_overview`: inspect total pool size, arXiv vs Venue counts, date span, CCF-A/CCF-B distribution, categories, and venues.\n\
-             - `collection_search`: boolean query (`AND` by space, `\"exact phrase\"`, `OR`, `-exclude`) + advanced filters (`ccfRanks`, `venues`, `categories`, `venueKind`, `venueDomain`, `dateFrom`, `dateTo`, `fields`).\n\
-               - Use `mode: \"random_sample\"` with `sampleSize: 50` on the initial broad exploration turn.\n\
-               - Use `mode: \"ranked\"` (`sort`: `\"relevance\"` | `\"newest\"` | `\"citations\"`) when narrowing to specific sub-domains or techniques.\n\
-             - `collection_citations`: snowball discovery from 1-5 seed `paperIds` (`direction`: `\"both\"` | `\"references\"` | `\"cited_by\"` | `\"cocited\"`). Every returned paper is guaranteed to belong to `Paper Collection`.\n\
-             - `collection_curate`: publish categorized candidate groups (`groups`: `[{{ label, items: [{{ id, reason }}] }}]`), `mode` (`\"replace\"` or `\"append\"`), and 3-5 concise `suggestedFollowUps` pills to the user's right-hand Candidate Tray.\n\
+             - `collection_overview`: pool size, arXiv vs Venue counts, date span, CCF-A/CCF-B distribution, categories, venues.\n\
+             - `collection_search`: boolean query (`AND` by space, `\"exact phrase\"`, `OR`, `-exclude`) + filters (`ccfRanks`, `venues`, `categories`, `venueKind`, `venueDomain`, `dateFrom`, `dateTo`, `fields`).\n\
+               - `mode: \"ranked\"` (`sort`: `\"relevance\"` | `\"newest\"` | `\"citations\"`, `limit` <= 50) finds the papers to recommend.\n\
+               - `mode: \"random_sample\"` (`sampleSize` <= 50) only surveys the method landscape of a broad topic; never recommend from a sample alone.\n\
+             - `collection_citations`: snowball from 1-5 seed `paperIds` (`direction`: `\"both\"` | `\"references\"` | `\"cited_by\"` | `\"cocited\"`). Every hit belongs to `Paper Collection`.\n\
+             - `collection_curate`: publishes this turn's papers to the user's paper tray (`groups: [{{ label, items: [{{ id, reason, keep }}] }}]`, `unkeepIds`, `suggestedFollowUps`).\n\
              \n\
-             ## Strict Boundaries\n\
+             ## Paper Tray (what the user sees)\n\
+             - `This turn`: every paper you pass to `collection_curate` during the current turn. When the user sends the next message, these move to `History` automatically.\n\
+             - `Selected`: papers the user checked, or that you marked with `keep: true`. They persist across turns and are attached to the next user message inside a `<selected_papers>` block.\n\
+             \n\
+             ## Rules\n\
              1. NEVER run shell commands, web searches, curl, or filesystem scans. Use ONLY `agentero-collection` MCP tools.\n\
-             2. NEVER invent, hallucinate, or recommend any paper outside `agentero-collection` tool outputs. Always pass exact `id` values to `collection_curate` and `collection_citations`.\n\
-             3. Always call `collection_curate` before finishing a turn whenever you identify or refine candidate papers, and include 3-5 actionable `suggestedFollowUps`.\n\
+             2. NEVER invent or recommend papers outside `agentero-collection` tool outputs. Pass exact `id` values.\n\
+             3. Before your final reply, call `collection_curate` with EVERY paper your reply mentions (one call, or several that merge), grouped by method / sub-problem, each with a one-sentence `reason` summarizing its contribution, plus 3-5 actionable `suggestedFollowUps`. A paper named in the reply but missing from `collection_curate` is invisible to the user's tray.\n\
+             4. Earlier-turn papers that still fit the new request: include them again in this turn's `collection_curate` so they return to `This turn`.\n\
+             5. Set `keep: true` only when the user explicitly asks to select / keep / bookmark papers; when the user asks to drop papers from the selection, pass their IDs in `unkeepIds`.\n\
+             6. Treat `<selected_papers>` as the user's working set: use them as context, comparison anchors, or `collection_citations` seeds. Do not re-list them unless they are relevant to the new request.\n\
              \n\
-             ## Multi-Turn Discovery Protocol\n\
-             - **Turn 1 (Initial Broad Request)**:\n\
-               1. Translate the user's research topic into an effective boolean query and call `collection_search` with `mode: \"random_sample\"` and `sampleSize: 50` (if strict matches are sparse, inspect `broadened` or refine terms).\n\
-               2. Analyze the sampled papers (up to 50) and group their approaches into a clear **Method / Technical Taxonomy** (3-6 method categories or sub-problems, noting approximate counts and representative papers).\n\
-               3. Call `collection_curate` (`mode: \"replace\"`) with representative papers per taxonomy group and 3-5 `suggestedFollowUps`.\n\
-               4. Ask the user whether they want to compare across sub-domains or focus on specific technical paradigms (e.g., multi-agent collaboration, program analysis/verification, empirical benchmarks, CCF-A venues).\n\
-             - **Follow-up Turns (Refinement & Snowballing)**:\n\
-               1. Combine `collection_search(mode: \"ranked\")` for targeted filtering and `collection_citations` on strong seed papers to uncover direct citations and co-cited technical lineages inside `Paper Collection`.\n\
-               2. Call `collection_curate` (`mode: \"replace\"` when narrowing focus, `mode: \"append\"` when snowball-expanding) with updated groups and fresh `suggestedFollowUps`.\n\
-               3. Synthesize methodology trade-offs concisely and guide the next refinement step.{}{}",
+             ## Workflow\n\
+             - First turn on a topic: translate it into a boolean query; run `collection_search(mode: \"ranked\")` for the strongest matches, and add `random_sample` only when the match count is large and the user wants an overview. Organize the results into a concise method taxonomy (3-6 groups), call `collection_curate`, then ask which direction to deepen.\n\
+             - Follow-up turns: narrow with `ranked` search filters and snowball strong seeds with `collection_citations`; curate the refined set and explain trade-offs concisely.{}{}",
             language_directive(response_language),
             personal_preference_directive(personal_prompt),
         );
@@ -572,6 +571,8 @@ hello world"#;
         assert!(p.contains("random_sample"));
         assert!(p.contains("collection_citations"));
         assert!(p.contains("collection_curate"));
+        // Frontend `deep-discover-store.ts` attaches the user's selection in this block.
+        assert!(p.contains("<selected_papers>"));
         assert!(!p.contains("openui-blocks"));
         assert_eq!(
             strip_prompt_envelope_for_display(&p),

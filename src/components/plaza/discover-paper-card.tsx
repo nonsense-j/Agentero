@@ -2,15 +2,15 @@ import {
 	ArrowUpRight,
 	BookOpen,
 	Check,
+	ChevronDown,
 	Copy,
 	Download,
 	FileCode2,
 	GitFork,
 	Loader2,
-	Pin,
 	Quote,
 } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
 import { SelectionSurface } from "@/components/selection/selection-surface";
@@ -31,18 +31,54 @@ import {
 } from "@/lib/plaza/collection";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
+function IconAction({
+	label,
+	onClick,
+	disabled,
+	className,
+	children,
+}: {
+	label: string;
+	onClick: () => void;
+	disabled?: boolean;
+	className?: string;
+	children: ReactNode;
+}) {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-xs"
+					disabled={disabled}
+					onClick={onClick}
+					aria-label={label}
+					className={className}
+				>
+					{children}
+				</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">{label}</TooltipContent>
+		</Tooltip>
+	);
+}
+
+/**
+ * Paper card for Discover. `compact` (Deep Search tray) collapses to
+ * header + title + authors + one-line summary; the chevron reveals the
+ * abstract, keywords, and secondary actions.
+ */
 export function DiscoverPaperCard({
 	paper,
 	compact = false,
 	reason,
 	selected = false,
 	imported = false,
-	pinned = false,
 	snowballDisabled = false,
 	onToggleSelect,
 	onOpenDetail,
 	onImport,
-	onTogglePin,
 	onSnowball,
 }: {
 	paper: CollectionPaperItem;
@@ -50,12 +86,10 @@ export function DiscoverPaperCard({
 	reason?: string;
 	selected?: boolean;
 	imported?: boolean;
-	pinned?: boolean;
 	snowballDisabled?: boolean;
 	onToggleSelect?: (id: string) => void;
 	onOpenDetail?: (paper: CollectionPaperItem) => void;
 	onImport: (paper: CollectionPaperItem) => Promise<void> | void;
-	onTogglePin?: (id: string) => void;
 	onSnowball?: (paper: CollectionPaperItem) => void;
 }) {
 	const { t } = useTranslation("sidebar");
@@ -66,6 +100,7 @@ export function DiscoverPaperCard({
 	);
 
 	const keywords = paper.keywords ?? [];
+	const collapsed = compact && !expanded;
 
 	const copyToClipboard = async (kind: "citation" | "bibtex") => {
 		try {
@@ -95,18 +130,109 @@ export function DiscoverPaperCard({
 		}
 	};
 
-	const dateLabel = paper.publishedAt ? paper.publishedAt.slice(0, 10) : "";
+	const dateLabel = compact
+		? paper.year
+			? String(paper.year)
+			: ""
+		: paper.publishedAt
+			? paper.publishedAt.slice(0, 10)
+			: "";
+
+	const secondaryActions = (
+		<>
+			{onSnowball ? (
+				<IconAction
+					label={t("plaza.discover.snowballAction")}
+					disabled={snowballDisabled}
+					onClick={() => onSnowball(paper)}
+				>
+					<GitFork className="size-3.5" />
+				</IconAction>
+			) : null}
+			<IconAction
+				label={
+					copiedKind === "citation"
+						? t("plaza.collection.copied")
+						: t("plaza.collection.copyCitation")
+				}
+				onClick={() => void copyToClipboard("citation")}
+			>
+				{copiedKind === "citation" ? (
+					<Check className="size-3.5 text-brand" />
+				) : (
+					<Copy className="size-3.5" />
+				)}
+			</IconAction>
+			<IconAction
+				label={
+					copiedKind === "bibtex"
+						? t("plaza.collection.copied")
+						: t("plaza.collection.copyBibtex")
+				}
+				onClick={() => void copyToClipboard("bibtex")}
+			>
+				{copiedKind === "bibtex" ? (
+					<Check className="size-3.5 text-brand" />
+				) : (
+					<FileCode2 className="size-3.5" />
+				)}
+			</IconAction>
+			{paper.arxivId ? (
+				<IconAction
+					label={t("plaza.arxivRec.read")}
+					onClick={() =>
+						openRemoteArxivPaper({
+							arxivId: paper.arxivId ?? "",
+							title: paper.title,
+							abstract: paper.abstract,
+							url: paper.url,
+							score: 1,
+						})
+					}
+				>
+					<BookOpen className="size-3.5" />
+				</IconAction>
+			) : null}
+			{paper.url ? (
+				<IconAction
+					label={t("plaza.feeds.openOriginal")}
+					onClick={() => openExternalUrl(paper.url)}
+				>
+					<ArrowUpRight className="size-3.5" />
+				</IconAction>
+			) : null}
+		</>
+	);
+
+	const importAction = (
+		<IconAction
+			label={imported ? t("plaza.feeds.imported") : t("plaza.feeds.import")}
+			disabled={importing || imported}
+			onClick={() => void handleImport()}
+		>
+			{imported ? (
+				<Check className="size-3.5 text-brand" />
+			) : importing ? (
+				<Loader2 className="size-3.5 animate-spin" />
+			) : (
+				<Download className="size-3.5" />
+			)}
+		</IconAction>
+	);
+
+	const expandLabel = expanded
+		? t("plaza.discover.collapseAbstract")
+		: t("plaza.discover.expandAbstract");
 
 	return (
 		<article
 			className={cn(
 				"magpie-card group flex flex-col transition-colors motion-reduce:transition-none",
-				compact ? "gap-2 p-3" : "gap-2.5 p-3.5",
+				compact ? "gap-1.5 p-2.5" : "gap-2.5 p-3.5",
 				selected && "ring-1 ring-brand/45",
-				pinned && "border-brand/35",
 			)}
 		>
-			{/* Top row: metadata badges + icon actions */}
+			{/* Header: selection + metadata badges + actions */}
 			<div className="flex items-center justify-between gap-2">
 				<div className="flex min-w-0 flex-wrap items-center gap-1.5">
 					{onToggleSelect ? (
@@ -148,176 +274,26 @@ export function DiscoverPaperCard({
 				</div>
 
 				<div className="flex shrink-0 items-center gap-0.5">
-					{onTogglePin ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-xs"
-									onClick={() => onTogglePin(paper.id)}
-									aria-label={
-										pinned
-											? t("plaza.discover.unpinPaper")
-											: t("plaza.discover.pinPaper")
-									}
-									className={cn(pinned && "text-brand")}
-								>
-									<Pin className={cn("size-3.5", pinned && "fill-current")} />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{pinned
-									? t("plaza.discover.unpinPaper")
-									: t("plaza.discover.pinPaper")}
-							</TooltipContent>
-						</Tooltip>
-					) : null}
-
-					{onSnowball ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-xs"
-									disabled={snowballDisabled}
-									onClick={() => onSnowball(paper)}
-									aria-label={t("plaza.discover.snowballAction")}
-								>
-									<GitFork className="size-3.5" />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{t("plaza.discover.snowballAction")}
-							</TooltipContent>
-						</Tooltip>
-					) : null}
-
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-xs"
-								onClick={() => void copyToClipboard("citation")}
-								aria-label={t("plaza.collection.copyCitation")}
-							>
-								{copiedKind === "citation" ? (
-									<Check className="size-3.5 text-brand" />
-								) : (
-									<Copy className="size-3.5" />
+					{compact ? null : secondaryActions}
+					{importAction}
+					{compact ? (
+						<IconAction
+							label={expandLabel}
+							onClick={() => setExpanded((v) => !v)}
+						>
+							<ChevronDown
+								className={cn(
+									"size-3.5 transition-transform motion-reduce:transition-none",
+									expanded && "rotate-180",
 								)}
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent side="bottom">
-							{copiedKind === "citation"
-								? t("plaza.collection.copied")
-								: t("plaza.collection.copyCitation")}
-						</TooltipContent>
-					</Tooltip>
-
-					{!compact ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-xs"
-									onClick={() => void copyToClipboard("bibtex")}
-									aria-label={t("plaza.collection.copyBibtex")}
-								>
-									{copiedKind === "bibtex" ? (
-										<Check className="size-3.5 text-brand" />
-									) : (
-										<FileCode2 className="size-3.5" />
-									)}
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{copiedKind === "bibtex"
-									? t("plaza.collection.copied")
-									: t("plaza.collection.copyBibtex")}
-							</TooltipContent>
-						</Tooltip>
+							/>
+						</IconAction>
 					) : null}
-
-					{paper.arxivId ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-xs"
-									onClick={() =>
-										openRemoteArxivPaper({
-											arxivId: paper.arxivId ?? "",
-											title: paper.title,
-											abstract: paper.abstract,
-											url: paper.url,
-											score: 1,
-										})
-									}
-									aria-label={t("plaza.arxivRec.read")}
-								>
-									<BookOpen className="size-3.5" />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{t("plaza.arxivRec.read")}
-							</TooltipContent>
-						</Tooltip>
-					) : null}
-
-					{paper.url ? (
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon-xs"
-									onClick={() => openExternalUrl(paper.url)}
-									aria-label={t("plaza.feeds.openOriginal")}
-								>
-									<ArrowUpRight className="size-3.5" />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								{t("plaza.feeds.openOriginal")}
-							</TooltipContent>
-						</Tooltip>
-					) : null}
-
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-xs"
-								disabled={importing || imported}
-								onClick={() => void handleImport()}
-								aria-label={
-									imported ? t("plaza.feeds.imported") : t("plaza.feeds.import")
-								}
-							>
-								{imported ? (
-									<Check className="size-3.5 text-brand" />
-								) : importing ? (
-									<Loader2 className="size-3.5 animate-spin" />
-								) : (
-									<Download className="size-3.5" />
-								)}
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent side="bottom">
-							{imported ? t("plaza.feeds.imported") : t("plaza.feeds.import")}
-						</TooltipContent>
-					</Tooltip>
 				</div>
 			</div>
 
 			{/* Title & Authors */}
-			<div className="space-y-1">
+			<div className="space-y-0.5">
 				{onOpenDetail ? (
 					<button
 						type="button"
@@ -341,65 +317,89 @@ export function DiscoverPaperCard({
 				)}
 
 				{paper.authors.length > 0 ? (
-					<p className="line-clamp-1 select-text text-muted-foreground text-xs">
-						{paper.authors.slice(0, 6).join(", ")}
-						{paper.authors.length > 6 ? " et al." : ""}
+					<p
+						className={cn(
+							"line-clamp-1 select-text text-muted-foreground",
+							compact ? "text-[0.6875rem]" : "text-xs",
+						)}
+					>
+						{paper.authors.slice(0, compact ? 3 : 6).join(", ")}
+						{paper.authors.length > (compact ? 3 : 6) ? " et al." : ""}
 					</p>
 				) : null}
 			</div>
 
-			{/* Agent curation reason */}
-			{reason ? (
-				<p className="rounded-md bg-brand/8 px-2.5 py-1.5 text-foreground text-xs leading-relaxed">
-					{reason}
-				</p>
-			) : null}
-
-			{/* Expandable Abstract */}
-			{paper.abstract ? (
-				<div className="space-y-1">
-					<SelectionSurface
-						source={{
-							sourcePath: paper.url,
-							sourceUrl: paper.url,
-							sourceTitle: paper.title,
-							origin: "markdown",
-							surface: "abstract",
-						}}
-						className={cn(
-							"select-text text-muted-foreground text-xs leading-relaxed",
-							!expanded && (compact ? "line-clamp-2" : "line-clamp-3"),
-						)}
+			{/* Collapsed tray card: one-line summary, click to expand */}
+			{collapsed ? (
+				reason || paper.abstract ? (
+					<button
+						type="button"
+						onClick={() => setExpanded(true)}
+						className="line-clamp-1 w-full text-left text-[0.6875rem] text-muted-foreground leading-relaxed hover:text-foreground"
 					>
-						{paper.abstract}
-					</SelectionSurface>
-					{paper.abstract.length > (compact ? 140 : 240) ? (
-						<button
-							type="button"
-							onClick={() => setExpanded((v) => !v)}
-							className="font-medium text-[0.6875rem] text-brand/85 hover:text-brand focus:outline-none"
-						>
-							{expanded
-								? t("plaza.discover.collapseAbstract")
-								: t("plaza.discover.expandAbstract")}
-						</button>
+						{reason || paper.abstract}
+					</button>
+				) : null
+			) : (
+				<>
+					{/* Agent curation reason */}
+					{reason ? (
+						<p className="select-text rounded-md bg-brand/8 px-2.5 py-1.5 text-foreground text-xs leading-relaxed">
+							{reason}
+						</p>
 					) : null}
-				</div>
-			) : null}
 
-			{/* Keyword chips */}
-			{keywords.length > 0 ? (
-				<div className="flex flex-wrap gap-1">
-					{keywords.slice(0, compact ? 4 : 6).map((kw) => (
-						<span
-							key={kw}
-							className="rounded bg-muted/70 px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground leading-none"
-						>
-							{kw}
-						</span>
-					))}
-				</div>
-			) : null}
+					{/* Abstract */}
+					{paper.abstract ? (
+						<div className="space-y-1">
+							<SelectionSurface
+								source={{
+									sourcePath: paper.url,
+									sourceUrl: paper.url,
+									sourceTitle: paper.title,
+									origin: "markdown",
+									surface: "abstract",
+								}}
+								className={cn(
+									"select-text text-muted-foreground text-xs leading-relaxed",
+									!compact && !expanded && "line-clamp-3",
+								)}
+							>
+								{paper.abstract}
+							</SelectionSurface>
+							{!compact && paper.abstract.length > 240 ? (
+								<button
+									type="button"
+									onClick={() => setExpanded((v) => !v)}
+									className="font-medium text-[0.6875rem] text-brand/85 hover:text-brand focus:outline-none"
+								>
+									{expandLabel}
+								</button>
+							) : null}
+						</div>
+					) : null}
+
+					{/* Keyword chips */}
+					{keywords.length > 0 ? (
+						<div className="flex flex-wrap gap-1">
+							{keywords.slice(0, compact ? 4 : 6).map((kw) => (
+								<span
+									key={kw}
+									className="rounded bg-muted/70 px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground leading-none"
+								>
+									{kw}
+								</span>
+							))}
+						</div>
+					) : null}
+
+					{compact ? (
+						<div className="-ml-1 flex items-center gap-0.5">
+							{secondaryActions}
+						</div>
+					) : null}
+				</>
+			)}
 		</article>
 	);
 }

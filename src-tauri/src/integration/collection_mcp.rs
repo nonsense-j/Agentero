@@ -55,7 +55,7 @@ impl CollectionMcp {
     }
 
     #[tool(
-        description = "Search the local Paper Collection over title + abstract + keywords with boolean syntax (`AND` by space, `\"exact phrase\"`, `OR`, `-exclude`) and advanced filters (`ccfRanks`, `venues`, `categories`, `venueKind`, `venueDomain`, `dateFrom`, `dateTo`). Set `mode: \"random_sample\"` (`sampleSize: 50`) on the initial turn to uniformly sample up to 50 matching papers for unbiased method taxonomy analysis; set `mode: \"ranked\"` for targeted multi-turn narrowing."
+        description = "Search the local Paper Collection over title + abstract + keywords with boolean syntax (`AND` by space, `\"exact phrase\"`, `OR`, `-exclude`) and advanced filters (`ccfRanks`, `venues`, `categories`, `venueKind`, `venueDomain`, `dateFrom`, `dateTo`). Set `mode: \"ranked\"` (default) for the most relevant matches to recommend; set `mode: \"random_sample\"` (`sampleSize` <= 50) to uniformly sample matches when surveying the method landscape of a broad topic."
     )]
     async fn collection_search(
         &self,
@@ -83,7 +83,7 @@ impl CollectionMcp {
     }
 
     #[tool(
-        description = "Publish structured candidate paper groups and 3-5 clickable follow-up direction pills to the Deep Search UI (`groups`, `mode`: `\"replace\"` or `\"append\"`, `suggestedFollowUps`). Every paper ID is verified against Paper Collection; call this whenever you present categorized or refined paper recommendations."
+        description = "Publish this turn's papers to the user's paper tray. Call it before your final reply with EVERY paper the reply mentions, grouped by method / sub-problem (`groups: [{ label, items: [{ id, reason, keep }] }]`); repeated calls in one turn merge. `reason` is the one-sentence summary shown on the paper card. Set `keep: true` only when the user explicitly asks to select / keep a paper; put IDs the user wants removed from their selection in `unkeepIds`. Add 3-5 `suggestedFollowUps` pills. IDs are verified against Paper Collection; unknown IDs are returned in `droppedUnknownIds`."
     )]
     async fn collection_curate(
         &self,

@@ -34,6 +34,8 @@ import { isTauri } from "@/lib/core/tauri";
 
 const STORAGE_KEY = "plaza:discover:deep-sessions:v1";
 const MAX_SESSIONS = 24;
+/** Per-session tray cap; the oldest unkept History entries go first. */
+const MAX_TRAY_ENTRIES = 400;
 
 export type DeepToolCallRecord = {
 	id: string;
@@ -51,20 +53,29 @@ export type DeepChatMessage = {
 	reasoning?: string;
 	toolCalls?: DeepToolCallRecord[];
 	suggestedFollowUps?: string[];
+	/** User turn only: selected paper IDs attached as reference context. */
+	referenceIds?: string[];
 	createdAt: string;
 	streaming?: boolean;
 	error?: string;
 };
 
-export type CuratedPaperRef = {
+/**
+ * One paper in the Deep Search tray. `turnId` is the assistant message of the
+ * latest turn that surfaced it: the latest turn is `This turn`, older ones are
+ * `History`. `kept` is the user's selection (checkbox or Agent `keep: true`),
+ * attached to the next prompt as reference.
+ */
+export type DeepTrayEntry = {
 	id: string;
+	turnId: string;
 	reason?: string;
+	group?: string;
+	kept?: boolean;
+	keptAt?: string;
 };
 
-export type CuratedPaperGroup = {
-	label: string;
-	items: CuratedPaperRef[];
-};
+export type DeepReferencePaper = { id: string; title: string };
 
 export type DeepDiscoverSession = {
 	id: string;
@@ -75,9 +86,7 @@ export type DeepDiscoverSession = {
 	modelId: string | null;
 	providerSessionId: string | null;
 	messages: DeepChatMessage[];
-	curatedGroups: CuratedPaperGroup[];
-	pinnedIds: string[];
-	sampledIds: string[];
+	tray: DeepTrayEntry[];
 };
 
 export type DeepDiscoverStoreState = {
@@ -176,132 +185,105 @@ export function extractMcpToolJsonPayload(
 	return null;
 }
 
-/**
- * Fallback ID extractor when a large `collection_search` (`random_sample`) JSON
- * string was capped at 32 KB by the Host webview relay.
- */
-function extractTruncatedSampleIds(rawOutput: unknown): string[] {
-	let text = "";
-	if (typeof rawOutput === "string") {
-		text = rawOutput;
-	} else if (rawOutput && typeof rawOutput === "object") {
-		const obj = rawOutput as Record<string, unknown>;
-		if (typeof obj.stdout === "string") text = obj.stdout;
-	}
-	if (!text.includes('"random_sample"')) return [];
-	const ids: string[] = [];
-	const seen = new Set<string>();
-	const regex = /"id"\s*:\s*"((?:arxiv|doi|venue):[^"]+)"/g;
-	for (const match of text.matchAll(regex)) {
-		const id = match[1]?.trim();
-		if (id && !seen.has(id)) {
-			seen.add(id);
-			ids.push(id);
-		}
-	}
-	return ids;
+type CurateItem = {
+	id: string;
+	reason?: string;
+	group: string;
+	keep: boolean;
+};
+
+function trimmedString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function normalizeCurateGroups(rawGroups: unknown): CuratedPaperGroup[] {
+function stringList(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.map(trimmedString).filter((s): s is string => s !== undefined);
+}
+
+function normalizeCurateItems(rawGroups: unknown): CurateItem[] {
 	if (!Array.isArray(rawGroups)) return [];
-	const groups: CuratedPaperGroup[] = [];
+	const items: CurateItem[] = [];
+	const seen = new Set<string>();
 	for (const g of rawGroups) {
 		if (!g || typeof g !== "object") continue;
 		const rec = g as Record<string, unknown>;
-		const label =
-			typeof rec.label === "string" && rec.label.trim()
-				? rec.label.trim()
-				: "Recommended";
-		const rawItems = Array.isArray(rec.items) ? rec.items : [];
-		const items: CuratedPaperRef[] = [];
-		const seen = new Set<string>();
-		for (const it of rawItems) {
+		const group = trimmedString(rec.label) ?? "";
+		for (const it of Array.isArray(rec.items) ? rec.items : []) {
 			if (!it || typeof it !== "object") continue;
 			const itemRec = it as Record<string, unknown>;
-			const id = typeof itemRec.id === "string" ? itemRec.id.trim() : "";
+			const id = trimmedString(itemRec.id);
 			if (!id || seen.has(id)) continue;
 			seen.add(id);
-			const reason =
-				typeof itemRec.reason === "string" && itemRec.reason.trim()
-					? itemRec.reason.trim()
-					: undefined;
-			items.push({ id, reason });
-		}
-		if (items.length > 0) {
-			groups.push({ label, items });
+			items.push({
+				id,
+				reason: trimmedString(itemRec.reason),
+				group,
+				keep: itemRec.keep === true,
+			});
 		}
 	}
-	return groups;
+	return items;
 }
 
-function mergeCuratedGroups(
-	existing: CuratedPaperGroup[],
-	incoming: CuratedPaperGroup[],
-	mode: "replace" | "append",
-	pinnedIds: string[],
-): CuratedPaperGroup[] {
-	if (incoming.length === 0) return existing;
-
-	if (mode === "append") {
-		const byLabel = new Map<string, CuratedPaperRef[]>();
-		const order: string[] = [];
-		const globalSeen = new Set<string>();
-
-		for (const g of existing) {
-			byLabel.set(g.label, [...g.items]);
-			order.push(g.label);
-			for (const item of g.items) globalSeen.add(item.id);
-		}
-		for (const g of incoming) {
-			let bucket = byLabel.get(g.label);
-			if (!bucket) {
-				bucket = [];
-				byLabel.set(g.label, bucket);
-				order.push(g.label);
-			}
-			for (const item of g.items) {
-				if (globalSeen.has(item.id)) continue;
-				globalSeen.add(item.id);
-				bucket.push(item);
-			}
-		}
-		return order
-			.map((label) => ({ label, items: byLabel.get(label) ?? [] }))
-			.filter((g) => g.items.length > 0);
+/** Assistant message id of the latest turn; tray entries with it form `This turn`. */
+export function currentDeepTurnId(session: DeepDiscoverSession): string | null {
+	for (let i = session.messages.length - 1; i >= 0; i--) {
+		if (session.messages[i].role === "assistant") return session.messages[i].id;
 	}
+	return null;
+}
 
-	// mode === "replace": preserve pinned papers that weren't re-included
-	const incomingIds = new Set<string>();
-	for (const g of incoming) {
-		for (const item of g.items) incomingIds.add(item.id);
-	}
-
-	const pinnedSet = new Set(pinnedIds);
-	const CarryPinnedLabel = "Pinned";
-	const carriedPinned: CuratedPaperRef[] = [];
-	const seenCarried = new Set<string>();
-
-	for (const g of existing) {
-		for (const item of g.items) {
-			if (
-				pinnedSet.has(item.id) &&
-				!incomingIds.has(item.id) &&
-				!seenCarried.has(item.id)
-			) {
-				seenCarried.add(item.id);
-				carriedPinned.push(item);
-			}
+function capTray(entries: DeepTrayEntry[], turnId: string): DeepTrayEntry[] {
+	let overflow = entries.length - MAX_TRAY_ENTRIES;
+	if (overflow <= 0) return entries;
+	return entries.filter((e) => {
+		if (overflow > 0 && !e.kept && e.turnId !== turnId) {
+			overflow--;
+			return false;
 		}
-	}
-
-	return carriedPinned.length > 0
-		? [{ label: CarryPinnedLabel, items: carriedPinned }, ...incoming]
-		: incoming;
+		return true;
+	});
 }
 
 /**
- * Pure reducer that applies `agentero-collection` MCP tool outputs (or inputs fallback)
- * to a `DeepDiscoverSession`, updating `curatedGroups`, `sampledIds`, and `suggestedFollowUps`.
+ * Merge one `collection_curate` call into the tray: every curated paper moves
+ * to the current turn (re-surfaced History papers included), `keep: true`
+ * selects it, and `unkeepIds` clear the selection. Calls within one turn merge.
+ */
+function applyCurateToTray(
+	tray: DeepTrayEntry[],
+	turnId: string,
+	items: CurateItem[],
+	unkeepIds: string[],
+	now: string,
+): DeepTrayEntry[] {
+	const unkeep = new Set(unkeepIds);
+	const byId = new Map(tray.map((e) => [e.id, e]));
+	const incoming = new Set(items.map((it) => it.id));
+	const next = tray
+		.filter((e) => !incoming.has(e.id))
+		.map((e) =>
+			unkeep.has(e.id) && e.kept ? { ...e, kept: false, keptAt: undefined } : e,
+		);
+	for (const it of items) {
+		const prev = byId.get(it.id);
+		const kept = it.keep || (prev?.kept === true && !unkeep.has(it.id));
+		next.push({
+			id: it.id,
+			turnId,
+			reason: it.reason ?? prev?.reason,
+			group: it.group || prev?.group,
+			kept: kept || undefined,
+			keptAt: kept ? (prev?.kept ? prev.keptAt : now) : undefined,
+		});
+	}
+	return capTray(next, turnId);
+}
+
+/**
+ * Pure reducer that applies `agentero-collection` `collection_curate` output
+ * (or its input as fallback) to the session tray and returns follow-up pills.
  */
 export function applyCollectionToolOutputToSession(
 	session: DeepDiscoverSession,
@@ -309,111 +291,111 @@ export function applyCollectionToolOutputToSession(
 	rawOutput: unknown,
 	rawInput?: unknown,
 ): { session: DeepDiscoverSession; suggestedFollowUps?: string[] } {
-	const titleLc = toolTitle.toLowerCase();
+	const isCurate = toolTitle.toLowerCase().includes("collection_curate");
+	const fromOutput = extractMcpToolJsonPayload(rawOutput);
 	const payload =
-		extractMcpToolJsonPayload(rawOutput) ??
-		(titleLc.includes("collection_curate")
-			? extractMcpToolJsonPayload(rawInput)
-			: null);
+		fromOutput && Array.isArray(fromOutput.groups)
+			? fromOutput
+			: isCurate
+				? extractMcpToolJsonPayload(rawInput)
+				: null;
+	if (!payload || !Array.isArray(payload.groups)) return { session };
+	const turnId = currentDeepTurnId(session);
+	if (!turnId) return { session };
 
-	// 1. collection_curate
-	if (
-		titleLc.includes("collection_curate") ||
-		(payload && Array.isArray(payload.groups))
-	) {
-		if (!payload) return { session };
-		const groups = normalizeCurateGroups(payload.groups);
-		const mode =
-			typeof payload.mode === "string" &&
-			payload.mode.toLowerCase() === "append"
-				? "append"
-				: "replace";
-		const followUps = Array.isArray(payload.suggestedFollowUps)
-			? payload.suggestedFollowUps
-					.filter((s): s is string => typeof s === "string" && s.trim() !== "")
-					.map((s) => s.trim())
-					.slice(0, 6)
-			: undefined;
-
+	const items = normalizeCurateItems(payload.groups);
+	const unkeepIds = stringList(payload.unkeepIds);
+	const followUps = stringList(payload.suggestedFollowUps).slice(0, 6);
+	if (items.length === 0 && unkeepIds.length === 0) {
 		return {
-			session: {
-				...session,
-				curatedGroups: mergeCuratedGroups(
-					session.curatedGroups,
-					groups,
-					mode,
-					session.pinnedIds,
-				),
-				updatedAt: new Date().toISOString(),
-			},
-			suggestedFollowUps:
-				followUps && followUps.length > 0 ? followUps : undefined,
+			session,
+			suggestedFollowUps: followUps.length > 0 ? followUps : undefined,
 		};
 	}
+	const now = new Date().toISOString();
+	return {
+		session: {
+			...session,
+			tray: applyCurateToTray(session.tray, turnId, items, unkeepIds, now),
+			updatedAt: now,
+		},
+		suggestedFollowUps: followUps.length > 0 ? followUps : undefined,
+	};
+}
 
-	// 2. collection_search (capture `random_sample` pool)
-	if (
-		titleLc.includes("collection_search") ||
-		(payload &&
-			typeof payload.mode === "string" &&
-			Array.isArray(payload.items))
-	) {
-		if (
-			payload &&
-			payload.mode === "random_sample" &&
-			Array.isArray(payload.items)
-		) {
-			const ids = payload.items
-				.map((it) =>
-					it && typeof it === "object"
-						? (it as Record<string, unknown>).id
-						: null,
-				)
-				.filter(
-					(id): id is string => typeof id === "string" && id.trim() !== "",
-				);
-			if (ids.length > 0) {
-				return {
-					session: {
-						...session,
-						sampledIds: ids,
-						updatedAt: new Date().toISOString(),
-					},
-				};
-			}
-		} else {
-			const fallbackIds = extractTruncatedSampleIds(rawOutput);
-			if (fallbackIds.length > 0) {
-				return {
-					session: {
-						...session,
-						sampledIds: fallbackIds,
-						updatedAt: new Date().toISOString(),
-					},
-				};
-			}
+/** Prompt suffix carrying the user's selection; the envelope documents the tag. */
+export function buildSelectedPapersBlock(
+	papers: readonly DeepReferencePaper[],
+): string {
+	if (papers.length === 0) return "";
+	const lines = papers.map((p) => `- \`${p.id}\` ${p.title}`);
+	return `\n\n<selected_papers>\n${lines.join("\n")}\n</selected_papers>`;
+}
+
+type LegacySession = Partial<DeepDiscoverSession> & {
+	curatedGroups?: Array<{
+		label?: string;
+		items?: Array<{ id?: string; reason?: string }>;
+	}>;
+	pinnedIds?: string[];
+};
+
+/** Convert pre-tray sessions (`curatedGroups` / `pinnedIds` / `sampledIds`). */
+function migrateLegacyTray(
+	s: LegacySession,
+	messages: DeepChatMessage[],
+): DeepTrayEntry[] {
+	if (Array.isArray(s.tray)) return s.tray;
+	const turnId =
+		[...messages].reverse().find((m) => m.role === "assistant")?.id ?? "";
+	const pinned = new Set(Array.isArray(s.pinnedIds) ? s.pinnedIds : []);
+	const tray: DeepTrayEntry[] = [];
+	const seen = new Set<string>();
+	for (const g of Array.isArray(s.curatedGroups) ? s.curatedGroups : []) {
+		for (const it of Array.isArray(g?.items) ? g.items : []) {
+			const id = trimmedString(it?.id);
+			if (!id || seen.has(id)) continue;
+			seen.add(id);
+			const kept = pinned.has(id);
+			tray.push({
+				id,
+				turnId,
+				reason: trimmedString(it.reason),
+				group: trimmedString(g.label),
+				kept: kept || undefined,
+				keptAt: kept ? s.updatedAt : undefined,
+			});
 		}
 	}
-
-	return { session };
+	return tray;
 }
 
 // ─── Reactive Store ───
 
 function loadPersistedSessions(): DeepDiscoverSession[] {
-	const raw = readJsonStorage<DeepDiscoverSession[]>(STORAGE_KEY, []);
+	const raw = readJsonStorage<LegacySession[]>(STORAGE_KEY, []);
 	if (!Array.isArray(raw)) return [];
 	return raw
-		.filter((s) => s && typeof s.id === "string" && Array.isArray(s.messages))
-		.map((s) => ({
-			...s,
-			messages: s.messages.map((m) =>
+		.filter(
+			(s): s is LegacySession & { id: string; messages: DeepChatMessage[] } =>
+				Boolean(s) && typeof s.id === "string" && Array.isArray(s.messages),
+		)
+		.map((s) => {
+			const messages = s.messages.map((m) =>
 				m.streaming ? { ...m, streaming: false } : m,
-			),
-			curatedGroups: Array.isArray(s.curatedGroups) ? s.curatedGroups : [],
-			pinnedIds: Array.isArray(s.pinnedIds) ? s.pinnedIds : [],
-			sampledIds: Array.isArray(s.sampledIds) ? s.sampledIds : [],
-		}));
+			);
+			return {
+				id: s.id,
+				title: s.title ?? "",
+				createdAt: s.createdAt ?? "",
+				updatedAt: s.updatedAt ?? "",
+				agentId: s.agentId ?? null,
+				modelId: s.modelId ?? null,
+				providerSessionId: s.providerSessionId ?? null,
+				messages,
+				tray: migrateLegacyTray(s, messages),
+			};
+		});
 }
 
 function persistSessions(sessions: DeepDiscoverSession[]): void {
@@ -778,9 +760,7 @@ export function createDeepDiscoverSession(): DeepDiscoverSession {
 		modelId: storeState.selectedModelId,
 		providerSessionId: null,
 		messages: [],
-		curatedGroups: [],
-		pinnedIds: [],
-		sampledIds: [],
+		tray: [],
 	};
 	updateState(
 		(prev) => ({
@@ -835,19 +815,26 @@ export function deleteDeepDiscoverSession(sessionId: string): void {
 	}, true);
 }
 
-export function togglePinDeepPaper(
+/** Check / uncheck tray papers; checked papers are attached to the next prompt. */
+export function setDeepPapersKept(
 	explorationId: string,
-	paperId: string,
+	paperIds: readonly string[],
+	kept: boolean,
 ): void {
+	if (paperIds.length === 0) return;
+	const ids = new Set(paperIds);
+	const now = new Date().toISOString();
 	updateExplorationById(
 		explorationId,
-		(session) => {
-			const has = session.pinnedIds.includes(paperId);
-			const pinnedIds = has
-				? session.pinnedIds.filter((id) => id !== paperId)
-				: [...session.pinnedIds, paperId];
-			return { ...session, pinnedIds };
-		},
+		(session) => ({
+			...session,
+			tray: session.tray.map((e) => {
+				if (!ids.has(e.id) || Boolean(e.kept) === kept) return e;
+				return kept
+					? { ...e, kept: true, keptAt: now }
+					: { ...e, kept: undefined, keptAt: undefined };
+			}),
+		}),
 		true,
 	);
 }
@@ -868,7 +855,10 @@ function buildPriorTranscript(messages: DeepChatMessage[]): string | undefined {
 
 let launchingTurn = false;
 
-export async function sendDeepDiscoverTurn(rawPrompt: string): Promise<void> {
+export async function sendDeepDiscoverTurn(
+	rawPrompt: string,
+	references: readonly DeepReferencePaper[] = [],
+): Promise<void> {
 	const prompt = rawPrompt.trim();
 	if (!prompt) return;
 	if (launchingTurn || storeState.runningRuntimeSessionId) return;
@@ -897,6 +887,8 @@ export async function sendDeepDiscoverTurn(rawPrompt: string): Promise<void> {
 		id: makeId("usr"),
 		role: "user",
 		content: prompt,
+		referenceIds:
+			references.length > 0 ? references.map((p) => p.id) : undefined,
 		createdAt: now,
 	};
 	const assistantMsg: DeepChatMessage = {
@@ -931,7 +923,7 @@ export async function sendDeepDiscoverTurn(rawPrompt: string): Promise<void> {
 		const accepted = await runOnce({
 			agentId: storeState.selectedAgentId ?? undefined,
 			sessionId: resumeSessionId,
-			prompt,
+			prompt: `${prompt}${buildSelectedPapersBlock(references)}`,
 			workflow: "plaza_deep_discover",
 			modelId: storeState.selectedModelId ?? undefined,
 			permissionMode: "auto",

@@ -11,6 +11,7 @@ import {
 	History,
 	Loader2,
 	PanelRight,
+	Paperclip,
 	Plus,
 	Sparkles,
 	Square,
@@ -49,7 +50,10 @@ import {
 } from "@/lib/plaza/collection";
 import {
 	createDeepDiscoverSession,
+	currentDeepTurnId,
+	type DeepReferencePaper,
 	type DeepToolCallRecord,
+	type DeepTrayEntry,
 	deleteDeepDiscoverSession,
 	getDeepDiscoverState,
 	initDeepDiscoverAgents,
@@ -57,14 +61,37 @@ import {
 	sendDeepDiscoverTurn,
 	setDeepDiscoverAgent,
 	setDeepDiscoverModel,
+	setDeepPapersKept,
 	stopDeepDiscoverTurn,
 	subscribeDeepDiscoverState,
-	togglePinDeepPaper,
 } from "@/lib/plaza/deep-discover-store";
 import { sameCollectionPaperWork } from "@/lib/plaza/paper-identity";
 import { mergeArxivIntoVenueItem } from "@/lib/plaza/paper-search";
 
-type TrayTab = "curated" | "sampled";
+type TrayTab = "selected" | "turn" | "history";
+
+type TrayItem = { entry: DeepTrayEntry; paper: CollectionPaperItem };
+
+type TrayGroup = {
+	key: string;
+	label: string;
+	hint?: string;
+	items: TrayItem[];
+};
+
+function groupTrayItems(
+	items: TrayItem[],
+	keyOf: (item: TrayItem) => string,
+): Map<string, TrayItem[]> {
+	const groups = new Map<string, TrayItem[]>();
+	for (const item of items) {
+		const key = keyOf(item);
+		const bucket = groups.get(key);
+		if (bucket) bucket.push(item);
+		else groups.set(key, [item]);
+	}
+	return groups;
+}
 
 function formatShortToolName(rawTitle: string): string {
 	const cleaned = rawTitle
@@ -158,14 +185,11 @@ export function DiscoverDeepView({
 
 	const [draft, setDraft] = useState("");
 	const [trayOpen, setTrayOpen] = useState(true);
-	const [trayTab, setTrayTab] = useState<TrayTab>("curated");
+	const [trayTab, setTrayTab] = useState<TrayTab>("turn");
 	const [sessionsPopoverOpen, setSessionsPopoverOpen] = useState(false);
 	const [agentPopoverOpen, setAgentPopoverOpen] = useState(false);
 	const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
 	const [openReasoningIds, setOpenReasoningIds] = useState<Set<string>>(
-		new Set(),
-	);
-	const [selectedTrayIds, setSelectedTrayIds] = useState<Set<string>>(
 		new Set(),
 	);
 	const [batchBusy, setBatchBusy] = useState(false);
@@ -193,27 +217,12 @@ export function DiscoverDeepView({
 
 	const isRunning = store.runningRuntimeSessionId !== null;
 
-	const curatedGroupsRaw = activeSession?.curatedGroups;
-	const sampledIdsRaw = activeSession?.sampledIds;
-	const pinnedIdsRaw = activeSession?.pinnedIds;
+	const trayRaw = activeSession?.tray;
 
 	const neededIdsKey = useMemo(() => {
-		if (!curatedGroupsRaw && !sampledIdsRaw && !pinnedIdsRaw) return "";
-		const seen = new Set<string>();
-		const ids: string[] = [];
-		const add = (id: string) => {
-			if (id && !seen.has(id)) {
-				seen.add(id);
-				ids.push(id);
-			}
-		};
-		for (const group of curatedGroupsRaw ?? []) {
-			for (const entry of group.items) add(entry.id);
-		}
-		for (const id of sampledIdsRaw ?? []) add(id);
-		for (const id of pinnedIdsRaw ?? []) add(id);
-		return ids.join("\u0000");
-	}, [curatedGroupsRaw, sampledIdsRaw, pinnedIdsRaw]);
+		if (!trayRaw?.length) return "";
+		return Array.from(new Set(trayRaw.map((e) => e.id))).join("\u0000");
+	}, [trayRaw]);
 
 	useEffect(() => {
 		if (summary.revision < 0) return;
@@ -239,91 +248,112 @@ export function DiscoverDeepView({
 			});
 	}, [neededIdsKey, summary.revision]);
 
-	const resolvedCuratedGroups = useMemo(() => {
-		if (!activeSession) return [];
-		const allTrayPapers = Array.from(collectionById.values());
+	const turnId = activeSession ? currentDeepTurnId(activeSession) : null;
+
+	/** Tray entries resolved to Collection papers, deduped by work (newest wins). */
+	const trayItems = useMemo<TrayItem[]>(() => {
+		if (!trayRaw?.length) return [];
+		const allPapers = Array.from(collectionById.values());
 		const upgradeToVenue = (
 			paper: CollectionPaperItem,
 		): CollectionPaperItem => {
-			if (paper.sourceType === "arxiv") {
-				const venueTwin = allTrayPapers.find(
-					(cand) =>
-						cand.sourceType === "venue" && sameCollectionPaperWork(paper, cand),
-				);
-				if (venueTwin) return mergeArxivIntoVenueItem(venueTwin, paper);
-			}
-			return paper;
-		};
-
-		const seenWorks: CollectionPaperItem[] = [];
-		return activeSession.curatedGroups
-			.map((group) => {
-				const items: Array<{ paper: CollectionPaperItem; reason?: string }> =
-					[];
-				for (const entry of group.items) {
-					const raw = collectionById.get(entry.id);
-					if (!raw) continue;
-					const paper = upgradeToVenue(raw);
-					if (seenWorks.some((prev) => sameCollectionPaperWork(prev, paper))) {
-						continue;
-					}
-					seenWorks.push(paper);
-					items.push({ paper, reason: entry.reason });
-				}
-				return { label: group.label, items };
-			})
-			.filter((group) => group.items.length > 0);
-	}, [activeSession, collectionById]);
-
-	const curatedCount = useMemo(
-		() =>
-			resolvedCuratedGroups.reduce((sum, group) => sum + group.items.length, 0),
-		[resolvedCuratedGroups],
-	);
-
-	const resolvedSampledPapers = useMemo(() => {
-		if (!activeSession) return [];
-		const rawList = activeSession.sampledIds
-			.map((id) => collectionById.get(id))
-			.filter((p): p is CollectionPaperItem => p !== undefined);
-		const deduped: CollectionPaperItem[] = [];
-		for (const item of rawList) {
-			const idx = deduped.findIndex((prev) =>
-				sameCollectionPaperWork(prev, item),
+			if (paper.sourceType !== "arxiv") return paper;
+			const venueTwin = allPapers.find(
+				(cand) =>
+					cand.sourceType === "venue" && sameCollectionPaperWork(paper, cand),
 			);
-			if (idx >= 0) {
-				const prev = deduped[idx];
-				if (prev.sourceType === "arxiv" && item.sourceType === "venue") {
-					deduped[idx] = mergeArxivIntoVenueItem(item, prev);
-				} else if (prev.sourceType === "venue" && item.sourceType === "arxiv") {
-					deduped[idx] = mergeArxivIntoVenueItem(prev, item);
-				}
-			} else {
-				deduped.push(item);
+			return venueTwin ? mergeArxivIntoVenueItem(venueTwin, paper) : paper;
+		};
+		const out: TrayItem[] = [];
+		for (let i = trayRaw.length - 1; i >= 0; i--) {
+			const entry = trayRaw[i];
+			const raw = collectionById.get(entry.id);
+			if (!raw) continue;
+			const paper = upgradeToVenue(raw);
+			if (out.some((prev) => sameCollectionPaperWork(prev.paper, paper))) {
+				continue;
 			}
+			out.push({ entry, paper });
 		}
-		return deduped;
-	}, [activeSession, collectionById]);
+		return out.reverse();
+	}, [trayRaw, collectionById]);
 
-	const pinnedSet = useMemo(
-		() => new Set(activeSession?.pinnedIds ?? []),
-		[activeSession?.pinnedIds],
+	const turnGroups = useMemo<TrayGroup[]>(() => {
+		const current = trayItems.filter((it) => it.entry.turnId === turnId);
+		return Array.from(
+			groupTrayItems(current, (it) => it.entry.group ?? ""),
+			([key, items]) => ({
+				key,
+				label: key || t("plaza.discover.groupOther"),
+				items,
+			}),
+		);
+	}, [trayItems, turnId, t]);
+
+	const turnCount = useMemo(
+		() => turnGroups.reduce((sum, g) => sum + g.items.length, 0),
+		[turnGroups],
 	);
 
-	const activeTrayPapers = useMemo(() => {
-		if (trayTab === "sampled") return resolvedSampledPapers;
-		const seen = new Set<string>();
-		const list: CollectionPaperItem[] = [];
-		for (const g of resolvedCuratedGroups) {
-			for (const it of g.items) {
-				if (!seen.has(it.paper.id)) {
-					seen.add(it.paper.id);
-					list.push(it.paper);
-				}
-			}
+	const selectedItems = useMemo(
+		() =>
+			trayItems
+				.filter((it) => it.entry.kept)
+				.sort((a, b) =>
+					(a.entry.keptAt ?? "").localeCompare(b.entry.keptAt ?? ""),
+				),
+		[trayItems],
+	);
+
+	/** Earlier turns, newest first, labelled with the user question that started them. */
+	const historyGroups = useMemo<TrayGroup[]>(() => {
+		const messages = activeSession?.messages ?? [];
+		const turnMeta = new Map<string, { index: number; question: string }>();
+		let index = 0;
+		let question = "";
+		for (const msg of messages) {
+			if (msg.role === "user") question = msg.content;
+			else turnMeta.set(msg.id, { index: ++index, question });
 		}
-		return list;
-	}, [trayTab, resolvedSampledPapers, resolvedCuratedGroups]);
+		const past = trayItems.filter((it) => it.entry.turnId !== turnId);
+		return Array.from(
+			groupTrayItems(past, (it) => it.entry.turnId),
+			([key, items]) => {
+				const meta = turnMeta.get(key);
+				return {
+					key,
+					label: meta
+						? t("plaza.discover.historyTurn", { index: meta.index })
+						: t("plaza.discover.groupOther"),
+					hint: meta?.question,
+					items,
+					order: meta?.index ?? 0,
+				};
+			},
+		).sort((a, b) => b.order - a.order);
+	}, [activeSession?.messages, trayItems, turnId, t]);
+
+	const historyCount = useMemo(
+		() => historyGroups.reduce((sum, g) => sum + g.items.length, 0),
+		[historyGroups],
+	);
+
+	const activeTrayItems = useMemo<TrayItem[]>(() => {
+		if (trayTab === "selected") return selectedItems;
+		const groups = trayTab === "turn" ? turnGroups : historyGroups;
+		return groups.flatMap((g) => g.items);
+	}, [trayTab, selectedItems, turnGroups, historyGroups]);
+
+	const referencePapers = useMemo<DeepReferencePaper[]>(
+		() =>
+			selectedItems.map((it) => ({ id: it.entry.id, title: it.paper.title })),
+		[selectedItems],
+	);
+
+	// A new turn fills `This turn`; show it while the Agent works.
+	useEffect(() => {
+		if (isRunning) setTrayTab("turn");
+	}, [isRunning]);
 
 	const lastMsgContentLen =
 		activeSession?.messages[activeSession.messages.length - 1]?.content
@@ -351,9 +381,9 @@ export function DiscoverDeepView({
 			if (!trimmed || isRunning) return;
 			stickToBottomRef.current = true;
 			setDraft("");
-			await sendDeepDiscoverTurn(trimmed);
+			await sendDeepDiscoverTurn(trimmed, referencePapers);
 		},
-		[isRunning],
+		[isRunning, referencePapers],
 	);
 
 	const handleSnowball = useCallback(
@@ -371,44 +401,47 @@ export function DiscoverDeepView({
 		[isRunning, submitPrompt, t],
 	);
 
-	const toggleTraySelect = (id: string) => {
-		setSelectedTrayIds((prev) => {
-			const next = new Set(prev);
-			if (next.has(id)) next.delete(id);
-			else next.add(id);
-			return next;
-		});
-	};
-
-	const allTraySelected =
-		activeTrayPapers.length > 0 &&
-		activeTrayPapers.every((p) => selectedTrayIds.has(p.id));
-
-	const toggleSelectAllTray = () => {
-		if (allTraySelected) {
-			setSelectedTrayIds(new Set());
-			return;
-		}
-		setSelectedTrayIds(new Set(activeTrayPapers.map((p) => p.id)));
-	};
-
-	const handleTrayBatchImport = async () => {
-		if (selectedTrayIds.size === 0 || batchBusy) return;
-		const chosen = activeTrayPapers.filter(
-			(p) => selectedTrayIds.has(p.id) && !isPaperImported(p, importedSet),
+	const setKept = (items: readonly TrayItem[], kept: boolean) => {
+		if (!activeSession) return;
+		setDeepPapersKept(
+			activeSession.id,
+			items.map((it) => it.entry.id),
+			kept,
 		);
-		if (chosen.length === 0) {
-			setSelectedTrayIds(new Set());
-			return;
-		}
+	};
+
+	const allTrayKept =
+		activeTrayItems.length > 0 && activeTrayItems.every((it) => it.entry.kept);
+
+	const importableSelected = selectedItems.filter(
+		(it) => !isPaperImported(it.paper, importedSet),
+	);
+
+	const handleSelectedBatchImport = async () => {
+		if (importableSelected.length === 0 || batchBusy) return;
 		setBatchBusy(true);
 		try {
-			await onBatchImport(chosen);
-			setSelectedTrayIds(new Set());
+			await onBatchImport(importableSelected.map((it) => it.paper));
 		} finally {
 			setBatchBusy(false);
 		}
 	};
+
+	const renderTrayCard = ({ entry, paper }: TrayItem) => (
+		<DiscoverPaperCard
+			key={entry.id}
+			paper={paper}
+			compact
+			reason={entry.reason}
+			selected={Boolean(entry.kept)}
+			imported={isPaperImported(paper, importedSet)}
+			snowballDisabled={isRunning}
+			onToggleSelect={() => setKept([{ entry, paper }], !entry.kept)}
+			onOpenDetail={onOpenDetail}
+			onImport={onImportPaper}
+			onSnowball={handleSnowball}
+		/>
+	);
 
 	const currentAgent =
 		store.agents.find((a) => a.id === store.selectedAgentId) ?? null;
@@ -654,7 +687,7 @@ export function DiscoverDeepView({
 							{t("plaza.discover.trayTitle")}
 						</span>
 						<span className="rounded-full bg-brand/15 px-1.5 py-0.2 font-mono text-[0.6875rem] text-brand leading-tight">
-							{curatedCount}
+							{turnCount}
 						</span>
 					</Button>
 				</div>
@@ -708,10 +741,21 @@ export function DiscoverDeepView({
 								{activeSession.messages.map((msg) => {
 									if (msg.role === "user") {
 										return (
-											<div key={msg.id} className="flex justify-end">
+											<div
+												key={msg.id}
+												className="flex flex-col items-end gap-1"
+											>
 												<div className="max-w-[85%] select-text whitespace-pre-wrap rounded-2xl bg-brand/12 px-3.5 py-2.5 text-foreground text-sm leading-relaxed">
 													{msg.content}
 												</div>
+												{msg.referenceIds?.length ? (
+													<span className="inline-flex items-center gap-1 px-1 text-[0.6875rem] text-muted-foreground tabular-nums">
+														<Paperclip className="size-3" />
+														{t("plaza.discover.attachedSelected", {
+															count: msg.referenceIds.length,
+														})}
+													</span>
+												) : null}
 											</div>
 										);
 									}
@@ -808,6 +852,23 @@ export function DiscoverDeepView({
 
 					{/* Always-visible Multi-Turn Composer */}
 					<div className="shrink-0 border-t bg-background/80 px-4 py-3">
+						{selectedItems.length > 0 ? (
+							<div className="mx-auto mb-1.5 flex max-w-3xl">
+								<button
+									type="button"
+									onClick={() => {
+										setTrayOpen(true);
+										setTrayTab("selected");
+									}}
+									className="inline-flex items-center gap-1 rounded-full border bg-brand/8 px-2 py-0.5 text-[0.6875rem] text-foreground tabular-nums transition-colors hover:border-brand/50"
+								>
+									<Paperclip className="size-3 text-brand" />
+									{t("plaza.discover.attachedSelected", {
+										count: selectedItems.length,
+									})}
+								</button>
+							</div>
+						) : null}
 						<form
 							onSubmit={(e) => {
 								e.preventDefault();
@@ -859,51 +920,46 @@ export function DiscoverDeepView({
 					</div>
 				</div>
 
-				{/* Right Collapsible Candidate Tray */}
+				{/* Right Collapsible Paper Tray: Selected / This turn / History */}
 				{trayOpen ? (
 					<aside className="flex w-80 shrink-0 flex-col overflow-hidden border-l bg-muted/15 lg:w-96">
 						<div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
 							<div className="inline-flex items-center rounded-lg bg-muted/70 p-0.5">
-								<button
-									type="button"
-									onClick={() => setTrayTab("curated")}
-									className={cn(
-										"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
-										trayTab === "curated"
-											? "bg-background text-foreground shadow-xs"
-											: "text-muted-foreground hover:text-foreground",
-									)}
-								>
-									{t("plaza.discover.tabCurated", { count: curatedCount })}
-								</button>
-								<button
-									type="button"
-									onClick={() => setTrayTab("sampled")}
-									className={cn(
-										"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
-										trayTab === "sampled"
-											? "bg-background text-foreground shadow-xs"
-											: "text-muted-foreground hover:text-foreground",
-									)}
-								>
-									{t("plaza.discover.tabSampled", {
-										count: resolvedSampledPapers.length,
-									})}
-								</button>
+								{(
+									[
+										["selected", "tabSelected", selectedItems.length],
+										["turn", "tabTurn", turnCount],
+										["history", "tabHistory", historyCount],
+									] as const
+								).map(([tab, labelKey, count]) => (
+									<button
+										key={tab}
+										type="button"
+										onClick={() => setTrayTab(tab)}
+										className={cn(
+											"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
+											trayTab === tab
+												? "bg-background text-foreground shadow-xs"
+												: "text-muted-foreground hover:text-foreground",
+										)}
+									>
+										{t(`plaza.discover.${labelKey}`, { count })}
+									</button>
+								))}
 							</div>
 
 							<div className="flex items-center gap-1">
-								{activeTrayPapers.length > 0 ? (
+								{activeTrayItems.length > 0 ? (
 									<Tooltip>
 										<TooltipTrigger asChild>
 											<Button
 												type="button"
 												variant="ghost"
 												size="icon-xs"
-												onClick={toggleSelectAllTray}
+												onClick={() => setKept(activeTrayItems, !allTrayKept)}
 												aria-label={t("plaza.collection.toggleSelectAll")}
 											>
-												{allTraySelected ? (
+												{allTrayKept ? (
 													<CheckSquare className="size-3.5 text-brand" />
 												) : (
 													<Square className="size-3.5" />
@@ -916,12 +972,12 @@ export function DiscoverDeepView({
 									</Tooltip>
 								) : null}
 
-								{selectedTrayIds.size > 0 ? (
+								{importableSelected.length > 0 ? (
 									<Button
 										type="button"
 										size="sm"
 										disabled={batchBusy}
-										onClick={() => void handleTrayBatchImport()}
+										onClick={() => void handleSelectedBatchImport()}
 										className="h-6 gap-1 px-2 text-[0.6875rem] tabular-nums"
 									>
 										{batchBusy ? (
@@ -930,7 +986,7 @@ export function DiscoverDeepView({
 											<Download className="size-3" />
 										)}
 										{t("plaza.collection.importSelected", {
-											count: selectedTrayIds.size,
+											count: importableSelected.length,
 										})}
 									</Button>
 								) : null}
@@ -938,76 +994,43 @@ export function DiscoverDeepView({
 						</div>
 
 						<div className="agentero-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-							{trayTab === "curated" ? (
-								resolvedCuratedGroups.length === 0 ? (
-									<div className="flex h-40 items-center justify-center px-4 text-center text-muted-foreground text-xs leading-relaxed">
-										{t("plaza.discover.trayEmptyCurated")}
-									</div>
-								) : (
-									resolvedCuratedGroups.map((group) => (
-										<section key={group.label} className="space-y-2">
-											<div className="flex items-center justify-between px-0.5">
-												<h4 className="font-semibold text-foreground text-xs">
-													{group.label}
+							{activeTrayItems.length === 0 ? (
+								<div className="flex h-40 items-center justify-center px-4 text-center text-muted-foreground text-xs leading-relaxed">
+									{trayTab === "selected"
+										? t("plaza.discover.trayEmptySelected")
+										: trayTab === "turn"
+											? t("plaza.discover.trayEmptyTurn")
+											: t("plaza.discover.trayEmptyHistory")}
+								</div>
+							) : trayTab === "selected" ? (
+								<div className="space-y-2">
+									{selectedItems.map(renderTrayCard)}
+								</div>
+							) : (
+								(trayTab === "turn" ? turnGroups : historyGroups).map(
+									(group) => (
+										<section key={group.key} className="space-y-2">
+											<div className="flex items-baseline justify-between gap-2 px-0.5">
+												<h4 className="flex min-w-0 items-baseline gap-1.5 text-xs">
+													<span className="shrink-0 font-semibold text-foreground">
+														{group.label}
+													</span>
+													{group.hint ? (
+														<span className="truncate text-muted-foreground">
+															{group.hint}
+														</span>
+													) : null}
 												</h4>
-												<span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+												<span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
 													{group.items.length}
 												</span>
 											</div>
 											<div className="space-y-2">
-												{group.items.map(({ paper, reason }) => (
-													<DiscoverPaperCard
-														key={paper.id}
-														paper={paper}
-														compact
-														reason={reason}
-														selected={selectedTrayIds.has(paper.id)}
-														imported={isPaperImported(paper, importedSet)}
-														pinned={pinnedSet.has(paper.id)}
-														snowballDisabled={isRunning}
-														onToggleSelect={toggleTraySelect}
-														onOpenDetail={onOpenDetail}
-														onImport={onImportPaper}
-														onTogglePin={
-															activeSession
-																? (id) =>
-																		togglePinDeepPaper(activeSession.id, id)
-																: undefined
-														}
-														onSnowball={handleSnowball}
-													/>
-												))}
+												{group.items.map(renderTrayCard)}
 											</div>
 										</section>
-									))
+									),
 								)
-							) : resolvedSampledPapers.length === 0 ? (
-								<div className="flex h-40 items-center justify-center px-4 text-center text-muted-foreground text-xs leading-relaxed">
-									{t("plaza.discover.trayEmptySampled")}
-								</div>
-							) : (
-								<div className="space-y-2">
-									{resolvedSampledPapers.map((paper) => (
-										<DiscoverPaperCard
-											key={paper.id}
-											paper={paper}
-											compact
-											selected={selectedTrayIds.has(paper.id)}
-											imported={isPaperImported(paper, importedSet)}
-											pinned={pinnedSet.has(paper.id)}
-											snowballDisabled={isRunning}
-											onToggleSelect={toggleTraySelect}
-											onOpenDetail={onOpenDetail}
-											onImport={onImportPaper}
-											onTogglePin={
-												activeSession
-													? (id) => togglePinDeepPaper(activeSession.id, id)
-													: undefined
-											}
-											onSnowball={handleSnowball}
-										/>
-									))}
-								</div>
 							)}
 						</div>
 					</aside>

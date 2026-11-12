@@ -668,8 +668,13 @@ pub struct CollectionSearchOut {
 #[serde(rename_all = "camelCase")]
 pub struct CurateItemInput {
     pub id: String,
+    /// One-sentence summary of why this paper matters for the user's request.
     #[serde(default)]
     pub reason: Option<String>,
+    /// `true` only when the user explicitly asked to select / keep this paper.
+    /// Kept papers stay in the user's `Selected` list across turns.
+    #[serde(default)]
+    pub keep: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -679,16 +684,18 @@ pub struct CurateGroupInput {
     pub items: Vec<CurateItemInput>,
 }
 
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionCurateParams {
+    /// Every paper mentioned in this turn's reply, grouped by method / sub-problem.
+    /// Repeated calls within one turn merge into the same `This turn` list.
     pub groups: Vec<CurateGroupInput>,
-    /// `"replace"` (default) or `"append"`.
-    #[serde(default)]
-    pub mode: Option<String>,
     /// 3–5 concise follow-up direction pills shown below the Agent message.
     #[serde(default)]
     pub suggested_follow_ups: Vec<String>,
+    /// Paper IDs the user asked to remove from their `Selected` list.
+    #[serde(default)]
+    pub unkeep_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -702,6 +709,7 @@ pub struct CuratedPaperOut {
     pub year: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    pub keep: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -711,14 +719,15 @@ pub struct CuratedGroupOut {
     pub items: Vec<CuratedPaperOut>,
 }
 
+/// MCP output schema: every non-`Option` field is `required`, so never
+/// `skip_serializing_if` a `Vec` here — clients reject the result otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionCurateOut {
-    pub mode: String,
     pub curated_count: usize,
     pub groups: Vec<CuratedGroupOut>,
     pub suggested_follow_ups: Vec<String>,
-    /// Always serialized: MCP clients validate output against the schema, which marks it required.
+    pub unkeep_ids: Vec<String>,
     pub dropped_unknown_ids: Vec<String>,
 }
 

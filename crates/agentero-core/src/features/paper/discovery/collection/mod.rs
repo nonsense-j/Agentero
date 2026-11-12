@@ -377,20 +377,32 @@ mod tests {
                         CurateItemInput {
                             id: "arxiv:2603.00001".into(),
                             reason: Some("In scope".into()),
+                            keep: true,
                         },
                         CurateItemInput {
                             id: "arxiv:2603.00002".into(),
                             reason: Some("Disabled cs.AI".into()),
+                            keep: false,
                         },
                     ],
                 }],
-                mode: None,
-                suggested_follow_ups: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(curated.curated_count, 1);
+        assert!(curated.groups[0].items[0].keep);
         assert_eq!(curated.dropped_unknown_ids, vec!["arxiv:2603.00002"]);
+
+        // MCP clients validate `structuredContent` against the output schema:
+        // every `required` property must be present even when its list is empty.
+        let empty = curate_collection_at(&db, CollectionCurateParams::default()).unwrap();
+        let value = serde_json::to_value(&empty).unwrap();
+        let schema = serde_json::to_value(schemars::schema_for!(CollectionCurateOut)).unwrap();
+        for key in schema["required"].as_array().unwrap() {
+            let key = key.as_str().unwrap();
+            assert!(value.get(key).is_some(), "curate output missing `{key}`");
+        }
 
         // Enable cs.AI and verify immediate visibility without re-fetching.
         let updated = config_update_at(
@@ -1039,15 +1051,16 @@ mod tests {
                         CurateItemInput {
                             id: "arxiv:2603.00101".into(),
                             reason: Some("Matched via arXiv ID".into()),
+                            keep: false,
                         },
                         CurateItemInput {
                             id: "venue:icse-2026:doi:10.1145/3650000.3650001".into(),
                             reason: Some("Duplicate venue ID".into()),
+                            keep: false,
                         },
                     ],
                 }],
-                mode: None,
-                suggested_follow_ups: vec![],
+                ..Default::default()
             },
         )
         .unwrap();

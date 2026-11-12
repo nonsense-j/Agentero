@@ -1431,10 +1431,6 @@ pub(crate) fn curate_collection_conn(
     params: CollectionCurateParams,
 ) -> Result<CollectionCurateOut, AppError> {
     let enabled_cats = load_enabled_categories(conn)?;
-    let mode = match params.mode.as_deref() {
-        Some(m) if m.eq_ignore_ascii_case("append") => "append".to_string(),
-        _ => "replace".to_string(),
-    };
 
     let mut requested_ids: Vec<String> = Vec::new();
     let mut seen_req = HashSet::new();
@@ -1557,6 +1553,7 @@ pub(crate) fn curate_collection_conn(
                     ccf_rank: resolved.ccf_rank.clone(),
                     year: resolved.year,
                     reason: entry.reason.filter(|r| !r.trim().is_empty()),
+                    keep: entry.keep,
                 });
             } else if !trimmed.is_empty() {
                 dropped.push(trimmed.to_string());
@@ -1571,7 +1568,6 @@ pub(crate) fn curate_collection_conn(
     }
 
     Ok(CollectionCurateOut {
-        mode,
         curated_count,
         groups: groups_out,
         suggested_follow_ups: params
@@ -1580,6 +1576,12 @@ pub(crate) fn curate_collection_conn(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .take(6)
+            .collect(),
+        unkeep_ids: params
+            .unkeep_ids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .collect(),
         dropped_unknown_ids: dropped,
     })

@@ -100,7 +100,13 @@ describe("Plaza Paper Discover (Fast Search & Deep Search)", () => {
 		]);
 	});
 
-	it("updates sampled pool, curated groups, follow-up pills, and preserves pinned papers in Deep Search", () => {
+	it("tracks This turn / History / Selected in the Deep Search tray across turns", () => {
+		const turn = (id: string) => ({
+			id,
+			role: "assistant" as const,
+			content: "",
+			createdAt: "2026-04-01T00:00:00Z",
+		});
 		const initial: DeepDiscoverSession = {
 			id: "deep_1",
 			title: "Multi-agent testing",
@@ -109,79 +115,82 @@ describe("Plaza Paper Discover (Fast Search & Deep Search)", () => {
 			agentId: "codex",
 			modelId: null,
 			providerSessionId: null,
-			messages: [],
-			curatedGroups: [],
-			pinnedIds: ["arxiv:2603.00001"],
-			sampledIds: [],
+			messages: [turn("ast_1")],
+			tray: [],
 		};
 
-		// Turn 1: collection_search(mode="random_sample")
-		const afterSample = applyCollectionToolOutputToSession(
+		// Turn 1: two curate calls merge; `keep: true` selects a paper.
+		const afterA = applyCollectionToolOutputToSession(
 			initial,
-			"mcp__agentero-collection__collection_search",
+			"mcp__agentero-collection__collection_curate",
 			{
-				stdout: JSON.stringify({
-					mode: "random_sample",
-					totalMatched: 42,
-					returnedCount: 2,
-					items: [{ id: "arxiv:2603.00001" }, { id: "doi:10.1145/icse-2" }],
-				}),
+				structuredContent: {
+					groups: [
+						{
+							label: "Multi-Agent Repair",
+							items: [
+								{
+									id: "arxiv:2603.00001",
+									reason: "Core repair workflow",
+									keep: true,
+								},
+							],
+						},
+					],
+					suggestedFollowUps: ["Zoom into multi-agent repair"],
+					unkeepIds: [],
+					droppedUnknownIds: [],
+				},
 			},
 		);
-		expect(afterSample.session.sampledIds).toEqual([
-			"arxiv:2603.00001",
-			"doi:10.1145/icse-2",
-		]);
-
-		// Turn 1: collection_curate(mode="replace")
-		const afterCurate1 = applyCollectionToolOutputToSession(
-			afterSample.session,
+		expect(afterA.suggestedFollowUps).toEqual(["Zoom into multi-agent repair"]);
+		const afterB = applyCollectionToolOutputToSession(
+			afterA.session,
 			"collection_curate",
+			undefined,
 			{
-				mode: "replace",
 				groups: [
 					{
-						label: "Multi-Agent Repair",
-						items: [
-							{ id: "arxiv:2603.00001", reason: "Core repair workflow" },
-							{ id: "doi:10.1145/icse-2", reason: "CCF-A benchmark" },
-						],
-					},
-				],
-				suggestedFollowUps: [
-					"Zoom into multi-agent repair",
-					"Snowball citations of ICSE paper",
-				],
-			},
-		);
-		expect(afterCurate1.suggestedFollowUps).toEqual([
-			"Zoom into multi-agent repair",
-			"Snowball citations of ICSE paper",
-		]);
-		expect(afterCurate1.session.curatedGroups).toHaveLength(1);
-
-		// Turn 2: collection_curate(mode="replace") with a new group must keep pinned arxiv:2603.00001
-		const afterCurate2 = applyCollectionToolOutputToSession(
-			afterCurate1.session,
-			"collection_curate",
-			{
-				mode: "replace",
-				groups: [
-					{
-						label: "Snowballed Lineage",
-						items: [{ id: "doi:10.1145/fse-9", reason: "Co-cited 2026 work" }],
+						label: "Benchmarks",
+						items: [{ id: "doi:10.1145/icse-2", reason: "CCF-A benchmark" }],
 					},
 				],
 			},
 		);
-		expect(afterCurate2.session.curatedGroups).toHaveLength(2);
-		expect(afterCurate2.session.curatedGroups[0]?.label).toBe("Pinned");
-		expect(afterCurate2.session.curatedGroups[0]?.items[0]?.id).toBe(
-			"arxiv:2603.00001",
+		expect(
+			afterB.session.tray.map((e) => [e.id, e.turnId, Boolean(e.kept)]),
+		).toEqual([
+			["arxiv:2603.00001", "ast_1", true],
+			["doi:10.1145/icse-2", "ast_1", false],
+		]);
+
+		// Turn 2: the benchmark paper re-surfaces; the kept one moves to History, then is unkept.
+		const turn2 = {
+			...afterB.session,
+			messages: [...afterB.session.messages, turn("ast_2")],
+		};
+		const afterC = applyCollectionToolOutputToSession(
+			turn2,
+			"collection_curate",
+			{
+				groups: [
+					{
+						label: "Still relevant",
+						items: [{ id: "doi:10.1145/icse-2" }, { id: "doi:10.1145/fse-9" }],
+					},
+				],
+				unkeepIds: ["arxiv:2603.00001"],
+			},
 		);
-		expect(afterCurate2.session.curatedGroups[1]?.label).toBe(
-			"Snowballed Lineage",
-		);
+		const byId = new Map(afterC.session.tray.map((e) => [e.id, e]));
+		expect(byId.get("arxiv:2603.00001")).toMatchObject({ turnId: "ast_1" });
+		expect(byId.get("arxiv:2603.00001")?.kept).toBeFalsy();
+		expect(byId.get("doi:10.1145/icse-2")).toMatchObject({
+			turnId: "ast_2",
+			group: "Still relevant",
+			reason: "CCF-A benchmark",
+		});
+		expect(byId.get("doi:10.1145/fse-9")?.turnId).toBe("ast_2");
 	});
 
 	it("delegates searchCollectionFastRemote to plazaCollectionSearch IPC with normalized filters, pagination, and activeFilterCount", async () => {
