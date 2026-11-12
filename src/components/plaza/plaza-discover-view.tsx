@@ -39,7 +39,6 @@ import {
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
-import { lookupSubmit } from "@/lib/paper/import-actions";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionPaperItem,
@@ -50,27 +49,16 @@ import {
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
-import { importPlazaPaper } from "@/lib/plaza/import";
-import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
+import { importCollectionPapers } from "@/lib/plaza/collection-import";
+import {
+	addCollectionPaperKeys,
+	isCollectionPaperImported,
+	syncCollectionImportedKeys,
+} from "@/lib/plaza/imported";
 
 type DiscoverStage = "hub" | "fast" | "deep";
 
-function checkPaperImported(
-	paper: CollectionPaperItem,
-	importedSet: ReadonlySet<string>,
-): boolean {
-	if (importedSet.has(paper.id)) return true;
-	if (paper.coolPapersId && importedSet.has(paper.coolPapersId.toLowerCase())) {
-		return true;
-	}
-	if (paper.arxivId) {
-		const bare = bareArxivId(paper.arxivId);
-		if (bare && importedSet.has(bare)) return true;
-		if (importedSet.has(paper.arxivId)) return true;
-	}
-	if (paper.doi && importedSet.has(paper.doi.toLowerCase())) return true;
-	return false;
-}
+const checkPaperImported = isCollectionPaperImported;
 
 export function PlazaDiscoverView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
@@ -93,7 +81,7 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		null,
 	);
 
-	const observedArxivIdsRef = useRef<Set<string>>(new Set());
+	const observedPapersRef = useRef<Map<string, CollectionPaperItem>>(new Map());
 	const manualImportedIdsRef = useRef<Set<string>>(new Set());
 
 	useEffect(() => {
@@ -102,60 +90,41 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		});
 	}, []);
 
-	const syncArxivQueries = useCallback(
-		async (queries: string[], replaceFromManual = false) => {
-			if (queries.length === 0) {
-				if (replaceFromManual) {
-					setImportedIds(new Set(manualImportedIdsRef.current));
-				}
-				return;
-			}
-			try {
-				const matched = await importedIdsInLibrary(queries, {
-					limit: Number.POSITIVE_INFINITY,
-				});
-				if (matched.length === 0 && !replaceFromManual) return;
-				setImportedIds((prev) => {
-					const next = replaceFromManual
-						? new Set(manualImportedIdsRef.current)
-						: new Set(prev);
-					for (const raw of matched) {
-						next.add(raw);
-						const bare = bareArxivId(raw);
-						if (bare) next.add(bare);
-					}
-					return next;
-				});
-			} catch {
-				// Ignore when no Vault is open
-			}
-		},
-		[],
-	);
+	const syncObservedImported = useCallback(async () => {
+		try {
+			const next = await syncCollectionImportedKeys(
+				Array.from(observedPapersRef.current.values()),
+				manualImportedIdsRef.current,
+			);
+			setImportedIds(next);
+		} catch {
+			// Ignore when no Vault is open
+		}
+	}, []);
 
 	const observePapers = useCallback(
 		(papers: readonly CollectionPaperItem[]) => {
-			const newArxivIds: string[] = [];
+			let added = false;
 			for (const p of papers) {
-				if (p.arxivId && !observedArxivIdsRef.current.has(p.arxivId)) {
-					observedArxivIdsRef.current.add(p.arxivId);
-					newArxivIds.push(p.arxivId);
+				if (!observedPapersRef.current.has(p.id)) {
+					observedPapersRef.current.set(p.id, p);
+					added = true;
 				}
 			}
-			if (newArxivIds.length > 0) {
-				void syncArxivQueries(newArxivIds, false);
+			if (added) {
+				void syncObservedImported();
 			}
 		},
-		[syncArxivQueries],
+		[syncObservedImported],
 	);
 
 	useEffect(() => {
 		return libraryStore.subscribe((state, prevState) => {
 			if (state.papers !== prevState.papers) {
-				void syncArxivQueries(Array.from(observedArxivIdsRef.current), true);
+				void syncObservedImported();
 			}
 		});
-	}, [syncArxivQueries]);
+	}, [syncObservedImported]);
 
 	const handleRefreshPool = useCallback(async () => {
 		if (refreshing || preloading) return;
@@ -172,68 +141,24 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	const importBatchPapers = useCallback(
 		async (papers: CollectionPaperItem[]) => {
 			if (papers.length === 0) return;
-			const coolTargets = papers.filter((p) => !p.arxivId && p.coolPapersId);
-			const lookupTargets = papers.filter((p) => p.arxivId || !p.coolPapersId);
-			const identifiers = lookupTargets
-				.map((p) =>
-					p.arxivId
-						? `arXiv:${p.arxivId}`
-						: p.doi
-							? `https://doi.org/${p.doi}`
-							: p.url || p.title,
-				)
-				.filter(Boolean);
-			if (coolTargets.length === 0 && identifiers.length === 0) return;
-
 			const markImported = (done: CollectionPaperItem[]) => {
 				if (done.length === 0) return;
-				const recordKey = (key: string) => {
-					manualImportedIdsRef.current.add(key);
-				};
+				for (const p of done) {
+					addCollectionPaperKeys(manualImportedIdsRef.current, p);
+				}
 				setImportedIds((prev) => {
 					const next = new Set(prev);
 					for (const p of done) {
-						next.add(p.id);
-						recordKey(p.id);
-						if (p.coolPapersId) {
-							const lower = p.coolPapersId.toLowerCase();
-							next.add(lower);
-							recordKey(lower);
-						}
-						if (p.arxivId) {
-							next.add(p.arxivId);
-							recordKey(p.arxivId);
-							const bare = bareArxivId(p.arxivId);
-							if (bare) {
-								next.add(bare);
-								recordKey(bare);
-							}
-						}
-						if (p.doi) {
-							const lowerDoi = p.doi.toLowerCase();
-							next.add(lowerDoi);
-							recordKey(lowerDoi);
-						}
+						addCollectionPaperKeys(next, p);
 					}
 					return next;
 				});
 			};
 
 			try {
-				for (const p of coolTargets) {
-					const ok = await importPlazaPaper({
-						id: p.coolPapersId ?? p.id,
-						branch: "venue",
-						url: p.url,
-						title: p.title,
-					});
-					if (ok) markImported([p]);
-				}
-				if (identifiers.length > 0) {
-					await lookupSubmit(identifiers, {
-						onComplete: () => markImported(lookupTargets),
-					});
-				}
+				await importCollectionPapers(papers, {
+					onMarked: markImported,
+				});
 			} catch (err) {
 				notifyError(errorText(err));
 			}

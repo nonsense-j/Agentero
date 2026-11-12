@@ -159,13 +159,16 @@ pub async fn import_page(args: ImportPageArgs<'_>) -> Result<PaperCommitResult, 
     if meta.publication.is_none() {
         meta.publication = page.publisher.clone();
     }
+    agentero_core::features::paper::discovery::collection::enrich_paper_record_from_collection(
+        &mut meta,
+    );
 
     paper_commit(
         meta,
         PaperCommitOptions {
             vault: args.vault,
             parent_dir: args.parent_dir,
-            dedupe: DedupePolicy::ByCatalogId,
+            dedupe: DedupePolicy::ByIdentifiers,
             assets: AssetsPolicy::SyncDownload {
                 cookies: None,
                 progress: args.progress,

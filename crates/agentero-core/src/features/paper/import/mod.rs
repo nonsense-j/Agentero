@@ -339,14 +339,30 @@ pub async fn import_by_identifier_with_progress(
     }
 
     check_task_not_cancelled(args.task_id.as_deref())?;
-    let resolved = resolve_metadata(text, &base, args.task_id.as_deref()).await?;
+    let resolved = match resolve_metadata(text, &base, args.task_id.as_deref()).await {
+        Ok(r) => r,
+        Err(first_err) => {
+            if let Some(sib_aid) =
+                crate::features::paper::discovery::collection::find_sibling_arxiv_id_in_collection(
+                    text,
+                )
+            {
+                resolve_metadata(&format!("arXiv:{sib_aid}"), &base, args.task_id.as_deref())
+                    .await
+                    .map_err(|_| first_err)?
+            } else {
+                return Err(first_err);
+            }
+        }
+    };
     check_task_not_cancelled(args.task_id.as_deref())?;
 
     let ResolvedMetadata {
-        record: meta,
+        record: mut meta,
         used_translator,
         notices,
     } = resolved;
+    crate::features::paper::discovery::collection::enrich_paper_record_from_collection(&mut meta);
 
     let commit = paper_commit(
         meta,

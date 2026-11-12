@@ -567,6 +567,33 @@ pub fn find_by_identifier(
     })
 }
 
+/// Find a catalog paper matching `(normalized title + first 2 authors)` cross-portal
+/// work identity (e.g. an arXiv preprint already in the Vault when its Venue version
+/// is imported, or vice versa). Requires both sides to have non-empty title and authors.
+pub fn find_by_work_identity(
+    vault_root: &Path,
+    title: &str,
+    authors: &[String],
+) -> Result<Option<PaperRecord>, AppError> {
+    use crate::features::paper::util::{norm_title_key, same_work_by_title_and_authors};
+
+    if norm_title_key(title).is_empty() || authors.is_empty() {
+        return Ok(None);
+    }
+    let sql = format!("SELECT {PAPER_COLUMNS} FROM papers WHERE title != '' ORDER BY path ASC");
+    with_catalog(vault_root, |conn| {
+        let mut stmt = conn.prepare(&sql).map_err(AppError::from)?;
+        let rows = stmt.query_map([], map_row).map_err(AppError::from)?;
+        for entry in rows {
+            let record = entry.map_err(AppError::from)?;
+            if same_work_by_title_and_authors(&record.title, &record.authors, title, authors) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    })
+}
+
 /// List all papers for library table (newest first).
 pub fn list_all(vault_root: &Path) -> Result<Vec<PaperRecord>, AppError> {
     with_catalog(vault_root, |conn| {

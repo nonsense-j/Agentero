@@ -17,9 +17,11 @@ use super::schema::{
     ensure_collection, ensure_collection_at, DEFAULT_WORD_CLOUD_TOP_N, MAX_WORD_CLOUD_TOP_N,
     MIN_WORD_CLOUD_TOP_N,
 };
+use super::search::enrich_venue_summaries_from_arxiv_conn;
 use super::store::{
-    append_enabled_scope_clause, clean_opt_str, load_enabled_categories, load_summaries_by_row_ids,
-    now_rfc3339,
+    append_enabled_scope_clause, choose_better_abstract, clean_opt_str, is_publisher_doi,
+    load_enabled_categories, load_summaries_by_row_ids, now_rfc3339, same_collection_work,
+    union_strings_case_insensitive,
 };
 
 pub const DEFAULT_RECOMMEND_BATCH_SIZE: usize = 15;
@@ -727,75 +729,215 @@ pub(crate) fn recommend_next_conn(
 
     let enabled_cats = load_enabled_categories(&tx)?;
     let mut sql = String::from(
-        "SELECT p.row_id, p.id, p.published_at, p.title, p.abstract_text, p.source_label, \
-                p.categories_json, p.keywords_json \
-         FROM papers p WHERE p.recommended_at IS NULL",
+        "SELECT p.row_id, p.id, p.source_type, p.ccf_rank, p.published_at, p.title, \
+                p.authors_json, p.title_norm, p.arxiv_id_norm, p.doi_norm, p.abstract_text, \
+                p.source_label, p.categories_json, p.keywords_json, p.recommended_at \
+         FROM papers p WHERE 1=1",
     );
     let mut binds: Vec<rusqlite::types::Value> = Vec::new();
     append_enabled_scope_clause(&mut sql, &mut binds, "p", &enabled_cats);
 
-    let mut candidates: Vec<(i64, String, String, f64, Vec<String>)> = Vec::new();
+    struct RawRecRow {
+        row_id: i64,
+        id: String,
+        source_type: String,
+        ccf_rank: Option<String>,
+        published_at: String,
+        title: String,
+        authors: Vec<String>,
+        title_norm: String,
+        arxiv_id_norm: Option<String>,
+        doi_norm: Option<String>,
+        abstract_text: String,
+        source_label: String,
+        categories: Vec<String>,
+        keywords: Vec<String>,
+        recommended: bool,
+        sibling_row_ids: Vec<i64>,
+    }
+
+    fn ccf_priority(rank: Option<&str>) -> u8 {
+        match rank.map(str::trim) {
+            Some(r) if r.eq_ignore_ascii_case("CCF-A") => 0,
+            Some(r) if r.eq_ignore_ascii_case("CCF-B") => 1,
+            Some(r) if !r.is_empty() => 2,
+            _ => 3,
+        }
+    }
+
+    let mut venue_rows: Vec<RawRecRow> = Vec::new();
+    let mut arxiv_rows: Vec<RawRecRow> = Vec::new();
     {
         let mut stmt = tx.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(binds), |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-            ))
+            let authors_json: String = r.get(6)?;
+            let cats_json: String = r.get(12)?;
+            let kws_json: String = r.get(13)?;
+            let rec_at: Option<String> = r.get(14)?;
+            Ok(RawRecRow {
+                row_id: r.get(0)?,
+                id: r.get(1)?,
+                source_type: r.get(2)?,
+                ccf_rank: r.get(3)?,
+                published_at: r.get(4)?,
+                title: r.get(5)?,
+                authors: serde_json::from_str(&authors_json).unwrap_or_default(),
+                title_norm: r.get(7)?,
+                arxiv_id_norm: r.get::<_, Option<String>>(8)?.filter(|s| !s.is_empty()),
+                doi_norm: r.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
+                abstract_text: r.get(10)?,
+                source_label: r.get(11)?,
+                categories: serde_json::from_str(&cats_json).unwrap_or_default(),
+                keywords: serde_json::from_str(&kws_json).unwrap_or_default(),
+                recommended: rec_at.is_some_and(|s| !s.trim().is_empty()),
+                sibling_row_ids: Vec::new(),
+            })
         })?;
 
         for entry in rows {
-            let (row_id, id, published_at, title, abstract_text, source_label, cats_json, kws_json) =
-                entry?;
-            let raw_kws: Vec<String> = serde_json::from_str(&kws_json).unwrap_or_default();
-            let raw_cats: Vec<String> = serde_json::from_str(&cats_json).unwrap_or_default();
-
-            let mut norm_kws: Vec<String> = Vec::with_capacity(raw_kws.len());
-            let mut norm_kw_set: HashSet<String> = HashSet::with_capacity(raw_kws.len());
-            for kw in raw_kws {
-                let norm = normalize_term_key(&kw);
-                if norm.chars().count() >= 2 && norm_kw_set.insert(norm.clone()) {
-                    norm_kws.push(norm);
-                }
-            }
-            let keywords_joined_lower = norm_kws.join(" ; ");
-            let title_lower = title.to_lowercase();
-            let abstract_lower = abstract_text.to_lowercase();
-            let cat_lower = format!("{source_label} {}", raw_cats.join(" "))
-                .trim()
-                .to_lowercase();
-            let combined_lower =
-                format!("{title_lower}\n{keywords_joined_lower}\n{abstract_lower}\n{cat_lower}");
-
-            let doc = ScorablePaperRow {
-                row_id,
-                id,
-                published_at,
-                title_lower,
-                abstract_lower,
-                cat_lower,
-                norm_kw_set,
-                keywords_joined_lower,
-                combined_lower,
-            };
-
-            if let Some((score, matched)) = score_paper_against_prepared(&doc, &prepared) {
-                candidates.push((doc.row_id, doc.id, doc.published_at, score, matched));
+            let row = entry?;
+            if row.source_type == "venue" {
+                venue_rows.push(row);
+            } else {
+                arxiv_rows.push(row);
             }
         }
     }
 
+    venue_rows.sort_by(|a, b| {
+        ccf_priority(a.ccf_rank.as_deref())
+            .cmp(&ccf_priority(b.ccf_rank.as_deref()))
+            .then_with(|| b.published_at.cmp(&a.published_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut venue_by_arxiv: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut venue_by_doi: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut venue_by_title: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, v) in venue_rows.iter().enumerate() {
+        if let Some(ref a) = v.arxiv_id_norm {
+            venue_by_arxiv.entry(a.clone()).or_default().push(idx);
+        }
+        if let Some(d) = v.doi_norm.as_deref().filter(|d| is_publisher_doi(d)) {
+            venue_by_doi.entry(d.to_string()).or_default().push(idx);
+        }
+        if !v.title_norm.is_empty() {
+            venue_by_title
+                .entry(v.title_norm.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    let mut standalone_arxiv: Vec<RawRecRow> = Vec::new();
+    for a in arxiv_rows {
+        let mut cand_v: Vec<usize> = Vec::new();
+        if let Some(ref aid) = a.arxiv_id_norm {
+            if let Some(idxs) = venue_by_arxiv.get(aid) {
+                cand_v.extend(idxs.iter().copied());
+            }
+        }
+        if let Some(d) = a.doi_norm.as_deref().filter(|d| is_publisher_doi(d)) {
+            if let Some(idxs) = venue_by_doi.get(d) {
+                cand_v.extend(idxs.iter().copied());
+            }
+        }
+        if !a.title_norm.is_empty() {
+            if let Some(idxs) = venue_by_title.get(&a.title_norm) {
+                cand_v.extend(idxs.iter().copied());
+            }
+        }
+        cand_v.sort_unstable();
+        cand_v.dedup();
+
+        if let Some(v_idx) = cand_v.into_iter().find(|&vi| {
+            let v = &venue_rows[vi];
+            same_collection_work(
+                &a.title,
+                &a.authors,
+                a.arxiv_id_norm.as_deref(),
+                a.doi_norm.as_deref(),
+                &v.title,
+                &v.authors,
+                v.arxiv_id_norm.as_deref(),
+                v.doi_norm.as_deref(),
+            )
+        }) {
+            let v = &mut venue_rows[v_idx];
+            if a.recommended {
+                v.recommended = true;
+            }
+            v.sibling_row_ids.push(a.row_id);
+            v.abstract_text =
+                choose_better_abstract(&v.abstract_text, &a.abstract_text, &v.source_label);
+            v.keywords = union_strings_case_insensitive(&v.keywords, &a.keywords);
+            v.categories = union_strings_case_insensitive(&v.categories, &a.categories);
+        } else {
+            standalone_arxiv.push(a);
+        }
+    }
+
+    struct ScoredRecCandidate {
+        row_id: i64,
+        sibling_row_ids: Vec<i64>,
+        id: String,
+        published_at: String,
+        score: f64,
+        matched_keywords: Vec<String>,
+    }
+
+    let mut candidates: Vec<ScoredRecCandidate> = Vec::new();
+    for row in venue_rows.into_iter().chain(standalone_arxiv) {
+        if row.recommended {
+            continue;
+        }
+        let mut norm_kws: Vec<String> = Vec::with_capacity(row.keywords.len());
+        let mut norm_kw_set: HashSet<String> = HashSet::with_capacity(row.keywords.len());
+        for kw in &row.keywords {
+            let norm = normalize_term_key(kw);
+            if norm.chars().count() >= 2 && norm_kw_set.insert(norm.clone()) {
+                norm_kws.push(norm);
+            }
+        }
+        let keywords_joined_lower = norm_kws.join(" ; ");
+        let title_lower = row.title.to_lowercase();
+        let abstract_lower = row.abstract_text.to_lowercase();
+        let cat_lower = format!("{} {}", row.source_label, row.categories.join(" "))
+            .trim()
+            .to_lowercase();
+        let combined_lower =
+            format!("{title_lower}\n{keywords_joined_lower}\n{abstract_lower}\n{cat_lower}");
+
+        let doc = ScorablePaperRow {
+            row_id: row.row_id,
+            id: row.id,
+            published_at: row.published_at,
+            title_lower,
+            abstract_lower,
+            cat_lower,
+            norm_kw_set,
+            keywords_joined_lower,
+            combined_lower,
+        };
+
+        if let Some((score, matched_keywords)) = score_paper_against_prepared(&doc, &prepared) {
+            candidates.push(ScoredRecCandidate {
+                row_id: doc.row_id,
+                sibling_row_ids: row.sibling_row_ids,
+                id: doc.id,
+                published_at: doc.published_at,
+                score,
+                matched_keywords,
+            });
+        }
+    }
+
     candidates.sort_by(|a, b| {
-        b.3.partial_cmp(&a.3)
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.2.cmp(&a.2))
-            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| b.published_at.cmp(&a.published_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     if candidates.is_empty() {
@@ -810,32 +952,38 @@ pub(crate) fn recommend_next_conn(
     }
 
     let total_matching = candidates.len();
-    let selected: Vec<(i64, String, String, f64, Vec<String>)> =
-        candidates.into_iter().take(max_batch_size).collect();
+    let selected: Vec<ScoredRecCandidate> = candidates.into_iter().take(max_batch_size).collect();
     let remaining_unrecommended = total_matching.saturating_sub(selected.len());
 
     let now = now_rfc3339();
-    for (rid, _, _, _, _) in &selected {
+    for cand in &selected {
         tx.execute(
             "UPDATE papers SET recommended_at = ?1, updated_at = ?1 WHERE row_id = ?2",
-            params![now, rid],
+            params![now, cand.row_id],
         )?;
+        for srid in &cand.sibling_row_ids {
+            tx.execute(
+                "UPDATE papers SET recommended_at = ?1, updated_at = ?1 WHERE row_id = ?2",
+                params![now, srid],
+            )?;
+        }
     }
 
     merged_state.last_recommended_at = Some(now);
     persist_recommend_state_tx(&tx, &merged_state)?;
 
-    let row_ids: Vec<i64> = selected.iter().map(|(rid, _, _, _, _)| *rid).collect();
+    let row_ids: Vec<i64> = selected.iter().map(|cand| cand.row_id).collect();
     let mut summaries = load_summaries_by_row_ids(&tx, &row_ids)?;
+    enrich_venue_summaries_from_arxiv_conn(&tx, &mut summaries)?;
     tx.commit()?;
 
     let mut items = Vec::with_capacity(selected.len());
-    for (rid, _, _, score, matched_keywords) in selected {
-        if let Some(paper) = summaries.remove(&rid) {
+    for cand in selected {
+        if let Some(paper) = summaries.remove(&cand.row_id) {
             items.push(RecommendedPaperDto {
                 paper,
-                matched_keywords,
-                score,
+                matched_keywords: cand.matched_keywords,
+                score: cand.score,
             });
         }
     }

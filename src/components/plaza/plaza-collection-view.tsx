@@ -64,7 +64,6 @@ import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
-import { lookupSubmit } from "@/lib/paper/import-actions";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionListPapersQuery,
@@ -88,9 +87,13 @@ import {
 	type VenueConfig,
 	type VenueDomain,
 } from "@/lib/plaza/collection";
+import { importCollectionPapers } from "@/lib/plaza/collection-import";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
-import { importPlazaPaper } from "@/lib/plaza/import";
-import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
+import {
+	addCollectionPaperKeys,
+	isCollectionPaperImported,
+	syncCollectionImportedKeys,
+} from "@/lib/plaza/imported";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
 type ViewStage = "hub" | "list";
@@ -106,22 +109,7 @@ const COLLECTION_ICON_BTN_CLASS =
 const COLLECTION_CARD_IMPORT_BTN_CLASS =
 	"bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/20 hover:bg-blue-600 hover:text-white dark:bg-blue-500/20 dark:text-blue-200 dark:ring-blue-400/35 dark:hover:bg-blue-500 dark:hover:text-white";
 
-function checkPaperImported(
-	paper: CollectionPaperItem,
-	importedSet: ReadonlySet<string>,
-): boolean {
-	if (importedSet.has(paper.id)) return true;
-	if (paper.coolPapersId && importedSet.has(paper.coolPapersId.toLowerCase())) {
-		return true;
-	}
-	if (paper.arxivId) {
-		const bare = bareArxivId(paper.arxivId);
-		if (bare && importedSet.has(bare)) return true;
-		if (importedSet.has(paper.arxivId)) return true;
-	}
-	if (paper.doi && importedSet.has(paper.doi.toLowerCase())) return true;
-	return false;
-}
+const checkPaperImported = isCollectionPaperImported;
 
 export function PlazaCollectionView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
@@ -178,6 +166,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const [loadingMoreRemote, setLoadingMoreRemote] = useState(false);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
+	const manualImportedKeysRef = useRef<Set<string>>(new Set());
 	const [batchImporting, setBatchImporting] = useState(false);
 	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
 		null,
@@ -192,24 +181,12 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const syncLibraryImported = useCallback(
 		async (items: readonly CollectionPaperItem[]) => {
-			const arxivQueries = items
-				.map((p) => p.arxivId)
-				.filter((id): id is string => Boolean(id));
-			if (arxivQueries.length === 0) return;
 			try {
-				const matched = await importedIdsInLibrary(arxivQueries, {
-					limit: Number.POSITIVE_INFINITY,
-				});
-				if (matched.length === 0) return;
-				setImportedIds((prev) => {
-					const next = new Set(prev);
-					for (const raw of matched) {
-						next.add(raw);
-						const bare = bareArxivId(raw);
-						if (bare) next.add(bare);
-					}
-					return next;
-				});
+				const next = await syncCollectionImportedKeys(
+					items,
+					manualImportedKeysRef.current,
+				);
+				setImportedIds(next);
 			} catch {
 				// Ignore when no Vault is open
 			}
@@ -796,32 +773,15 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const importPapers = useCallback(
 		async (targets: CollectionPaperItem[]) => {
 			if (targets.length === 0 || batchImporting) return;
-			const coolTargets = targets.filter((p) => !p.arxivId && p.coolPapersId);
-			const lookupTargets = targets.filter((p) => p.arxivId || !p.coolPapersId);
-			const identifiers = lookupTargets
-				.map((p) =>
-					p.arxivId
-						? `arXiv:${p.arxivId}`
-						: p.doi
-							? `https://doi.org/${p.doi}`
-							: p.url || p.title,
-				)
-				.filter(Boolean);
-			if (coolTargets.length === 0 && identifiers.length === 0) return;
-
 			const markTargetsDone = (done: CollectionPaperItem[]) => {
 				if (done.length === 0) return;
+				for (const p of done) {
+					addCollectionPaperKeys(manualImportedKeysRef.current, p);
+				}
 				setImportedIds((prev) => {
 					const next = new Set(prev);
 					for (const p of done) {
-						next.add(p.id);
-						if (p.coolPapersId) next.add(p.coolPapersId.toLowerCase());
-						if (p.arxivId) {
-							next.add(p.arxivId);
-							const bare = bareArxivId(p.arxivId);
-							if (bare) next.add(bare);
-						}
-						if (p.doi) next.add(p.doi.toLowerCase());
+						addCollectionPaperKeys(next, p);
 					}
 					return next;
 				});
@@ -834,27 +794,12 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 			setBatchImporting(true);
 			try {
-				for (const p of coolTargets) {
-					const ok = await importPlazaPaper({
-						id: p.coolPapersId ?? p.id,
-						branch: "venue",
-						url: p.url,
-						title: p.title,
-					});
-					if (ok) markTargetsDone([p]);
-				}
-				if (identifiers.length > 0) {
-					await lookupSubmit(identifiers, {
-						onComplete: () => {
-							markTargetsDone(lookupTargets);
-							setBatchImporting(false);
-						},
-					});
-				} else {
-					setBatchImporting(false);
-				}
+				await importCollectionPapers(targets, {
+					onMarked: markTargetsDone,
+				});
 			} catch (err) {
 				notifyError(errorText(err));
+			} finally {
 				setBatchImporting(false);
 			}
 		},

@@ -16,9 +16,11 @@ use super::models::{
 };
 use super::schema::{ensure_collection, ensure_collection_at};
 use super::store::{
-    append_ccf_ranks_clause, append_enabled_scope_clause, infer_venue_kind,
-    load_enabled_categories, load_summaries_by_row_ids, max_published_at_in_scope,
-    resolve_date_bounds, resolve_single_date_bound, PAPER_SUMMARY_SELECT_COLS,
+    append_ccf_ranks_clause, append_enabled_scope_clause, clean_arxiv_key,
+    compare_preferred_venue_summary, infer_venue_kind, is_publisher_doi, load_enabled_categories,
+    load_summaries_by_row_ids, map_paper_summary_row, max_published_at_in_scope,
+    merge_arxiv_into_venue_summary, norm_title_key, resolve_date_bounds, resolve_single_date_bound,
+    same_collection_work, same_summary_work, PAPER_SUMMARY_SELECT_COLS,
 };
 
 // ─── Overview ───
@@ -369,12 +371,19 @@ impl SearchFieldsMask {
     }
 }
 
+#[derive(Clone)]
 struct CandidateDoc {
     row_id: i64,
     id: String,
+    source_type: String,
+    ccf_rank: Option<String>,
     published_at: String,
     citation_count: u32,
     title: String,
+    authors: Vec<String>,
+    title_norm: String,
+    arxiv_id_norm: Option<String>,
+    doi_norm: Option<String>,
     keywords_text: String,
     abstract_text: String,
 }
@@ -574,13 +583,16 @@ fn query_candidate_docs(
     base_binds: &[rusqlite::types::Value],
     fts_expr: Option<&str>,
 ) -> Result<Vec<CandidateDoc>, AppError> {
+    const SELECT_COLS: &str = "p.row_id, p.id, p.source_type, p.ccf_rank, p.published_at, \
+        p.citation_count, p.title, p.authors_json, p.title_norm, p.arxiv_id_norm, p.doi_norm, \
+        p.keywords_text, p.abstract_text";
     let (sql, binds) = if let Some(expr) = fts_expr {
         let mut b = Vec::with_capacity(base_binds.len() + 1);
         b.push(rusqlite::types::Value::from(expr.to_string()));
         b.extend(base_binds.iter().cloned());
         (
             format!(
-                "SELECT p.row_id, p.id, p.published_at, p.citation_count, p.title, p.keywords_text, p.abstract_text \
+                "SELECT {SELECT_COLS} \
                  FROM papers p \
                  JOIN papers_fts ON papers_fts.rowid = p.row_id \
                  {where_sql_fts}",
@@ -590,29 +602,419 @@ fn query_candidate_docs(
         )
     } else {
         (
-            format!(
-                "SELECT p.row_id, p.id, p.published_at, p.citation_count, p.title, p.keywords_text, p.abstract_text \
-                 FROM papers p{where_sql}"
-            ),
+            format!("SELECT {SELECT_COLS} FROM papers p{where_sql}"),
             base_binds.to_vec(),
         )
     };
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(binds), |r| {
-        let cites: i64 = r.get(3)?;
+        let cites: i64 = r.get(5)?;
+        let authors_json: String = r.get(7)?;
         Ok(CandidateDoc {
             row_id: r.get(0)?,
             id: r.get(1)?,
-            published_at: r.get(2)?,
+            source_type: r.get(2)?,
+            ccf_rank: r.get(3)?,
+            published_at: r.get(4)?,
             citation_count: cites.max(0) as u32,
-            title: r.get(4)?,
-            keywords_text: r.get(5)?,
-            abstract_text: r.get(6)?,
+            title: r.get(6)?,
+            authors: serde_json::from_str(&authors_json).unwrap_or_default(),
+            title_norm: r.get(8)?,
+            arxiv_id_norm: r.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
+            doi_norm: r.get::<_, Option<String>>(10)?.filter(|s| !s.is_empty()),
+            keywords_text: r.get(11)?,
+            abstract_text: r.get(12)?,
         })
     })?;
 
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn should_dedupe_cross_portal(filters: &StructuralFilters<'_>) -> bool {
+    if let Some(st) = filters.source_type.map(str::trim) {
+        if st.eq_ignore_ascii_case("arxiv") {
+            return false;
+        }
+    }
+    let non_empty_ranks: Vec<&str> = filters
+        .ccf_ranks
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !non_empty_ranks.is_empty()
+        && non_empty_ranks
+            .iter()
+            .all(|r| r.eq_ignore_ascii_case("arxiv") || r.eq_ignore_ascii_case("preprint"))
+    {
+        return false;
+    }
+    true
+}
+
+fn ccf_priority(rank: Option<&str>) -> u8 {
+    match rank.map(str::trim) {
+        Some(r) if r.eq_ignore_ascii_case("CCF-A") => 0,
+        Some(r) if r.eq_ignore_ascii_case("CCF-B") => 1,
+        Some(r) if !r.is_empty() => 2,
+        _ => 3,
+    }
+}
+
+fn same_candidate_work(a: &CandidateDoc, b: &CandidateDoc) -> bool {
+    same_collection_work(
+        &a.title,
+        &a.authors,
+        a.arxiv_id_norm.as_deref(),
+        a.doi_norm.as_deref(),
+        &b.title,
+        &b.authors,
+        b.arxiv_id_norm.as_deref(),
+        b.doi_norm.as_deref(),
+    )
+}
+
+fn doc_violates_negations(
+    doc: &CandidateDoc,
+    parsed: &ParsedBooleanQuery,
+    mask: SearchFieldsMask,
+) -> bool {
+    let Some(first_branch) = parsed.branches.first() else {
+        return false;
+    };
+    let negations: Vec<&str> = first_branch
+        .iter()
+        .filter(|t| t.negated)
+        .map(|t| t.text.as_str())
+        .collect();
+    if negations.is_empty() {
+        return false;
+    }
+    let title_lc = if mask.title {
+        doc.title.to_lowercase()
+    } else {
+        String::new()
+    };
+    let kw_lc = if mask.keywords {
+        doc.keywords_text.to_lowercase()
+    } else {
+        String::new()
+    };
+    let abs_lc = if mask.abstract_text {
+        doc.abstract_text.to_lowercase()
+    } else {
+        String::new()
+    };
+    negations
+        .into_iter()
+        .any(|neg| title_lc.contains(neg) || kw_lc.contains(neg) || abs_lc.contains(neg))
+}
+
+fn union_matched_fields(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(3);
+    for canonical in ["title", "keywords", "abstract"] {
+        if a.iter().any(|f| f == canonical) || b.iter().any(|f| f == canonical) {
+            out.push(canonical.to_string());
+        }
+    }
+    out
+}
+
+/// Collapse `arxiv` hits into their eligible `venue` counterpart (by `arxiv_id_norm`,
+/// publisher `doi_norm`, or `title + first 2 authors`) so search output keeps only
+/// `Venue` when both portals contain the same paper.
+fn dedupe_candidates_prefer_venue(
+    conn: &Connection,
+    enabled_cats: &[String],
+    filters: &StructuralFilters<'_>,
+    parsed: &ParsedBooleanQuery,
+    mask: SearchFieldsMask,
+    hits: Vec<(CandidateDoc, f64, Vec<String>)>,
+) -> Result<Vec<(CandidateDoc, f64, Vec<String>)>, AppError> {
+    if !should_dedupe_cross_portal(filters)
+        || !hits.iter().any(|(d, _, _)| d.source_type == "arxiv")
+    {
+        return Ok(hits);
+    }
+
+    // Load eligible `venue` rows matching any `arxiv` hit's `title_norm` or `arxiv_id_norm`
+    // in case only the `arxiv` row matched the query text (e.g. richer preprint abstract).
+    let mut need_titles: HashSet<String> = HashSet::new();
+    let mut need_arxivs: HashSet<String> = HashSet::new();
+    let mut present_row_ids: HashSet<i64> = HashSet::with_capacity(hits.len());
+
+    for (doc, _, _) in &hits {
+        present_row_ids.insert(doc.row_id);
+        if doc.source_type == "arxiv" {
+            if doc.title_norm.len() >= 4 {
+                need_titles.insert(doc.title_norm.clone());
+            }
+            if let Some(ref a) = doc.arxiv_id_norm {
+                need_arxivs.insert(a.clone());
+            }
+        }
+    }
+
+    let mut extra_venues: Vec<CandidateDoc> = Vec::new();
+    if !need_titles.is_empty() || !need_arxivs.is_empty() {
+        let venue_filters = StructuralFilters {
+            source_type: Some("venue"),
+            categories: &[],
+            venues: filters.venues,
+            venue_kind: filters.venue_kind,
+            venue_domain: filters.venue_domain,
+            ccf_ranks: filters.ccf_ranks,
+            from_ymd: filters.from_ymd,
+            to_ymd: filters.to_ymd,
+        };
+        let mut v_where = String::from(" WHERE 1=1");
+        let mut v_binds: Vec<rusqlite::types::Value> = Vec::new();
+        append_structural_where(&mut v_where, &mut v_binds, enabled_cats, &venue_filters);
+
+        let title_vec: Vec<&String> = need_titles.iter().collect();
+        for chunk in title_vec.chunks(200) {
+            let ph = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut sql_where = format!("{v_where} AND p.title_norm IN ({ph})");
+            let mut b = v_binds.clone();
+            for t in chunk {
+                b.push((*t).clone().into());
+            }
+            let _ = &mut sql_where;
+            for vdoc in query_candidate_docs(conn, &sql_where, &b, None)? {
+                if present_row_ids.insert(vdoc.row_id)
+                    && !doc_violates_negations(&vdoc, parsed, mask)
+                {
+                    extra_venues.push(vdoc);
+                }
+            }
+        }
+
+        let arxiv_vec: Vec<&String> = need_arxivs.iter().collect();
+        for chunk in arxiv_vec.chunks(200) {
+            let ph = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql_where = format!("{v_where} AND p.arxiv_id_norm IN ({ph})");
+            let mut b = v_binds.clone();
+            for a in chunk {
+                b.push((*a).clone().into());
+            }
+            for vdoc in query_candidate_docs(conn, &sql_where, &b, None)? {
+                if present_row_ids.insert(vdoc.row_id)
+                    && !doc_violates_negations(&vdoc, parsed, mask)
+                {
+                    extra_venues.push(vdoc);
+                }
+            }
+        }
+    }
+
+    type VenueSlot = (CandidateDoc, Option<(f64, Vec<String>)>);
+
+    // Index all available `venue` docs (scored + extra) by `arxiv_id_norm`, publisher `doi_norm`, and `title_norm`.
+    let mut venue_pool: Vec<VenueSlot> = Vec::new();
+    let mut arxiv_hits: Vec<(CandidateDoc, f64, Vec<String>)> = Vec::new();
+
+    for (doc, score, mf) in hits {
+        if doc.source_type == "venue" {
+            venue_pool.push((doc, Some((score, mf))));
+        } else {
+            arxiv_hits.push((doc, score, mf));
+        }
+    }
+    for vdoc in extra_venues {
+        venue_pool.push((vdoc, None));
+    }
+
+    if venue_pool.is_empty() {
+        return Ok(arxiv_hits);
+    }
+
+    // Sort `venue_pool` so preferred CCF-A / newer venues come first when multiple match.
+    venue_pool.sort_by(|(a, _), (b, _)| {
+        ccf_priority(a.ccf_rank.as_deref())
+            .cmp(&ccf_priority(b.ccf_rank.as_deref()))
+            .then_with(|| b.published_at.cmp(&a.published_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut by_arxiv: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut by_doi: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, (vdoc, _)) in venue_pool.iter().enumerate() {
+        if let Some(ref a) = vdoc.arxiv_id_norm {
+            by_arxiv.entry(a.clone()).or_default().push(idx);
+        }
+        if let Some(d) = vdoc.doi_norm.as_deref().filter(|d| is_publisher_doi(d)) {
+            by_doi.entry(d.to_string()).or_default().push(idx);
+        }
+        if !vdoc.title_norm.is_empty() {
+            by_title
+                .entry(vdoc.title_norm.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    let mut kept_arxiv: Vec<(CandidateDoc, f64, Vec<String>)> = Vec::new();
+
+    for (adoc, ascore, amf) in arxiv_hits {
+        let mut candidate_indices: Vec<usize> = Vec::new();
+        if let Some(ref a) = adoc.arxiv_id_norm {
+            if let Some(idxs) = by_arxiv.get(a) {
+                candidate_indices.extend(idxs.iter().copied());
+            }
+        }
+        if let Some(d) = adoc.doi_norm.as_deref().filter(|d| is_publisher_doi(d)) {
+            if let Some(idxs) = by_doi.get(d) {
+                candidate_indices.extend(idxs.iter().copied());
+            }
+        }
+        if !adoc.title_norm.is_empty() {
+            if let Some(idxs) = by_title.get(&adoc.title_norm) {
+                candidate_indices.extend(idxs.iter().copied());
+            }
+        }
+        candidate_indices.sort_unstable();
+        candidate_indices.dedup();
+
+        if let Some(best_v_idx) = candidate_indices
+            .into_iter()
+            .find(|&idx| same_candidate_work(&adoc, &venue_pool[idx].0))
+        {
+            let (ref mut vdoc, ref mut vscore_opt) = venue_pool[best_v_idx];
+            vdoc.citation_count = vdoc.citation_count.max(adoc.citation_count);
+            match vscore_opt {
+                Some((ref mut vs, ref mut vmf)) => {
+                    if ascore > *vs {
+                        *vs = ascore;
+                    }
+                    *vmf = union_matched_fields(vmf, &amf);
+                }
+                None => {
+                    *vscore_opt = Some((ascore, amf));
+                }
+            }
+        } else {
+            kept_arxiv.push((adoc, ascore, amf));
+        }
+    }
+
+    let mut out: Vec<(CandidateDoc, f64, Vec<String>)> = venue_pool
+        .into_iter()
+        .filter_map(|(vdoc, score_opt)| score_opt.map(|(s, mf)| (vdoc, s, mf)))
+        .collect();
+    out.extend(kept_arxiv);
+    Ok(out)
+}
+
+/// Enrich a materialized slice of `CollectionPaperSummary` so any `venue` row
+/// backfills missing `arxiv_id`, `pdf_url`, fuller `abstract_text`, `keywords`,
+/// and max `citation_count` from its `arxiv` twin in `collection.sqlite`.
+pub(crate) fn enrich_venue_summaries_from_arxiv_conn(
+    conn: &Connection,
+    summaries: &mut HashMap<i64, CollectionPaperSummary>,
+) -> Result<(), AppError> {
+    let mut title_keys: HashSet<String> = HashSet::new();
+    let mut arxiv_keys: HashSet<String> = HashSet::new();
+
+    for s in summaries.values() {
+        if s.source_type == "venue" {
+            let tk = norm_title_key(&s.title);
+            if tk.len() >= 4 {
+                title_keys.insert(tk);
+            }
+            if let Some(a) = s.arxiv_id.as_deref().and_then(clean_arxiv_key) {
+                arxiv_keys.insert(a);
+            }
+        }
+    }
+
+    if title_keys.is_empty() && arxiv_keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut arxiv_pool: HashMap<String, CollectionPaperSummary> = HashMap::new();
+
+    let title_vec: Vec<&String> = title_keys.iter().collect();
+    for chunk in title_vec.chunks(200) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
+             WHERE p.source_type = 'arxiv' AND p.title_norm IN ({ph})"
+        );
+        let binds: Vec<rusqlite::types::Value> =
+            chunk.iter().map(|s| (*s).clone().into()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        for entry in stmt.query_map(params_from_iter(binds), map_paper_summary_row)? {
+            let p = entry?;
+            arxiv_pool.entry(p.id.clone()).or_insert(p);
+        }
+    }
+
+    let arxiv_vec: Vec<&String> = arxiv_keys.iter().collect();
+    for chunk in arxiv_vec.chunks(200) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
+             WHERE p.source_type = 'arxiv' AND p.arxiv_id_norm IN ({ph})"
+        );
+        let binds: Vec<rusqlite::types::Value> =
+            chunk.iter().map(|s| (*s).clone().into()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        for entry in stmt.query_map(params_from_iter(binds), map_paper_summary_row)? {
+            let p = entry?;
+            arxiv_pool.entry(p.id.clone()).or_insert(p);
+        }
+    }
+
+    if arxiv_pool.is_empty() {
+        return Ok(());
+    }
+
+    let mut by_title: HashMap<String, Vec<CollectionPaperSummary>> = HashMap::new();
+    let mut by_arxiv: HashMap<String, Vec<CollectionPaperSummary>> = HashMap::new();
+    for ap in arxiv_pool.into_values() {
+        if let Some(a) = ap.arxiv_id.as_deref().and_then(clean_arxiv_key) {
+            by_arxiv.entry(a).or_default().push(ap.clone());
+        }
+        let tk = norm_title_key(&ap.title);
+        if !tk.is_empty() {
+            by_title.entry(tk).or_default().push(ap);
+        }
+    }
+
+    for s in summaries.values_mut() {
+        if s.source_type != "venue" {
+            continue;
+        }
+        let mut matched_arxiv: Option<&CollectionPaperSummary> = None;
+        if let Some(a) = s.arxiv_id.as_deref().and_then(clean_arxiv_key) {
+            if let Some(list) = by_arxiv.get(&a) {
+                matched_arxiv = list.iter().find(|ap| same_summary_work(s, ap));
+            }
+        }
+        if matched_arxiv.is_none() {
+            let tk = norm_title_key(&s.title);
+            if let Some(list) = by_title.get(&tk) {
+                matched_arxiv = list.iter().find(|ap| same_summary_work(s, ap));
+            }
+        }
+        if let Some(ap) = matched_arxiv {
+            merge_arxiv_into_venue_summary(s, ap);
+        }
+    }
+
+    Ok(())
 }
 
 fn score_filtered_candidates(
@@ -672,30 +1074,28 @@ pub(crate) fn search_fast_conn(
         latest_iso.as_deref(),
     );
 
+    let filters = StructuralFilters {
+        source_type: args.source_type.as_deref(),
+        categories: &args.categories,
+        venues: &args.venues,
+        venue_kind: args.venue_kind.as_deref(),
+        venue_domain: args.venue_domain.as_deref(),
+        ccf_ranks: &args.ccf_ranks,
+        from_ymd: from_ymd.as_deref(),
+        to_ymd: to_ymd.as_deref(),
+    };
     let mut where_sql = String::from(" WHERE 1=1");
     let mut base_binds: Vec<rusqlite::types::Value> = Vec::new();
-    append_structural_where(
-        &mut where_sql,
-        &mut base_binds,
-        &enabled_cats,
-        &StructuralFilters {
-            source_type: args.source_type.as_deref(),
-            categories: &args.categories,
-            venues: &args.venues,
-            venue_kind: args.venue_kind.as_deref(),
-            venue_domain: args.venue_domain.as_deref(),
-            ccf_ranks: &args.ccf_ranks,
-            from_ymd: from_ymd.as_deref(),
-            to_ymd: to_ymd.as_deref(),
-        },
-    );
+    append_structural_where(&mut where_sql, &mut base_binds, &enabled_cats, &filters);
 
     let raw_query = args.query.as_deref().unwrap_or("").trim();
     let parsed = parse_boolean_query(raw_query);
     let mask = SearchFieldsMask::from_list(&args.fields);
     let has_query = !parsed.branches.is_empty();
 
-    let mut hits = score_filtered_candidates(conn, &where_sql, &base_binds, &parsed, mask)?;
+    let raw_hits = score_filtered_candidates(conn, &where_sql, &base_binds, &parsed, mask)?;
+    let mut hits =
+        dedupe_candidates_prefer_venue(conn, &enabled_cats, &filters, &parsed, mask, raw_hits)?;
     let total_matched = hits.len();
 
     let raw_sort = args.sort.as_deref().map(str::trim).unwrap_or("relevance");
@@ -740,6 +1140,7 @@ pub(crate) fn search_fast_conn(
 
     let row_ids: Vec<i64> = page_slice.iter().map(|(rid, _, _)| *rid).collect();
     let mut summaries = load_summaries_by_row_ids(conn, &row_ids)?;
+    enrich_venue_summaries_from_arxiv_conn(conn, &mut summaries)?;
 
     let mut items = Vec::with_capacity(page_slice.len());
     for (rid, score, matched_fields) in page_slice {
@@ -874,26 +1275,23 @@ pub(crate) fn search_collection_conn(
         resolve_single_date_bound(params.date_from.as_deref(), latest_iso.as_deref());
     let date_to_ymd = resolve_single_date_bound(params.date_to.as_deref(), latest_iso.as_deref());
 
+    let filters = StructuralFilters {
+        source_type: params.source_type.as_deref(),
+        categories: &params.categories,
+        venues: &params.venues,
+        venue_kind: params.venue_kind.as_deref(),
+        venue_domain: params.venue_domain.as_deref(),
+        ccf_ranks: &params.ccf_ranks,
+        from_ymd: date_from_ymd.as_deref(),
+        to_ymd: date_to_ymd.as_deref(),
+    };
     let mut where_sql = String::from(" WHERE 1=1");
     let mut base_binds: Vec<rusqlite::types::Value> = Vec::new();
-    append_structural_where(
-        &mut where_sql,
-        &mut base_binds,
-        &enabled_cats,
-        &StructuralFilters {
-            source_type: params.source_type.as_deref(),
-            categories: &params.categories,
-            venues: &params.venues,
-            venue_kind: params.venue_kind.as_deref(),
-            venue_domain: params.venue_domain.as_deref(),
-            ccf_ranks: &params.ccf_ranks,
-            from_ymd: date_from_ymd.as_deref(),
-            to_ymd: date_to_ymd.as_deref(),
-        },
-    );
+    append_structural_where(&mut where_sql, &mut base_binds, &enabled_cats, &filters);
 
+    let raw_strict = score_filtered_candidates(conn, &where_sql, &base_binds, &parsed, mask)?;
     let mut strict_hits: Vec<(CandidateDoc, f32)> =
-        score_filtered_candidates(conn, &where_sql, &base_binds, &parsed, mask)?
+        dedupe_candidates_prefer_venue(conn, &enabled_cats, &filters, &parsed, mask, raw_strict)?
             .into_iter()
             .map(|(doc, s, _)| (doc, s as f32))
             .collect();
@@ -905,12 +1303,23 @@ pub(crate) fn search_collection_conn(
         if let Some(broad_q) = build_broadened_or_query(&raw_query) {
             let strict_ids: HashSet<String> =
                 strict_hits.iter().map(|(d, _)| d.id.clone()).collect();
-            let mut extra: Vec<(CandidateDoc, f32)> =
-                score_filtered_candidates(conn, &where_sql, &base_binds, &broad_q, mask)?
-                    .into_iter()
-                    .filter(|(d, _, _)| !strict_ids.contains(&d.id))
-                    .map(|(d, s, _)| (d, (s as f32) * 0.6))
-                    .collect();
+            let raw_extra =
+                score_filtered_candidates(conn, &where_sql, &base_binds, &broad_q, mask)?;
+            let mut extra: Vec<(CandidateDoc, f32)> = dedupe_candidates_prefer_venue(
+                conn,
+                &enabled_cats,
+                &filters,
+                &broad_q,
+                mask,
+                raw_extra,
+            )?
+            .into_iter()
+            .filter(|(d, _, _)| {
+                !strict_ids.contains(&d.id)
+                    && !strict_hits.iter().any(|(sd, _)| same_candidate_work(sd, d))
+            })
+            .map(|(d, s, _)| (d, (s as f32) * 0.6))
+            .collect();
             if !extra.is_empty() {
                 broadened = true;
                 extra.sort_by(|a, b| {
@@ -988,7 +1397,8 @@ pub(crate) fn search_collection_conn(
     };
 
     let row_ids: Vec<i64> = chosen_slice.iter().map(|(rid, _)| *rid).collect();
-    let summaries = load_summaries_by_row_ids(conn, &row_ids)?;
+    let mut summaries = load_summaries_by_row_ids(conn, &row_ids)?;
+    enrich_venue_summaries_from_arxiv_conn(conn, &mut summaries)?;
     let mut selected = Vec::with_capacity(chosen_slice.len());
     for (rid, score) in chosen_slice {
         if let Some(summary) = summaries.get(&rid) {
@@ -1037,52 +1447,115 @@ pub(crate) fn curate_collection_conn(
         }
     }
 
-    let mut by_id: HashMap<String, (String, String, Option<String>, i32)> = HashMap::new();
+    let mut by_id: HashMap<String, CollectionPaperSummary> = HashMap::new();
     if !requested_ids.is_empty() {
         let placeholders: String = std::iter::repeat_n("?", requested_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
         let mut sql = format!(
-            "SELECT p.id, p.title, p.source_label, p.ccf_rank, p.year \
-             FROM papers p WHERE p.id IN ({placeholders})"
+            "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.id IN ({placeholders})"
         );
         let mut binds: Vec<rusqlite::types::Value> =
             requested_ids.iter().cloned().map(Into::into).collect();
         append_enabled_scope_clause(&mut sql, &mut binds, "p", &enabled_cats);
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(binds), |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, i32>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(params_from_iter(binds), map_paper_summary_row)?;
         for entry in rows {
-            let (id, title, source_label, ccf_rank, year) = entry?;
-            by_id.insert(id, (title, source_label, ccf_rank, year));
+            let summary = entry?;
+            by_id.insert(summary.id.clone(), summary);
         }
     }
 
-    let _ = PAPER_SUMMARY_SELECT_COLS; // keep import cleanliness
-    let mut groups_out = Vec::new();
+    // Upgrade any curated `arxiv` entry to its `venue` counterpart when present in `papers`.
+    let mut arxiv_title_keys: HashSet<String> = HashSet::new();
+    let mut arxiv_id_keys: HashSet<String> = HashSet::new();
+    for s in by_id.values() {
+        if s.source_type == "arxiv" {
+            let tk = norm_title_key(&s.title);
+            if tk.len() >= 4 {
+                arxiv_title_keys.insert(tk);
+            }
+            if let Some(a) = s.arxiv_id.as_deref().and_then(clean_arxiv_key) {
+                arxiv_id_keys.insert(a);
+            }
+        }
+    }
+
+    let mut venue_candidates: Vec<CollectionPaperSummary> = Vec::new();
+    if !arxiv_title_keys.is_empty() {
+        let tvec: Vec<&String> = arxiv_title_keys.iter().collect();
+        for chunk in tvec.chunks(200) {
+            let ph = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
+                 WHERE p.source_type = 'venue' AND p.title_norm IN ({ph})"
+            );
+            let binds: Vec<rusqlite::types::Value> =
+                chunk.iter().map(|s| (*s).clone().into()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            for entry in stmt.query_map(params_from_iter(binds), map_paper_summary_row)? {
+                venue_candidates.push(entry?);
+            }
+        }
+    }
+    if !arxiv_id_keys.is_empty() {
+        let avec: Vec<&String> = arxiv_id_keys.iter().collect();
+        for chunk in avec.chunks(200) {
+            let ph = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
+                 WHERE p.source_type = 'venue' AND p.arxiv_id_norm IN ({ph})"
+            );
+            let binds: Vec<rusqlite::types::Value> =
+                chunk.iter().map(|s| (*s).clone().into()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            for entry in stmt.query_map(params_from_iter(binds), map_paper_summary_row)? {
+                let v = entry?;
+                if !venue_candidates.iter().any(|existing| existing.id == v.id) {
+                    venue_candidates.push(v);
+                }
+            }
+        }
+    }
+    venue_candidates.sort_by(compare_preferred_venue_summary);
+
+    let mut groups_out: Vec<CuratedGroupOut> = Vec::new();
     let mut dropped = Vec::new();
     let mut curated_count = 0usize;
+    let mut curated_seen: Vec<CollectionPaperSummary> = Vec::new();
 
     for group in params.groups {
         let mut items_out = Vec::new();
         for entry in group.items {
             let trimmed = entry.id.trim();
-            if let Some((title, source_label, ccf_rank, year)) = by_id.get(trimmed) {
+            if let Some(orig) = by_id.get(trimmed) {
+                let resolved = if orig.source_type == "arxiv" {
+                    venue_candidates
+                        .iter()
+                        .find(|v| same_summary_work(orig, v))
+                        .unwrap_or(orig)
+                } else {
+                    orig
+                };
+                if curated_seen
+                    .iter()
+                    .any(|prev| prev.id == resolved.id || same_summary_work(prev, resolved))
+                {
+                    continue;
+                }
+                curated_seen.push(resolved.clone());
                 curated_count += 1;
                 items_out.push(CuratedPaperOut {
-                    id: trimmed.to_string(),
-                    title: title.clone(),
-                    source_label: source_label.clone(),
-                    ccf_rank: ccf_rank.clone(),
-                    year: *year,
+                    id: resolved.id.clone(),
+                    title: resolved.title.clone(),
+                    source_label: resolved.source_label.clone(),
+                    ccf_rank: resolved.ccf_rank.clone(),
+                    year: resolved.year,
                     reason: entry.reason.filter(|r| !r.trim().is_empty()),
                 });
             } else if !trimmed.is_empty() {

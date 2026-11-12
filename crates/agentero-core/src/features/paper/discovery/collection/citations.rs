@@ -16,10 +16,11 @@ use super::models::{
     CollectionCitationsOut, CollectionCitationsParams, CollectionPaperSummary, SnowballPaperHit,
 };
 use super::schema::ensure_collection_at;
-use super::search::summary_to_hit;
+use super::search::{enrich_venue_summaries_from_arxiv_conn, summary_to_hit};
 use super::store::{
-    append_enabled_scope_clause, clean_arxiv_key, clean_doi_key, load_enabled_categories,
-    map_paper_summary_row, norm_title_key, now_rfc3339, PAPER_SUMMARY_SELECT_COLS,
+    append_enabled_scope_clause, clean_arxiv_key, clean_doi_key, compare_preferred_venue_summary,
+    load_enabled_categories, map_paper_summary_row, merge_arxiv_into_venue_summary, norm_title_key,
+    now_rfc3339, same_summary_work, PAPER_SUMMARY_SELECT_COLS,
 };
 
 const OPENALEX_MAILTO: &str = "agentero@users.noreply.github.com";
@@ -536,16 +537,42 @@ impl StubCandidatePool {
         fetch_by_column(conn, "doi_norm", &doi_keys, enabled_cats, &mut by_id)?;
         fetch_by_column(conn, "title_norm", &title_keys, enabled_cats, &mut by_id)?;
 
-        // Sort deterministically (prefer venue portal over preprint when same DOI/arXiv exists)
-        let mut items: Vec<CollectionPaperSummary> = by_id.into_values().collect();
-        items.sort_by(|a, b| {
-            let a_venue = u8::from(a.source_type != "venue");
-            let b_venue = u8::from(b.source_type != "venue");
-            a_venue
-                .cmp(&b_venue)
-                .then_with(|| b.published_at.cmp(&a.published_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        // Pull cross-portal siblings by `title_norm` (e.g. stub only had `arxiv_id`, while the
+        // `venue` counterpart in `collection.sqlite` only shares `title + first 2 authors`).
+        let sibling_titles: HashSet<String> = by_id
+            .values()
+            .map(|p| norm_title_key(&p.title))
+            .filter(|tk| tk.len() >= 4 && !title_keys.contains(tk))
+            .collect();
+        if !sibling_titles.is_empty() {
+            fetch_by_column(
+                conn,
+                "title_norm",
+                &sibling_titles,
+                enabled_cats,
+                &mut by_id,
+            )?;
+        }
+
+        // Sort deterministically (prefer venue portal over preprint when same work exists)
+        let mut raw_items: Vec<CollectionPaperSummary> = by_id.into_values().collect();
+        raw_items.sort_by(compare_preferred_venue_summary);
+
+        // Collapse cross-portal `arXiv` + `Venue` twins into the preferred `Venue` summary.
+        let mut items: Vec<CollectionPaperSummary> = Vec::with_capacity(raw_items.len());
+        for cand in raw_items {
+            if let Some(existing) = items.iter_mut().find(|prev| same_summary_work(prev, &cand)) {
+                if existing.source_type == "venue" && cand.source_type == "arxiv" {
+                    merge_arxiv_into_venue_summary(existing, &cand);
+                } else if existing.source_type == "arxiv" && cand.source_type == "venue" {
+                    let mut upgraded = cand;
+                    merge_arxiv_into_venue_summary(&mut upgraded, existing);
+                    *existing = upgraded;
+                }
+            } else {
+                items.push(cand);
+            }
+        }
 
         let mut by_arxiv = HashMap::new();
         let mut by_doi = HashMap::new();
@@ -753,24 +780,43 @@ pub async fn snowball_citations_at(
     }
 
     fn record_hit(
-        hits: &mut HashMap<String, Acc>,
-        seed_id_set: &HashSet<String>,
+        hits: &mut Vec<Acc>,
+        resolved_seeds: &[CollectionPaperSummary],
         seed_id: &str,
         cand: &CollectionPaperSummary,
         rank: u8,
         rel: &'static str,
         via_msg: String,
     ) -> bool {
-        if seed_id_set.contains(&cand.id) {
+        if resolved_seeds
+            .iter()
+            .any(|s| s.id == cand.id || same_summary_work(s, cand))
+        {
             return false;
         }
-        let entry = hits.entry(cand.id.clone()).or_insert_with(|| Acc {
-            paper: cand.clone(),
-            relation_rank: rank,
-            relation_type: rel,
-            seeds: HashSet::new(),
-            via: Vec::new(),
-        });
+        let idx = if let Some(pos) = hits
+            .iter()
+            .position(|e| e.paper.id == cand.id || same_summary_work(&e.paper, cand))
+        {
+            if hits[pos].paper.source_type == "arxiv" && cand.source_type == "venue" {
+                let mut upgraded = cand.clone();
+                merge_arxiv_into_venue_summary(&mut upgraded, &hits[pos].paper);
+                hits[pos].paper = upgraded;
+            } else if hits[pos].paper.source_type == "venue" && cand.source_type == "arxiv" {
+                merge_arxiv_into_venue_summary(&mut hits[pos].paper, cand);
+            }
+            pos
+        } else {
+            hits.push(Acc {
+                paper: cand.clone(),
+                relation_rank: rank,
+                relation_type: rel,
+                seeds: HashSet::new(),
+                via: Vec::new(),
+            });
+            hits.len() - 1
+        };
+        let entry = &mut hits[idx];
         if rank > entry.relation_rank {
             entry.relation_rank = rank;
             entry.relation_type = rel;
@@ -782,7 +828,7 @@ pub async fn snowball_citations_at(
         true
     }
 
-    let mut hits: HashMap<String, Acc> = HashMap::new();
+    let mut hits: Vec<Acc> = Vec::new();
 
     for seed in &resolved_seeds {
         let Some(edges) = edge_map.get(&seed.id) else {
@@ -795,7 +841,7 @@ pub async fn snowball_citations_at(
                 if let Some(cand) = pool.match_stub(stub) {
                     seed_matched |= record_hit(
                         &mut hits,
-                        &seed_id_set,
+                        &resolved_seeds,
                         &seed.id,
                         cand,
                         3,
@@ -811,7 +857,7 @@ pub async fn snowball_citations_at(
                 if let Some(cand) = pool.match_stub(stub) {
                     seed_matched |= record_hit(
                         &mut hits,
-                        &seed_id_set,
+                        &resolved_seeds,
                         &seed.id,
                         cand,
                         2,
@@ -827,7 +873,7 @@ pub async fn snowball_citations_at(
                 if let Some(cand) = pool.match_stub(stub) {
                     seed_matched |= record_hit(
                         &mut hits,
-                        &seed_id_set,
+                        &resolved_seeds,
                         &seed.id,
                         cand,
                         1,
@@ -845,7 +891,7 @@ pub async fn snowball_citations_at(
             for (cand, shared_kw) in local_matches {
                 let _ = record_hit(
                     &mut hits,
-                    &seed_id_set,
+                    &resolved_seeds,
                     &seed.id,
                     &cand,
                     1,
@@ -860,8 +906,37 @@ pub async fn snowball_citations_at(
         }
     }
 
+    // Upgrade any local-lineage `arXiv` hit that has an enabled `Venue` twin in `collection.sqlite`.
+    for acc in &mut hits {
+        if acc.paper.source_type == "arxiv" {
+            let tk = norm_title_key(&acc.paper.title);
+            if tk.len() >= 4 {
+                let mut sql = format!(
+                    "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
+                     WHERE p.source_type = 'venue' AND p.title_norm = ?"
+                );
+                let mut binds: Vec<rusqlite::types::Value> = vec![tk.into()];
+                append_enabled_scope_clause(&mut sql, &mut binds, "p", &enabled_cats);
+                if let Ok(mut stmt) = conn.prepare(&sql) {
+                    if let Ok(rows) = stmt.query_map(params_from_iter(binds), map_paper_summary_row)
+                    {
+                        let mut venues: Vec<CollectionPaperSummary> = rows
+                            .filter_map(Result::ok)
+                            .filter(|v| same_summary_work(&acc.paper, v))
+                            .collect();
+                        venues.sort_by(compare_preferred_venue_summary);
+                        if let Some(mut best_venue) = venues.into_iter().next() {
+                            merge_arxiv_into_venue_summary(&mut best_venue, &acc.paper);
+                            acc.paper = best_venue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let limit = params.limit.unwrap_or(25).clamp(1, 50);
-    let mut ranked: Vec<Acc> = hits.into_values().collect();
+    let mut ranked: Vec<Acc> = hits;
     ranked.sort_by(|a, b| {
         b.seeds
             .len()
@@ -871,18 +946,27 @@ pub async fn snowball_citations_at(
             .then_with(|| b.paper.citation_count.cmp(&a.paper.citation_count))
             .then_with(|| b.paper.published_at.cmp(&a.paper.published_at))
     });
+    ranked.truncate(limit);
+
+    let mut top_summaries: HashMap<i64, CollectionPaperSummary> = ranked
+        .iter()
+        .enumerate()
+        .map(|(i, acc)| (i as i64, acc.paper.clone()))
+        .collect();
+    enrich_venue_summaries_from_arxiv_conn(&conn, &mut top_summaries)?;
 
     let items: Vec<SnowballPaperHit> = ranked
         .into_iter()
-        .take(limit)
-        .map(|acc| {
+        .enumerate()
+        .map(|(i, acc)| {
+            let enriched_paper = top_summaries.remove(&(i as i64)).unwrap_or(acc.paper);
             let score = (acc.seeds.len() as f32) * 3.0
                 + (acc.relation_rank as f32) * 2.0
                 + (acc.via.len() as f32);
             let mut linked_seed_ids: Vec<String> = acc.seeds.into_iter().collect();
             linked_seed_ids.sort();
             SnowballPaperHit {
-                paper: summary_to_hit(&acc.paper, score),
+                paper: summary_to_hit(&enriched_paper, score),
                 relation_type: acc.relation_type.to_string(),
                 linked_seed_ids,
                 via: acc.via,

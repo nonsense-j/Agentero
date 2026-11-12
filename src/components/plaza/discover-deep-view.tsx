@@ -61,6 +61,8 @@ import {
 	subscribeDeepDiscoverState,
 	togglePinDeepPaper,
 } from "@/lib/plaza/deep-discover-store";
+import { sameCollectionPaperWork } from "@/lib/plaza/paper-identity";
+import { mergeArxivIntoVenueItem } from "@/lib/plaza/paper-search";
 
 type TrayTab = "curated" | "sampled";
 
@@ -239,14 +241,37 @@ export function DiscoverDeepView({
 
 	const resolvedCuratedGroups = useMemo(() => {
 		if (!activeSession) return [];
+		const allTrayPapers = Array.from(collectionById.values());
+		const upgradeToVenue = (
+			paper: CollectionPaperItem,
+		): CollectionPaperItem => {
+			if (paper.sourceType === "arxiv") {
+				const venueTwin = allTrayPapers.find(
+					(cand) =>
+						cand.sourceType === "venue" && sameCollectionPaperWork(paper, cand),
+				);
+				if (venueTwin) return mergeArxivIntoVenueItem(venueTwin, paper);
+			}
+			return paper;
+		};
+
+		const seenWorks: CollectionPaperItem[] = [];
 		return activeSession.curatedGroups
-			.map((group) => ({
-				label: group.label,
-				items: group.items.flatMap((entry) => {
-					const paper = collectionById.get(entry.id);
-					return paper ? [{ paper, reason: entry.reason }] : [];
-				}),
-			}))
+			.map((group) => {
+				const items: Array<{ paper: CollectionPaperItem; reason?: string }> =
+					[];
+				for (const entry of group.items) {
+					const raw = collectionById.get(entry.id);
+					if (!raw) continue;
+					const paper = upgradeToVenue(raw);
+					if (seenWorks.some((prev) => sameCollectionPaperWork(prev, paper))) {
+						continue;
+					}
+					seenWorks.push(paper);
+					items.push({ paper, reason: entry.reason });
+				}
+				return { label: group.label, items };
+			})
 			.filter((group) => group.items.length > 0);
 	}, [activeSession, collectionById]);
 
@@ -258,9 +283,26 @@ export function DiscoverDeepView({
 
 	const resolvedSampledPapers = useMemo(() => {
 		if (!activeSession) return [];
-		return activeSession.sampledIds
+		const rawList = activeSession.sampledIds
 			.map((id) => collectionById.get(id))
 			.filter((p): p is CollectionPaperItem => p !== undefined);
+		const deduped: CollectionPaperItem[] = [];
+		for (const item of rawList) {
+			const idx = deduped.findIndex((prev) =>
+				sameCollectionPaperWork(prev, item),
+			);
+			if (idx >= 0) {
+				const prev = deduped[idx];
+				if (prev.sourceType === "arxiv" && item.sourceType === "venue") {
+					deduped[idx] = mergeArxivIntoVenueItem(item, prev);
+				} else if (prev.sourceType === "venue" && item.sourceType === "arxiv") {
+					deduped[idx] = mergeArxivIntoVenueItem(prev, item);
+				}
+			} else {
+				deduped.push(item);
+			}
+		}
+		return deduped;
 	}, [activeSession, collectionById]);
 
 	const pinnedSet = useMemo(

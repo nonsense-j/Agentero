@@ -60,12 +60,142 @@ pub(crate) fn clean_arxiv_key(raw: &str) -> Option<String> {
     (!stripped.is_empty()).then(|| stripped.to_string())
 }
 
-pub(crate) fn norm_title_key(title: &str) -> String {
-    title
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(c))
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+pub use crate::features::paper::util::{
+    norm_author_key, norm_title_key, paper_work_key, same_work_by_title_and_authors,
+};
+
+pub(crate) fn is_publisher_doi(doi_norm: &str) -> bool {
+    !doi_norm.is_empty() && !doi_norm.starts_with("10.48550/arxiv.")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn same_collection_work(
+    a_title: &str,
+    a_authors: &[String],
+    a_arxiv_norm: Option<&str>,
+    a_doi_norm: Option<&str>,
+    b_title: &str,
+    b_authors: &[String],
+    b_arxiv_norm: Option<&str>,
+    b_doi_norm: Option<&str>,
+) -> bool {
+    if let (Some(aa), Some(ba)) = (
+        a_arxiv_norm.filter(|s| !s.is_empty()),
+        b_arxiv_norm.filter(|s| !s.is_empty()),
+    ) {
+        if aa == ba {
+            return true;
+        }
+    }
+    if let (Some(ad), Some(bd)) = (
+        a_doi_norm.filter(|s| is_publisher_doi(s)),
+        b_doi_norm.filter(|s| is_publisher_doi(s)),
+    ) {
+        if ad == bd {
+            return true;
+        }
+    }
+    same_work_by_title_and_authors(a_title, a_authors, b_title, b_authors)
+}
+
+pub(crate) fn same_summary_work(a: &CollectionPaperSummary, b: &CollectionPaperSummary) -> bool {
+    let a_arxiv = a.arxiv_id.as_deref().and_then(clean_arxiv_key).or_else(|| {
+        a.doi
+            .as_deref()
+            .and_then(clean_doi_key)
+            .and_then(|d| d.strip_prefix("10.48550/arxiv.").map(str::to_string))
+    });
+    let b_arxiv = b.arxiv_id.as_deref().and_then(clean_arxiv_key).or_else(|| {
+        b.doi
+            .as_deref()
+            .and_then(clean_doi_key)
+            .and_then(|d| d.strip_prefix("10.48550/arxiv.").map(str::to_string))
+    });
+    let a_doi = a.doi.as_deref().and_then(clean_doi_key);
+    let b_doi = b.doi.as_deref().and_then(clean_doi_key);
+    same_collection_work(
+        &a.title,
+        &a.authors,
+        a_arxiv.as_deref(),
+        a_doi.as_deref(),
+        &b.title,
+        &b.authors,
+        b_arxiv.as_deref(),
+        b_doi.as_deref(),
+    )
+}
+
+/// Merge richer preprint fields (`arxiv_id`, `pdf_url`, fuller `abstract_text`,
+/// `keywords`, max `citation_count`) into a `venue` summary while keeping the
+/// `venue` row's identity, badges, URL, and publisher bibliographic fields.
+pub(crate) fn merge_arxiv_into_venue_summary(
+    venue: &mut CollectionPaperSummary,
+    arxiv: &CollectionPaperSummary,
+) {
+    if venue
+        .arxiv_id
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        if let Some(aid) = arxiv
+            .arxiv_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            venue.arxiv_id = Some(aid.to_string());
+        }
+    }
+    if venue.pdf_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        venue.pdf_url = arxiv
+            .pdf_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                venue
+                    .arxiv_id
+                    .as_deref()
+                    .and_then(clean_arxiv_key)
+                    .map(|aid| format!("https://arxiv.org/pdf/{aid}"))
+            });
+    }
+    if venue.authors.is_empty() && !arxiv.authors.is_empty() {
+        venue.authors = arxiv.authors.clone();
+    }
+    venue.abstract_text = choose_better_abstract(
+        &venue.abstract_text,
+        &arxiv.abstract_text,
+        &venue.source_label,
+    );
+    venue.keywords = union_strings_case_insensitive(&venue.keywords, &arxiv.keywords);
+    venue.citation_count = venue.citation_count.max(arxiv.citation_count);
+}
+
+fn ccf_rank_priority(rank: Option<&str>) -> u8 {
+    match rank.map(str::trim) {
+        Some(r) if r.eq_ignore_ascii_case("CCF-A") => 0,
+        Some(r) if r.eq_ignore_ascii_case("CCF-B") => 1,
+        Some(r) if !r.is_empty() => 2,
+        _ => 3,
+    }
+}
+
+/// Prefer `venue` rows over `arxiv`, then higher CCF tier, then newer `published_at`.
+pub(crate) fn compare_preferred_venue_summary(
+    a: &CollectionPaperSummary,
+    b: &CollectionPaperSummary,
+) -> std::cmp::Ordering {
+    let a_not_venue = u8::from(a.source_type != "venue");
+    let b_not_venue = u8::from(b.source_type != "venue");
+    a_not_venue
+        .cmp(&b_not_venue)
+        .then_with(|| {
+            ccf_rank_priority(a.ccf_rank.as_deref()).cmp(&ccf_rank_priority(b.ccf_rank.as_deref()))
+        })
+        .then_with(|| b.published_at.cmp(&a.published_at))
+        .then_with(|| a.id.cmp(&b.id))
 }
 
 pub(crate) fn is_placeholder_abstract(abstract_text: &str, venue_label: Option<&str>) -> bool {
@@ -1799,4 +1929,326 @@ pub(crate) fn clear_collection_conn(
     }
     tx.commit()?;
     read_state_summary_conn(conn)
+}
+
+// ─── Cross-Portal Vault Import Enrichment ───
+
+/// Enrich a `PaperRecord` being imported into the Vault with cross-portal sibling
+/// metadata from `collection.sqlite` (when present on disk):
+/// - Venue imports gain their arXiv twin's `arxiv_id`, canonical PDF/HTML URLs,
+///   and fuller `abstract_text` (so `paper_commit` downloads both PDF and LaTeX `source/`).
+/// - arXiv imports gain their Venue twin's `publication`, publisher `doi`,
+///   `volume`, `issue`, `pages`, and `citation_count`.
+pub fn enrich_paper_record_from_collection(
+    meta: &mut crate::features::catalog::papers::PaperRecord,
+) {
+    let db_path = super::schema::collection_db_path();
+    enrich_paper_record_from_collection_at(&db_path, meta);
+}
+
+pub fn enrich_paper_record_from_collection_at(
+    db_path: &Path,
+    meta: &mut crate::features::catalog::papers::PaperRecord,
+) {
+    use crate::features::scholar_api::sources::semantic_scholar::is_usable_publication;
+    use crate::features::scholar_api::urls::arxiv_canonical_urls;
+
+    if !db_path.is_file() {
+        return;
+    }
+    let Ok(conn) = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return;
+    };
+
+    let meta_arxiv = meta
+        .arxiv_id
+        .as_deref()
+        .and_then(clean_arxiv_key)
+        .or_else(|| {
+            meta.doi
+                .as_deref()
+                .and_then(clean_doi_key)
+                .and_then(|d| d.strip_prefix("10.48550/arxiv.").map(str::to_string))
+        });
+    let meta_doi = meta.doi.as_deref().and_then(clean_doi_key);
+    let title_norm = norm_title_key(&meta.title);
+
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+
+    if title_norm.len() >= 4 {
+        clauses.push("p.title_norm = ?");
+        binds.push(title_norm.into());
+    }
+    if let Some(ref aid) = meta_arxiv {
+        clauses.push("p.arxiv_id_norm = ?");
+        binds.push(aid.clone().into());
+    }
+    if let Some(ref d) = meta_doi {
+        clauses.push("p.doi_norm = ?");
+        binds.push(d.clone().into());
+    }
+    let trimmed_id = meta.id.trim();
+    if !trimmed_id.is_empty() {
+        clauses.push("p.id = ?");
+        binds.push(trimmed_id.to_string().into());
+        clauses.push("p.cool_papers_id = ?");
+        binds.push(trimmed_id.to_string().into());
+    }
+
+    if clauses.is_empty() {
+        return;
+    }
+
+    let sql = format!(
+        "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE {}",
+        clauses.join(" OR ")
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map(params_from_iter(binds), map_paper_summary_row) else {
+        return;
+    };
+    let candidates: Vec<CollectionPaperSummary> = rows.filter_map(Result::ok).collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut matched: Vec<CollectionPaperSummary> = Vec::new();
+    for cand in &candidates {
+        let cand_arxiv = cand.arxiv_id.as_deref().and_then(clean_arxiv_key);
+        let cand_doi = cand.doi.as_deref().and_then(clean_doi_key);
+        let direct = (!trimmed_id.is_empty()
+            && (cand.id == trimmed_id || cand.cool_papers_id.as_deref() == Some(trimmed_id)))
+            || same_collection_work(
+                &meta.title,
+                &meta.authors,
+                meta_arxiv.as_deref(),
+                meta_doi.as_deref(),
+                &cand.title,
+                &cand.authors,
+                cand_arxiv.as_deref(),
+                cand_doi.as_deref(),
+            );
+        if direct {
+            matched.push(cand.clone());
+        }
+    }
+
+    if matched.is_empty() {
+        return;
+    }
+
+    // Transitive sibling closure (e.g. DOI-only input matched Venue row, whose title+authors match arXiv row).
+    for cand in &candidates {
+        if matched.iter().any(|m| m.id == cand.id) {
+            continue;
+        }
+        if matched.iter().any(|m| same_summary_work(m, cand)) {
+            matched.push(cand.clone());
+        }
+    }
+
+    // Second pass in DB if an ID/DOI match discovered a title_norm that wasn't initially queried.
+    let extra_titles: Vec<String> = matched
+        .iter()
+        .map(|m| norm_title_key(&m.title))
+        .filter(|tk| tk.len() >= 4 && *tk != norm_title_key(&meta.title))
+        .collect();
+    for tk in extra_titles {
+        if let Ok(mut st2) = conn.prepare(&format!(
+            "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.title_norm = ?"
+        )) {
+            if let Ok(r2) = st2.query_map([tk], map_paper_summary_row) {
+                for cand in r2.filter_map(Result::ok) {
+                    if !matched.iter().any(|m| m.id == cand.id)
+                        && matched.iter().any(|m| same_summary_work(m, &cand))
+                    {
+                        matched.push(cand);
+                    }
+                }
+            }
+        }
+    }
+
+    matched.sort_by(compare_preferred_venue_summary);
+
+    // 1. Backfill core title / authors / year if missing on `meta`.
+    if meta.title.trim().is_empty() {
+        if let Some(best) = matched.iter().find(|m| !m.title.trim().is_empty()) {
+            meta.title = best.title.clone();
+        }
+    }
+    if meta.authors.is_empty() {
+        if let Some(best) = matched.iter().find(|m| !m.authors.is_empty()) {
+            meta.authors = best.authors.clone();
+        }
+    }
+    if meta.year.is_none() {
+        if let Some(best) = matched.iter().find(|m| m.year > 0) {
+            meta.year = Some(best.year);
+        }
+    }
+
+    // 2. Attach Venue bibliographic metadata when a `venue` sibling exists.
+    if let Some(venue_row) = matched.iter().find(|m| m.source_type == "venue") {
+        let venue_pub = venue_row
+            .venue_full
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && is_usable_publication(s))
+            .or_else(|| {
+                let sl = venue_row.source_label.trim();
+                (!sl.is_empty() && is_usable_publication(sl)).then_some(sl)
+            });
+        let cur_usable = meta
+            .publication
+            .as_deref()
+            .is_some_and(is_usable_publication);
+        if !cur_usable {
+            if let Some(vp) = venue_pub {
+                meta.publication = Some(vp.to_string());
+            }
+        }
+
+        let cur_has_pub_doi = meta
+            .doi
+            .as_deref()
+            .and_then(clean_doi_key)
+            .is_some_and(|d| is_publisher_doi(&d));
+        if !cur_has_pub_doi {
+            if let Some(vdoi) = venue_row
+                .doi
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| clean_doi_key(d).is_some_and(|k| is_publisher_doi(&k)))
+            {
+                meta.doi = Some(vdoi.to_string());
+            }
+        }
+
+        if meta.volume.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.volume = clean_opt_str(venue_row.volume.clone());
+        }
+        if meta.issue.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.issue = clean_opt_str(venue_row.issue.clone());
+        }
+        if meta.pages.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.pages = clean_opt_str(venue_row.pages.clone());
+        }
+        if meta
+            .source_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+            && !venue_row.url.trim().is_empty()
+        {
+            meta.source_url = Some(venue_row.url.trim().to_string());
+        }
+    }
+
+    // 3. Attach arXiv preprint identifier, canonical PDF/HTML URLs, and fuller abstract.
+    let sibling_arxiv_id = matched
+        .iter()
+        .find_map(|m| m.arxiv_id.as_deref().and_then(clean_arxiv_key));
+    if let Some(aid) = sibling_arxiv_id {
+        if meta.arxiv_id.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.arxiv_id = Some(aid.clone());
+        }
+        let urls = arxiv_canonical_urls(&aid);
+        if meta.pdf_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.pdf_url = Some(urls.pdf);
+        }
+        if meta.html_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            meta.html_url = Some(urls.html);
+        }
+        if meta
+            .source_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            meta.source_url = Some(urls.abs);
+        }
+    }
+
+    for row in &matched {
+        let next_abs = choose_better_abstract(
+            meta.abstract_text.as_deref().unwrap_or(""),
+            &row.abstract_text,
+            &row.source_label,
+        );
+        if !next_abs.is_empty() && meta.abstract_text.as_deref() != Some(next_abs.as_str()) {
+            meta.abstract_text = Some(next_abs);
+        }
+        if row.citation_count > 0 {
+            let cites = i64::from(row.citation_count);
+            if meta.citation_count.is_none_or(|cur| cites > cur) {
+                meta.citation_count = Some(cites);
+            }
+        }
+    }
+}
+
+/// Resolve a cross-portal `arxiv_id` from `collection.sqlite` when an input identifier
+/// (e.g. a publisher DOI, URL, or `venue:...` id) belongs to a Venue paper whose arXiv
+/// sibling is present in `collection.sqlite`.
+pub fn find_sibling_arxiv_id_in_collection(raw_text: &str) -> Option<String> {
+    let db_path = super::schema::collection_db_path();
+    find_sibling_arxiv_id_in_collection_at(&db_path, raw_text)
+}
+
+pub fn find_sibling_arxiv_id_in_collection_at(db_path: &Path, raw_text: &str) -> Option<String> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let trimmed = raw_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let conn =
+        Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+
+    let mut clauses: Vec<&str> = vec!["p.id = ?", "p.url = ?", "p.cool_papers_id = ?"];
+    let mut binds: Vec<rusqlite::types::Value> = vec![
+        trimmed.to_string().into(),
+        trimmed.to_string().into(),
+        trimmed.to_string().into(),
+    ];
+    if let Some(d) = clean_doi_key(trimmed) {
+        clauses.push("p.doi_norm = ?");
+        binds.push(d.into());
+    }
+    let sql = format!(
+        "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE {} LIMIT 5",
+        clauses.join(" OR ")
+    );
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let seeds: Vec<CollectionPaperSummary> = stmt
+        .query_map(params_from_iter(binds), map_paper_summary_row)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    let seed = seeds.first()?;
+    if let Some(aid) = seed.arxiv_id.as_deref().and_then(clean_arxiv_key) {
+        return Some(aid);
+    }
+
+    let tk = norm_title_key(&seed.title);
+    if tk.len() < 4 {
+        return None;
+    }
+    let mut sib_stmt = conn
+        .prepare(&format!(
+            "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.title_norm = ?"
+        ))
+        .ok()?;
+    let sibs: Vec<CollectionPaperSummary> = sib_stmt
+        .query_map([tk], map_paper_summary_row)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    sibs.into_iter()
+        .find(|cand| same_summary_work(seed, cand) && cand.arxiv_id.is_some())
+        .and_then(|cand| cand.arxiv_id.as_deref().and_then(clean_arxiv_key))
 }

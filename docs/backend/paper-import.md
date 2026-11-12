@@ -63,7 +63,8 @@ Skill 不写入 catalog、不创建 `papers/` 条目、不执行 `scripts/`。�
   finalizer 先将 paper 移到 latest target，再在稳定路径提交共享正文准备任务，补齐源码后
   决定是否解析 PDF。打开论文 / reconcile 也使用相同规则。
 - 错误：全局 Toast；重复不破坏用户 NOTES。
-- 标识符去重（#406）：批量预检之外，commit 阶段按规范 `id` / `arxiv_id` / `doi` / `pmid` / `isbn` 查 catalog（`DedupePolicy::ByIdentifiers`），任一可靠身份命中即 `Deduped`。本地 PDF 的文件名占位 ID 不作为合并依据；碰撞时分配独立条目，避免中文或同名 PDF 被挂到无关论文附件（#937 / #938）。带 arXiv/DOI 的本地 PDF 只有 ID 与该标识符派生值一致时才允许按 ID 恢复不完整旧行。
+- 标识符去重（#406）：批量预检之外，commit 阶段按规范 `id` / `arxiv_id` / `doi` / `pmid` / `isbn` 及归一化「论文标题 + 前 2 位作者姓名」（`paper_work_key` / `same_work_by_title_and_authors`）查 catalog（`DedupePolicy::ByIdentifiers`），任一可靠身份命中即 `Deduped`。本地 PDF 的文件名占位 ID（`meta_source == "local"` 且无 `arxiv_id` / `doi`）不作为合并依据；碰撞时分配独立条目，避免中文或同名 PDF 被挂到无关论文附件（#937 / #938）。带 arXiv/DOI 的本地 PDF 只有 ID 与该标识符派生值一致时才允许按 ID 恢复不完整旧行。
+- 跨门户（arXiv + Venue）合并与去重：完整论文池（`collection.sqlite` `list_papers` / `state_get`）允许同一篇论文的 `arXiv` 与 `Venue` 记录独立共存；但在搜索结果（`Fast Search` / `Deep Search` `collection_search` 与 `collection_curate`）、引用滚雪球结果（`collection_citations`）和论文推荐（`recommend_next`，同时将同源 `arXiv` 标记 `recommended_at`）输出时，按 `arxiv_id`、出版商 `doi` 或「归一化标题 + 前 2 位作者」合并并仅保留 `Venue` 记录（自动补齐同源 `arXiv` 的 `arxiv_id`、`pdf_url`、完整摘要与关键词）。任一入口将 `Venue` 入库时，`enrich_paper_record_from_collection` 自动从 `collection.sqlite` 关联对应 `arXiv` 的 `arxiv_id`、PDF 与 LaTeX `source/` 合并为单条 Vault catalog 记录（同时保留 `Venue` 的 `publication` / 出版商 `doi` / `volume` / `issue` / `pages`），广场前端同步将 `Venue` 与 `arXiv` 两侧卡片均标记为「已入库」。
 - 新建壳会写论文全称 alias，并在元数据足够时写确定性短 alias；历史笔记由 [Doctor](doctor.md) 诊断和确认迁移。`created` 不属于入库壳或 Doctor 的职责。
 - 壳内容由设置 `paper_note_mode` 决定（`standard` / `title-only` / `blank` / `custom`，默认 `standard`，见 [settings.md](../frontend/settings.md)）；`custom` 模板位于 `{vault}/.agentero/templates/NOTES.md`，缺失或不可读时回退 standard 并 warn。任何模式的产物都会补齐 aliases frontmatter（模板 frontmatter 不可安全改写时留给 Doctor）。Connector 的后台摘要机翻仅对 standard 壳生效，避免改写 custom 模板渲染的原文摘要。
 

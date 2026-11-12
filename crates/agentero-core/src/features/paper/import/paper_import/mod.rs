@@ -147,13 +147,52 @@ pub async fn paper_commit(
                 }
                 let existing = repair_existing_import_shell(vault, existing, &meta, &opts).await?;
                 let dir = vault.join(&existing.path);
-                return Ok(existing_result(
-                    CommitStatus::Deduped,
-                    existing,
-                    vault,
-                    &dir,
-                    opts.cache,
-                ));
+                let mut asset_messages = Vec::new();
+                if let AssetsPolicy::SyncDownload { cookies, progress } = opts.assets {
+                    let before_caps = probe_paper_caps(&dir);
+                    let need_pdf = !before_caps.has_pdf()
+                        && (existing.arxiv_id.is_some()
+                            || existing.pdf_url.is_some()
+                            || existing.doi.is_some());
+                    let need_tex = !before_caps.has_tex && existing.arxiv_id.is_some();
+                    if need_pdf || need_tex {
+                        let arxiv_req = crate::features::paper::source::arxiv_request(&existing);
+                        match ensure_paper_assets_with_progress(
+                            &dir,
+                            vault,
+                            &existing.path,
+                            &existing.id,
+                            arxiv_req.as_deref(),
+                            existing.pdf_url.as_deref(),
+                            existing.doi.as_deref(),
+                            cookies,
+                            opts.cache,
+                            progress,
+                        )
+                        .await
+                        {
+                            Ok(assets) => {
+                                if let Some(c) = opts.cache {
+                                    c.invalidate(vault, &existing.path);
+                                }
+                                crate::features::lifecycle::emit_paper_assets_ready(
+                                    opts.app,
+                                    vault,
+                                    &existing.id,
+                                    &existing.path,
+                                );
+                                asset_messages = assets.messages;
+                            }
+                            Err(e) => {
+                                asset_messages.push(format!("asset download error: {e}"));
+                            }
+                        }
+                    }
+                }
+                let mut res =
+                    existing_result(CommitStatus::Deduped, existing, vault, &dir, opts.cache);
+                res.asset_messages.extend(asset_messages);
+                return Ok(res);
             }
         }
         DedupePolicy::ByPathOrNotes => {
@@ -438,8 +477,38 @@ fn backfill_existing_metadata(
         changed = true;
     }
     fill!(abstract_text);
+    // Upgrade short placeholder abstract with fuller incoming abstract (e.g. arXiv sibling).
+    if let (Some(ex_abs), Some(in_abs)) = (
+        existing.abstract_text.as_deref().map(str::trim),
+        incoming
+            .abstract_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        if ex_abs.chars().count() < 80 && in_abs.chars().count() > ex_abs.chars().count() {
+            existing.abstract_text = Some(in_abs.to_string());
+            changed = true;
+        }
+    }
     fill!(arxiv_id);
     fill!(doi);
+    // Upgrade arXiv-issued DOI (`10.48550/arxiv.*`) to publisher DOI when Venue sibling arrives.
+    if let (Some(ex_doi), Some(in_doi)) = (
+        existing.doi.as_deref().map(str::trim),
+        incoming
+            .doi
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        if ex_doi.to_ascii_lowercase().starts_with("10.48550/arxiv.")
+            && !in_doi.to_ascii_lowercase().starts_with("10.48550/arxiv.")
+        {
+            existing.doi = Some(in_doi.to_string());
+            changed = true;
+        }
+    }
     fill!(pdf_url);
     fill!(html_url);
     fill!(source_url);
@@ -460,6 +529,25 @@ fn backfill_existing_metadata(
     fill!(issn);
     fill!(pmid);
     fill!(publication);
+    // Upgrade repository placeholder (`arXiv`, `CoRR`, `preprint`) to Venue publication.
+    {
+        use crate::features::scholar_api::sources::semantic_scholar::is_usable_publication;
+        let ex_usable = existing
+            .publication
+            .as_deref()
+            .is_some_and(is_usable_publication);
+        if !ex_usable {
+            if let Some(in_pub) = incoming
+                .publication
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| is_usable_publication(s))
+            {
+                existing.publication = Some(in_pub.to_string());
+                changed = true;
+            }
+        }
+    }
     fill!(volume);
     fill!(issue);
     fill!(pages);
@@ -493,15 +581,24 @@ fn find_existing_by_identifiers(
 ) -> Result<Option<papers::PaperRecord>, AppError> {
     // Local PDF names are placeholders, never proof of scholarly identity.
     // Keep id-based recovery for identifier imports with incomplete old rows.
-    let canonical_id = meta.paper_type != papers::PaperKind::Pdf
-        || meta
-            .arxiv_id
-            .as_deref()
-            .is_some_and(|id| super::slug_from_stem(id) == meta.id)
-        || meta
-            .doi
-            .as_deref()
-            .is_some_and(|doi| super::doi_slug(doi) == meta.id);
+    let is_unverified_local_pdf = meta.paper_type == papers::PaperKind::Pdf
+        && meta.arxiv_id.is_none()
+        && meta.doi.is_none()
+        && meta.meta_source.as_deref().is_none_or(|src| src == "local");
+    let canonical_id = !is_unverified_local_pdf
+        && (meta.paper_type != papers::PaperKind::Pdf
+            || meta
+                .meta_source
+                .as_deref()
+                .is_some_and(|src| src != "local")
+            || meta
+                .arxiv_id
+                .as_deref()
+                .is_some_and(|id| super::slug_from_stem(id) == meta.id)
+            || meta
+                .doi
+                .as_deref()
+                .is_some_and(|doi| super::doi_slug(doi) == meta.id));
     if canonical_id {
         if let Some(existing) = papers::get_by_id(vault, &meta.id)? {
             return Ok(Some(existing));
@@ -518,6 +615,11 @@ fn find_existing_by_identifiers(
             continue;
         };
         if let Some(existing) = papers::find_by_identifier(vault, column, value)? {
+            return Ok(Some(existing));
+        }
+    }
+    if !is_unverified_local_pdf {
+        if let Some(existing) = papers::find_by_work_identity(vault, &meta.title, &meta.authors)? {
             return Ok(Some(existing));
         }
     }
@@ -914,6 +1016,168 @@ mod tests {
             row.openreview_url.as_deref(),
             Some("https://openreview.net/forum?id=keep")
         );
+
+        let _ = fs::remove_dir_all(&vault);
+    }
+
+    #[tokio::test]
+    async fn cross_portal_enrichment_and_work_identity_dedupe_merge_venue_and_arxiv_on_import() {
+        use crate::features::paper::discovery::collection::{
+            enrich_paper_record_from_collection_at, find_sibling_arxiv_id_in_collection_at,
+            upsert_papers_at, CollectionPaperUpsertInput, CollectionUpsertPapersArgs,
+        };
+
+        let vault = tmp_vault("cross-portal-merge");
+        let db = vault.join("collection.sqlite");
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00555".into(),
+                        title: "DirectedSymbolic Execution for Rust Kernels".into(),
+                        authors: vec![
+                            "Alice B. Smith".into(),
+                            "Bob Jones".into(),
+                            "Carol Lee".into(),
+                        ],
+                        abstract_text: "We present a directed symbolic execution framework for unsafe Rust kernel modules with automated invariant synthesis.".into(),
+                        published_at: "2026-02-15T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        url: "https://arxiv.org/abs/2603.00555".into(),
+                        pdf_url: Some("https://arxiv.org/pdf/2603.00555".into()),
+                        arxiv_id: Some("2603.00555".into()),
+                        citation_count: Some(9),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:doi:10.1145/3660000.3660555".into(),
+                        title: "DirectedSymbolic Execution for Rust Kernels.".into(),
+                        authors: vec![
+                            "Smith, Alice".into(),
+                            "B. Jones".into(),
+                            "Different Third".into(),
+                        ],
+                        abstract_text: "".into(),
+                        published_at: "2026-04-20T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        url: "https://doi.org/10.1145/3660000.3660555".into(),
+                        doi: Some("10.1145/3660000.3660555".into()),
+                        venue_id: Some("icse-2026".into()),
+                        venue_kind: Some("conference".into()),
+                        venue_domain: Some("PL/SE".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        pages: Some("210-222".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // 1. Sibling arXiv ID lookup resolves from DOI when external publisher DOI lookup is unavailable.
+        assert_eq!(
+            find_sibling_arxiv_id_in_collection_at(&db, "https://doi.org/10.1145/3660000.3660555")
+                .as_deref(),
+            Some("2603.00555")
+        );
+
+        // 2. Importing the Venue record attaches arXiv ID, PDF/HTML URLs, and fuller abstract.
+        let mut venue_meta = papers::PaperRecord::local_pdf(
+            "smith2026directed".into(),
+            "DirectedSymbolic Execution for Rust Kernels.".into(),
+        );
+        venue_meta.meta_source = Some("crossref".into());
+        venue_meta.authors = vec!["Smith, Alice".into(), "B. Jones".into()];
+        venue_meta.publication = Some("ICSE 2026".into());
+        venue_meta.doi = Some("10.1145/3660000.3660555".into());
+        enrich_paper_record_from_collection_at(&db, &mut venue_meta);
+        assert_eq!(venue_meta.arxiv_id.as_deref(), Some("2603.00555"));
+        assert_eq!(
+            venue_meta.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2603.00555")
+        );
+        assert_eq!(venue_meta.publication.as_deref(), Some("ICSE 2026"));
+        assert_eq!(venue_meta.pages.as_deref(), Some("210-222"));
+
+        // 3. Even if an arXiv entry was already in the Vault first (with placeholder `publication = "arXiv"`
+        //    and arXiv DOI), committing the Venue entry afterwards dedupes into the SAME Vault entry
+        //    by `(title + first 2 authors)` and upgrades publication + publisher DOI.
+        let mut existing_arxiv = papers::PaperRecord::local_pdf(
+            "2603.00555".into(),
+            "DirectedSymbolic Execution for Rust Kernels".into(),
+        );
+        existing_arxiv.meta_source = Some("arxiv".into());
+        existing_arxiv.authors = vec!["Alice B. Smith".into(), "Bob Jones".into()];
+        existing_arxiv.year = Some(2026);
+        existing_arxiv.publication = Some("arXiv".into());
+        existing_arxiv.doi = Some("10.48550/arXiv.2603.00555".into());
+        existing_arxiv.arxiv_id = Some("2603.00555".into());
+
+        let first = paper_commit(
+            existing_arxiv,
+            PaperCommitOptions {
+                vault: &vault,
+                parent_dir: "papers",
+                dedupe: DedupePolicy::ByIdentifiers,
+                assets: AssetsPolicy::Deferred,
+                translate_abstract: false,
+                note_mode: NoteShellMode::Standard,
+                fresh_timestamps: false,
+                cache: None,
+                app: None,
+                defer_parse_jobs: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, CommitStatus::Created);
+
+        let mut incoming_venue_only = papers::PaperRecord::local_pdf(
+            "icse-2026-directed".into(),
+            "DirectedSymbolic Execution for Rust Kernels.".into(),
+        );
+        incoming_venue_only.meta_source = Some("crossref".into());
+        incoming_venue_only.authors = vec!["A. Smith".into(), "Jones, Bob 0001".into()];
+        incoming_venue_only.year = Some(2026);
+        incoming_venue_only.publication = Some("ICSE 2026".into());
+        incoming_venue_only.doi = Some("10.1145/3660000.3660555".into());
+        incoming_venue_only.pages = Some("210-222".into());
+
+        let second = paper_commit(
+            incoming_venue_only,
+            PaperCommitOptions {
+                vault: &vault,
+                parent_dir: "papers",
+                dedupe: DedupePolicy::ByIdentifiers,
+                assets: AssetsPolicy::Deferred,
+                translate_abstract: false,
+                note_mode: NoteShellMode::Standard,
+                fresh_timestamps: false,
+                cache: None,
+                app: None,
+                defer_parse_jobs: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.status, CommitStatus::Deduped);
+        assert_eq!(second.path, first.path);
+        assert_eq!(papers::list_all_unique_by_id(&vault).unwrap().len(), 1);
+
+        let merged = papers::get_by_path(&vault, &first.path).unwrap().unwrap();
+        assert_eq!(merged.arxiv_id.as_deref(), Some("2603.00555"));
+        assert_eq!(merged.publication.as_deref(), Some("ICSE 2026"));
+        assert_eq!(merged.doi.as_deref(), Some("10.1145/3660000.3660555"));
+        assert_eq!(merged.pages.as_deref(), Some("210-222"));
 
         let _ = fs::remove_dir_all(&vault);
     }

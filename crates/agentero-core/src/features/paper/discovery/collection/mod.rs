@@ -27,9 +27,12 @@ pub use search::{
     curate_collection_at, overview, overview_at, search_collection_at, search_fast, search_fast_at,
 };
 pub use store::{
-    clear_collection, clear_collection_at, config_update, config_update_at, list_papers,
-    list_papers_at, paper_get, paper_get_at, papers_by_ids, papers_by_ids_at, patch_papers,
-    patch_papers_at, state_get, state_get_at, upsert_papers, upsert_papers_at,
+    clear_collection, clear_collection_at, config_update, config_update_at,
+    enrich_paper_record_from_collection, enrich_paper_record_from_collection_at,
+    find_sibling_arxiv_id_in_collection, find_sibling_arxiv_id_in_collection_at, list_papers,
+    list_papers_at, norm_author_key, norm_title_key, paper_get, paper_get_at, paper_work_key,
+    papers_by_ids, papers_by_ids_at, patch_papers, patch_papers_at, same_work_by_title_and_authors,
+    state_get, state_get_at, upsert_papers, upsert_papers_at,
 };
 
 #[cfg(test)]
@@ -868,5 +871,289 @@ mod tests {
                 .notes,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn cross_portal_dedupe_keeps_full_pool_but_outputs_only_venue_in_search_citations_and_recommend(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        let state = upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00100".into(),
+                        title: "Seed Program Repair Study".into(),
+                        authors: vec!["Dana White".into(), "Evan Green".into()],
+                        abstract_text: "Seed study on automated repair.".into(),
+                        published_at: "2026-03-01T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        url: "https://arxiv.org/abs/2603.00100".into(),
+                        arxiv_id: Some("2603.00100".into()),
+                        keywords: vec!["Repair".into()],
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:seed".into(),
+                        title: "Seed Program Repair Study.".into(),
+                        authors: vec!["White, Dana".into(), "E. Green".into()],
+                        abstract_text: "".into(),
+                        published_at: "2026-04-01T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        url: "https://doi.org/10.1145/3650000.3650000".into(),
+                        doi: Some("10.1145/3650000.3650000".into()),
+                        venue_id: Some("icse-2026".into()),
+                        venue_kind: Some("conference".into()),
+                        venue_domain: Some("PL/SE".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00101".into(),
+                        title: "Multi-Agent Fuzzing for Smart Contracts".into(),
+                        authors: vec![
+                            "Alice B. Smith".into(),
+                            "Bob Jones".into(),
+                            "Carol Lee".into(),
+                        ],
+                        abstract_text:
+                            "We propose a multi-agent fuzzing engine tailored to smart contracts."
+                                .into(),
+                        published_at: "2026-03-05T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        url: "https://arxiv.org/abs/2603.00101".into(),
+                        pdf_url: Some("https://arxiv.org/pdf/2603.00101".into()),
+                        arxiv_id: Some("2603.00101".into()),
+                        keywords: vec!["Fuzzing".into(), "Smart Contracts".into()],
+                        citation_count: Some(14),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:doi:10.1145/3650000.3650001".into(),
+                        title: "Multi-Agent Fuzzing for Smart Contracts.".into(),
+                        authors: vec![
+                            "Smith, Alice".into(),
+                            "B. Jones".into(),
+                            "Different Third".into(),
+                        ],
+                        abstract_text: "".into(),
+                        published_at: "2026-04-10T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        url: "https://doi.org/10.1145/3650000.3650001".into(),
+                        doi: Some("10.1145/3650000.3650001".into()),
+                        venue_id: Some("icse-2026".into()),
+                        venue_kind: Some("conference".into()),
+                        venue_domain: Some("PL/SE".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        keywords: vec!["ICSE".into()],
+                        citation_count: Some(6),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // 1. Full Paper Pool (`state_get_at` & `list_papers_at`) retains both arXiv and Venue entries.
+        assert_eq!(state.arxiv_count, 2);
+        assert_eq!(state.venue_count, 2);
+        assert_eq!(state.total_count, 4);
+        let full_list = list_papers_at(&db, &CollectionListPapersArgs::default()).unwrap();
+        assert_eq!(full_list.total, 4);
+
+        // 2. Search (`search_fast_at` & `search_collection_at`) keeps ONLY Venue, even when the query
+        //    matched text/keywords present only on the arXiv twin, and enriches Venue metadata.
+        let fast = search_fast_at(
+            &db,
+            &CollectionSearchArgs {
+                query: Some("\"smart contracts\"".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fast.total_matched, 1);
+        assert_eq!(
+            fast.items[0].paper.id,
+            "venue:icse-2026:doi:10.1145/3650000.3650001"
+        );
+        assert_eq!(fast.items[0].paper.source_type, "venue");
+        assert_eq!(fast.items[0].paper.arxiv_id.as_deref(), Some("2603.00101"));
+        assert_eq!(
+            fast.items[0].paper.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2603.00101")
+        );
+        assert!(fast.items[0]
+            .paper
+            .abstract_text
+            .contains("multi-agent fuzzing engine"));
+        assert_eq!(fast.items[0].paper.citation_count, 14);
+
+        // Explicit `source_type = "arxiv"` still surfaces arXiv entries when explicitly requested.
+        let arxiv_only = search_fast_at(
+            &db,
+            &CollectionSearchArgs {
+                query: Some("\"smart contracts\"".into()),
+                source_type: Some("arxiv".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(arxiv_only.total_matched, 1);
+        assert_eq!(arxiv_only.items[0].paper.id, "arxiv:2603.00101");
+
+        let deep_sample = search_collection_at(
+            &db,
+            &CollectionSearchParams {
+                mode: Some("random_sample".into()),
+                sample_size: Some(10),
+                seed: Some(7),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(deep_sample.total_matched, 2);
+        assert!(deep_sample.items.iter().all(|h| h.source_type == "venue"));
+
+        // Curate upgrades an arXiv ID to its Venue twin and deduplicates when both IDs are passed.
+        let curated = curate_collection_at(
+            &db,
+            CollectionCurateParams {
+                groups: vec![CurateGroupInput {
+                    label: "Fuzzing".into(),
+                    items: vec![
+                        CurateItemInput {
+                            id: "arxiv:2603.00101".into(),
+                            reason: Some("Matched via arXiv ID".into()),
+                        },
+                        CurateItemInput {
+                            id: "venue:icse-2026:doi:10.1145/3650000.3650001".into(),
+                            reason: Some("Duplicate venue ID".into()),
+                        },
+                    ],
+                }],
+                mode: None,
+                suggested_follow_ups: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(curated.curated_count, 1);
+        assert_eq!(
+            curated.groups[0].items[0].id,
+            "venue:icse-2026:doi:10.1145/3650000.3650001"
+        );
+
+        // 3. Citations (`snowball_citations_at`) resolves an arXiv-only stub to the Venue twin
+        //    (matched via `title + first 2 authors`) and excludes the seed's cross-portal twin.
+        {
+            let mut conn = ensure_collection_at(&db).unwrap();
+            save_cached_edges_conn(
+                &mut conn,
+                &[(
+                    "arxiv:2603.00100".into(),
+                    CachedPaperEdges {
+                        openalex_id: Some("W100".into()),
+                        cited_by: vec![
+                            ExternalPaperStub {
+                                arxiv_id: Some("2603.00101".into()),
+                                cited_by_count: 14,
+                                ..Default::default()
+                            },
+                            ExternalPaperStub {
+                                doi: Some("10.1145/3650000.3650000".into()),
+                                title: "Seed Program Repair Study.".into(),
+                                cited_by_count: 3,
+                                ..Default::default()
+                            },
+                        ],
+                        references: vec![],
+                        cocited_2026: vec![],
+                    },
+                )],
+            )
+            .unwrap();
+        }
+        let citations = snowball_citations_at(
+            &db,
+            &CollectionCitationsParams {
+                paper_ids: vec!["arxiv:2603.00100".into()],
+                direction: Some("cited_by".into()),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(citations.returned_count, 1);
+        assert_eq!(
+            citations.items[0].paper.id,
+            "venue:icse-2026:doi:10.1145/3650000.3650001"
+        );
+        assert_eq!(citations.items[0].paper.source_type, "venue");
+        assert_eq!(
+            citations.items[0].paper.arxiv_id.as_deref(),
+            Some("2603.00101")
+        );
+
+        // 4. Recommend (`recommend_next_at`) returns ONLY Venue and marks BOTH Venue and arXiv
+        //    rows as `recommended_at`, preventing the arXiv twin from surfacing in later batches.
+        recommend_state_set_at(
+            &db,
+            RecommendPoolStateInput {
+                keywords: Some(vec![RecommendKeywordChipInput {
+                    id: Some("kw-sc".into()),
+                    term: "Smart Contracts".into(),
+                    enabled: true,
+                }]),
+                selected_cloud_terms: Some(vec![]),
+                word_cloud_top_n: Some(25),
+                last_recommended_at: None,
+            },
+        )
+        .unwrap();
+        let rec1 = recommend_next_at(
+            &db,
+            &RecommendNextArgs {
+                max_batch_size: Some(5),
+            },
+        )
+        .unwrap();
+        assert_eq!(rec1.items.len(), 1);
+        assert_eq!(
+            rec1.items[0].paper.id,
+            "venue:icse-2026:doi:10.1145/3650000.3650001"
+        );
+        assert_eq!(rec1.items[0].paper.arxiv_id.as_deref(), Some("2603.00101"));
+        assert!(!rec1.exhausted);
+
+        let venue_detail = paper_get_at(&db, "venue:icse-2026:doi:10.1145/3650000.3650001")
+            .unwrap()
+            .unwrap();
+        let arxiv_detail = paper_get_at(&db, "arxiv:2603.00101").unwrap().unwrap();
+        assert!(venue_detail.recommended_at.is_some());
+        assert_eq!(arxiv_detail.recommended_at, venue_detail.recommended_at);
+
+        let rec2 = recommend_next_at(
+            &db,
+            &RecommendNextArgs {
+                max_batch_size: Some(5),
+            },
+        )
+        .unwrap();
+        assert!(rec2.items.is_empty());
+        assert!(rec2.exhausted);
     }
 }

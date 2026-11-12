@@ -21,6 +21,13 @@ import type {
 	VenueKind,
 } from "@/lib/plaza/collection-enrichment";
 import { fromPaperSummaryDto } from "@/lib/plaza/collection-store";
+import {
+	cleanArxivKey,
+	cleanDoiKey,
+	isPublisherDoi,
+	normTitleKey,
+	sameCollectionPaperWork,
+} from "@/lib/plaza/paper-identity";
 
 export type FastSearchField = "title" | "abstract" | "keywords";
 export type FastSearchSort = "relevance" | "newest" | "citations";
@@ -343,6 +350,307 @@ function scorePaperAgainstQuery(
 	};
 }
 
+function unionCaseInsensitive(
+	primary: readonly string[],
+	extra: readonly string[],
+): string[] {
+	const seen = new Set(primary.map((s) => s.toLowerCase()));
+	const out = [...primary];
+	for (const item of extra) {
+		const trimmed = item.trim();
+		if (!trimmed) continue;
+		const key = trimmed.toLowerCase();
+		if (!seen.has(key)) {
+			seen.add(key);
+			out.push(trimmed);
+		}
+	}
+	return out;
+}
+
+/**
+ * Enrich a `venue` paper summary with missing `arxivId`, `pdfUrl`, fuller `abstract`,
+ * unioned `keywords`/`categories`, and max `citationCount` from a matching `arxiv` twin.
+ */
+export function mergeArxivIntoVenueItem(
+	venue: CollectionPaperItem,
+	arxiv: CollectionPaperItem,
+): CollectionPaperItem {
+	const venueAbsLen = venue.abstract.trim().length;
+	const arxivAbsLen = arxiv.abstract.trim().length;
+	const mergedAbstract =
+		venueAbsLen < 40 && arxivAbsLen > venueAbsLen
+			? arxiv.abstract
+			: venue.abstract;
+	const mergedKeywords = unionCaseInsensitive(
+		venue.keywords ?? [],
+		arxiv.keywords ?? [],
+	);
+	const mergedCategories = unionCaseInsensitive(
+		venue.categories,
+		arxiv.categories,
+	);
+	const mergedCitations =
+		venue.citationCount != null || arxiv.citationCount != null
+			? Math.max(venue.citationCount ?? 0, arxiv.citationCount ?? 0)
+			: undefined;
+
+	return {
+		...venue,
+		arxivId: venue.arxivId || arxiv.arxivId,
+		pdfUrl: venue.pdfUrl || arxiv.pdfUrl,
+		abstract: mergedAbstract,
+		keywords: mergedKeywords.length > 0 ? mergedKeywords : venue.keywords,
+		categories: mergedCategories,
+		citationCount: mergedCitations,
+	};
+}
+
+export function comparePreferredVenueItem(
+	a: CollectionPaperItem,
+	b: CollectionPaperItem,
+): number {
+	const rankWeight = (r?: string) =>
+		r === "CCF-A" ? 2 : r === "CCF-B" ? 1 : 0;
+	const rw = rankWeight(b.ccfRank) - rankWeight(a.ccfRank);
+	if (rw !== 0) return rw;
+	const cite = (b.citationCount ?? 0) - (a.citationCount ?? 0);
+	if (cite !== 0) return cite;
+	return b.publishedAt.localeCompare(a.publishedAt);
+}
+
+function violatesNegatedTerms(
+	paper: CollectionPaperItem,
+	parsed: ParsedBooleanQuery,
+	enabledFields: ReadonlySet<FastSearchField>,
+): boolean {
+	if (parsed.branches.length === 0) return false;
+	const negations = parsed.branches[0].filter((t) => t.negated);
+	if (negations.length === 0) return false;
+
+	const checkTitle = enabledFields.has("title");
+	const checkKeywords = enabledFields.has("keywords");
+	const checkAbstract = enabledFields.has("abstract");
+	const titleLc = checkTitle ? paper.title.toLowerCase() : "";
+	const kwLc = checkKeywords
+		? `${(paper.keywords ?? []).join(" ")} ${paper.categories.join(" ")}`.toLowerCase()
+		: "";
+	const absLc = checkAbstract ? paper.abstract.toLowerCase() : "";
+
+	return negations.some(
+		(term) =>
+			(checkTitle && titleLc.includes(term.text)) ||
+			(checkKeywords && kwLc.includes(term.text)) ||
+			(checkAbstract && absLc.includes(term.text)),
+	);
+}
+
+function dedupeScoredPreferVenue(
+	scored: ScoredCollectionPaper[],
+	allItems: CollectionPaperItem[],
+	filters: FastSearchFilters,
+	parsed: ParsedBooleanQuery,
+	effectiveFields: ReadonlySet<FastSearchField>,
+	fromYmd: string | null,
+	toYmd: string | null,
+): ScoredCollectionPaper[] {
+	const eligibleVenuesByTitle = new Map<string, CollectionPaperItem[]>();
+	const eligibleVenuesByArxiv = new Map<string, CollectionPaperItem[]>();
+	const eligibleVenuesByDoi = new Map<string, CollectionPaperItem[]>();
+	const arxivByTitle = new Map<string, CollectionPaperItem[]>();
+	const arxivByArxiv = new Map<string, CollectionPaperItem[]>();
+
+	for (const item of allItems) {
+		const tk = normTitleKey(item.title);
+		const ax = cleanArxivKey(item.arxivId);
+		const doi = cleanDoiKey(item.doi);
+		if (item.sourceType === "venue") {
+			if (
+				!matchesFastFilters(item, filters, fromYmd, toYmd) ||
+				violatesNegatedTerms(item, parsed, effectiveFields)
+			) {
+				continue;
+			}
+			if (tk) {
+				const arr = eligibleVenuesByTitle.get(tk) ?? [];
+				arr.push(item);
+				eligibleVenuesByTitle.set(tk, arr);
+			}
+			if (ax) {
+				const arr = eligibleVenuesByArxiv.get(ax) ?? [];
+				arr.push(item);
+				eligibleVenuesByArxiv.set(ax, arr);
+			}
+			if (doi && isPublisherDoi(doi)) {
+				const arr = eligibleVenuesByDoi.get(doi) ?? [];
+				arr.push(item);
+				eligibleVenuesByDoi.set(doi, arr);
+			}
+		} else if (item.sourceType === "arxiv") {
+			if (tk) {
+				const arr = arxivByTitle.get(tk) ?? [];
+				arr.push(item);
+				arxivByTitle.set(tk, arr);
+			}
+			if (ax) {
+				const arr = arxivByArxiv.get(ax) ?? [];
+				arr.push(item);
+				arxivByArxiv.set(ax, arr);
+			}
+		}
+	}
+
+	const findBestEligibleVenue = (
+		target: CollectionPaperItem,
+	): CollectionPaperItem | null => {
+		const candidates: CollectionPaperItem[] = [];
+		const seenIds = new Set<string>();
+		const pushList = (list?: CollectionPaperItem[]) => {
+			if (!list) return;
+			for (const c of list) {
+				if (!seenIds.has(c.id) && sameCollectionPaperWork(target, c)) {
+					seenIds.add(c.id);
+					candidates.push(c);
+				}
+			}
+		};
+		const tk = normTitleKey(target.title);
+		const ax = cleanArxivKey(target.arxivId);
+		const doi = cleanDoiKey(target.doi);
+		if (ax) pushList(eligibleVenuesByArxiv.get(ax));
+		if (doi && isPublisherDoi(doi)) pushList(eligibleVenuesByDoi.get(doi));
+		if (tk) pushList(eligibleVenuesByTitle.get(tk));
+		if (candidates.length === 0) return null;
+		candidates.sort(comparePreferredVenueItem);
+		return candidates[0];
+	};
+
+	const enrichVenueFromArxivPool = (
+		venue: CollectionPaperItem,
+	): CollectionPaperItem => {
+		let merged = venue;
+		const seenIds = new Set<string>();
+		const applyList = (list?: CollectionPaperItem[]) => {
+			if (!list) return;
+			for (const axItem of list) {
+				if (
+					!seenIds.has(axItem.id) &&
+					sameCollectionPaperWork(merged, axItem)
+				) {
+					seenIds.add(axItem.id);
+					merged = mergeArxivIntoVenueItem(merged, axItem);
+				}
+			}
+		};
+		const ax = cleanArxivKey(venue.arxivId);
+		const tk = normTitleKey(venue.title);
+		if (ax) applyList(arxivByArxiv.get(ax));
+		if (tk) applyList(arxivByTitle.get(tk));
+		return merged;
+	};
+
+	const mergedList: ScoredCollectionPaper[] = [];
+	const byTitleIdx = new Map<string, number[]>();
+	const byIdIdx = new Map<string, number>();
+
+	const unionFields = (
+		a: readonly FastSearchField[],
+		b: readonly FastSearchField[],
+	): FastSearchField[] => {
+		const out: FastSearchField[] = [...a];
+		for (const f of b) {
+			if (!out.includes(f)) out.push(f);
+		}
+		return out;
+	};
+
+	for (const entry of scored) {
+		let candidatePaper = entry.paper;
+		if (candidatePaper.sourceType === "arxiv") {
+			const bestVenue = findBestEligibleVenue(candidatePaper);
+			if (bestVenue) {
+				candidatePaper = mergeArxivIntoVenueItem(bestVenue, candidatePaper);
+			}
+		}
+		if (candidatePaper.sourceType === "venue") {
+			candidatePaper = enrichVenueFromArxivPool(candidatePaper);
+		}
+
+		let existingIdx = byIdIdx.get(candidatePaper.id);
+		if (existingIdx === undefined) {
+			const tk = normTitleKey(candidatePaper.title);
+			const bucket = tk ? byTitleIdx.get(tk) : undefined;
+			if (bucket) {
+				existingIdx = bucket.find((idx) =>
+					sameCollectionPaperWork(mergedList[idx].paper, candidatePaper),
+				);
+			}
+			if (existingIdx === undefined) {
+				const found = mergedList.findIndex((it) =>
+					sameCollectionPaperWork(it.paper, candidatePaper),
+				);
+				if (found >= 0) existingIdx = found;
+			}
+		}
+
+		if (existingIdx !== undefined) {
+			const prev = mergedList[existingIdx];
+			let nextPaper = prev.paper;
+			if (
+				prev.paper.sourceType === "arxiv" &&
+				candidatePaper.sourceType === "venue"
+			) {
+				nextPaper = mergeArxivIntoVenueItem(candidatePaper, prev.paper);
+			} else if (
+				prev.paper.sourceType === "venue" &&
+				candidatePaper.sourceType === "arxiv"
+			) {
+				nextPaper = mergeArxivIntoVenueItem(prev.paper, candidatePaper);
+			} else if (
+				prev.paper.sourceType === "venue" &&
+				candidatePaper.sourceType === "venue"
+			) {
+				const preferred =
+					comparePreferredVenueItem(prev.paper, candidatePaper) <= 0
+						? prev.paper
+						: candidatePaper;
+				nextPaper = enrichVenueFromArxivPool(preferred);
+			}
+			mergedList[existingIdx] = {
+				paper: nextPaper,
+				score: Math.max(prev.score, entry.score),
+				matchedFields: unionFields(prev.matchedFields, entry.matchedFields),
+			};
+			byIdIdx.set(nextPaper.id, existingIdx);
+		} else {
+			const idx = mergedList.length;
+			mergedList.push({
+				paper: candidatePaper,
+				score: entry.score,
+				matchedFields: entry.matchedFields,
+			});
+			byIdIdx.set(candidatePaper.id, idx);
+			const tk = normTitleKey(candidatePaper.title);
+			if (tk) {
+				const arr = byTitleIdx.get(tk) ?? [];
+				arr.push(idx);
+				byTitleIdx.set(tk, arr);
+			}
+		}
+	}
+
+	return mergedList;
+}
+
+export type FastSearchOptions = {
+	/**
+	 * When `true` (default), collapses cross-portal `arXiv` + `Venue` duplicates
+	 * to keep only the `Venue` entry (unless filters explicitly select `arXiv`-only).
+	 * Pass `false` when listing the full `Paper Collection` pool where both coexist.
+	 */
+	dedupeCrossPortal?: boolean;
+};
+
 /**
  * Execute synchronous, weighted local search over `Paper Collection` items.
  */
@@ -350,6 +658,7 @@ export function searchCollectionFast(
 	items: CollectionPaperItem[],
 	query: string,
 	partialFilters?: Partial<FastSearchFilters>,
+	options?: FastSearchOptions,
 ): FastSearchResult {
 	const filters: FastSearchFilters = {
 		...DEFAULT_FAST_SEARCH_FILTERS,
@@ -362,17 +671,34 @@ export function searchCollectionFast(
 	const parsed = parseBooleanSearchQuery(query);
 	const { fromYmd, toYmd } = resolveDateBounds(filters, items);
 
-	const scored: ScoredCollectionPaper[] = [];
+	const rawScored: ScoredCollectionPaper[] = [];
 	for (const paper of items) {
 		if (!matchesFastFilters(paper, filters, fromYmd, toYmd)) continue;
 		const hit = scorePaperAgainstQuery(paper, parsed, effectiveFields);
 		if (!hit) continue;
-		scored.push({
+		rawScored.push({
 			paper,
 			score: hit.score,
 			matchedFields: hit.matchedFields,
 		});
 	}
+
+	const arxivOnlyFilter =
+		filters.sourceType === "arxiv" ||
+		(filters.ccfRanks.length > 0 &&
+			filters.ccfRanks.every((rank) => rank === "arxiv"));
+	const scored =
+		(options?.dedupeCrossPortal ?? true) && !arxivOnlyFilter
+			? dedupeScoredPreferVenue(
+					rawScored,
+					items,
+					filters,
+					parsed,
+					effectiveFields,
+					fromYmd,
+					toYmd,
+				)
+			: rawScored;
 
 	const hasQuery = parsed.branches.length > 0;
 	const effectiveSort: FastSearchSort =

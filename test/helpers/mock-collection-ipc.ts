@@ -38,11 +38,14 @@ import {
 	normalizePaperKeywords,
 	type VenueConfig,
 } from "@/lib/plaza/collection";
+import { sameCollectionPaperWork } from "@/lib/plaza/paper-identity";
 import {
+	comparePreferredVenueItem,
 	type FastRankFilter,
 	type FastSearchField,
 	type FastSearchSort,
 	type FastTimePreset,
+	mergeArxivIntoVenueItem,
 	searchCollectionFast,
 } from "@/lib/plaza/paper-search";
 import {
@@ -523,29 +526,34 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 		vi
 			.spyOn(commands, "plazaCollectionListPapers")
 			.mockImplementation(async (args: CollectionListPapersArgs) => {
-				const searched = searchCollectionFast(getVisibleItems(), "", {
-					sourceType:
-						args.sourceType === "arxiv" || args.sourceType === "venue"
-							? args.sourceType
-							: "all",
-					categories: args.category ? [args.category] : [],
-					timePreset: (args.timePreset as FastTimePreset | null) ?? "all",
-					dateFrom: args.dateFrom ?? "",
-					dateTo: args.dateTo ?? "",
-					venueKind:
-						args.venueKind === "conference" || args.venueKind === "journal"
-							? args.venueKind
-							: "all",
-					venueDomain:
-						args.venueDomain === "PL/SE" ||
-						args.venueDomain === "CR" ||
-						args.venueDomain === "AI"
-							? args.venueDomain
-							: "all",
-					venues: args.venueId ? [args.venueId] : [],
-					ccfRanks: (args.ccfRanks ?? []) as FastRankFilter[],
-					sort: (args.sort as FastSearchSort | null) ?? "newest",
-				});
+				const searched = searchCollectionFast(
+					getVisibleItems(),
+					"",
+					{
+						sourceType:
+							args.sourceType === "arxiv" || args.sourceType === "venue"
+								? args.sourceType
+								: "all",
+						categories: args.category ? [args.category] : [],
+						timePreset: (args.timePreset as FastTimePreset | null) ?? "all",
+						dateFrom: args.dateFrom ?? "",
+						dateTo: args.dateTo ?? "",
+						venueKind:
+							args.venueKind === "conference" || args.venueKind === "journal"
+								? args.venueKind
+								: "all",
+						venueDomain:
+							args.venueDomain === "PL/SE" ||
+							args.venueDomain === "CR" ||
+							args.venueDomain === "AI"
+								? args.venueDomain
+								: "all",
+						venues: args.venueId ? [args.venueId] : [],
+						ccfRanks: (args.ccfRanks ?? []) as FastRankFilter[],
+						sort: (args.sort as FastSearchSort | null) ?? "newest",
+					},
+					{ dedupeCrossPortal: false },
+				);
 				const offset = args.offset ?? 0;
 				const limit = args.limit ?? 100;
 				const sliced = searched.items
@@ -720,12 +728,52 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 				}
 
 				const visible = getVisibleItems();
-				const candidates = visible
-					.filter((p) => !p.recommendedAt)
-					.map((paper) => {
-						const res = scorePaperAgainstKeywords(paper, activeTerms);
+				type RecGroup = {
+					rep: CollectionPaperItem;
+					memberIds: string[];
+					alreadyRecommended: boolean;
+				};
+				const groups: RecGroup[] = [];
+				for (const item of visible) {
+					const existing = groups.find((g) =>
+						sameCollectionPaperWork(g.rep, item),
+					);
+					if (existing) {
+						existing.memberIds.push(item.id);
+						if (item.recommendedAt) existing.alreadyRecommended = true;
+						if (
+							existing.rep.sourceType === "arxiv" &&
+							item.sourceType === "venue"
+						) {
+							existing.rep = mergeArxivIntoVenueItem(item, existing.rep);
+						} else if (
+							existing.rep.sourceType === "venue" &&
+							item.sourceType === "arxiv"
+						) {
+							existing.rep = mergeArxivIntoVenueItem(existing.rep, item);
+						} else if (
+							existing.rep.sourceType === "venue" &&
+							item.sourceType === "venue" &&
+							comparePreferredVenueItem(existing.rep, item) > 0
+						) {
+							existing.rep = item;
+						}
+					} else {
+						groups.push({
+							rep: item,
+							memberIds: [item.id],
+							alreadyRecommended: Boolean(item.recommendedAt),
+						});
+					}
+				}
+
+				const candidates = groups
+					.filter((g) => !g.alreadyRecommended)
+					.map((g) => {
+						const res = scorePaperAgainstKeywords(g.rep, activeTerms);
 						return {
-							paper,
+							paper: g.rep,
+							memberIds: g.memberIds,
 							score: res.score,
 							matchedKeywords: res.matchedKeywords,
 						};
@@ -740,12 +788,13 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 				recClockSeq += 1;
 				const stamp = `2026-04-12T10:${String(recClockSeq).padStart(2, "0")}:00Z`;
 				for (const winner of picked) {
-					const existing = itemsById.get(winner.paper.id);
-					if (existing) {
-						const updated = { ...existing, recommendedAt: stamp };
-						itemsById.set(existing.id, updated);
-						winner.paper = updated;
+					for (const memberId of winner.memberIds) {
+						const existing = itemsById.get(memberId);
+						if (existing) {
+							itemsById.set(existing.id, { ...existing, recommendedAt: stamp });
+						}
 					}
+					winner.paper = { ...winner.paper, recommendedAt: stamp };
 				}
 				if (picked.length > 0) {
 					mergedState = { ...mergedState, lastRecommendedAt: stamp };
