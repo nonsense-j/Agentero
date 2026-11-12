@@ -36,6 +36,11 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import {
+	ResizableGroup,
+	ResizableHandle,
+	ResizablePanel,
+} from "@/components/ui/resizable";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
@@ -69,6 +74,10 @@ import { sameCollectionPaperWork } from "@/lib/plaza/paper-identity";
 import { mergeArxivIntoVenueItem } from "@/lib/plaza/paper-search";
 
 type TrayTab = "selected" | "turn" | "history";
+
+const TRAY_MIN_PX = 280;
+/** Tray width survives view remounts within the app session. */
+let lastTrayWidthPx = 384;
 
 type TrayItem = { entry: DeepTrayEntry; paper: CollectionPaperItem };
 
@@ -693,10 +702,17 @@ export function DiscoverDeepView({
 				</div>
 			</header>
 
-			{/* Dual-pane body */}
-			<div className="flex min-h-0 flex-1 overflow-hidden">
+			{/* Dual-pane body: drag the sash to resize the tray */}
+			<ResizableGroup
+				orientation="horizontal"
+				className="min-h-0 flex-1 overflow-hidden"
+			>
 				{/* Left / Main Multi-Turn Dialog */}
-				<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+				<ResizablePanel
+					id="deep-chat"
+					minSize={360}
+					className="flex min-h-0 min-w-0 flex-col overflow-hidden"
+				>
 					<div
 						ref={scrollRef}
 						onScroll={handleScroll}
@@ -918,124 +934,137 @@ export function DiscoverDeepView({
 							)}
 						</form>
 					</div>
-				</div>
+				</ResizablePanel>
 
 				{/* Right Collapsible Paper Tray: Selected / This turn / History */}
+				{trayOpen ? <ResizableHandle /> : null}
 				{trayOpen ? (
-					<aside className="flex w-80 shrink-0 flex-col overflow-hidden border-l bg-muted/15 lg:w-96">
-						<div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
-							<div className="inline-flex items-center rounded-lg bg-muted/70 p-0.5">
-								{(
-									[
-										["selected", "tabSelected", selectedItems.length],
-										["turn", "tabTurn", turnCount],
-										["history", "tabHistory", historyCount],
-									] as const
-								).map(([tab, labelKey, count]) => (
-									<button
-										key={tab}
-										type="button"
-										onClick={() => setTrayTab(tab)}
-										className={cn(
-											"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
-											trayTab === tab
-												? "bg-background text-foreground shadow-xs"
-												: "text-muted-foreground hover:text-foreground",
-										)}
-									>
-										{t(`plaza.discover.${labelKey}`, { count })}
-									</button>
-								))}
+					<ResizablePanel
+						id="deep-tray"
+						defaultSize={lastTrayWidthPx}
+						minSize={TRAY_MIN_PX}
+						maxSize="65%"
+						groupResizeBehavior="preserve-pixel-size"
+						onResize={(size) => {
+							if (size.inPixels >= TRAY_MIN_PX) lastTrayWidthPx = size.inPixels;
+						}}
+						className="min-h-0 overflow-hidden"
+					>
+						<aside className="flex h-full flex-col overflow-hidden bg-muted/15">
+							<div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+								<div className="inline-flex items-center rounded-lg bg-muted/70 p-0.5">
+									{(
+										[
+											["selected", "tabSelected", selectedItems.length],
+											["turn", "tabTurn", turnCount],
+											["history", "tabHistory", historyCount],
+										] as const
+									).map(([tab, labelKey, count]) => (
+										<button
+											key={tab}
+											type="button"
+											onClick={() => setTrayTab(tab)}
+											className={cn(
+												"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
+												trayTab === tab
+													? "bg-background text-foreground shadow-xs"
+													: "text-muted-foreground hover:text-foreground",
+											)}
+										>
+											{t(`plaza.discover.${labelKey}`, { count })}
+										</button>
+									))}
+								</div>
+
+								<div className="flex items-center gap-1">
+									{activeTrayItems.length > 0 ? (
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<Button
+													type="button"
+													variant="ghost"
+													size="icon-xs"
+													onClick={() => setKept(activeTrayItems, !allTrayKept)}
+													aria-label={t("plaza.collection.toggleSelectAll")}
+												>
+													{allTrayKept ? (
+														<CheckSquare className="size-3.5 text-brand" />
+													) : (
+														<Square className="size-3.5" />
+													)}
+												</Button>
+											</TooltipTrigger>
+											<TooltipContent side="bottom">
+												{t("plaza.collection.toggleSelectAll")}
+											</TooltipContent>
+										</Tooltip>
+									) : null}
+
+									{importableSelected.length > 0 ? (
+										<Button
+											type="button"
+											size="sm"
+											disabled={batchBusy}
+											onClick={() => void handleSelectedBatchImport()}
+											className="h-6 gap-1 px-2 text-[0.6875rem] tabular-nums"
+										>
+											{batchBusy ? (
+												<Loader2 className="size-3 animate-spin" />
+											) : (
+												<Download className="size-3" />
+											)}
+											{t("plaza.collection.importSelected", {
+												count: importableSelected.length,
+											})}
+										</Button>
+									) : null}
+								</div>
 							</div>
 
-							<div className="flex items-center gap-1">
-								{activeTrayItems.length > 0 ? (
-									<Tooltip>
-										<TooltipTrigger asChild>
-											<Button
-												type="button"
-												variant="ghost"
-												size="icon-xs"
-												onClick={() => setKept(activeTrayItems, !allTrayKept)}
-												aria-label={t("plaza.collection.toggleSelectAll")}
-											>
-												{allTrayKept ? (
-													<CheckSquare className="size-3.5 text-brand" />
-												) : (
-													<Square className="size-3.5" />
-												)}
-											</Button>
-										</TooltipTrigger>
-										<TooltipContent side="bottom">
-											{t("plaza.collection.toggleSelectAll")}
-										</TooltipContent>
-									</Tooltip>
-								) : null}
-
-								{importableSelected.length > 0 ? (
-									<Button
-										type="button"
-										size="sm"
-										disabled={batchBusy}
-										onClick={() => void handleSelectedBatchImport()}
-										className="h-6 gap-1 px-2 text-[0.6875rem] tabular-nums"
-									>
-										{batchBusy ? (
-											<Loader2 className="size-3 animate-spin" />
-										) : (
-											<Download className="size-3" />
-										)}
-										{t("plaza.collection.importSelected", {
-											count: importableSelected.length,
-										})}
-									</Button>
-								) : null}
-							</div>
-						</div>
-
-						<div className="agentero-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-							{activeTrayItems.length === 0 ? (
-								<div className="flex h-40 items-center justify-center px-4 text-center text-muted-foreground text-xs leading-relaxed">
-									{trayTab === "selected"
-										? t("plaza.discover.trayEmptySelected")
-										: trayTab === "turn"
-											? t("plaza.discover.trayEmptyTurn")
-											: t("plaza.discover.trayEmptyHistory")}
-								</div>
-							) : trayTab === "selected" ? (
-								<div className="space-y-2">
-									{selectedItems.map(renderTrayCard)}
-								</div>
-							) : (
-								(trayTab === "turn" ? turnGroups : historyGroups).map(
-									(group) => (
-										<section key={group.key} className="space-y-2">
-											<div className="flex items-baseline justify-between gap-2 px-0.5">
-												<h4 className="flex min-w-0 items-baseline gap-1.5 text-xs">
-													<span className="shrink-0 font-semibold text-foreground">
-														{group.label}
-													</span>
-													{group.hint ? (
-														<span className="truncate text-muted-foreground">
-															{group.hint}
+							<div className="agentero-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+								{activeTrayItems.length === 0 ? (
+									<div className="flex h-40 items-center justify-center px-4 text-center text-muted-foreground text-xs leading-relaxed">
+										{trayTab === "selected"
+											? t("plaza.discover.trayEmptySelected")
+											: trayTab === "turn"
+												? t("plaza.discover.trayEmptyTurn")
+												: t("plaza.discover.trayEmptyHistory")}
+									</div>
+								) : trayTab === "selected" ? (
+									<div className="space-y-2">
+										{selectedItems.map(renderTrayCard)}
+									</div>
+								) : (
+									(trayTab === "turn" ? turnGroups : historyGroups).map(
+										(group) => (
+											<section key={group.key} className="space-y-2">
+												<div className="flex items-baseline justify-between gap-2 px-0.5">
+													<h4 className="flex min-w-0 items-baseline gap-1.5 text-xs">
+														<span className="shrink-0 font-semibold text-foreground">
+															{group.label}
 														</span>
-													) : null}
-												</h4>
-												<span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
-													{group.items.length}
-												</span>
-											</div>
-											<div className="space-y-2">
-												{group.items.map(renderTrayCard)}
-											</div>
-										</section>
-									),
-								)
-							)}
-						</div>
-					</aside>
+														{group.hint ? (
+															<span className="truncate text-muted-foreground">
+																{group.hint}
+															</span>
+														) : null}
+													</h4>
+													<span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+														{group.items.length}
+													</span>
+												</div>
+												<div className="space-y-2">
+													{group.items.map(renderTrayCard)}
+												</div>
+											</section>
+										),
+									)
+								)}
+							</div>
+						</aside>
+					</ResizablePanel>
 				) : null}
-			</div>
+			</ResizableGroup>
 		</div>
 	);
 }

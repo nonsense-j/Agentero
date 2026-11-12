@@ -66,8 +66,8 @@ function IconAction({
 
 /**
  * Paper card for Discover. `compact` (Deep Search tray) collapses to
- * header + title + authors + one-line summary; the chevron reveals the
- * abstract, keywords, and secondary actions.
+ * header + title + authors + the Agent's one-sentence summary; clicking the
+ * summary or chevron reveals the abstract, keywords, and secondary actions.
  */
 export function DiscoverPaperCard({
 	paper,
@@ -329,21 +329,21 @@ export function DiscoverPaperCard({
 				) : null}
 			</div>
 
-			{/* Collapsed tray card: one-line summary, click to expand */}
-			{collapsed ? (
-				reason || paper.abstract ? (
-					<button
-						type="button"
-						onClick={() => setExpanded(true)}
-						className="line-clamp-1 w-full text-left text-[0.6875rem] text-muted-foreground leading-relaxed hover:text-foreground"
-					>
-						{reason || paper.abstract}
-					</button>
-				) : null
-			) : (
+			{/* Tray card: the full one-sentence summary is always visible; click toggles details */}
+			{compact && reason ? (
+				<button
+					type="button"
+					onClick={() => setExpanded((v) => !v)}
+					className="w-full rounded-md bg-brand/8 px-2 py-1 text-left text-foreground text-xs leading-relaxed hover:bg-brand/12"
+				>
+					{reason}
+				</button>
+			) : null}
+
+			{collapsed ? null : (
 				<>
 					{/* Agent curation reason */}
-					{reason ? (
+					{!compact && reason ? (
 						<p className="select-text rounded-md bg-brand/8 px-2.5 py-1.5 text-foreground text-xs leading-relaxed">
 							{reason}
 						</p>
