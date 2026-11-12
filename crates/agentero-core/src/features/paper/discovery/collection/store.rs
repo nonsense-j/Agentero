@@ -163,7 +163,7 @@ pub(crate) fn infer_venue_kind(id: &str, name: &str, url: &str, kind: Option<&st
         }
     }
     let lower = format!("{id} {name} {url}").to_lowercase();
-    if lower.contains("/db/journals/")
+    if lower.contains("/journal/")
         || lower.contains("journal")
         || lower.contains("transactions")
         || lower.starts_with("tse-")
@@ -592,7 +592,7 @@ pub(crate) fn read_state_summary_conn(
     let mut venues = Vec::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, mode, kind, domain, ccf_rank, dblp_stream, \
+            "SELECT id, name, url, tracks_json, notes, mode, kind, domain, ccf_rank, \
                     last_fetched_at, latest_published_at, remote_total_count \
              FROM venues ORDER BY position ASC, id ASC",
         )?;
@@ -600,9 +600,12 @@ pub(crate) fn read_state_summary_conn(
             let id: String = r.get(0)?;
             let name: String = r.get(1)?;
             let url: String = r.get(2)?;
-            let mode: String = r.get(3)?;
-            let kind_opt: Option<String> = r.get(4)?;
-            let remote_total: Option<i64> = r.get(10)?;
+            let tracks_raw: String = r.get(3)?;
+            let notes: Option<String> = r.get(4)?;
+            let mode: String = r.get(5)?;
+            let kind_opt: Option<String> = r.get(6)?;
+            let remote_total: Option<i64> = r.get(11)?;
+            let tracks: Vec<String> = serde_json::from_str(&tracks_raw).unwrap_or_default();
             let pcount = venue_counts_by_id.get(&id).copied().unwrap_or_else(|| {
                 venue_counts_by_label
                     .get(&name.to_lowercase())
@@ -614,13 +617,14 @@ pub(crate) fn read_state_summary_conn(
                 id,
                 name,
                 url,
+                tracks,
+                notes,
                 mode,
                 kind: resolved_kind,
-                domain: r.get(5)?,
-                ccf_rank: r.get(6)?,
-                dblp_stream: r.get(7)?,
-                last_fetched_at: r.get(8)?,
-                latest_published_at: r.get(9)?,
+                domain: r.get(7)?,
+                ccf_rank: r.get(8)?,
+                last_fetched_at: r.get(9)?,
+                latest_published_at: r.get(10)?,
                 remote_total_count: remote_total.map(|n| n.max(0) as usize),
                 paper_count: pcount,
             })
@@ -747,20 +751,26 @@ fn sync_venues_list_tx(conn: &Connection, venues: &[CollectionVenueInput]) -> Re
             _ => "auto",
         };
         let kind = infer_venue_kind(&id, &name, &url, v.kind.as_deref());
+        let tracks_json_opt: Option<String> = v.tracks.as_ref().map(|list| {
+            serde_json::to_string(&clean_string_vec(list)).unwrap_or_else(|_| "[]".to_string())
+        });
+        let has_notes_input = i64::from(v.notes.is_some());
+        let cleaned_notes = clean_opt_str(v.notes.clone());
         conn.execute(
             "INSERT INTO venues (
-                id, position, name, url, mode, kind, domain, ccf_rank, dblp_stream,
+                id, position, name, url, tracks_json, notes, mode, kind, domain, ccf_rank,
                 last_fetched_at, latest_published_at, remote_total_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ) VALUES (?1, ?2, ?3, ?4, COALESCE(?5, '[]'), ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 position = excluded.position,
                 name = excluded.name,
                 url = excluded.url,
+                tracks_json = COALESCE(?5, venues.tracks_json),
+                notes = CASE WHEN ?14 = 1 THEN ?6 ELSE venues.notes END,
                 mode = excluded.mode,
                 kind = excluded.kind,
                 domain = COALESCE(excluded.domain, venues.domain),
                 ccf_rank = COALESCE(excluded.ccf_rank, venues.ccf_rank),
-                dblp_stream = COALESCE(excluded.dblp_stream, venues.dblp_stream),
                 last_fetched_at = COALESCE(excluded.last_fetched_at, venues.last_fetched_at),
                 latest_published_at = COALESCE(excluded.latest_published_at, venues.latest_published_at),
                 remote_total_count = COALESCE(excluded.remote_total_count, venues.remote_total_count)",
@@ -769,27 +779,34 @@ fn sync_venues_list_tx(conn: &Connection, venues: &[CollectionVenueInput]) -> Re
                 idx as i64,
                 name,
                 url,
+                tracks_json_opt,
+                cleaned_notes,
                 mode,
                 kind,
                 clean_opt_str(v.domain.clone()),
                 clean_opt_str(v.ccf_rank.clone()),
-                clean_opt_str(v.dblp_stream.clone()),
                 clean_opt_str(v.last_fetched_at.clone()),
                 clean_opt_str(v.latest_published_at.clone()),
                 v.remote_total_count.map(|n| n as i64),
+                has_notes_input,
             ],
         )?;
         kept_ids.push(id);
     }
 
     if kept_ids.is_empty() {
+        conn.execute("DELETE FROM papers WHERE source_type = 'venue'", [])?;
         conn.execute("DELETE FROM venues", [])?;
     } else {
         let placeholders: String = std::iter::repeat_n("?", kept_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("DELETE FROM venues WHERE id NOT IN ({placeholders})");
         let binds: Vec<rusqlite::types::Value> = kept_ids.iter().cloned().map(Into::into).collect();
+        let del_papers_sql = format!(
+            "DELETE FROM papers WHERE source_type = 'venue' AND venue_id IS NOT NULL AND venue_id NOT IN ({placeholders})"
+        );
+        conn.execute(&del_papers_sql, params_from_iter(binds.clone()))?;
+        let sql = format!("DELETE FROM venues WHERE id NOT IN ({placeholders})");
         conn.execute(&sql, params_from_iter(binds))?;
     }
     Ok(())

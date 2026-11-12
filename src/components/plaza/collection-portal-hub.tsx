@@ -267,7 +267,7 @@ export function CollectionPortalHub({
 				</div>
 			</section>
 
-			{/* Card 2: Venue Entry Portal (Conference + Journal via DBLP 2026) */}
+			{/* Card 2: Venue Entry Portal (Conference + Journal · 2026) */}
 			<section className="magpie-card flex flex-col gap-3.5 p-4">
 				<div className="flex items-start justify-between gap-2">
 					<button
@@ -281,7 +281,7 @@ export function CollectionPortalHub({
 								label={t("plaza.collection.source.venue")}
 							/>
 							<span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-								DBLP 2026
+								2026
 							</span>
 							<span className="font-mono text-muted-foreground text-xs tabular-nums">
 								{t("plaza.collection.papersCount", { count: venueCount })}

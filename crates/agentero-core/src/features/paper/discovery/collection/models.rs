@@ -16,11 +16,12 @@ pub struct CollectionVenueRecord {
     pub id: String,
     pub name: String,
     pub url: String,
+    pub tracks: Vec<String>,
+    pub notes: Option<String>,
     pub mode: String,
     pub kind: Option<String>,
     pub domain: Option<String>,
     pub ccf_rank: Option<String>,
-    pub dblp_stream: Option<String>,
     pub last_fetched_at: Option<String>,
     pub latest_published_at: Option<String>,
     pub remote_total_count: Option<usize>,
@@ -34,6 +35,10 @@ pub struct CollectionVenueInput {
     pub name: String,
     pub url: String,
     #[serde(default)]
+    pub tracks: Option<Vec<String>>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
@@ -41,8 +46,6 @@ pub struct CollectionVenueInput {
     pub domain: Option<String>,
     #[serde(default)]
     pub ccf_rank: Option<String>,
-    #[serde(default)]
-    pub dblp_stream: Option<String>,
     #[serde(default)]
     pub last_fetched_at: Option<String>,
     #[serde(default)]

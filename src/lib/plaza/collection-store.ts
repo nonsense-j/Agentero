@@ -12,10 +12,10 @@ import { callApi } from "@/lib/core/ipc";
 import {
 	type CollectionPaperItem,
 	type CollectionSourceType,
-	DBLP_2026_VENUE_SPECS,
 	formatPaperCitationText,
 	inferVenueKind,
 	VENUE_SPEC_BY_ID,
+	VENUE_SPECS,
 	type VenueCcfRank,
 	type VenueConfig,
 	type VenueDomain,
@@ -25,15 +25,15 @@ import {
 export const DEFAULT_ARXIV_CATEGORIES = ["cs.SE", "cs.CR", "cs.PL"] as const;
 
 export const DEFAULT_COLLECTION_VENUES: readonly VenueConfig[] =
-	DBLP_2026_VENUE_SPECS.map((spec) => ({
+	VENUE_SPECS.map((spec) => ({
 		id: spec.id,
 		name: spec.name,
 		url: spec.url,
+		tracks: [...spec.tracks],
 		mode: "auto",
 		kind: spec.kind,
 		domain: spec.domain,
 		ccfRank: spec.ccfRank,
-		dblpStream: spec.dblpStream,
 	}));
 
 const LEGACY_COLLECTION_STORAGE_KEYS = [
@@ -239,11 +239,12 @@ type WireVenueRecordLike = {
 	id: string;
 	name: string;
 	url: string;
+	tracks?: string[] | null;
+	notes?: string | null;
 	mode?: string | null;
 	kind?: string | null;
 	domain?: string | null;
 	ccfRank?: string | null;
-	dblpStream?: string | null;
 	lastFetchedAt?: string | null;
 	latestPublishedAt?: string | null;
 	remoteTotalCount?: number | null;
@@ -343,44 +344,35 @@ export function fromPaperDetailDto(
 
 function fromVenueRecordDto(dto: WireVenueRecordLike): VenueConfig {
 	const spec = VENUE_SPEC_BY_ID.get(dto.id);
-	if (spec) {
-		return {
-			id: spec.id,
-			name: spec.name,
-			url: spec.url,
-			mode: "auto",
-			kind: spec.kind,
-			domain: spec.domain,
-			ccfRank: spec.ccfRank,
-			dblpStream: spec.dblpStream,
-			lastFetchedAt: dto.lastFetchedAt ?? null,
-			latestPublishedAt: dto.latestPublishedAt ?? null,
-			...(dto.remoteTotalCount != null
-				? { remoteTotalCount: dto.remoteTotalCount }
-				: {}),
-			paperCount: dto.paperCount ?? 0,
-		};
-	}
-
+	const name = dto.name?.trim() || spec?.name || dto.id;
+	const url = dto.url?.trim() || spec?.url || "";
+	const tracks = Array.isArray(dto.tracks)
+		? dto.tracks.map((t) => t.trim()).filter(Boolean)
+		: spec
+			? [...spec.tracks]
+			: [];
+	const notes = dto.notes?.trim() || undefined;
 	const kind =
 		coerceVenueKind(dto.kind) ??
+		spec?.kind ??
 		inferVenueKind({
 			id: dto.id,
-			name: dto.name,
-			url: dto.url,
+			name,
+			url,
 		});
-	const domain = coerceVenueDomain(dto.domain);
-	const ccfRank = coerceCcfRank(dto.ccfRank);
+	const domain = coerceVenueDomain(dto.domain) ?? spec?.domain;
+	const ccfRank = coerceCcfRank(dto.ccfRank) ?? spec?.ccfRank;
 
 	return {
 		id: dto.id,
-		name: dto.name,
-		url: dto.url,
+		name,
+		url,
+		tracks,
+		...(notes ? { notes } : {}),
 		mode: dto.mode === "agent" ? "agent" : "auto",
 		kind,
 		...(domain ? { domain } : {}),
 		...(ccfRank ? { ccfRank } : {}),
-		...(dto.dblpStream ? { dblpStream: dto.dblpStream } : {}),
 		lastFetchedAt: dto.lastFetchedAt ?? null,
 		latestPublishedAt: dto.latestPublishedAt ?? null,
 		...(dto.remoteTotalCount != null
@@ -388,19 +380,6 @@ function fromVenueRecordDto(dto: WireVenueRecordLike): VenueConfig {
 			: {}),
 		paperCount: dto.paperCount ?? 0,
 	};
-}
-
-function normalizeVenuesOrder(venues: VenueConfig[]): VenueConfig[] {
-	const byId = new Map(venues.map((v) => [v.id, v]));
-	const ordered: VenueConfig[] = [];
-	for (const def of DEFAULT_COLLECTION_VENUES) {
-		ordered.push(byId.get(def.id) ?? { ...def, paperCount: 0 });
-		byId.delete(def.id);
-	}
-	for (const custom of byId.values()) {
-		ordered.push(custom);
-	}
-	return ordered;
 }
 
 function fromWatermarkMapDto(
@@ -433,16 +412,15 @@ export function fromStateSummaryDto(
 			categoryCounts[k] = v;
 		}
 	}
-	const mappedVenues = (dto.venues ?? []).map(fromVenueRecordDto);
+	const venues = Array.isArray(dto.venues)
+		? dto.venues.map(fromVenueRecordDto)
+		: DEFAULT_COLLECTION_VENUES.map((v) => ({ ...v, paperCount: 0 }));
 	return {
 		categories:
 			dto.categories && dto.categories.length > 0
 				? [...dto.categories]
 				: [...DEFAULT_ARXIV_CATEGORIES],
-		venues:
-			mappedVenues.length > 0
-				? normalizeVenuesOrder(mappedVenues)
-				: DEFAULT_COLLECTION_VENUES.map((v) => ({ ...v, paperCount: 0 })),
+		venues,
 		arxivWatermarks: fromWatermarkMapDto(dto.arxivWatermarks),
 		lastRefreshedAt: dto.lastRefreshedAt ?? null,
 		latestArxiv: dto.latestArxiv ?? null,
@@ -456,15 +434,23 @@ export function fromStateSummaryDto(
 }
 
 function toVenueInputDto(venue: VenueConfig) {
+	const spec = VENUE_SPEC_BY_ID.get(venue.id);
+	const resolvedTracks =
+		venue.tracks !== undefined
+			? venue.tracks.map((t) => t.trim()).filter(Boolean)
+			: spec
+				? [...spec.tracks]
+				: [];
 	return {
 		id: venue.id,
 		name: venue.name,
 		url: venue.url,
+		tracks: resolvedTracks,
+		notes: venue.notes?.trim() ?? "",
 		mode: venue.mode,
 		kind: venue.kind ?? null,
 		domain: venue.domain ?? null,
 		ccfRank: venue.ccfRank ?? null,
-		dblpStream: venue.dblpStream ?? null,
 		lastFetchedAt: venue.lastFetchedAt ?? null,
 		latestPublishedAt: venue.latestPublishedAt ?? null,
 		remoteTotalCount: venue.remoteTotalCount ?? null,

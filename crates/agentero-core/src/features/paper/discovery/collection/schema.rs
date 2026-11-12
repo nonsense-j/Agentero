@@ -21,10 +21,10 @@ pub struct DefaultVenueSeed {
     pub id: &'static str,
     pub name: &'static str,
     pub url: &'static str,
+    pub tracks: &'static [&'static str],
     pub kind: &'static str,
     pub domain: &'static str,
     pub ccf_rank: &'static str,
-    pub dblp_stream: &'static str,
 }
 
 /// Complete 2026 Venue catalog (28 CCF-A / CCF-B venues across PL/SE, CR, and AI).
@@ -33,258 +33,261 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
     DefaultVenueSeed {
         id: "ase-2026",
         name: "ASE 2026",
-        url: "https://dblp.uni-trier.de/db/conf/kbse/",
+        url: "https://conf.researchr.org/home/ase-2026",
+        tracks: &["https://conf.researchr.org/track/ase-2026/ase-2026-research-track"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/kbse",
     },
     DefaultVenueSeed {
         id: "icse-2026",
         name: "ICSE 2026",
-        url: "https://dblp.uni-trier.de/db/conf/icse/",
+        url: "https://conf.researchr.org/home/icse-2026",
+        tracks: &["https://conf.researchr.org/track/icse-2026/icse-2026-research-track"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/icse",
     },
     DefaultVenueSeed {
         id: "issta-2026",
         name: "ISSTA 2026",
-        url: "https://dblp.uni-trier.de/db/conf/issta/",
+        url: "https://conf.researchr.org/home/issta-2026",
+        tracks: &["https://conf.researchr.org/track/issta-2026/issta-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/issta",
     },
     DefaultVenueSeed {
         id: "fse-2026",
         name: "FSE 2026",
-        url: "https://dblp.uni-trier.de/db/conf/sigsoft/",
+        url: "https://conf.researchr.org/home/fse-2026",
+        tracks: &["https://conf.researchr.org/track/fse-2026/fse-2026-research-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/sigsoft",
     },
     DefaultVenueSeed {
         id: "pldi-2026",
         name: "PLDI 2026",
-        url: "https://dblp.uni-trier.de/db/conf/pldi/",
+        url: "https://pldi26.sigplan.org",
+        tracks: &["https://pldi26.sigplan.org/track/pldi-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/pldi",
     },
     DefaultVenueSeed {
         id: "popl-2026",
         name: "POPL 2026",
-        url: "https://dblp.uni-trier.de/db/conf/popl/",
+        url: "https://popl26.sigplan.org",
+        tracks: &["https://popl26.sigplan.org/track/POPL-2026-popl-research-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/popl",
     },
     DefaultVenueSeed {
         id: "oopsla-2026",
         name: "OOPSLA 2026",
-        url: "https://dblp.uni-trier.de/db/conf/oopsla/",
+        url: "https://2026.splashcon.org",
+        tracks: &["https://2026.splashcon.org/track/oopsla-2026"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/oopsla",
     },
     // 1a. PL/SE Conferences — CCF-B
     DefaultVenueSeed {
         id: "ecoop-2026",
         name: "ECOOP 2026",
-        url: "https://dblp.uni-trier.de/db/conf/ecoop/",
+        url: "https://2026.ecoop.org",
+        tracks: &["https://2026.ecoop.org/track/ecoop-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/ecoop",
     },
     DefaultVenueSeed {
         id: "icpc-2026",
         name: "ICPC 2026",
-        url: "https://dblp.uni-trier.de/db/conf/iwpc/",
+        url: "https://conf.researchr.org/home/icpc-2026",
+        tracks: &["https://conf.researchr.org/track/icpc-2026/icpc-2026-research"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/iwpc",
     },
     DefaultVenueSeed {
         id: "re-2026",
         name: "RE 2026",
-        url: "https://dblp.uni-trier.de/db/conf/re/",
+        url: "https://conf.researchr.org/home/RE-2026",
+        tracks: &["https://conf.researchr.org/track/RE-2026/RE-2026-Research-Papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/re",
     },
     DefaultVenueSeed {
         id: "saner-2026",
         name: "SANER 2026",
-        url: "https://dblp.uni-trier.de/db/conf/wcre/",
+        url: "https://conf.researchr.org/home/saner-2026",
+        tracks: &["https://conf.researchr.org/track/saner-2026/saner-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/wcre",
     },
     DefaultVenueSeed {
         id: "icsme-2026",
         name: "ICSME 2026",
-        url: "https://dblp.uni-trier.de/db/conf/icsm/",
+        url: "https://conf.researchr.org/home/icsme-2026",
+        tracks: &["https://conf.researchr.org/track/icsme-2026/icsme-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/icsm",
     },
     DefaultVenueSeed {
         id: "sas-2026",
         name: "SAS 2026",
-        url: "https://dblp.uni-trier.de/db/conf/sas/",
+        url: "https://2026.splashcon.org/home/sas-2026",
+        tracks: &["https://2026.splashcon.org/track/sas-2026-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/sas",
     },
     DefaultVenueSeed {
         id: "esem-2026",
         name: "ESEM 2026",
-        url: "https://dblp.uni-trier.de/db/conf/esem/",
+        url: "https://conf.researchr.org/home/eseiw-2026",
+        tracks: &["https://conf.researchr.org/track/eseiw-2026/eseiw-2026-esem---technical-track"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/esem",
     },
     DefaultVenueSeed {
         id: "issre-2026",
         name: "ISSRE 2026",
-        url: "https://dblp.uni-trier.de/db/conf/issre/",
+        url: "https://cyprusconferences.org/issre2026/",
+        tracks: &["https://cyprusconferences.org/issre2026/accepted-papers/"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/conf/issre",
     },
     // 1b. PL/SE Journals — CCF-A & CCF-B
     DefaultVenueSeed {
         id: "tse-2026",
         name: "TSE 2026",
-        url: "https://dblp.uni-trier.de/db/journals/tse/",
+        url: "https://www.computer.org/csdl/journal/ts",
+        tracks: &[],
         kind: "journal",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/journals/tse",
     },
     DefaultVenueSeed {
         id: "tosem-2026",
         name: "TOSEM 2026",
-        url: "https://dblp.uni-trier.de/db/journals/tosem/",
+        url: "https://dl.acm.org/journal/tosem",
+        tracks: &[],
         kind: "journal",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/journals/tosem",
     },
     DefaultVenueSeed {
         id: "ase-journal-2026",
         name: "ASE (J) 2026",
-        url: "https://dblp.uni-trier.de/db/journals/ase/",
+        url: "https://link.springer.com/journal/10515",
+        tracks: &[],
         kind: "journal",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/journals/ase",
     },
     DefaultVenueSeed {
         id: "ese-2026",
         name: "ESE 2026",
-        url: "https://dblp.uni-trier.de/db/journals/ese/",
+        url: "https://link.springer.com/journal/10664",
+        tracks: &[],
         kind: "journal",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
-        dblp_stream: "streams/journals/ese",
     },
     // 2. CR Conferences — CCF-A
     DefaultVenueSeed {
         id: "ccs-2026",
         name: "CCS 2026",
-        url: "https://dblp.uni-trier.de/db/conf/ccs/",
+        url: "https://www.sigsac.org/ccs/CCS2026/",
+        tracks: &["https://www.sigsac.org/ccs/CCS2026/program/schedule.html"],
         kind: "conference",
         domain: "CR",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/ccs",
     },
     DefaultVenueSeed {
         id: "sp-2026",
         name: "S&P 2026",
-        url: "https://dblp.uni-trier.de/db/conf/sp/",
+        url: "https://sp2026.ieee-security.org/",
+        tracks: &["https://sp2026.ieee-security.org/program-papers.html"],
         kind: "conference",
         domain: "CR",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/sp",
     },
     DefaultVenueSeed {
         id: "usenix-sec-2026",
         name: "USENIX Security 2026",
-        url: "https://dblp.uni-trier.de/db/conf/uss/",
+        url: "https://www.usenix.org/conference/usenixsecurity26",
+        tracks: &["https://www.usenix.org/conference/usenixsecurity26/technical-sessions"],
         kind: "conference",
         domain: "CR",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/uss",
     },
     DefaultVenueSeed {
         id: "ndss-2026",
         name: "NDSS 2026",
-        url: "https://dblp.uni-trier.de/db/conf/ndss/",
+        url: "https://www.ndss-symposium.org/ndss2026/",
+        tracks: &["https://www.ndss-symposium.org/ndss2026/accepted-papers/"],
         kind: "conference",
         domain: "CR",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/ndss",
     },
     // 3. AI Conferences — CCF-A
     DefaultVenueSeed {
         id: "aaai-2026",
         name: "AAAI 2026",
-        url: "https://dblp.uni-trier.de/db/conf/aaai/",
+        url: "https://aaai.org/conference/aaai/aaai-26/",
+        tracks: &["https://ojs.aaai.org/index.php/AAAI/issue/archive"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/aaai",
     },
     DefaultVenueSeed {
         id: "neurips-2026",
         name: "NeurIPS 2026",
-        url: "https://dblp.uni-trier.de/db/conf/nips/",
+        url: "https://neurips.cc/Conferences/2026",
+        tracks: &["https://openreview.net/group?id=NeurIPS.cc/2026/Conference"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/nips",
     },
     DefaultVenueSeed {
         id: "acl-2026",
         name: "ACL 2026",
-        url: "https://dblp.uni-trier.de/db/conf/acl/",
+        url: "https://2026.aclweb.org/",
+        tracks: &[
+            "https://aclanthology.org/volumes/2026.acl-long/",
+            "https://aclanthology.org/volumes/2026.acl-short/",
+        ],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/acl",
     },
     DefaultVenueSeed {
         id: "iclr-2026",
         name: "ICLR 2026",
-        url: "https://dblp.uni-trier.de/db/conf/iclr/",
+        url: "https://iclr.cc/Conferences/2026",
+        tracks: &["https://openreview.net/group?id=ICLR.cc/2026/Conference"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/iclr",
     },
     DefaultVenueSeed {
         id: "icml-2026",
         name: "ICML 2026",
-        url: "https://dblp.uni-trier.de/db/conf/icml/",
+        url: "https://icml.cc/Conferences/2026",
+        tracks: &["https://openreview.net/group?id=ICML.cc/2026/Conference"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
-        dblp_stream: "streams/conf/icml",
     },
 ];
 
@@ -320,11 +323,12 @@ CREATE TABLE IF NOT EXISTS venues (
   position            INTEGER NOT NULL DEFAULT 0,
   name                TEXT NOT NULL,
   url                 TEXT NOT NULL,
+  tracks_json         TEXT NOT NULL DEFAULT '[]',
+  notes               TEXT,
   mode                TEXT NOT NULL DEFAULT 'auto',
   kind                TEXT,
   domain              TEXT,
   ccf_rank            TEXT,
-  dblp_stream         TEXT,
   last_fetched_at     TEXT,
   latest_published_at TEXT,
   remote_total_count  INTEGER
@@ -466,10 +470,11 @@ pub fn seed_defaults(conn: &Connection) -> Result<(), AppError> {
         .unwrap_or(0);
     if venue_count == 0 {
         for (pos, v) in DEFAULT_VENUES.iter().enumerate() {
+            let tracks_json = serde_json::to_string(v.tracks).unwrap_or_else(|_| "[]".to_string());
             conn.execute(
-                "INSERT OR IGNORE INTO venues (id, position, name, url, mode, kind, domain, ccf_rank, dblp_stream)
-                 VALUES (?1, ?2, ?3, ?4, 'auto', ?5, ?6, ?7, ?8)",
-                params![v.id, pos as i64, v.name, v.url, v.kind, v.domain, v.ccf_rank, v.dblp_stream],
+                "INSERT OR IGNORE INTO venues (id, position, name, url, tracks_json, mode, kind, domain, ccf_rank)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'auto', ?6, ?7, ?8)",
+                params![v.id, pos as i64, v.name, v.url, tracks_json, v.kind, v.domain, v.ccf_rank],
             )
             .map_err(|e| AppError::message(format!("collection seed venue {}: {e}", v.id)))?;
         }
@@ -529,6 +534,36 @@ pub fn ensure_collection() -> Result<Connection, AppError> {
     ensure_collection_at(&collection_db_path())
 }
 
+fn reset_legacy_dblp_schema_if_needed(conn: &Connection) -> Result<(), AppError> {
+    let has_legacy_dblp: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('venues') WHERE name = 'dblp_stream')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !has_legacy_dblp {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS citation_edges;
+         DROP TRIGGER IF EXISTS papers_fts_ai;
+         DROP TRIGGER IF EXISTS papers_fts_ad;
+         DROP TRIGGER IF EXISTS papers_fts_au;
+         DROP TABLE IF EXISTS papers_fts;
+         DROP TABLE IF EXISTS paper_keywords;
+         DROP TABLE IF EXISTS paper_categories;
+         DROP TABLE IF EXISTS papers;
+         DROP TABLE IF EXISTS recommend_keywords;
+         DROP TABLE IF EXISTS arxiv_watermarks;
+         DROP TABLE IF EXISTS venues;
+         DROP TABLE IF EXISTS collection_config;
+         DROP TABLE IF EXISTS schema_meta;",
+    )
+    .map_err(|e| AppError::message(format!("collection reset legacy dblp schema: {e}")))?;
+    Ok(())
+}
+
 pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -536,6 +571,7 @@ pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
         }
     }
     let conn = crate::sqlite::open_standard(db_path, DbMsgs::COLLECTION)?;
+    reset_legacy_dblp_schema_if_needed(&conn)?;
     migrate(&conn)?;
     Ok(conn)
 }

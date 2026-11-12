@@ -1,10 +1,10 @@
 /**
- * Native 广场 panel: Paper Collection (2026–Now arXiv + 28 DBLP 2026 Venues).
+ * Native 广场 panel: Paper Collection (2026–Now arXiv + 2026 Main-Track Venues).
  *
  * Two-stage flow backed by `collection.sqlite`:
  * 1. Portal Hub: Separate `arXiv` (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`, …) and
- *    `Venue` (`Conference` + `Journal`, all 2026 from DBLP) entry cards powered
- *    by `CollectionSummarySnapshot` (zero paper rows in JS memory).
+ *    `Venue` (`Conference` + `Journal`, 2026 Main/Research/Technical Track) entry cards
+ *    powered by `CollectionSummarySnapshot` (zero paper rows in JS memory).
  * 2. List View: Top navigation bar with source switcher, `arXiv`-only time filter
  *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 100-paper paginated SQLite query
  *    with +50 Load More increments, and full detail dialog on card click.
@@ -19,6 +19,7 @@ import {
 	ChevronDown,
 	Download,
 	Loader2,
+	Pencil,
 	Plus,
 	Quote,
 	RefreshCw,
@@ -26,6 +27,7 @@ import {
 	Sparkles,
 	Square,
 	Trash2,
+	X,
 } from "lucide-react";
 import {
 	useCallback,
@@ -1625,6 +1627,17 @@ function CollectionPaperCard({
 	);
 }
 
+function parseTracksInput(raw: string): string[] {
+	return Array.from(
+		new Set(
+			raw
+				.split(/[\n,]+/)
+				.map((s) => s.trim())
+				.filter(Boolean),
+		),
+	);
+}
+
 function CollectionConfigPopover({
 	arxivCategories,
 	venues,
@@ -1640,9 +1653,12 @@ function CollectionConfigPopover({
 }) {
 	const { t } = useTranslation("sidebar");
 	const [catSearch, setCatSearch] = useState("");
-	const [newVenueLabel, setNewVenueLabel] = useState("");
-	const [newVenueUrl, setNewVenueUrl] = useState("");
-	const [newVenueAgent, setNewVenueAgent] = useState(false);
+	const [editingVenueId, setEditingVenueId] = useState<string | null>(null);
+	const [venueLabel, setVenueLabel] = useState("");
+	const [venueUrl, setVenueUrl] = useState("");
+	const [venueTracksText, setVenueTracksText] = useState("");
+	const [venueNotes, setVenueNotes] = useState("");
+	const [venueAgent, setVenueAgent] = useState(true);
 
 	const orderedCategories = useMemo(() => {
 		const seen = new Set<string>();
@@ -1672,24 +1688,70 @@ function CollectionConfigPopover({
 		}
 	};
 
-	const addVenue = () => {
-		const name = newVenueLabel.trim();
-		const url = newVenueUrl.trim();
+	const resetVenueForm = () => {
+		setEditingVenueId(null);
+		setVenueLabel("");
+		setVenueUrl("");
+		setVenueTracksText("");
+		setVenueNotes("");
+		setVenueAgent(true);
+	};
+
+	const startEditVenue = (v: VenueConfig) => {
+		setEditingVenueId(v.id);
+		setVenueLabel(v.name);
+		setVenueUrl(v.url);
+		setVenueTracksText((v.tracks ?? []).join("\n"));
+		setVenueNotes(v.notes ?? "");
+		setVenueAgent(v.mode === "agent");
+	};
+
+	const submitVenueForm = () => {
+		const name = venueLabel.trim();
+		const url = venueUrl.trim();
 		if (!name || !url) return;
-		const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+		const tracks = parseTracksInput(venueTracksText);
+		const notes = venueNotes.trim() || undefined;
+
+		if (editingVenueId) {
+			onChangeVenues(
+				venues.map((item) =>
+					item.id === editingVenueId
+						? {
+								...item,
+								name,
+								url,
+								tracks,
+								notes,
+								mode: venueAgent ? "agent" : "auto",
+								kind: item.kind ?? inferVenueKind({ id: item.id, name, url }),
+							}
+						: item,
+				),
+			);
+			resetVenueForm();
+			return;
+		}
+
+		const slug = name
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-|-$/g, "");
+		const id = `${slug || "venue"}-${Date.now()}`;
 		const kind = inferVenueKind({ id, name, url });
 		onChangeVenues([
 			...venues,
 			{
-				id: `${id}-${Date.now()}`,
+				id,
 				name,
 				url,
-				mode: newVenueAgent ? "agent" : "auto",
+				tracks,
+				...(notes ? { notes } : {}),
+				mode: venueAgent ? "agent" : "auto",
 				kind,
 			},
 		]);
-		setNewVenueLabel("");
-		setNewVenueUrl("");
+		resetVenueForm();
 	};
 
 	return (
@@ -1736,7 +1798,7 @@ function CollectionConfigPopover({
 							className="h-6 w-32 rounded-md border bg-background px-2 text-[11px]"
 						/>
 					</div>
-					<div className="agentero-scroll mt-1.5 flex max-h-40 flex-wrap gap-1 overflow-y-auto pr-1">
+					<div className="agentero-scroll mt-1.5 flex max-h-36 flex-wrap gap-1 overflow-y-auto pr-1">
 						{orderedCategories.map((cat) => {
 							const active = arxivCategories.includes(cat);
 							return (
@@ -1756,13 +1818,16 @@ function CollectionConfigPopover({
 
 				<div className="border-t pt-2.5">
 					<p className="font-medium text-xs">
-						{t("plaza.collection.venuesTitle")}
+						{t("plaza.collection.venuesTitle")} ({venues.length})
 					</p>
 					<div className="agentero-scroll mt-1.5 max-h-44 space-y-1.5 overflow-y-auto pr-1">
 						{venues.map((v) => (
 							<div
 								key={v.id}
-								className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs"
+								className={cn(
+									"flex items-center justify-between gap-1.5 rounded-md bg-muted/40 px-2 py-1 text-xs",
+									editingVenueId === v.id && "ring-1 ring-brand/50",
+								)}
 							>
 								<button
 									type="button"
@@ -1779,7 +1844,7 @@ function CollectionConfigPopover({
 										)
 									}
 									className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-									title={t("plaza.collection.agentExtract")}
+									title={v.notes || v.url}
 								>
 									<span className="truncate font-medium">{v.name}</span>
 									{v.ccfRank ? (
@@ -1791,14 +1856,27 @@ function CollectionConfigPopover({
 										<Sparkles className="size-3 shrink-0 text-brand" />
 									) : null}
 								</button>
-								<button
-									type="button"
-									onClick={() => onRemoveVenue(v.id)}
-									className="text-muted-foreground hover:text-destructive"
-									aria-label={t("plaza.feeds.remove")}
-								>
-									<Trash2 className="size-3" />
-								</button>
+								<div className="flex shrink-0 items-center gap-1">
+									<button
+										type="button"
+										onClick={() => startEditVenue(v)}
+										className="text-muted-foreground hover:text-foreground"
+										aria-label={v.name}
+									>
+										<Pencil className="size-3" />
+									</button>
+									<button
+										type="button"
+										onClick={() => {
+											if (editingVenueId === v.id) resetVenueForm();
+											onRemoveVenue(v.id);
+										}}
+										className="text-muted-foreground hover:text-destructive"
+										aria-label={t("plaza.feeds.remove")}
+									>
+										<Trash2 className="size-3" />
+									</button>
+								</div>
 							</div>
 						))}
 					</div>
@@ -1806,17 +1884,31 @@ function CollectionConfigPopover({
 					<div className="mt-2 space-y-1.5 border-t pt-2">
 						<input
 							type="text"
-							value={newVenueLabel}
-							onChange={(e) => setNewVenueLabel(e.target.value)}
+							value={venueLabel}
+							onChange={(e) => setVenueLabel(e.target.value)}
 							placeholder={t("plaza.collection.venueNamePlaceholder")}
 							className="h-7 w-full rounded-md border bg-background px-2 text-xs"
 						/>
 						<input
 							type="url"
-							value={newVenueUrl}
-							onChange={(e) => setNewVenueUrl(e.target.value)}
+							value={venueUrl}
+							onChange={(e) => setVenueUrl(e.target.value)}
 							placeholder={t("plaza.collection.venueUrlPlaceholder")}
 							className="h-7 w-full rounded-md border bg-background px-2 text-xs"
+						/>
+						<input
+							type="text"
+							value={venueTracksText}
+							onChange={(e) => setVenueTracksText(e.target.value)}
+							placeholder={t("plaza.collection.venueTracksPlaceholder")}
+							className="h-7 w-full rounded-md border bg-background px-2 text-xs"
+						/>
+						<textarea
+							rows={2}
+							value={venueNotes}
+							onChange={(e) => setVenueNotes(e.target.value)}
+							placeholder={t("plaza.collection.venueNotesPlaceholder")}
+							className="w-full resize-none rounded-md border bg-background px-2 py-1 text-xs leading-snug"
 						/>
 						<div className="flex items-center justify-between gap-2">
 							<label
@@ -1825,24 +1917,43 @@ function CollectionConfigPopover({
 							>
 								<Checkbox
 									id="collection-new-venue-agent"
-									checked={newVenueAgent}
-									onCheckedChange={(c) => setNewVenueAgent(c === true)}
+									checked={venueAgent}
+									onCheckedChange={(c) => setVenueAgent(c === true)}
 								/>
 								<span>{t("plaza.collection.agentExtract")}</span>
 							</label>
-							<Button
-								type="button"
-								size="sm"
-								onClick={addVenue}
-								disabled={!newVenueLabel.trim() || !newVenueUrl.trim()}
-								className={cn(
-									"h-7 gap-1 text-caption",
-									COLLECTION_PRIMARY_BTN_CLASS,
-								)}
-							>
-								<Plus className="size-3" />
-								{t("plaza.feeds.add")}
-							</Button>
+							<div className="flex items-center gap-1">
+								{editingVenueId ? (
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon-sm"
+										onClick={resetVenueForm}
+										className="size-7"
+									>
+										<X className="size-3.5" />
+									</Button>
+								) : null}
+								<Button
+									type="button"
+									size="sm"
+									onClick={submitVenueForm}
+									disabled={!venueLabel.trim() || !venueUrl.trim()}
+									className={cn(
+										"h-7 gap-1 text-caption",
+										COLLECTION_PRIMARY_BTN_CLASS,
+									)}
+								>
+									{editingVenueId ? (
+										<Check className="size-3.5" />
+									) : (
+										<>
+											<Plus className="size-3" />
+											{t("plaza.feeds.add")}
+										</>
+									)}
+								</Button>
+							</div>
 						</div>
 					</div>
 				</div>

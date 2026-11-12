@@ -1,5 +1,5 @@
 /**
- * Plaza — Paper Collection venue taxonomy (28 DBLP 2026 venues),
+ * Plaza — Paper Collection venue taxonomy (28 curated 2026 venues),
  * shared types, and stateless abstract / keyword / citation enrichment.
  */
 
@@ -12,14 +12,17 @@ export type VenueConfig = {
 	id: string;
 	/** Short display name, e.g. `ASE 2026`, `ISSTA 2026`, `TOSEM 2026`. */
 	name: string;
-	/** DBLP venue stream page URL, e.g. `https://dblp.uni-trier.de/db/conf/issta/`. */
+	/** Official conference or journal homepage URL, e.g. `https://conf.researchr.org/home/ase-2026`. */
 	url: string;
-	/** Extraction mode: deterministic DBLP + metadata (`auto`) or Agent-assisted (`agent`). */
+	/** Official Main / Research / Technical Track page URLs (empty for journals). */
+	tracks?: string[];
+	/** Optional prompt hints / instructions passed to the user's Agent when extracting or expanding this venue. */
+	notes?: string;
+	/** Extraction mode: deterministic structured metadata (`auto`) or Agent-assisted (`agent`). */
 	mode: "auto" | "agent";
 	kind?: VenueKind;
 	domain?: VenueDomain;
 	ccfRank?: VenueCcfRank;
-	dblpStream?: string;
 	lastFetchedAt?: string | null;
 	/** Newest `publishedAt` ISO timestamp observed for incremental diffing. */
 	latestPublishedAt?: string | null;
@@ -65,14 +68,23 @@ export type CollectionPaperItem = {
 export type FetchTextFn = (url: string, accept?: string) => Promise<string>;
 export type FetchJsonFn = <T = unknown>(url: string) => Promise<T>;
 
-export type DblpVenueSpec = {
+export type VenueSpec = {
 	id: string;
 	name: string;
+	/** Official conference or journal homepage URL. */
 	url: string;
+	/** Official Main / Research / Technical Track page URLs (empty for journals). */
+	tracks: readonly string[];
+	/**
+	 * How `tracks` participates in paper resolution:
+	 * - `"required"`: combined-volume conference whose publisher proceedings merge non-main tracks;
+	 *   `tracks` MUST be fetched and used as the authoritative Research/Technical Track roster.
+	 * - `"fallback"`: `tracks` provides official accepted-papers program HTML when publisher DOIs are not yet minted.
+	 */
+	trackRosterMode?: "required" | "fallback";
 	kind: VenueKind;
 	domain: VenueDomain;
 	ccfRank: VenueCcfRank;
-	dblpStream: string;
 	openAlexSourceIds?: readonly string[];
 	pacmIssue?: string;
 	issn?: string;
@@ -81,12 +93,16 @@ export type DblpVenueSpec = {
 	doiPrefixFilters?: readonly string[];
 	/** Companion / workshop / wrong-year DOI prefixes excluded from main conference portals. */
 	excludeDoiPrefixes?: readonly string[];
-	/** Optional case-insensitive whitelist of DBLP `publishedIn` labels to exclude co-located workshops. */
-	dblpAllowedPubIn?: readonly string[];
+	/** Require any non-arXiv publisher DOI to match `doiPrefixFilters` / `doiPrefixFilter`. */
+	requireDoiPrefixMatch?: boolean;
 	/** `papers.cool/venue/{slug}` identifier carrying complete abstracts, keywords, and direct PDF links. */
 	coolPapersVenueSlug?: string;
-	/** Official static accepted-papers / schedule page when publisher DOIs are not yet minted. */
-	officialProgramUrl?: string;
+	/** Whitelist of `papers.cool` `?group=...` main-track subject groups (e.g. `["Long Papers", "Short Papers"]`). */
+	coolPapersAllowedGroups?: readonly string[];
+	/** Blacklist regex for `papers.cool` `?group=...` non-main-track groups (e.g. AAAI Student Abstract / IAAI / EAAI). */
+	coolPapersExcludedGroupPattern?: RegExp;
+	/** Exclude `Position: ...` Position Paper Track entries on AI conferences (`ICML`, `NeurIPS`). */
+	excludePositionPapers?: boolean;
 	/** Semantic Scholar `/paper/search/bulk?venue=...` canonical venue name(s). */
 	s2VenueNames?: readonly string[];
 	/** Exact accepted-venue aliases matched in `<arxiv:comment>` / `<arxiv:journal_ref>`. */
@@ -107,125 +123,120 @@ export type DblpVenueSpec = {
  * 2. CR Conferences (CCF-A)
  * 3. AI Conferences (CCF-A)
  */
-export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
+export const VENUE_SPECS: readonly VenueSpec[] = [
 	// 1a. PL/SE Conferences — CCF-A
 	{
 		id: "ase-2026",
 		name: "ASE 2026",
-		url: "https://dblp.uni-trier.de/db/conf/kbse/",
+		url: "https://conf.researchr.org/home/ase-2026",
+		tracks: [
+			"https://conf.researchr.org/track/ase-2026/ase-2026-research-track",
+		],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/kbse",
 		openAlexSourceIds: ["S4363608212"],
 		doiPrefixFilters: ["10.1145/3832783"],
 		crossrefProceedingsQuery:
 			"41st IEEE/ACM International Conference on Automated Software Engineering",
-		dblpAllowedPubIn: ["ASE"],
 		s2VenueNames: ["ASE"],
 		arxivVenueAliases: ["ASE 2026"],
 	},
 	{
 		id: "icse-2026",
 		name: "ICSE 2026",
-		url: "https://dblp.uni-trier.de/db/conf/icse/",
+		url: "https://conf.researchr.org/home/icse-2026",
+		tracks: [
+			"https://conf.researchr.org/track/icse-2026/icse-2026-research-track",
+		],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/icse",
-		openAlexSourceIds: ["S4210203175", "S7407089274"],
-		doiPrefixFilters: [
-			"10.1145/3744916",
+		openAlexSourceIds: ["S4210203175"],
+		doiPrefixFilters: ["10.1145/3744916"],
+		requireDoiPrefixMatch: true,
+		excludeDoiPrefixes: [
+			"10.1145/3774748",
 			"10.1145/3786583",
 			"10.1145/3786582",
 			"10.1145/3786581",
 			"10.1145/3786580",
 		],
-		excludeDoiPrefixes: ["10.1145/3774748"],
 		crossrefProceedingsQuery:
 			"48th International Conference on Software Engineering",
-		dblpAllowedPubIn: [
-			"ICSE",
-			"ICSE-SEIP",
-			"ICSE-NIER",
-			"ICSE-SEIS",
-			"ICSE-SEET",
-		],
 		s2VenueNames: ["ICSE"],
 		arxivVenueAliases: ["ICSE 2026"],
 	},
 	{
 		id: "issta-2026",
 		name: "ISSTA 2026",
-		url: "https://dblp.uni-trier.de/db/conf/issta/",
+		url: "https://conf.researchr.org/home/issta-2026",
+		tracks: ["https://conf.researchr.org/track/issta-2026/issta-2026-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/issta",
-		openAlexSourceIds: ["S4404663975", "S7407085879"],
+		openAlexSourceIds: ["S4404663975"],
 		pacmIssue: "ISSTA",
 		issn: "2994-970X",
-		dblpAllowedPubIn: ["ISSTA", "Proc. ACM Softw. Eng."],
 		s2VenueNames: ["ISSTA"],
 		arxivVenueAliases: ["ISSTA 2026"],
 	},
 	{
 		id: "fse-2026",
 		name: "FSE 2026",
-		url: "https://dblp.uni-trier.de/db/conf/sigsoft/",
+		url: "https://conf.researchr.org/home/fse-2026",
+		tracks: [
+			"https://conf.researchr.org/track/fse-2026/fse-2026-research-papers",
+		],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/sigsoft",
 		openAlexSourceIds: ["S4404663975"],
 		pacmIssue: "FSE",
 		issn: "2994-970X",
-		dblpAllowedPubIn: ["Proc. ACM Softw. Eng.", "ESEC/SIGSOFT FSE", "FSE"],
 		s2VenueNames: ["FSE"],
 		arxivVenueAliases: ["FSE 2026", "ESEC/FSE 2026"],
 	},
 	{
 		id: "pldi-2026",
 		name: "PLDI 2026",
-		url: "https://dblp.uni-trier.de/db/conf/pldi/",
+		url: "https://pldi26.sigplan.org",
+		tracks: ["https://pldi26.sigplan.org/track/pldi-2026-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/pldi",
 		openAlexSourceIds: ["S4210216081"],
 		pacmIssue: "PLDI",
 		issn: "2475-1421",
-		dblpAllowedPubIn: ["Proc. ACM Program. Lang.", "PLDI"],
 		s2VenueNames: ["PLDI"],
 		arxivVenueAliases: ["PLDI 2026"],
 	},
 	{
 		id: "popl-2026",
 		name: "POPL 2026",
-		url: "https://dblp.uni-trier.de/db/conf/popl/",
+		url: "https://popl26.sigplan.org",
+		tracks: ["https://popl26.sigplan.org/track/POPL-2026-popl-research-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/popl",
-		openAlexSourceIds: ["S4210216081", "S7407088133"],
+		openAlexSourceIds: ["S4210216081"],
 		pacmIssue: "POPL",
 		issn: "2475-1421",
-		dblpAllowedPubIn: ["Proc. ACM Program. Lang.", "POPL"],
 		s2VenueNames: ["POPL"],
 		arxivVenueAliases: ["POPL 2026"],
 	},
 	{
 		id: "oopsla-2026",
 		name: "OOPSLA 2026",
-		url: "https://dblp.uni-trier.de/db/conf/oopsla/",
+		url: "https://2026.splashcon.org",
+		tracks: ["https://2026.splashcon.org/track/oopsla-2026"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/oopsla",
 		openAlexSourceIds: ["S4210216081"],
 		pacmIssue: "OOPSLA",
 		issn: "2475-1421",
-		dblpAllowedPubIn: ["Proc. ACM Program. Lang.", "OOPSLA"],
 		s2VenueNames: ["OOPSLA"],
 		arxivVenueAliases: ["OOPSLA 2026"],
 	},
@@ -234,61 +245,63 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "ecoop-2026",
 		name: "ECOOP 2026",
-		url: "https://dblp.uni-trier.de/db/conf/ecoop/",
+		url: "https://2026.ecoop.org",
+		tracks: ["https://2026.ecoop.org/track/ecoop-2026-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/ecoop",
 		doiPrefixFilter: "10.4230/lipics.ecoop.2026",
+		requireDoiPrefixMatch: true,
 		crossrefProceedingsQuery:
 			"European Conference on Object-Oriented Programming",
-		dblpAllowedPubIn: ["ECOOP"],
 		s2VenueNames: ["ECOOP"],
 		arxivVenueAliases: ["ECOOP 2026"],
 	},
 	{
 		id: "icpc-2026",
 		name: "ICPC 2026",
-		url: "https://dblp.uni-trier.de/db/conf/iwpc/",
+		url: "https://conf.researchr.org/home/icpc-2026",
+		tracks: ["https://conf.researchr.org/track/icpc-2026/icpc-2026-research"],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/iwpc",
 		openAlexSourceIds: ["S7407088527", "S4306419777"],
 		doiPrefixFilters: ["10.1145/3794763"],
 		crossrefProceedingsQuery:
 			"34th IEEE/ACM International Conference on Program Comprehension",
-		dblpAllowedPubIn: ["ICPC"],
 		s2VenueNames: ["ICPC"],
 		arxivVenueAliases: ["ICPC 2026"],
 	},
 	{
 		id: "re-2026",
 		name: "RE 2026",
-		url: "https://dblp.uni-trier.de/db/conf/re/",
+		url: "https://conf.researchr.org/home/RE-2026",
+		tracks: [
+			"https://conf.researchr.org/track/RE-2026/RE-2026-Research-Papers",
+		],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/re",
 		openAlexSourceIds: ["S7407086818"],
 		doiPrefixFilters: ["10.1109/re68928.2026"],
 		excludeDoiPrefixes: ["10.1109/rew"],
-		dblpAllowedPubIn: ["RE"],
 		csdlIdPrefix: "re",
 		arxivVenueAliases: ["RE 2026"],
 	},
 	{
 		id: "saner-2026",
 		name: "SANER 2026",
-		url: "https://dblp.uni-trier.de/db/conf/wcre/",
+		url: "https://conf.researchr.org/home/saner-2026",
+		tracks: ["https://conf.researchr.org/track/saner-2026/saner-2026-papers"],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/wcre",
 		openAlexSourceIds: ["S4363608226"],
 		doiPrefixFilters: ["10.1109/saner67736.2026"],
 		excludeDoiPrefixes: ["10.1109/saner-c"],
-		dblpAllowedPubIn: ["SANER"],
 		csdlIdPrefix: "saner",
 		s2VenueNames: ["SANER"],
 		arxivVenueAliases: ["SANER 2026"],
@@ -296,14 +309,14 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "icsme-2026",
 		name: "ICSME 2026",
-		url: "https://dblp.uni-trier.de/db/conf/icsm/",
+		url: "https://conf.researchr.org/home/icsme-2026",
+		tracks: ["https://conf.researchr.org/track/icsme-2026/icsme-2026-papers"],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/icsm",
 		openAlexSourceIds: ["S4210174939"],
 		doiPrefixFilters: ["10.1109/icsme67971.2026"],
-		dblpAllowedPubIn: ["ICSME"],
 		csdlIdPrefix: "icsme",
 		s2VenueNames: ["ICSME"],
 		arxivVenueAliases: ["ICSME 2026"],
@@ -311,45 +324,45 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "sas-2026",
 		name: "SAS 2026",
-		url: "https://dblp.uni-trier.de/db/conf/sas/",
+		url: "https://2026.splashcon.org/home/sas-2026",
+		tracks: ["https://2026.splashcon.org/track/sas-2026-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/sas",
 		openAlexSourceIds: ["S4306420942"],
 		doiPrefixFilters: ["10.1007/978-3-032-40374-2"],
+		requireDoiPrefixMatch: true,
 		excludeDoiPrefixes: ["10.1007/978-3-032-07106-4"],
 		crossrefIsbns: ["9783032403735", "9783032403742"],
-		dblpAllowedPubIn: ["SAS"],
-		arxivVenueAliases: ["SAS 2026"],
+		arxivVenueAliases: ["Static Analysis Symposium 2026"],
 	},
 	{
 		id: "esem-2026",
 		name: "ESEM 2026",
-		url: "https://dblp.uni-trier.de/db/conf/esem/",
+		url: "https://conf.researchr.org/home/eseiw-2026",
+		tracks: [
+			"https://conf.researchr.org/track/eseiw-2026/eseiw-2026-esem---technical-track",
+		],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/esem",
 		openAlexSourceIds: ["S4210197744"],
 		doiPrefixFilter: "10.4230/lipics.esem.2026",
 		issn: "1949-3770",
-		dblpAllowedPubIn: ["ESEM"],
 		s2VenueNames: ["ESEM"],
 		arxivVenueAliases: ["ESEM 2026"],
 	},
 	{
 		id: "issre-2026",
 		name: "ISSRE 2026",
-		url: "https://dblp.uni-trier.de/db/conf/issre/",
+		url: "https://cyprusconferences.org/issre2026/",
+		tracks: ["https://cyprusconferences.org/issre2026/accepted-papers/"],
+		trackRosterMode: "fallback",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/conf/issre",
 		openAlexSourceIds: ["S4210220341"],
-		officialProgramUrl:
-			"https://cyprusconferences.org/issre2026/accepted-papers/",
-		dblpAllowedPubIn: ["ISSRE"],
 		s2VenueNames: ["ISSRE"],
 		arxivVenueAliases: ["ISSRE 2026"],
 	},
@@ -358,11 +371,11 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "tse-2026",
 		name: "TSE 2026",
-		url: "https://dblp.uni-trier.de/db/journals/tse/",
+		url: "https://www.computer.org/csdl/journal/ts",
+		tracks: [],
 		kind: "journal",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/journals/tse",
 		openAlexSourceIds: ["S8351582"],
 		issn: "0098-5589",
 		csdlIdPrefix: "ts",
@@ -371,11 +384,11 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "tosem-2026",
 		name: "TOSEM 2026",
-		url: "https://dblp.uni-trier.de/db/journals/tosem/",
+		url: "https://dl.acm.org/journal/tosem",
+		tracks: [],
 		kind: "journal",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/journals/tosem",
 		openAlexSourceIds: ["S142627899"],
 		issn: "1049-331X",
 		arxivVenueAliases: ["TOSEM 2026", "ACM TOSEM 2026"],
@@ -383,22 +396,22 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "ase-journal-2026",
 		name: "ASE (J) 2026",
-		url: "https://dblp.uni-trier.de/db/journals/ase/",
+		url: "https://link.springer.com/journal/10515",
+		tracks: [],
 		kind: "journal",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/journals/ase",
 		openAlexSourceIds: ["S4210177399"],
 		issn: "1573-7535",
 	},
 	{
 		id: "ese-2026",
 		name: "ESE 2026",
-		url: "https://dblp.uni-trier.de/db/journals/ese/",
+		url: "https://link.springer.com/journal/10664",
+		tracks: [],
 		kind: "journal",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
-		dblpStream: "streams/journals/ese",
 		openAlexSourceIds: ["S109852484"],
 		issn: "1382-3256",
 		arxivVenueAliases: ["EMSE 2026"],
@@ -408,58 +421,60 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "ccs-2026",
 		name: "CCS 2026",
-		url: "https://dblp.uni-trier.de/db/conf/ccs/",
+		url: "https://www.sigsac.org/ccs/CCS2026/",
+		tracks: ["https://www.sigsac.org/ccs/CCS2026/program/schedule.html"],
+		trackRosterMode: "fallback",
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/ccs",
 		openAlexSourceIds: ["S4393917527"],
-		officialProgramUrl:
-			"https://www.sigsac.org/ccs/CCS2026/program/schedule.html",
-		dblpAllowedPubIn: ["CCS"],
 		s2VenueNames: ["CCS"],
 		arxivVenueAliases: ["CCS 2026", "ACM CCS 2026"],
 	},
 	{
 		id: "sp-2026",
 		name: "S&P 2026",
-		url: "https://dblp.uni-trier.de/db/conf/sp/",
+		url: "https://sp2026.ieee-security.org/",
+		tracks: ["https://sp2026.ieee-security.org/program-papers.html"],
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/sp",
 		openAlexSourceIds: ["S4210233669"],
 		doiPrefixFilters: ["10.1109/sp63933.2026"],
+		requireDoiPrefixMatch: true,
 		excludeDoiPrefixes: ["10.1109/spw"],
-		dblpAllowedPubIn: ["SP", "IEEE Symposium on Security and Privacy"],
 		csdlIdPrefix: "sp",
 		arxivVenueAliases: ["IEEE S&P 2026", "Oakland 2026"],
 	},
 	{
 		id: "usenix-sec-2026",
 		name: "USENIX Security 2026",
-		url: "https://dblp.uni-trier.de/db/conf/uss/",
+		url: "https://www.usenix.org/conference/usenixsecurity26",
+		tracks: [
+			"https://www.usenix.org/conference/usenixsecurity26/technical-sessions",
+		],
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/uss",
 		openAlexSourceIds: ["S4306421123"],
 		coolPapersVenueSlug: "USENIX-Sec.2026",
-		dblpAllowedPubIn: ["USENIX Security Symposium"],
+		coolPapersExcludedGroupPattern:
+			/\b(workshops?|posters?|demos?|demonstrations?|tutorials?|doctoral)\b/i,
 		s2VenueNames: ["USENIX Security Symposium", "USENIX Security"],
 		arxivVenueAliases: ["USENIX Security 2026"],
 	},
 	{
 		id: "ndss-2026",
 		name: "NDSS 2026",
-		url: "https://dblp.uni-trier.de/db/conf/ndss/",
+		url: "https://www.ndss-symposium.org/ndss2026/",
+		tracks: ["https://www.ndss-symposium.org/ndss2026/accepted-papers/"],
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/ndss",
 		openAlexSourceIds: ["S4306420590"],
 		coolPapersVenueSlug: "NDSS.2026",
-		dblpAllowedPubIn: ["NDSS"],
+		coolPapersExcludedGroupPattern:
+			/\b(workshops?|posters?|demos?|demonstrations?|tutorials?|doctoral)\b/i,
 		s2VenueNames: ["NDSS"],
 		arxivVenueAliases: ["NDSS 2026"],
 	},
@@ -468,14 +483,15 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "aaai-2026",
 		name: "AAAI 2026",
-		url: "https://dblp.uni-trier.de/db/conf/aaai/",
+		url: "https://aaai.org/conference/aaai/aaai-26/",
+		tracks: ["https://ojs.aaai.org/index.php/AAAI/issue/archive"],
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/aaai",
 		openAlexSourceIds: ["S4210191458"],
 		coolPapersVenueSlug: "AAAI.2026",
-		dblpAllowedPubIn: ["AAAI"],
+		coolPapersExcludedGroupPattern:
+			/\b(special\s+track|senior\s+member|new\s+faculty|journal\s+track|emerging\s+trends|doctoral\s+consortium|student\s+abstract|undergraduate\s+consortium|demonstration|demos?\b|iaai|eaai|workshops?|bridges?|tutorials?)\b/i,
 		issn: "2374-3468",
 		s2VenueNames: ["AAAI"],
 		arxivVenueAliases: ["AAAI 2026"],
@@ -483,42 +499,55 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "neurips-2026",
 		name: "NeurIPS 2026",
-		url: "https://dblp.uni-trier.de/db/conf/nips/",
+		url: "https://neurips.cc/Conferences/2026",
+		tracks: ["https://openreview.net/group?id=NeurIPS.cc/2026/Conference"],
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/nips",
 		openAlexSourceIds: ["S4363606243"],
+		excludeDoiPrefixes: ["10.52202/079017", "10.52202/085713"],
 		coolPapersVenueSlug: "NeurIPS.2026",
-		dblpAllowedPubIn: ["NeurIPS"],
+		coolPapersAllowedGroups: ["Oral", "Spotlight", "Poster"],
+		excludePositionPapers: true,
 		s2VenueNames: ["NeurIPS", "Neural Information Processing Systems"],
 		arxivVenueAliases: ["NeurIPS 2026"],
 	},
 	{
 		id: "acl-2026",
 		name: "ACL 2026",
-		url: "https://dblp.uni-trier.de/db/conf/acl/",
+		url: "https://2026.aclweb.org/",
+		tracks: [
+			"https://aclanthology.org/volumes/2026.acl-long/",
+			"https://aclanthology.org/volumes/2026.acl-short/",
+		],
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/acl",
 		openAlexSourceIds: ["S4393915740"],
+		excludeDoiPrefixes: [
+			"10.18653/v1/2026.findings-",
+			"10.18653/v1/2026.acl-industry",
+			"10.18653/v1/2026.acl-srw",
+			"10.18653/v1/2026.acl-demo",
+			"10.18653/v1/2026.acl-tutorials",
+		],
 		coolPapersVenueSlug: "ACL.2026",
+		coolPapersAllowedGroups: ["Long Papers", "Short Papers"],
 		crossrefContainerMatch: "Association for Computational Linguistics",
 		s2VenueNames: ["ACL"],
-		arxivVenueAliases: ["ACL 2026", "Findings of ACL 2026"],
+		arxivVenueAliases: ["ACL 2026"],
 	},
 	{
 		id: "iclr-2026",
 		name: "ICLR 2026",
-		url: "https://dblp.uni-trier.de/db/conf/iclr/",
+		url: "https://iclr.cc/Conferences/2026",
+		tracks: ["https://openreview.net/group?id=ICLR.cc/2026/Conference"],
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/iclr",
 		openAlexSourceIds: ["S4306419637"],
 		coolPapersVenueSlug: "ICLR.2026",
-		dblpAllowedPubIn: ["ICLR"],
+		coolPapersAllowedGroups: ["Oral", "Spotlight", "Poster"],
 		s2VenueNames: [
 			"ICLR",
 			"International Conference on Learning Representations",
@@ -528,21 +557,22 @@ export const DBLP_2026_VENUE_SPECS: readonly DblpVenueSpec[] = [
 	{
 		id: "icml-2026",
 		name: "ICML 2026",
-		url: "https://dblp.uni-trier.de/db/conf/icml/",
+		url: "https://icml.cc/Conferences/2026",
+		tracks: ["https://openreview.net/group?id=ICML.cc/2026/Conference"],
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
-		dblpStream: "streams/conf/icml",
 		openAlexSourceIds: ["S4306419644"],
 		coolPapersVenueSlug: "ICML.2026",
-		dblpAllowedPubIn: ["ICML"],
+		coolPapersAllowedGroups: ["Oral", "Spotlight", "Poster"],
+		excludePositionPapers: true,
 		s2VenueNames: ["ICML", "International Conference on Machine Learning"],
 		arxivVenueAliases: ["ICML 2026"],
 	},
 ];
 
-export const VENUE_SPEC_BY_ID = new Map<string, DblpVenueSpec>(
-	DBLP_2026_VENUE_SPECS.map((s) => [s.id, s]),
+export const VENUE_SPEC_BY_ID = new Map<string, VenueSpec>(
+	VENUE_SPECS.map((s) => [s.id, s]),
 );
 
 export const ARXIV_CATEGORY_SUBTITLES: Record<string, string> = {
@@ -613,12 +643,92 @@ export function isPlaceholderAbstract(
 export function isFrontmatterTitle(title: string): boolean {
 	const t = title.trim();
 	if (t.length < 8) return true;
-	return /^(front\s*matter|back\s*matter|title page|copyright(?:\s+page)?|table of contents|contents\b|message from|welcome (?:from|message|to\b)|foreword|preface|proceedings of\b|companion proceedings\b|adjunct proceedings\b|extended abstracts of\b|conference organization|program committee|organizing committee|artifact evaluation committee|steering committee|external reviewers|additional reviewers|list of reviewers|reviewers?\b|author index|subject index|index of authors|sponsors?\b|corporate sponsors?\b|session details\s*:|keynote|panel:|tutorial:|editorial)\b/i.test(
+	if (
+		/^(front\s*matter|back\s*matter|title page|copyright(?:\s+page)?|table of contents|contents\b|message from|welcome (?:from|message|to\b)|foreword|preface|proceedings of\b|companion proceedings\b|adjunct proceedings\b|extended abstracts of\b|conference organization|program committee|organizing committee|artifact evaluation committee|steering committee|external reviewers|additional reviewers|list of reviewers|reviewers?\b|author index|subject index|index of authors|sponsors?\b|corporate sponsors?\b|session details\s*:|keynote\b|panel:|tutorial:|editorial\b|guest\s+editorial\b|introduction\s+to\s+the\s+special\s+(?:issue|section)\b|corrigendum\b|erratum\b|errata\b|corrections?\s+to\b|retraction\b|in\s+memoriam\b)/i.test(
+			t,
+		)
+	) {
+		return true;
+	}
+	return /[[(](?:keynote(?:\s+talk|\s+address)?|invited\s+(?:talk|paper|keynote)|tutorial|panel|extended\s+abstract|student\s+abstract|tool\s+demonstration|demo(?:\s+paper)?|poster(?:\s+abstract)?)[\])]\s*$/i.test(
 		t,
 	);
 }
 
-/** Reject co-located workshop, companion, or doctoral symposium sub-venues on main conference portals. */
+/** Reject non-research items in journals (Guest Editorials, TOSEM RCR Reports, short <=4p commentaries). */
+export function isNonResearchJournalItem(
+	title: string,
+	pages?: string | null,
+): boolean {
+	const t = title.trim();
+	if (isFrontmatterTitle(t)) return true;
+	if (
+		/^rcr\s+report\b/i.test(t) ||
+		/(?:—|--|–|-|:)\s*rcr\s+report\s*$/i.test(t) ||
+		/\breplicated\s+computational\s+results\s+report\b/i.test(t) ||
+		/^(?:letter\s+to\s+the\s+editor|book\s+review|issue\s+information|reviewer\s+acknowledg)/i.test(
+			t,
+		)
+	) {
+		return true;
+	}
+	const p = (pages ?? "").trim();
+	const rangeMatch = /^(\d+)\s*[-–]\s*(\d+)$/.exec(p);
+	if (rangeMatch?.[1] && rangeMatch[2]) {
+		const start = Number.parseInt(rangeMatch[1], 10);
+		const end = Number.parseInt(rangeMatch[2], 10);
+		if (
+			Number.isFinite(start) &&
+			Number.isFinite(end) &&
+			end >= start &&
+			end - start + 1 <= 4
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Detect AI conference Position Paper Track titles (`Position: ...` / `Position Paper: ...`). */
+export function isPositionPaperTitle(title: string): boolean {
+	return /^position(?:\s+paper)?\s*:/i.test(title.trim());
+}
+
+/** Detect generic preprint/archive repositories that should never overwrite `venueFull`. */
+export function isGenericRepositoryVenueName(name: string): boolean {
+	const s = name.trim();
+	if (!s) return false;
+	return /^(?:arxiv(?:\s*\(.*\))?|zenodo|figshare|ssrn|hal|osf\s*preprints?|techrxiv|research\s*square|rare\s*&\s*special\s*e-zone)$/i.test(
+		s,
+	);
+}
+
+/** Reject prior-year conference proceedings spillover (e.g. NeurIPS 2024/2025 indexed with online date 2026). */
+export function hasPriorConferenceYearSpillover(
+	targetYear: number,
+	...fields: Array<string | undefined | null>
+): boolean {
+	for (const raw of fields) {
+		if (!raw) continue;
+		const s = raw.trim();
+		if (!s) continue;
+		for (const m of s.matchAll(
+			/(?:\/paper_files\/paper\/|\/volumes\/|\/)(20\d{2})(?:\/|\.[a-z])/gi,
+		)) {
+			const y = Number.parseInt(m[1] ?? "", 10);
+			if (y >= 2018 && y < targetYear) return true;
+		}
+		for (const m of s.matchAll(/\b(20\d{2})\b/g)) {
+			const y = Number.parseInt(m[1] ?? "", 10);
+			if (y >= 2018 && y < targetYear && !s.startsWith("10.")) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/** Reject co-located workshop, companion, or non-main-track sub-venues on main conference portals. */
 export function isWorkshopOrCompanionVenue(venueLabel: string): boolean {
 	const s = venueLabel.trim();
 	if (!s) return false;
@@ -630,7 +740,7 @@ export function isWorkshopOrCompanionVenue(venueLabel: string): boolean {
 	) {
 		return true;
 	}
-	return /\b(workshops?|companion|adjunct|doctoral\s+symposium|student\s+research\s+competition|posters?\s+and\s+(?:tool\s+)?demos?|fast\s+abstracts?)\b/i.test(
+	return /\b(workshops?|companion|adjunct|doctoral\s+(?:symposium|consortium)|student\s+(?:research\s+competition|abstract)|posters?\s+and\s+(?:tool\s+)?demos?|fast\s+abstracts?|seip|seet|seis|nier|findings\s+of|datasets?\s+(?:and|&)\s+benchmarks?|position\s+paper\s+track|demonstrations?\s+track|industry\s+(?:track|showcase)|industrial\s+innovation|replications?\s+(?:and|&)\s+negative)\b/i.test(
 		s,
 	);
 }
@@ -642,6 +752,21 @@ export function isExcludedByDoiPrefix(
 	if (!doi || !excludePrefixes || excludePrefixes.length === 0) return false;
 	const lower = doi.toLowerCase();
 	return excludePrefixes.some((p) => lower.startsWith(p.toLowerCase()));
+}
+
+export function matchesConfiguredDoiPrefix(
+	doi: string | undefined,
+	spec: VenueSpec | undefined,
+): boolean {
+	if (!spec) return true;
+	const prefixes = [
+		...(spec.doiPrefixFilters ?? []),
+		...(spec.doiPrefixFilter ? [spec.doiPrefixFilter] : []),
+	];
+	if (prefixes.length === 0) return true;
+	if (!doi) return false;
+	const lower = doi.toLowerCase();
+	return prefixes.some((p) => lower.startsWith(p.toLowerCase()));
 }
 
 const NON_KEYWORD_LABELS = new Set([
@@ -815,10 +940,7 @@ export function inferVenueKind(
 	if (spec) return spec.kind;
 	const lower = `${venue.id} ${venue.name} ${venue.url}`.toLowerCase();
 	if (
-		lower.includes("/db/journals/tse") ||
-		lower.includes("/db/journals/tosem") ||
-		lower.includes("/db/journals/ase") ||
-		lower.includes("/db/journals/ese") ||
+		lower.includes("/journal/") ||
 		/\b(tosem|tse|ese|journal|transactions)\b/.test(lower)
 	) {
 		return "journal";
@@ -936,12 +1058,14 @@ function formatPages(
 	return f || l || undefined;
 }
 
-function matchesPacmIssue(row: OpenAlexWork, pacmIssue?: string): boolean {
+function matchesPacmIssue(
+	row: OpenAlexWork,
+	pacmIssue?: string,
+	doi?: string,
+): boolean {
 	if (!pacmIssue) return true;
-	const sourceId = row.primary_location?.source?.id ?? "";
-	// Only filter by issue when coming from shared PACMSE / PACMPL journal streams
-	if (!sourceId.endsWith("S4404663975") && !sourceId.endsWith("S4210216081")) {
-		return true;
+	if (doi && !doi.toLowerCase().startsWith("10.1145/")) {
+		return false;
 	}
 	const issue = (row.biblio?.issue ?? "").trim().toUpperCase();
 	if (!issue) return false;
@@ -952,7 +1076,7 @@ function matchesPacmIssue(row: OpenAlexWork, pacmIssue?: string): boolean {
 export function openAlexWorkToVenueItem(
 	row: OpenAlexWork,
 	venue: VenueConfig,
-	spec: DblpVenueSpec | undefined,
+	spec: VenueSpec | undefined,
 	targetYear: number,
 ): CollectionPaperItem | null {
 	if (
@@ -967,13 +1091,20 @@ export function openAlexWorkToVenueItem(
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!rawTitle || isFrontmatterTitle(rawTitle)) return null;
-	if (!matchesPacmIssue(row, spec?.pacmIssue)) return null;
+	if (spec?.excludePositionPapers && isPositionPaperTitle(rawTitle)) {
+		return null;
+	}
+
+	const doi = cleanDoi(row.doi);
+	if (!matchesPacmIssue(row, spec?.pacmIssue, doi)) return null;
 
 	const year = row.publication_year ?? targetYear;
 	if (year < targetYear) return null;
 
-	const doi = cleanDoi(row.doi);
 	if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) {
+		return null;
+	}
+	if (spec?.requireDoiPrefixMatch && !matchesConfiguredDoiPrefix(doi, spec)) {
 		return null;
 	}
 	// Reject bare IEEE conference-volume root DOIs such as `10.1109/re68928.2026` (papers end in `.00xxx` or `.11xxxxxx`)
@@ -982,24 +1113,39 @@ export function openAlexWorkToVenueItem(
 	}
 
 	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	const pages = formatPages(row.biblio?.first_page, row.biblio?.last_page);
+	if (venueKind === "journal" && isNonResearchJournalItem(rawTitle, pages)) {
+		return null;
+	}
+
 	const sourceId = row.primary_location?.source?.id ?? "";
 	const sourceExplicitlyCurated = Boolean(
 		(spec?.openAlexSourceIds?.some((sid) => sourceId.endsWith(sid)) ?? false) ||
 			(doi &&
-				[
-					...(spec?.doiPrefixFilters ?? []),
-					...(spec?.doiPrefixFilter ? [spec.doiPrefixFilter] : []),
-				].some((prefix) => doi.toLowerCase().startsWith(prefix.toLowerCase()))),
+				matchesConfiguredDoiPrefix(doi, spec) &&
+				Boolean(spec?.doiPrefixFilters?.length || spec?.doiPrefixFilter)),
 	);
 	const sourceDisplayName =
 		row.primary_location?.source?.display_name?.trim() ?? "";
-	if (
-		venueKind === "conference" &&
-		!sourceExplicitlyCurated &&
-		sourceDisplayName &&
-		isWorkshopOrCompanionVenue(sourceDisplayName)
-	) {
-		return null;
+	const landingPageUrl = row.primary_location?.landing_page_url?.trim() ?? "";
+	if (venueKind === "conference") {
+		if (
+			hasPriorConferenceYearSpillover(
+				targetYear,
+				landingPageUrl,
+				doi,
+				sourceDisplayName,
+			)
+		) {
+			return null;
+		}
+		if (
+			!sourceExplicitlyCurated &&
+			sourceDisplayName &&
+			isWorkshopOrCompanionVenue(sourceDisplayName)
+		) {
+			return null;
+		}
 	}
 
 	const rawAbs = reconstructOpenAlexAbstract(row.abstract_inverted_index);
@@ -1013,7 +1159,9 @@ export function openAlexWorkToVenueItem(
 	const venueDomain = spec?.domain ?? venue.domain;
 	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
 	const venueFull =
-		sourceDisplayName && !isWorkshopOrCompanionVenue(sourceDisplayName)
+		sourceDisplayName &&
+		!isWorkshopOrCompanionVenue(sourceDisplayName) &&
+		!isGenericRepositoryVenueName(sourceDisplayName)
 			? sourceDisplayName
 			: venue.name;
 	const categories = [
@@ -1043,9 +1191,7 @@ export function openAlexWorkToVenueItem(
 		sourceType: "venue",
 		sourceLabel: venue.name,
 		categories,
-		url:
-			row.primary_location?.landing_page_url ||
-			(doi ? `https://doi.org/${doi}` : venue.url),
+		url: landingPageUrl || (doi ? `https://doi.org/${doi}` : venue.url),
 		pdfUrl:
 			row.primary_location?.pdf_url ||
 			oaPdfCandidate ||
@@ -1061,7 +1207,7 @@ export function openAlexWorkToVenueItem(
 		keywords,
 		volume: row.biblio?.volume?.trim() || undefined,
 		issue: row.biblio?.issue?.trim() || undefined,
-		pages: formatPages(row.biblio?.first_page, row.biblio?.last_page),
+		pages,
 	};
 }
 
@@ -1200,13 +1346,24 @@ export async function fetchVenueStructuredPapers(
 		const doi = cleanDoi(row.DOI);
 		const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
 		if (!doi || !title || isFrontmatterTitle(title)) return null;
+		if (spec?.excludePositionPapers && isPositionPaperTitle(title)) return null;
 		if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) return null;
-		if (requireDoiPrefix) {
+		if (requireDoiPrefix || spec?.requireDoiPrefixMatch) {
 			const lowerDoi = doi.toLowerCase();
-			const matched = doiPrefixes.some(
-				(px) => lowerDoi.startsWith(`${px}.`) || lowerDoi.startsWith(`${px}/`),
-			);
+			const matched =
+				doiPrefixes.length === 0 ||
+				doiPrefixes.some(
+					(px) =>
+						lowerDoi.startsWith(px) &&
+						(lowerDoi.length === px.length ||
+							/^[./_-]/.test(lowerDoi.slice(px.length))),
+				);
 			if (!matched) return null;
+		}
+
+		const venueKind = spec?.kind ?? inferVenueKind(venue);
+		if (venueKind === "journal" && isNonResearchJournalItem(title, row.page)) {
+			return null;
 		}
 
 		const containerTitle = (row["container-title"]?.[0] ?? "").trim();
@@ -1218,15 +1375,17 @@ export async function fetchVenueStructuredPapers(
 		) {
 			return null;
 		}
-		if (
-			spec?.kind === "conference" &&
-			containerTitle &&
-			isWorkshopOrCompanionVenue(containerTitle)
-		) {
-			return null;
+		if (venueKind === "conference") {
+			if (hasPriorConferenceYearSpillover(year, doi, containerTitle)) {
+				return null;
+			}
+			if (containerTitle && isWorkshopOrCompanionVenue(containerTitle)) {
+				return null;
+			}
 		}
 
 		if (spec?.pacmIssue) {
+			if (!doi.toLowerCase().startsWith("10.1145/")) return null;
 			const iss = (row.issue ?? "").trim().toUpperCase();
 			if (!iss.startsWith(spec.pacmIssue.toUpperCase())) return null;
 		}
@@ -1276,10 +1435,13 @@ export async function fetchVenueStructuredPapers(
 			url: `https://doi.org/${doi}`,
 			doi,
 			venueId: venue.id,
-			venueKind: spec?.kind,
+			venueKind,
 			venueDomain: spec?.domain,
 			ccfRank: spec?.ccfRank,
-			venueFull: containerTitle || venue.name,
+			venueFull:
+				containerTitle && !isGenericRepositoryVenueName(containerTitle)
+					? containerTitle
+					: venue.name,
 			citationCount: Math.max(0, row["is-referenced-by-count"] ?? 0),
 			keywords: [],
 			volume: row.volume,
@@ -1404,7 +1566,7 @@ export async function fetchVenueStructuredPapers(
 	}
 
 	if (rawCrossrefPendingEnrich.length > 0) {
-		const finalizedCr = await enrichDblpItemsBatch(
+		const finalizedCr = await enrichVenueItemsBatch(
 			rawCrossrefPendingEnrich,
 			venue,
 			fetchJson,
@@ -1499,7 +1661,7 @@ async function fetchOpenAlexSingletonsByDoi(
  * `filter=doi:...` chunks (fast path when daily credits exist), automatically falling back
  * to OpenAlex's 0-credit singleton endpoint (`/works/doi:{doi}`) when list credits are exhausted.
  */
-export async function enrichDblpItemsBatch(
+export async function enrichVenueItemsBatch(
 	items: CollectionPaperItem[],
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
@@ -1676,11 +1838,16 @@ export async function enrichDblpItemsBatch(
 			const rowSourceName =
 				row.primary_location?.source?.display_name?.trim() || "";
 			venueFull =
-				(venueFull && venueFull !== venue.name ? venueFull : undefined) ||
-				(!isWorkshopOrCompanionVenue(rowSourceName)
+				(venueFull &&
+				venueFull !== venue.name &&
+				!isGenericRepositoryVenueName(venueFull)
+					? venueFull
+					: undefined) ||
+				(!isWorkshopOrCompanionVenue(rowSourceName) &&
+				!isGenericRepositoryVenueName(rowSourceName)
 					? rowSourceName
 					: undefined) ||
-				venueFull;
+				venue.name;
 			arxivId = arxivId || extractArxivIdFromOpenAlex(row);
 			const oaUrl = row.open_access?.oa_url?.trim() || "";
 			const oaPdf =
