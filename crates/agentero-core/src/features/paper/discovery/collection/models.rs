@@ -718,7 +718,7 @@ pub struct CollectionCurateOut {
     pub curated_count: usize,
     pub groups: Vec<CuratedGroupOut>,
     pub suggested_follow_ups: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized: MCP clients validate output against the schema, which marks it required.
     pub dropped_unknown_ids: Vec<String>,
 }
 
