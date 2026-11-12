@@ -12,6 +12,10 @@
 import { listenAgentCompleted, listenAgentFailed, runOnce } from "@/lib/agent";
 import { commands } from "@/lib/core/bindings";
 import {
+	ensureOpenAlexRuntimeKeyLoaded,
+	withOpenAlexApiKey,
+} from "@/lib/openalex";
+import {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
 	buildVenuePaperId,
@@ -231,7 +235,51 @@ const CORS_OPEN_HOSTS = new Set([
 	"api.datacite.org",
 	"api.semanticscholar.org",
 	"www.computer.org",
+	"arxiv.org",
 ]);
+
+function stripOpenAlexApiKeyParam(rawUrl: string): string {
+	try {
+		const parsed = new URL(rawUrl);
+		if (!parsed.searchParams.has("api_key")) return rawUrl;
+		parsed.searchParams.delete("api_key");
+		return parsed.toString();
+	} catch {
+		return rawUrl.replace(/([?&])api_key=[^&#]*(&|$)/, (_m, sep, tail) =>
+			tail === "&" ? sep : "",
+		);
+	}
+}
+
+async function readResponseHeadText(
+	res: Response,
+	maxBytes: number,
+): Promise<string> {
+	const reader = res.body?.getReader();
+	if (!reader) {
+		const full = await res.text();
+		return full.slice(0, maxBytes);
+	}
+	const decoder = new TextDecoder();
+	let out = "";
+	let received = 0;
+	try {
+		while (received < maxBytes) {
+			const { done, value } = await reader.read();
+			if (done || !value) break;
+			const remaining = maxBytes - received;
+			const slice =
+				value.byteLength > remaining ? value.subarray(0, remaining) : value;
+			out += decoder.decode(slice, { stream: true });
+			received += slice.byteLength;
+			if (slice.byteLength < value.byteLength) break;
+		}
+		out += decoder.decode();
+	} finally {
+		await reader.cancel().catch(() => undefined);
+	}
+	return out;
+}
 
 const allowedWebProxyHosts = new Set<string>();
 
@@ -262,28 +310,59 @@ export async function plazaFetchText(
 	url: string,
 	accept = "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
 ): Promise<string> {
-	const cleanUrl = url.split("#")[0] || url;
+	const rawCleanUrl = url.split("#")[0] || url;
 	let hostname = "";
+	let pathname = "";
 	try {
-		hostname = new URL(cleanUrl).hostname.toLowerCase();
+		const parsed = new URL(rawCleanUrl);
+		hostname = parsed.hostname.toLowerCase();
+		pathname = parsed.pathname;
 	} catch {
 		hostname = "";
 	}
+	if (hostname === "api.openalex.org") {
+		await ensureOpenAlexRuntimeKeyLoaded();
+	}
+	const cleanUrl =
+		hostname === "api.openalex.org"
+			? withOpenAlexApiKey(rawCleanUrl)
+			: rawCleanUrl;
+	const isArxivHtmlHead =
+		hostname === "arxiv.org" && /^\/html\//i.test(pathname);
 
-	// Fast path: OpenAlex / Crossref / DataCite / Semantic Scholar / CSDL send `Access-Control-Allow-Origin: *`
+	// Fast path: OpenAlex / Crossref / DataCite / Semantic Scholar / CSDL / arxiv.org send `Access-Control-Allow-Origin: *`
 	if (CORS_OPEN_HOSTS.has(hostname)) {
 		try {
-			const direct = await fetch(cleanUrl, {
+			const htmlSignal =
+				isArxivHtmlHead && typeof AbortSignal?.timeout === "function"
+					? AbortSignal.timeout(10_000)
+					: undefined;
+			let direct = await fetch(cleanUrl, {
 				headers: { Accept: accept },
+				...(htmlSignal ? { signal: htmlSignal } : {}),
 			});
-			if (direct.status === 202 || direct.status === 429) {
+			if (direct.status === 401 && hostname === "api.openalex.org") {
+				const unauthUrl = stripOpenAlexApiKeyParam(cleanUrl);
+				if (unauthUrl !== cleanUrl) {
+					direct = await fetch(unauthUrl, {
+						headers: { Accept: accept },
+					});
+				}
+			}
+			if (
+				direct.status === 202 ||
+				direct.status === 429 ||
+				(isArxivHtmlHead && direct.status === 404)
+			) {
 				throw new Error(`HTTP ${direct.status} fetching ${cleanUrl}`);
 			}
 			if (direct.ok) {
-				return await direct.text();
+				return isArxivHtmlHead
+					? await readResponseHeadText(direct, 65_536)
+					: await direct.text();
 			}
 		} catch (err) {
-			if (err instanceof Error && /HTTP (?:202|429)\b/.test(err.message)) {
+			if (err instanceof Error && /HTTP (?:202|404|429)\b/.test(err.message)) {
 				throw err;
 			}
 			// Fall through to proxy fallback if direct fetch failed at network layer.
@@ -862,7 +941,7 @@ export async function fetchArxivCollection(
 		rawMerged,
 		fetchJsonFn,
 		rawMerged.length,
-		{ fetchText: fetchTextFn, maxHtmlFallback: 24 },
+		{ fetchText: fetchTextFn, maxHtmlFallback: 120 },
 	);
 	markArxivKeywordEnrichAttempted(items);
 	const newest = items[0] ?? null;
@@ -1041,7 +1120,7 @@ export async function syncArxivCategoriesIncremental(
 			mergedWarmDelta,
 			fetchJsonFn,
 			mergedWarmDelta.length,
-			{ fetchText: fetchTextFn, maxHtmlFallback: 24 },
+			{ fetchText: fetchTextFn, maxHtmlFallback: 120 },
 		);
 		markArxivKeywordEnrichAttempted(enrichedDelta);
 	}
@@ -2073,7 +2152,6 @@ export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
 	if (isPlaceholderAbstract(paper.abstract, paper.sourceLabel)) return true;
 	if (paper.citationCount === undefined) return true;
 	if (
-		(paper.doi || paper.arxivId) &&
 		(!paper.keywords || paper.keywords.length === 0) &&
 		!attemptedDetailEnrichIds.has(paper.id)
 	) {
@@ -2321,7 +2399,7 @@ export async function backfillMissingArxivKeywords(
 						slice.length,
 						{
 							fetchText: fetchTextFn,
-							maxHtmlFallback: isFirstMissingSlice && offset === 0 ? 20 : 0,
+							maxHtmlFallback: isFirstMissingSlice && offset === 0 ? 120 : 0,
 						},
 					);
 					isFirstMissingSlice = false;

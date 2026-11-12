@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { commands } from "@/lib/core/bindings";
 import {
+	setCachedOpenAlexApiKeyForTests,
+	withOpenAlexApiKey,
+} from "@/lib/openalex";
+import {
 	applyFreshVenueItems,
 	backfillSpringerAbstracts,
 	type CollectionPaperItem,
@@ -2138,6 +2142,125 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		} finally {
 			ipc.restore();
 			resetCollectionMemoryForTests();
+		}
+	});
+
+	it("extracts ACM ltx_classification and inline arXiv HTML keywords while skipping CCS and LNCS run-ons", () => {
+		const acmHtml = `
+			<article class="ltx_document">
+				<div class="ltx_classification">
+					<h6 class="ltx_title ltx_title_classification">ccs</h6>
+					Software and its engineering — Software verification and validation
+				</div>
+				<div class="ltx_classification">
+					<h6 class="ltx_title ltx_title_classification">keywords</h6>
+					quantum software engineering; runtime assurance; context binding; retained results; prespecified protocol; service recovery
+				</div>
+			</article>
+		`;
+		expect(extractArxivHtmlKeywords(acmHtml)).toEqual([
+			"quantum software engineering",
+			"runtime assurance",
+			"context binding",
+			"retained results",
+			"prespecified protocol",
+			"service recovery",
+		]);
+
+		const inlinePipeHtml = `
+			<div class="ltx_abstract">
+				<p class="ltx_p">Abstract body.</p>
+				<p class="ltx_p"><span class="ltx_text ltx_font_bold">Keywords:</span> Static Analysis | Symbolic Execution | Memory Safety</p>
+			</div>
+		`;
+		expect(extractArxivHtmlKeywords(inlinePipeHtml)).toEqual([
+			"Static Analysis",
+			"Symbolic Execution",
+			"Memory Safety",
+		]);
+
+		const malformedLncsHtml = `
+			<div class="ltx_keywords">
+				<h6 class="ltx_title ltx_title_keywords">Keywords: </h6>
+				Cybersecurity Education Security Operations Center Incident Response Training Platform
+			</div>
+		`;
+		expect(extractArxivHtmlKeywords(malformedLncsHtml)).toEqual([]);
+	});
+
+	it("recovers OAI-PMH landing_page_url arXiv keywords and appends optional OpenAlex api_key when configured", async () => {
+		setCachedOpenAlexApiKeyForTests("test_dummy_oa_key");
+		try {
+			expect(
+				withOpenAlexApiKey(
+					"https://api.openalex.org/works/W2741809807?select=id",
+				),
+			).toBe(
+				"https://api.openalex.org/works/W2741809807?select=id&api_key=test_dummy_oa_key",
+			);
+
+			const seenUrls: string[] = [];
+			const enriched = await enrichArxivItemsBatch(
+				[
+					{
+						id: "arxiv:2610.36015",
+						arxivId: "2610.36015",
+						doi: "10.48550/arxiv.2610.36015",
+						title:
+							"Operational limits of reference renewal for retained quantum-service results",
+						authors: ["Ada Lovelace"],
+						abstract: "Rigorous study of reference renewal.",
+						publishedAt: "2026-10-18T12:00:00Z",
+						year: 2026,
+						sourceType: "arxiv",
+						sourceLabel: "cs.SE",
+						categories: ["cs.SE"],
+						url: "https://arxiv.org/abs/2610.36015",
+					},
+				],
+				async <T>(url: string) => {
+					seenUrls.push(url);
+					const decoded = decodeURIComponent(url);
+					if (
+						decoded.includes(
+							"locations.landing_page_url:https://arxiv.org/abs/2610.36015",
+						)
+					) {
+						return {
+							results: [
+								{
+									id: "https://openalex.org/W9999999999",
+									cited_by_count: 3,
+									locations: [
+										{
+											landing_page_url: "https://arxiv.org/abs/2610.36015",
+										},
+									],
+									keywords: [
+										{
+											display_name: "Quantum Software Engineering",
+											score: 0.91,
+										},
+										{ display_name: "Runtime Assurance", score: 0.85 },
+									],
+								},
+							],
+						} as T;
+					}
+					return { results: [] } as T;
+				},
+			);
+
+			expect(
+				seenUrls.every((u) => u.includes("api_key=test_dummy_oa_key")),
+			).toBe(true);
+			expect(enriched[0]?.keywords).toEqual([
+				"Quantum Software Engineering",
+				"Runtime Assurance",
+			]);
+			expect(enriched[0]?.citationCount).toBe(3);
+		} finally {
+			setCachedOpenAlexApiKeyForTests(null);
 		}
 	});
 });

@@ -7,6 +7,7 @@
  * without any DBLP dependency.
  */
 
+import { hasCachedOpenAlexApiKey } from "@/lib/openalex";
 import {
 	backfillSpringerAbstracts,
 	buildVenuePaperId,
@@ -41,7 +42,7 @@ const HOST_MIN_INTERVAL_MS: Record<string, number> = {
 	"api.datacite.org": 100,
 	"api.semanticscholar.org": 1400,
 	"export.arxiv.org": 3250,
-	"arxiv.org": 400,
+	"arxiv.org": 150,
 	"papers.cool": 300,
 	"conf.researchr.org": 250,
 	"link.springer.com": 80,
@@ -87,7 +88,10 @@ function isOpenAlexListUrl(url: string): boolean {
 
 async function acquireHostSlot(host: string): Promise<void> {
 	if (IS_TEST_ENV || !host) return;
-	const interval = HOST_MIN_INTERVAL_MS[host];
+	const interval =
+		host === "api.openalex.org" && hasCachedOpenAlexApiKey()
+			? 105
+			: HOST_MIN_INTERVAL_MS[host];
 	if (!interval) return;
 
 	const now = Date.now();
