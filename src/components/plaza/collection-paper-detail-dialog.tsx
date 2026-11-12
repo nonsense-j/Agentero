@@ -28,6 +28,7 @@ import {
 	ensurePaperFullDetails,
 	formatPaperBibtex,
 	formatPaperCitationText,
+	getCollectionPaperDetail,
 	shouldEnrichPaperOnDemand,
 } from "@/lib/plaza/collection";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
@@ -56,6 +57,9 @@ export function CollectionPaperDetailDialog({
 	const { t } = useTranslation("sidebar");
 	const [resolvedPaper, setResolvedPaper] =
 		useState<CollectionPaperItem | null>(paper);
+	const [serverCitationText, setServerCitationText] = useState<string | null>(
+		null,
+	);
 	const [enriching, setEnriching] = useState(false);
 	const [importing, setImporting] = useState(false);
 	const [copiedKind, setCopiedKind] = useState<"citation" | "bibtex" | null>(
@@ -64,22 +68,47 @@ export function CollectionPaperDetailDialog({
 
 	useEffect(() => {
 		setResolvedPaper(paper);
+		setServerCitationText(null);
 		setCopiedKind(null);
-		if (!open || !paper) return;
-		if (!shouldEnrichPaperOnDemand(paper)) return;
+		if (!open || !paper) {
+			setEnriching(false);
+			return;
+		}
 
 		let cancelled = false;
-		setEnriching(true);
-		void ensurePaperFullDetails(paper)
-			.then((updated) => {
+		const needsInitialEnrich = shouldEnrichPaperOnDemand(paper);
+		setEnriching(needsInitialEnrich);
+
+		void (async () => {
+			try {
+				const dbDetail = await getCollectionPaperDetail(paper.id).catch(
+					() => null,
+				);
+				if (cancelled) return;
+
+				let candidate: CollectionPaperItem = paper;
+				if (dbDetail) {
+					const { citationText: cite, ...detailPaper } = dbDetail;
+					candidate = detailPaper;
+					setResolvedPaper(detailPaper);
+					setServerCitationText(cite || null);
+				}
+
+				if (!shouldEnrichPaperOnDemand(candidate)) {
+					return;
+				}
+				setEnriching(true);
+				const updated = await ensurePaperFullDetails(candidate);
 				if (cancelled) return;
 				setResolvedPaper(updated);
+				setServerCitationText(formatPaperCitationText(updated));
 				onPaperUpdated?.(updated);
-			})
-			.catch(() => undefined)
-			.finally(() => {
+			} catch {
+				// Ignore transient network / offline failures; fall back to local formatting
+			} finally {
 				if (!cancelled) setEnriching(false);
-			});
+			}
+		})();
 
 		return () => {
 			cancelled = true;
@@ -90,18 +119,35 @@ export function CollectionPaperDetailDialog({
 	const keywords = active?.keywords ?? [];
 
 	const citationText = useMemo(
-		() => (active ? formatPaperCitationText(active) : ""),
-		[active],
+		() =>
+			serverCitationText?.trim() ||
+			(active ? formatPaperCitationText(active) : ""),
+		[active, serverCitationText],
 	);
 	const bibtexText = useMemo(
-		() => (active ? formatPaperBibtex(active) : ""),
+		() => active?.bibtex?.trim() || (active ? formatPaperBibtex(active) : ""),
 		[active],
 	);
 
 	if (!active) return null;
 
-	const copyText = async (text: string, kind: "citation" | "bibtex") => {
+	const copyText = async (kind: "citation" | "bibtex") => {
 		try {
+			let text = kind === "citation" ? citationText : bibtexText;
+			if (!active.bibtex) {
+				const detail = await getCollectionPaperDetail(active.id).catch(
+					() => null,
+				);
+				if (detail) {
+					const { citationText: cite, ...detailPaper } = detail;
+					setResolvedPaper(detailPaper);
+					if (cite) setServerCitationText(cite);
+					text =
+						kind === "citation"
+							? cite?.trim() || formatPaperCitationText(detailPaper)
+							: detailPaper.bibtex?.trim() || formatPaperBibtex(detailPaper);
+				}
+			}
 			await navigator.clipboard.writeText(text);
 			setCopiedKind(kind);
 			window.setTimeout(() => {
@@ -125,7 +171,7 @@ export function CollectionPaperDetailDialog({
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-				<DialogHeader className=" shrink-0 border-b px-5 pt-5 pb-3.5 pr-11">
+				<DialogHeader className="shrink-0 border-b px-5 pt-5 pr-11 pb-3.5">
 					<div className="flex flex-wrap items-center gap-1.5">
 						<PlazaSourceBadge
 							source={active.sourceType}
@@ -232,7 +278,7 @@ export function CollectionPaperDetailDialog({
 									type="button"
 									variant="outline"
 									size="sm"
-									onClick={() => void copyText(citationText, "citation")}
+									onClick={() => void copyText("citation")}
 									className={cn(
 										"h-6 gap-1 px-2 text-caption",
 										COLLECTION_OUTLINE_BTN_CLASS,
@@ -251,7 +297,7 @@ export function CollectionPaperDetailDialog({
 									type="button"
 									variant="outline"
 									size="sm"
-									onClick={() => void copyText(bibtexText, "bibtex")}
+									onClick={() => void copyText("bibtex")}
 									className={cn(
 										"h-6 gap-1 px-2 text-caption",
 										COLLECTION_OUTLINE_BTN_CLASS,

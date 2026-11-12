@@ -42,8 +42,9 @@ import {
 	matchesCollectionVenueKeys,
 } from "@/lib/plaza/ccf-deadlines";
 import {
-	loadCollectionState,
-	subscribeCollectionState,
+	ensureCollectionSummaryHydrated,
+	getCollectionSummarySnapshot,
+	subscribeCollectionSummary,
 } from "@/lib/plaza/collection";
 
 const RANKS: readonly CcfRank[] = ["A", "B", "C", "N"];
@@ -62,7 +63,7 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 	const [error, setError] = useState(false);
 	const [rankFilter, setRankFilter] = useState<CcfRank[]>([]);
 	const [collectionVenues, setCollectionVenues] = useState(
-		() => loadCollectionState().venues,
+		() => getCollectionSummarySnapshot().venues,
 	);
 	const [focusCollection, setFocusCollection] = useState(true);
 	const [query, setQuery] = useState("");
@@ -70,9 +71,12 @@ export function PlazaCcfDeadlinesView({ className }: { className?: string }) {
 	const loadedRef = useRef(false);
 
 	useEffect(() => {
-		setCollectionVenues(loadCollectionState().venues);
-		return subscribeCollectionState((state) => {
-			setCollectionVenues(state.venues);
+		setCollectionVenues(getCollectionSummarySnapshot().venues);
+		void ensureCollectionSummaryHydrated()
+			.then((summary) => setCollectionVenues(summary.venues))
+			.catch(() => undefined);
+		return subscribeCollectionSummary((snapshot) => {
+			setCollectionVenues(snapshot.venues);
 		});
 	}, []);
 

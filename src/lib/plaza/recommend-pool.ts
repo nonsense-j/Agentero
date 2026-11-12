@@ -1,38 +1,34 @@
 /**
- * Plaza — Paper Recommend Engine (Keyword Hub + Word Cloud + Metadata-backed Push).
+ * Plaza — Paper Recommend Engine (Keyword Hub + Word Cloud + SQLite-backed Push).
  *
  * Matches active user keywords (Recent Keywords + All Keywords Word Cloud) against
- * the 2026 Paper Collection pool (`arXiv` + 28 DBLP Venues).
+ * the unified `collection.sqlite` pool (`arXiv` + 28 DBLP Venues) via Tauri IPC.
  *
- * Performance & Persistence Architecture:
- * - Recommended status is stored directly as `paper.recommendedAt` (ISO timestamp) on
- *   `CollectionPaperItem` metadata and patched incrementally in IndexedDB (`store.put`),
- *   eliminating `localStorage` history/pushedIds bloat.
- * - Memoized in-memory `CorpusIndex` pre-aggregates and pre-sorts all unique paper
- *   keywords (`count`, `unrecommendedCount`, best display casing) for O(1) Top-N slider
- *   slicing, updates `unrecommendedCount` incrementally when batches are recommended,
- *   and pre-computes normalized keyword sets + lowercased search blobs for sub-10ms scoring.
+ * Architecture:
+ * - Zero `localStorage` persistence and zero in-memory `CorpusIndex` / `WeakMap` retention.
+ * - Keyword chips, selected cloud terms, Top-N setting, `lastRecommendedAt`, and per-paper
+ *   `recommended_at` timestamps live in `collection.sqlite`.
+ * - Pure chip manipulation and keyword scoring helpers remain statelessly exported for UI
+ *   optimistic updates and unit tests.
  */
 
-import {
-	readJsonStorage,
-	removeStorageKey,
-	writeJsonStorage,
-} from "@/lib/core/storage";
+import { commands } from "@/lib/core/bindings";
+import { callApi } from "@/lib/core/ipc";
 import {
 	type CollectionPaperItem,
 	derivePaperKeywords,
-	hydrateCollectionStateFromIdb,
-	loadCollectionState,
-	markCollectionPapersRecommended,
-} from "@/lib/plaza/collection";
+} from "@/lib/plaza/collection-enrichment";
+import {
+	bumpCollectionRevision,
+	type CollectionStateSummary,
+	clearCollection,
+	fromPaperSummaryDto,
+} from "@/lib/plaza/collection-store";
 
 export const DEFAULT_RECOMMEND_BATCH_SIZE = 15;
 export const DEFAULT_WORD_CLOUD_TOP_N = 50;
 export const MIN_WORD_CLOUD_TOP_N = 15;
 export const MAX_WORD_CLOUD_TOP_N = 150;
-
-const MAX_TIDY_RECENT_KEYWORDS = 24;
 
 export type RecommendKeywordChip = {
 	id: string;
@@ -59,16 +55,20 @@ export type RecommendPoolState = {
 	lastRecommendedAt: string | null;
 };
 
-type LegacyRecommendPoolStateV1 = {
-	keywords?: RecommendKeywordChip[];
-	recentBatchId?: string | null;
-	history?: Array<{ id?: string; pushedAt?: string }>;
-	pushedIds?: string[];
-	lastPushedAt?: string | null;
+export type CollectionWordCloudResult = {
+	keywords: WordCloudKeyword[];
+	totalUniqueKeywords: number;
+	totalCandidatePapers: number;
+	unrecommendedPaperCount: number;
 };
 
-const STORAGE_KEY = "plaza:recommend:pool-state:v2";
-const LEGACY_STORAGE_KEY = "plaza:recommend:pool-state:v1";
+export type RecommendNextResult = {
+	items: RecommendedPaperItem[];
+	state: RecommendPoolState;
+	selectedKeywords: string[];
+	exhausted: boolean;
+	remainingUnrecommended: number;
+};
 
 export const DEFAULT_RECOMMEND_KEYWORDS: readonly RecommendKeywordChip[] = [
 	{ id: "kw-llm-agent", term: "LLM Agent", enabled: true },
@@ -80,12 +80,6 @@ export const DEFAULT_RECOMMEND_KEYWORDS: readonly RecommendKeywordChip[] = [
 	{ id: "kw-repair", term: "Program Repair", enabled: false },
 	{ id: "kw-smart-contract", term: "Smart Contract", enabled: false },
 ];
-
-let memoryPoolState: RecommendPoolState | null = null;
-let pendingLegacyMigration: {
-	ids: string[];
-	recommendedAt: string;
-} | null = null;
 
 function cleanTermDisplay(term: string): string {
 	return term.replace(/\s+/g, " ").trim();
@@ -101,17 +95,6 @@ function clampWordCloudTopN(topN: number): number {
 		MAX_WORD_CLOUD_TOP_N,
 		Math.max(MIN_WORD_CLOUD_TOP_N, Math.round(topN)),
 	);
-}
-
-function hasUsableLocalStorage(): boolean {
-	try {
-		if (typeof localStorage === "undefined" || !localStorage) return false;
-		if (typeof localStorage.getItem !== "function") return false;
-		localStorage.getItem(STORAGE_KEY);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 function buildKeywordChipId(
@@ -215,116 +198,92 @@ function sanitizeRecommendPoolState(
 	};
 }
 
-function migrateLegacyV1StateIfPresent(): RecommendPoolState | null {
-	const legacy = readJsonStorage<LegacyRecommendPoolStateV1 | null>(
-		LEGACY_STORAGE_KEY,
-		null,
-	);
-	if (!legacy || typeof legacy !== "object") return null;
+export function createDefaultRecommendPoolState(): RecommendPoolState {
+	return sanitizeRecommendPoolState(null);
+}
 
-	const idSet = new Set<string>();
-	if (Array.isArray(legacy.pushedIds)) {
-		for (const id of legacy.pushedIds) {
-			if (typeof id === "string" && id.trim()) idSet.add(id.trim());
-		}
-	}
-	if (Array.isArray(legacy.history)) {
-		for (const h of legacy.history) {
-			if (h && typeof h.id === "string" && h.id.trim()) {
-				idSet.add(h.id.trim());
-			}
-		}
-	}
+// ─── Async IPC Wrappers (`commands.plazaCollection*`) ───
 
-	const migratedIso =
-		typeof legacy.lastPushedAt === "string" && legacy.lastPushedAt.trim()
-			? legacy.lastPushedAt.trim()
-			: new Date().toISOString();
-
-	if (idSet.size > 0) {
-		const ids = Array.from(idSet);
-		pendingLegacyMigration = { ids, recommendedAt: migratedIso };
-		void markCollectionPapersRecommended(ids, migratedIso);
-	}
-
-	const existingV2 = readJsonStorage<Partial<RecommendPoolState> | null>(
-		STORAGE_KEY,
-		null,
-	);
-	const migrated = sanitizeRecommendPoolState({
-		keywords: existingV2?.keywords ?? legacy.keywords,
-		selectedCloudTerms: existingV2?.selectedCloudTerms ?? [],
-		wordCloudTopN: existingV2?.wordCloudTopN ?? DEFAULT_WORD_CLOUD_TOP_N,
-		lastRecommendedAt:
-			existingV2?.lastRecommendedAt ??
-			(typeof legacy.lastPushedAt === "string" ? legacy.lastPushedAt : null),
+export async function fetchRecommendPoolState(): Promise<RecommendPoolState> {
+	const dto = await callApi(() => commands.plazaCollectionRecommendStateGet(), {
+		fallback: "Failed to load paper recommend state",
 	});
-
-	writeJsonStorage(STORAGE_KEY, migrated);
-	removeStorageKey(LEGACY_STORAGE_KEY);
-	memoryPoolState = migrated;
-	return migrated;
+	return sanitizeRecommendPoolState(dto);
 }
 
-export function loadRecommendPoolState(): RecommendPoolState {
-	if (hasUsableLocalStorage()) {
-		const migrated = migrateLegacyV1StateIfPresent();
-		if (migrated) return migrated;
-		const raw = readJsonStorage<
-			| (Partial<RecommendPoolState> & {
-					pushedIds?: string[];
-					history?: Array<{ id?: string }>;
-					lastPushedAt?: string | null;
-			  })
-			| null
-		>(STORAGE_KEY, null);
-		if (!raw) {
-			return sanitizeRecommendPoolState(null);
-		}
-		const clean = sanitizeRecommendPoolState({
-			...raw,
-			lastRecommendedAt:
-				raw.lastRecommendedAt ??
-				(typeof raw.lastPushedAt === "string" ? raw.lastPushedAt : null),
-		});
-		if ("pushedIds" in raw || "history" in raw || "recentBatchId" in raw) {
-			const extraIds = [
-				...(Array.isArray(raw.pushedIds) ? raw.pushedIds : []),
-				...(Array.isArray(raw.history)
-					? raw.history
-							.map((h) => h?.id)
-							.filter((id): id is string => typeof id === "string")
-					: []),
-			];
-			if (extraIds.length > 0) {
-				const ts = clean.lastRecommendedAt ?? new Date().toISOString();
-				pendingLegacyMigration = { ids: extraIds, recommendedAt: ts };
-				void markCollectionPapersRecommended(extraIds, ts);
-			}
-			writeJsonStorage(STORAGE_KEY, clean);
-		}
-		memoryPoolState = clean;
-		return clean;
-	}
-
-	return sanitizeRecommendPoolState(memoryPoolState);
-}
-
-export function saveRecommendPoolState(state: RecommendPoolState): void {
+export async function saveRecommendPoolState(
+	state: RecommendPoolState,
+): Promise<RecommendPoolState> {
 	const clean = sanitizeRecommendPoolState(state);
-	memoryPoolState = clean;
-	writeJsonStorage(STORAGE_KEY, clean);
-	removeStorageKey(LEGACY_STORAGE_KEY);
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionRecommendStateSet({
+				keywords: clean.keywords,
+				selectedCloudTerms: clean.selectedCloudTerms,
+				wordCloudTopN: clean.wordCloudTopN,
+				lastRecommendedAt: clean.lastRecommendedAt,
+			}),
+		{ fallback: "Failed to save paper recommend state" },
+	);
+	return sanitizeRecommendPoolState(dto);
 }
 
-/** Reset in-memory pool state and corpus index caches (primarily for unit tests). */
-export function resetRecommendPoolMemoryForTests(): void {
-	memoryPoolState = null;
-	pendingLegacyMigration = null;
-	cachedCorpusIndex = null;
+export async function fetchCollectionWordCloud(
+	topN?: number,
+): Promise<CollectionWordCloudResult> {
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionWordCloud({
+				topN: topN !== undefined ? clampWordCloudTopN(topN) : null,
+			}),
+		{ fallback: "Failed to load collection word cloud" },
+	);
+	return {
+		keywords: dto.keywords.map((kw) => ({
+			term: kw.term,
+			normalized: kw.normalized,
+			count: kw.count,
+			unrecommendedCount: kw.unrecommendedCount,
+		})),
+		totalUniqueKeywords: dto.totalUniqueKeywords,
+		totalCandidatePapers: dto.totalCandidatePapers,
+		unrecommendedPaperCount: dto.unrecommendedPaperCount,
+	};
 }
 
-// ─── Unified Keyword Selection & Recent Chips Management ───
+export async function recommendNextFromCollection(
+	maxBatchSize: number = DEFAULT_RECOMMEND_BATCH_SIZE,
+): Promise<RecommendNextResult> {
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionRecommendNext({
+				maxBatchSize,
+			}),
+		{ fallback: "Failed to recommend papers from collection" },
+	);
+	const state = sanitizeRecommendPoolState(dto.state);
+	const items: RecommendedPaperItem[] = dto.items.map((entry) => ({
+		...fromPaperSummaryDto(entry.paper),
+		matchedKeywords: entry.matchedKeywords,
+		score: entry.score ?? 0,
+	}));
+	if (items.length > 0) {
+		bumpCollectionRevision();
+	}
+	return {
+		items,
+		state,
+		selectedKeywords: getActiveSelectedTerms(state),
+		exhausted: dto.exhausted,
+		remainingUnrecommended: dto.remainingUnrecommended,
+	};
+}
+
+export async function resetRecommendedHistory(): Promise<CollectionStateSummary> {
+	return clearCollection("recommended");
+}
+
+// ─── Pure Keyword Selection & Recent Chips Helpers ───
 
 export function getActiveSelectedTerms(state: RecommendPoolState): string[] {
 	const out: string[] = [];
@@ -507,49 +466,7 @@ export function setWordCloudTopN(
 	};
 }
 
-function mergeCloudTermsIntoRecentKeywords(
-	state: RecommendPoolState,
-): RecommendPoolState {
-	if (state.selectedCloudTerms.length === 0) {
-		return state;
-	}
-
-	let nextState: RecommendPoolState = {
-		...state,
-		keywords: [...state.keywords],
-		selectedCloudTerms: [...state.selectedCloudTerms],
-	};
-
-	for (const cloudTerm of state.selectedCloudTerms) {
-		nextState = addCustomRecentKeyword(nextState, cloudTerm);
-	}
-	nextState = {
-		...nextState,
-		selectedCloudTerms: [],
-	};
-
-	if (nextState.keywords.length > MAX_TIDY_RECENT_KEYWORDS) {
-		const enabledChips = nextState.keywords.filter((k) => k.enabled);
-		const disabledChips = nextState.keywords.filter((k) => !k.enabled);
-		const disabledBudget = Math.max(
-			0,
-			MAX_TIDY_RECENT_KEYWORDS - enabledChips.length,
-		);
-		const keptDisabled = new Set(
-			disabledChips.slice(-disabledBudget).map((k) => k.id),
-		);
-		nextState = {
-			...nextState,
-			keywords: nextState.keywords.filter(
-				(k) => k.enabled || keptDisabled.has(k.id),
-			),
-		};
-	}
-
-	return nextState;
-}
-
-// ─── Memoized Corpus & Word-Cloud / Fast-Scoring Index ───
+// ─── Stateless Casing, Word Cloud & Keyword Scoring Helpers ───
 
 const MINOR_TITLE_WORDS = new Set([
 	"a",
@@ -576,8 +493,6 @@ function casingQuality(form: string): number {
 	const hasLower = /[a-z]/.test(form);
 	if (!hasUpper) return 1;
 	if (!hasLower) {
-		// Short acronyms like "LLM", "LLVM", "SMT", "WASM" are ideal in uppercase;
-		// long multi-word SHOUTING strings are lower quality than Title Case.
 		return form.length <= 6 && !/\s/.test(form) ? 4 : 2;
 	}
 
@@ -590,7 +505,6 @@ function casingQuality(form: string): number {
 		if (i > 0 && MINOR_TITLE_WORDS.has(lower)) continue;
 		if (!/[a-zA-Z]/.test(w)) continue;
 		contentWords += 1;
-		// Accept TitleCase ("Agent"), Acronym ("LLM"), or technical mixedCase ("eBPF", "GraphQL", "iOS")
 		if (/^[A-Z]/.test(w) || /[a-z][A-Z]/.test(w)) {
 			capitalizedContentWords += 1;
 		}
@@ -636,9 +550,8 @@ type PaperExtractedKeyword = {
 	normalized: string;
 };
 
-type PrecomputedPaperFields = {
+type ComputedPaperFields = {
 	extractedKeywords: PaperExtractedKeyword[];
-	normalizedKeywords: string[];
 	normalizedKeywordSet: ReadonlySet<string>;
 	keywordsJoinedLower: string;
 	titleLower: string;
@@ -646,11 +559,6 @@ type PrecomputedPaperFields = {
 	catLower: string;
 	combinedLower: string;
 };
-
-const paperFieldsWeakCache = new WeakMap<
-	CollectionPaperItem,
-	PrecomputedPaperFields
->();
 
 function extractPaperKeywordsNormalized(
 	paper: CollectionPaperItem,
@@ -680,12 +588,7 @@ function extractPaperKeywordsNormalized(
 	return out;
 }
 
-function getPrecomputedPaperFields(
-	paper: CollectionPaperItem,
-): PrecomputedPaperFields {
-	const hit = paperFieldsWeakCache.get(paper);
-	if (hit) return hit;
-
+function computePaperFields(paper: CollectionPaperItem): ComputedPaperFields {
 	const extractedKeywords = extractPaperKeywordsNormalized(paper);
 	const normalizedKeywords = extractedKeywords.map((k) => k.normalized);
 	const normalizedKeywordSet = new Set(normalizedKeywords);
@@ -697,9 +600,8 @@ function getPrecomputedPaperFields(
 		.toLowerCase();
 	const combinedLower = `${titleLower}\n${keywordsJoinedLower}\n${abstractLower}\n${catLower}`;
 
-	const computed: PrecomputedPaperFields = {
+	return {
 		extractedKeywords,
-		normalizedKeywords,
 		normalizedKeywordSet,
 		keywordsJoinedLower,
 		titleLower,
@@ -707,27 +609,7 @@ function getPrecomputedPaperFields(
 		catLower,
 		combinedLower,
 	};
-	paperFieldsWeakCache.set(paper, computed);
-	return computed;
 }
-
-type IndexedCorpusDoc = {
-	paper: CollectionPaperItem;
-	fields: PrecomputedPaperFields;
-	recommended: boolean;
-};
-
-type CorpusIndex = {
-	itemsRef: readonly CollectionPaperItem[];
-	length: number;
-	lastRefreshedAt: string | null;
-	recommendedCount: number;
-	docs: IndexedCorpusDoc[];
-	keywordByNormalized: Map<string, WordCloudKeyword>;
-	sortedKeywords: WordCloudKeyword[];
-};
-
-let cachedCorpusIndex: CorpusIndex | null = null;
 
 function compareWordCloudKeywords(
 	a: WordCloudKeyword,
@@ -740,109 +622,14 @@ function compareWordCloudKeywords(
 	return a.term.localeCompare(b.term);
 }
 
-function countRecommendedItems(items: readonly CollectionPaperItem[]): number {
-	let recCount = 0;
-	for (let i = 0; i < items.length; i++) {
-		if (items[i]?.recommendedAt) recCount += 1;
-	}
-	return recCount;
-}
-
-function tryIncrementalRecommendedUpdate(
-	prev: CorpusIndex,
+/**
+ * Pure, stateless word-cloud keyword extractor (zero module-level cache retention;
+ * useful for unit tests and non-Tauri environments).
+ */
+export function getWordCloudKeywords(
 	items: readonly CollectionPaperItem[],
-	lastRefreshedAt: string | null,
-	recommendedCount: number,
-): CorpusIndex | null {
-	if (prev.length !== items.length) return null;
-
-	const changedIndices: number[] = [];
-	for (let i = 0; i < items.length; i++) {
-		const nextPaper = items[i];
-		const prevDoc = prev.docs[i];
-		if (!nextPaper || !prevDoc) return null;
-		if (nextPaper === prevDoc.paper) {
-			if (Boolean(nextPaper.recommendedAt) !== prevDoc.recommended) {
-				changedIndices.push(i);
-			}
-			continue;
-		}
-		// Only take incremental path when paper identity & content are unchanged
-		if (
-			nextPaper.id !== prevDoc.paper.id ||
-			nextPaper.title !== prevDoc.paper.title ||
-			nextPaper.abstract !== prevDoc.paper.abstract ||
-			nextPaper.keywords !== prevDoc.paper.keywords
-		) {
-			return null;
-		}
-		paperFieldsWeakCache.set(nextPaper, prevDoc.fields);
-		if (Boolean(nextPaper.recommendedAt) !== prevDoc.recommended) {
-			changedIndices.push(i);
-		} else {
-			prevDoc.paper = nextPaper;
-		}
-	}
-
-	if (changedIndices.length === 0) {
-		prev.itemsRef = items;
-		prev.lastRefreshedAt = lastRefreshedAt;
-		prev.recommendedCount = recommendedCount;
-		return prev;
-	}
-
-	for (const idx of changedIndices) {
-		const nextPaper = items[idx];
-		const doc = prev.docs[idx];
-		if (!nextPaper || !doc) continue;
-		const nextRec = Boolean(nextPaper.recommendedAt);
-		const delta = nextRec ? -1 : 1;
-		doc.paper = nextPaper;
-		doc.recommended = nextRec;
-
-		for (const normKw of doc.fields.normalizedKeywords) {
-			const entry = prev.keywordByNormalized.get(normKw);
-			if (entry) {
-				entry.unrecommendedCount = Math.max(
-					0,
-					entry.unrecommendedCount + delta,
-				);
-			}
-		}
-	}
-
-	prev.sortedKeywords.sort(compareWordCloudKeywords);
-	prev.itemsRef = items;
-	prev.lastRefreshedAt = lastRefreshedAt;
-	prev.recommendedCount = recommendedCount;
-	return prev;
-}
-
-function getOrBuildCorpusIndex(
-	items: readonly CollectionPaperItem[],
-	lastRefreshedAt: string | null = null,
-): CorpusIndex {
-	const recommendedCount = countRecommendedItems(items);
-	if (cachedCorpusIndex) {
-		if (
-			cachedCorpusIndex.itemsRef === items &&
-			cachedCorpusIndex.recommendedCount === recommendedCount &&
-			cachedCorpusIndex.lastRefreshedAt === lastRefreshedAt
-		) {
-			return cachedCorpusIndex;
-		}
-		const incremental = tryIncrementalRecommendedUpdate(
-			cachedCorpusIndex,
-			items,
-			lastRefreshedAt,
-			recommendedCount,
-		);
-		if (incremental) {
-			return incremental;
-		}
-	}
-
-	const docs: IndexedCorpusDoc[] = [];
+	topN?: number,
+): { keywords: WordCloudKeyword[]; totalUniqueKeywords: number } {
 	const buckets = new Map<
 		string,
 		{
@@ -853,11 +640,9 @@ function getOrBuildCorpusIndex(
 	>();
 
 	for (const paper of items) {
-		const fields = getPrecomputedPaperFields(paper);
+		const extracted = extractPaperKeywordsNormalized(paper);
 		const recommended = Boolean(paper.recommendedAt);
-		docs.push({ paper, fields, recommended });
-
-		for (const kw of fields.extractedKeywords) {
+		for (const kw of extracted) {
 			let bucket = buckets.get(kw.normalized);
 			if (!bucket) {
 				bucket = {
@@ -878,49 +663,26 @@ function getOrBuildCorpusIndex(
 		}
 	}
 
-	const keywordByNormalized = new Map<string, WordCloudKeyword>();
 	const sortedKeywords: WordCloudKeyword[] = [];
 	for (const [normalized, bucket] of buckets) {
-		const entry: WordCloudKeyword = {
+		sortedKeywords.push({
 			term: pickBestDisplayCasing(bucket.variants, normalized),
 			normalized,
 			count: bucket.count,
 			unrecommendedCount: bucket.unrecommendedCount,
-		};
-		keywordByNormalized.set(normalized, entry);
-		sortedKeywords.push(entry);
+		});
 	}
 	sortedKeywords.sort(compareWordCloudKeywords);
 
-	const built: CorpusIndex = {
-		itemsRef: items,
-		length: items.length,
-		lastRefreshedAt,
-		recommendedCount,
-		docs,
-		keywordByNormalized,
-		sortedKeywords,
-	};
-	cachedCorpusIndex = built;
-	return built;
-}
-
-export function getWordCloudKeywords(
-	items: readonly CollectionPaperItem[],
-	topN?: number,
-): { keywords: WordCloudKeyword[]; totalUniqueKeywords: number } {
-	const index = getOrBuildCorpusIndex(items);
 	const limit =
 		topN === undefined
 			? DEFAULT_WORD_CLOUD_TOP_N
 			: Math.max(0, Math.round(topN));
 	return {
-		keywords: index.sortedKeywords.slice(0, limit),
-		totalUniqueKeywords: index.sortedKeywords.length,
+		keywords: sortedKeywords.slice(0, limit),
+		totalUniqueKeywords: sortedKeywords.length,
 	};
 }
-
-// ─── Keyword Scoring & Batch Recommendation ───
 
 type PreparedQueryKeyword = {
 	term: string;
@@ -952,7 +714,7 @@ function prepareQueryKeywords(
 }
 
 function scoreFieldsAgainstPreparedKeywords(
-	fields: PrecomputedPaperFields,
+	fields: ComputedPaperFields,
 	prepared: readonly PreparedQueryKeyword[],
 ): { score: number; matchedKeywords: string[] } {
 	if (prepared.length === 0) {
@@ -965,7 +727,6 @@ function scoreFieldsAgainstPreparedKeywords(
 	for (const kw of prepared) {
 		const { phrase, tokens, minThreshold } = kw;
 
-		// Fast single-pass rejection over pre-lowercased combined search blob
 		if (tokens.length === 0) {
 			if (!fields.combinedLower.includes(phrase)) continue;
 		} else if (tokens.length === 1) {
@@ -984,7 +745,7 @@ function scoreFieldsAgainstPreparedKeywords(
 
 		let kwScore = 0;
 
-		// 1. Paper-level keywords (strong exact & phrase boost so every word-cloud tag matches reliably)
+		// 1. Paper-level keywords
 		if (fields.normalizedKeywordSet.has(phrase)) {
 			kwScore += 5.0;
 		} else if (fields.keywordsJoinedLower.includes(phrase)) {
@@ -1066,136 +827,6 @@ export function scorePaperAgainstKeywords(
 	if (prepared.length === 0) {
 		return { score: 0, matchedKeywords: [] };
 	}
-	const fields = getPrecomputedPaperFields(paper);
+	const fields = computePaperFields(paper);
 	return scoreFieldsAgainstPreparedKeywords(fields, prepared);
-}
-
-export async function recommendFromCollection(options?: {
-	maxBatchSize?: number;
-	ensureCollectionLoaded?: boolean;
-	excludeIds?: ReadonlySet<string>;
-}): Promise<{
-	state: RecommendPoolState;
-	items: RecommendedPaperItem[];
-	selectedKeywords: string[];
-}> {
-	const maxBatchSize = options?.maxBatchSize ?? DEFAULT_RECOMMEND_BATCH_SIZE;
-	const initialState = loadRecommendPoolState();
-	const mergedState = mergeCloudTermsIntoRecentKeywords(initialState);
-	const selectedKeywords = getActiveSelectedTerms(mergedState);
-
-	if (selectedKeywords.length === 0 || maxBatchSize <= 0) {
-		if (mergedState !== initialState) {
-			saveRecommendPoolState(mergedState);
-		}
-		return {
-			state: mergedState,
-			items: [],
-			selectedKeywords,
-		};
-	}
-
-	let collection = loadCollectionState();
-	if (options?.ensureCollectionLoaded !== false) {
-		collection = await hydrateCollectionStateFromIdb();
-	}
-
-	if (pendingLegacyMigration) {
-		const mig = pendingLegacyMigration;
-		pendingLegacyMigration = null;
-		collection = await markCollectionPapersRecommended(
-			mig.ids,
-			mig.recommendedAt,
-		);
-	}
-
-	const index = getOrBuildCorpusIndex(
-		collection.items,
-		collection.lastRefreshedAt,
-	);
-	const prepared = prepareQueryKeywords(selectedKeywords);
-	const excludeIds = options?.excludeIds;
-
-	const candidates: Array<{
-		paper: CollectionPaperItem;
-		score: number;
-		matchedKeywords: string[];
-	}> = [];
-
-	for (const doc of index.docs) {
-		if (doc.recommended) continue;
-		if (excludeIds?.has(doc.paper.id)) continue;
-
-		const { score, matchedKeywords } = scoreFieldsAgainstPreparedKeywords(
-			doc.fields,
-			prepared,
-		);
-		if (score > 0 && matchedKeywords.length > 0) {
-			candidates.push({
-				paper: doc.paper,
-				score,
-				matchedKeywords,
-			});
-		}
-	}
-
-	candidates.sort((a, b) => {
-		if (b.score !== a.score) return b.score - a.score;
-		return b.paper.publishedAt.localeCompare(a.paper.publishedAt);
-	});
-
-	const selected = candidates.slice(0, maxBatchSize);
-	if (selected.length === 0) {
-		saveRecommendPoolState(mergedState);
-		return {
-			state: mergedState,
-			items: [],
-			selectedKeywords,
-		};
-	}
-
-	const nowIso = new Date().toISOString();
-	const selectedIds = selected.map((c) => c.paper.id);
-	const updatedCollection = await markCollectionPapersRecommended(
-		selectedIds,
-		nowIso,
-	);
-
-	// Incrementally update corpus index `unrecommendedCount` for the newly recommended batch
-	getOrBuildCorpusIndex(
-		updatedCollection.items,
-		updatedCollection.lastRefreshedAt,
-	);
-
-	const updatedById = new Map<string, CollectionPaperItem>();
-	const selectedIdSet = new Set(selectedIds);
-	for (const item of updatedCollection.items) {
-		if (selectedIdSet.has(item.id)) {
-			updatedById.set(item.id, item);
-		}
-	}
-
-	const items: RecommendedPaperItem[] = selected.map((c) => {
-		const basePaper = updatedById.get(c.paper.id) ?? {
-			...c.paper,
-			recommendedAt: c.paper.recommendedAt ?? nowIso,
-		};
-		return {
-			...basePaper,
-			matchedKeywords: c.matchedKeywords,
-			score: c.score,
-		};
-	});
-
-	const nextState: RecommendPoolState = {
-		...mergedState,
-		lastRecommendedAt: nowIso,
-	};
-	saveRecommendPoolState(nextState);
-
-	return {
-		state: nextState,
-		items,
-		selectedKeywords,
-	};
 }

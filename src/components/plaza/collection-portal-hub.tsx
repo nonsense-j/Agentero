@@ -19,9 +19,7 @@ import {
 import {
 	ARXIV_CATEGORY_SUBTITLES,
 	type ArxivCategoryWatermark,
-	type CollectionPaperItem,
 	inferVenueKind,
-	matchesAnyArxivCategory,
 	type VenueConfig,
 	type VenueKind,
 } from "@/lib/plaza/collection";
@@ -91,7 +89,11 @@ function groupVenuesByDomainAndRank(venues: VenueConfig[]): VenueGroup[] {
 export function CollectionPortalHub({
 	categories,
 	venues,
-	items,
+	arxivCount,
+	venueCount,
+	conferenceCount,
+	journalCount,
+	categoryCounts,
 	arxivWatermarks,
 	preloadingArxiv = false,
 	refreshingArxiv = false,
@@ -109,7 +111,11 @@ export function CollectionPortalHub({
 }: {
 	categories: string[];
 	venues: VenueConfig[];
-	items: CollectionPaperItem[];
+	arxivCount: number;
+	venueCount: number;
+	conferenceCount: number;
+	journalCount: number;
+	categoryCounts: Readonly<Record<string, number>>;
 	arxivWatermarks?: Record<string, ArxivCategoryWatermark>;
 	preloadingArxiv?: boolean;
 	refreshingArxiv?: boolean;
@@ -127,63 +133,17 @@ export function CollectionPortalHub({
 }) {
 	const { t } = useTranslation("sidebar");
 
-	const {
-		arxivTotal,
-		venueTotal,
-		catCounts,
-		venueCounts,
-		conferenceTotal,
-		journalTotal,
-		confList,
-		jourList,
-		conferences,
-		journals,
-	} = useMemo(() => {
-		const cMap = new Map<string, number>();
-		for (const cat of categories) cMap.set(cat, 0);
-		const vMap = new Map<string, number>();
-		for (const v of venues) vMap.set(v.id, 0);
-
-		let aCount = 0;
-		let vCount = 0;
-		let confCount = 0;
-		let jourCount = 0;
-
-		for (const p of items) {
-			if (p.sourceType === "arxiv") {
-				if (!matchesAnyArxivCategory(p, categories)) continue;
-				aCount += 1;
-				for (const cat of categories) {
-					if (p.sourceLabel === cat || p.categories.includes(cat)) {
-						cMap.set(cat, (cMap.get(cat) ?? 0) + 1);
-					}
-				}
-			} else {
-				vCount += 1;
-				if (p.venueId) {
-					vMap.set(p.venueId, (vMap.get(p.venueId) ?? 0) + 1);
-				}
-				if (p.venueKind === "journal") jourCount += 1;
-				else confCount += 1;
-			}
-		}
-
+	const { confList, jourList, conferences, journals } = useMemo(() => {
 		const cList = venues.filter((v) => inferVenueKind(v) === "conference");
 		const jList = venues.filter((v) => inferVenueKind(v) === "journal");
 
 		return {
-			arxivTotal: aCount,
-			venueTotal: vCount,
-			catCounts: cMap,
-			venueCounts: vMap,
-			conferenceTotal: confCount,
-			journalTotal: jourCount,
 			confList: cList,
 			jourList: jList,
 			conferences: groupVenuesByDomainAndRank(cList),
 			journals: groupVenuesByDomainAndRank(jList),
 		};
-	}, [categories, items, venues]);
+	}, [venues]);
 
 	const isConfRefreshing = confList.some((v) => refreshingVenueIds?.has(v.id));
 	const isConfRefreshed =
@@ -212,7 +172,7 @@ export function CollectionPortalHub({
 								{t("plaza.collection.time.all")}
 							</span>
 							<span className="font-mono text-muted-foreground text-xs tabular-nums">
-								{t("plaza.collection.papersCount", { count: arxivTotal })}
+								{t("plaza.collection.papersCount", { count: arxivCount })}
 							</span>
 						</div>
 						<p className="text-muted-foreground text-xs leading-relaxed">
@@ -266,7 +226,7 @@ export function CollectionPortalHub({
 					}
 				>
 					{categories.map((cat) => {
-						const count = catCounts.get(cat) ?? 0;
+						const count = categoryCounts[cat] ?? 0;
 						const subtitle = ARXIV_CATEGORY_SUBTITLES[cat];
 						const catRefreshing =
 							(refreshingCategories?.has(cat) ?? false) ||
@@ -324,7 +284,7 @@ export function CollectionPortalHub({
 								DBLP 2026
 							</span>
 							<span className="font-mono text-muted-foreground text-xs tabular-nums">
-								{t("plaza.collection.papersCount", { count: venueTotal })}
+								{t("plaza.collection.papersCount", { count: venueCount })}
 							</span>
 						</div>
 						<p className="text-muted-foreground text-xs leading-relaxed">
@@ -388,7 +348,7 @@ export function CollectionPortalHub({
 							) : null}
 						</span>
 						<span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground tabular-nums group-hover:text-foreground">
-							{conferenceTotal}
+							{conferenceCount}
 							<ChevronRight className="size-3.5" />
 						</span>
 					</button>
@@ -401,7 +361,7 @@ export function CollectionPortalHub({
 								</div>
 								<div className="flex flex-wrap gap-1.5">
 									{grp.venues.map((v) => {
-										const cnt = venueCounts.get(v.id) ?? v.paperCount ?? 0;
+										const cnt = v.paperCount ?? 0;
 										const vRefreshing = refreshingVenueIds?.has(v.id) ?? false;
 										const vRefreshed =
 											!vRefreshing && (refreshedVenueIds?.has(v.id) ?? false);
@@ -452,7 +412,7 @@ export function CollectionPortalHub({
 							) : null}
 						</span>
 						<span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground tabular-nums group-hover:text-foreground">
-							{journalTotal}
+							{journalCount}
 							<ChevronRight className="size-3.5" />
 						</span>
 					</button>
@@ -465,7 +425,7 @@ export function CollectionPortalHub({
 								</div>
 								<div className="flex flex-wrap gap-1.5">
 									{grp.venues.map((v) => {
-										const cnt = venueCounts.get(v.id) ?? v.paperCount ?? 0;
+										const cnt = v.paperCount ?? 0;
 										const vRefreshing = refreshingVenueIds?.has(v.id) ?? false;
 										const vRefreshed =
 											!vRefreshing && (refreshedVenueIds?.has(v.id) ?? false);

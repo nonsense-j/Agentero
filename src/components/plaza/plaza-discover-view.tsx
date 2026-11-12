@@ -1,7 +1,7 @@
 /**
  * Native 广场 panel: Paper Discover (`agentero:plaza/discover`).
  *
- * Strictly scoped to the user's local `Paper Collection` pool:
+ * Strictly scoped to the user's local `Paper Collection` SQLite pool (`collection.sqlite`):
  * - Landing Hub presents two distinct entry cards: `Fast Search` and `Deep Search`.
  * - `Fast Search`: Instant weighted boolean search across title + abstract + keywords
  *   with Advanced Search range filters (Time, Venue/arXiv, CCF-A/B, Fields).
@@ -14,14 +14,28 @@ import {
 	ChevronRight,
 	Compass,
 	Database,
+	Loader2,
+	RefreshCw,
 	Search,
 	Sparkles,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
 import { DiscoverDeepView } from "@/components/plaza/discover-deep-view";
 import { DiscoverFastView } from "@/components/plaza/discover-fast-view";
+import { Button } from "@/components/ui/button";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -29,13 +43,13 @@ import { lookupSubmit } from "@/lib/paper/import-actions";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionPaperItem,
-	type CollectionState,
-	hydrateCollectionStateFromIdb,
-	loadCollectionState,
-	saveCollectionState,
-	subscribeCollectionState,
+	ensureCollectionSummaryHydrated,
+	getCollectionSummarySnapshot,
+	isPreloadingCollection,
+	refreshAllCollection,
+	subscribeCollectionSummary,
+	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
-import { scheduleCollectionSnapshotSync } from "@/lib/plaza/collection-sync";
 import { importPlazaPaper } from "@/lib/plaza/import";
 import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
 
@@ -60,47 +74,51 @@ function checkPaperImported(
 
 export function PlazaDiscoverView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
-	const [collection, setCollection] =
-		useState<CollectionState>(loadCollectionState);
+	const summary = useSyncExternalStore(
+		subscribeCollectionSummary,
+		getCollectionSummarySnapshot,
+	);
+	const preloading = useSyncExternalStore(
+		subscribePreloadingCollection,
+		isPreloadingCollection,
+	);
 
 	const [stage, setStage] = useState<DiscoverStage>("hub");
 	const [visitedFast, setVisitedFast] = useState(false);
 	const [visitedDeep, setVisitedDeep] = useState(false);
+	const [refreshing, setRefreshing] = useState(false);
 
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
 	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
 		null,
 	);
 
-	// Hydrate Paper Collection from IndexedDB & keep Host snapshot synced
+	const observedArxivIdsRef = useRef<Set<string>>(new Set());
+	const manualImportedIdsRef = useRef<Set<string>>(new Set());
+
 	useEffect(() => {
-		const unsubState = subscribeCollectionState((next) => {
-			setCollection(next);
-			scheduleCollectionSnapshotSync(next);
+		void ensureCollectionSummaryHydrated().catch((err) => {
+			notifyError(errorText(err));
 		});
-		void hydrateCollectionStateFromIdb().then((hydrated) => {
-			setCollection(hydrated);
-			scheduleCollectionSnapshotSync(hydrated);
-		});
-		return () => {
-			unsubState();
-		};
 	}, []);
 
-	// Sync imported status against Library store
-	const syncLibraryImported = useCallback(
-		async (items: CollectionPaperItem[]) => {
-			const arxivQueries = items
-				.map((p) => p.arxivId)
-				.filter((id): id is string => Boolean(id));
-			if (arxivQueries.length === 0) return;
+	const syncArxivQueries = useCallback(
+		async (queries: string[], replaceFromManual = false) => {
+			if (queries.length === 0) {
+				if (replaceFromManual) {
+					setImportedIds(new Set(manualImportedIdsRef.current));
+				}
+				return;
+			}
 			try {
-				const matched = await importedIdsInLibrary(arxivQueries, {
+				const matched = await importedIdsInLibrary(queries, {
 					limit: Number.POSITIVE_INFINITY,
 				});
-				if (matched.length === 0) return;
+				if (matched.length === 0 && !replaceFromManual) return;
 				setImportedIds((prev) => {
-					const next = new Set(prev);
+					const next = replaceFromManual
+						? new Set(manualImportedIdsRef.current)
+						: new Set(prev);
 					for (const raw of matched) {
 						next.add(raw);
 						const bare = bareArxivId(raw);
@@ -115,24 +133,41 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		[],
 	);
 
+	const observePapers = useCallback(
+		(papers: readonly CollectionPaperItem[]) => {
+			const newArxivIds: string[] = [];
+			for (const p of papers) {
+				if (p.arxivId && !observedArxivIdsRef.current.has(p.arxivId)) {
+					observedArxivIdsRef.current.add(p.arxivId);
+					newArxivIds.push(p.arxivId);
+				}
+			}
+			if (newArxivIds.length > 0) {
+				void syncArxivQueries(newArxivIds, false);
+			}
+		},
+		[syncArxivQueries],
+	);
+
 	useEffect(() => {
-		void syncLibraryImported(collection.items);
 		return libraryStore.subscribe((state, prevState) => {
 			if (state.papers !== prevState.papers) {
-				void syncLibraryImported(collection.items);
+				void syncArxivQueries(Array.from(observedArxivIdsRef.current), true);
 			}
 		});
-	}, [collection.items, syncLibraryImported]);
+	}, [syncArxivQueries]);
 
-	const stats = useMemo(() => {
-		let arxiv = 0;
-		let venue = 0;
-		for (const item of collection.items) {
-			if (item.sourceType === "arxiv") arxiv += 1;
-			else venue += 1;
+	const handleRefreshPool = useCallback(async () => {
+		if (refreshing || preloading) return;
+		setRefreshing(true);
+		try {
+			await refreshAllCollection();
+		} catch (err) {
+			notifyError(errorText(err));
+		} finally {
+			setRefreshing(false);
 		}
-		return { total: collection.items.length, arxiv, venue };
-	}, [collection.items]);
+	}, [preloading, refreshing]);
 
 	const importBatchPapers = useCallback(
 		async (papers: CollectionPaperItem[]) => {
@@ -152,17 +187,33 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 
 			const markImported = (done: CollectionPaperItem[]) => {
 				if (done.length === 0) return;
+				const recordKey = (key: string) => {
+					manualImportedIdsRef.current.add(key);
+				};
 				setImportedIds((prev) => {
 					const next = new Set(prev);
 					for (const p of done) {
 						next.add(p.id);
-						if (p.coolPapersId) next.add(p.coolPapersId.toLowerCase());
+						recordKey(p.id);
+						if (p.coolPapersId) {
+							const lower = p.coolPapersId.toLowerCase();
+							next.add(lower);
+							recordKey(lower);
+						}
 						if (p.arxivId) {
 							next.add(p.arxivId);
+							recordKey(p.arxivId);
 							const bare = bareArxivId(p.arxivId);
-							if (bare) next.add(bare);
+							if (bare) {
+								next.add(bare);
+								recordKey(bare);
+							}
 						}
-						if (p.doi) next.add(p.doi.toLowerCase());
+						if (p.doi) {
+							const lowerDoi = p.doi.toLowerCase();
+							next.add(lowerDoi);
+							recordKey(lowerDoi);
+						}
 					}
 					return next;
 				});
@@ -199,15 +250,6 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 
 	const handlePaperUpdated = useCallback((updated: CollectionPaperItem) => {
 		setDetailPaper(updated);
-		setCollection((prev) => {
-			const next: CollectionState = {
-				...prev,
-				items: prev.items.map((it) => (it.id === updated.id ? updated : it)),
-			};
-			saveCollectionState(next);
-			scheduleCollectionSnapshotSync(next);
-			return next;
-		});
 	}, []);
 
 	const enterFast = () => {
@@ -243,15 +285,43 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 								<p className="flex items-center gap-1.5 font-mono text-muted-foreground text-xs tabular-nums">
 									<Database className="size-3.5 shrink-0" />
 									{t("plaza.discover.poolSummary", {
-										total: stats.total,
-										arxiv: stats.arxiv,
-										venue: stats.venue,
+										total: summary.totalCount,
+										arxiv: summary.arxivCount,
+										venue: summary.venueCount,
 									})}
 								</p>
 							</div>
+
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="outline"
+										size="icon-sm"
+										disabled={refreshing || preloading}
+										onClick={() => void handleRefreshPool()}
+										aria-label={t("plaza.collection.refresh")}
+									>
+										<RefreshCw
+											className={cn(
+												"size-3.5",
+												(refreshing || preloading) && "animate-spin",
+											)}
+										/>
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent side="bottom">
+									{t("plaza.collection.refresh")}
+								</TooltipContent>
+							</Tooltip>
 						</div>
 
-						{stats.total === 0 ? (
+						{preloading && summary.totalCount === 0 ? (
+							<div className="magpie-card flex items-center gap-2 rounded-xl px-4 py-3 text-muted-foreground text-xs">
+								<Loader2 className="size-3.5 shrink-0 animate-spin" />
+								<span>{t("plaza.collection.preloading")}</span>
+							</div>
+						) : summary.hydrated && summary.totalCount === 0 ? (
 							<div className="magpie-card rounded-xl px-4 py-3 text-muted-foreground text-xs leading-relaxed">
 								{t("plaza.discover.poolEmptyHint")}
 							</div>
@@ -340,7 +410,8 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 					)}
 				>
 					<DiscoverFastView
-						collection={collection}
+						summary={summary}
+						onObservePapers={observePapers}
 						importedSet={importedIds}
 						isPaperImported={checkPaperImported}
 						onBackToHub={() => setStage("hub")}
@@ -360,7 +431,8 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 					)}
 				>
 					<DiscoverDeepView
-						collection={collection}
+						summary={summary}
+						onObservePapers={observePapers}
 						importedSet={importedIds}
 						isPaperImported={checkPaperImported}
 						onBackToHub={() => setStage("hub")}

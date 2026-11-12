@@ -1,8 +1,10 @@
 /**
- * Plaza — Paper Discover local search engine over `Paper Collection`.
+ * Plaza — Paper Discover search engine over `collection.sqlite`.
  *
  * Powers `Fast Search`:
- * - Searches strictly within `CollectionPaperItem[]` across `title`, `abstract`, and `keywords`
+ * - Remote SQLite FTS5 + weighted boolean search via `searchCollectionFastRemote`
+ * - Pure synchronous local boolean parser & scorer (`parseBooleanSearchQuery`, `searchCollectionFast`)
+ *   retained for unit tests and non-Tauri environments
  * - Boolean syntax: space-separated `AND`, `"exact phrase"`, `OR` / `|`, and `-exclude`
  * - Advanced range filters: Time (`7d` / `30d` / `90d` / `all` / custom `YYYY-MM-DD`),
  *   Source (`all` / `arxiv` / `venue`), arXiv Categories, Venue Kind (`conference` / `journal`),
@@ -10,12 +12,15 @@
  * - Zero PDF downloads or external scraping during search.
  */
 
+import { commands } from "@/lib/core/bindings";
+import { callApi } from "@/lib/core/ipc";
 import type {
 	CollectionPaperItem,
 	CollectionSourceType,
 	VenueDomain,
 	VenueKind,
-} from "@/lib/plaza/collection";
+} from "@/lib/plaza/collection-enrichment";
+import { fromPaperSummaryDto } from "@/lib/plaza/collection-store";
 
 export type FastSearchField = "title" | "abstract" | "keywords";
 export type FastSearchSort = "relevance" | "newest" | "citations";
@@ -34,6 +39,11 @@ export type FastSearchFilters = {
 	ccfRanks: FastRankFilter[];
 	fields: FastSearchField[];
 	sort: FastSearchSort;
+};
+
+export type FastSearchPagination = {
+	limit?: number;
+	offset?: number;
 };
 
 export const DEFAULT_FAST_SEARCH_FILTERS: FastSearchFilters = {
@@ -390,6 +400,59 @@ export function searchCollectionFast(
 	return {
 		items: scored,
 		totalMatched: scored.length,
+		activeFilterCount: countActiveFastFilters(filters),
+	};
+}
+
+function coerceMatchedFields(raw: readonly string[]): FastSearchField[] {
+	const out: FastSearchField[] = [];
+	for (const f of raw) {
+		if (f === "title" || f === "abstract" || f === "keywords") {
+			out.push(f);
+		}
+	}
+	return out;
+}
+
+/**
+ * Execute remote SQLite FTS5 + weighted boolean search over `collection.sqlite`.
+ */
+export async function searchCollectionFastRemote(
+	query: string,
+	partialFilters?: Partial<FastSearchFilters>,
+	pagination?: FastSearchPagination,
+): Promise<FastSearchResult> {
+	const filters: FastSearchFilters = {
+		...DEFAULT_FAST_SEARCH_FILTERS,
+		...partialFilters,
+	};
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionSearch({
+				query,
+				timePreset: filters.timePreset,
+				dateFrom: filters.dateFrom.trim() || null,
+				dateTo: filters.dateTo.trim() || null,
+				sourceType: filters.sourceType === "all" ? null : filters.sourceType,
+				categories: filters.categories,
+				venues: filters.venues,
+				venueKind: filters.venueKind === "all" ? null : filters.venueKind,
+				venueDomain: filters.venueDomain === "all" ? null : filters.venueDomain,
+				ccfRanks: filters.ccfRanks,
+				fields: filters.fields,
+				sort: filters.sort,
+				limit: pagination?.limit ?? 200,
+				offset: pagination?.offset ?? 0,
+			}),
+		{ fallback: "Failed to search paper collection" },
+	);
+	return {
+		items: dto.items.map((entry) => ({
+			paper: fromPaperSummaryDto(entry.paper),
+			score: entry.score ?? 0,
+			matchedFields: coerceMatchedFields(entry.matchedFields),
+		})),
+		totalMatched: dto.totalMatched,
 		activeFilterCount: countActiveFastFilters(filters),
 	};
 }

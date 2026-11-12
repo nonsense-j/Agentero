@@ -5,13 +5,13 @@
  * and 28 DBLP 2026 Venues (PL/SE CCF-A & CCF-B Conferences + Journals,
  * CR CCF-A Conferences, AI CCF-A Conferences).
  *
- * PDFs are never downloaded automatically, while complete abstracts, citation
- * counts, citation strings / BibTeX, and keywords are always populated.
+ * Unified single source of truth: Rust `collection.sqlite` via Tauri IPC.
+ * Fetching, XML/HTML parsing, and OpenAlex/Crossref/publisher enrichment are
+ * stateless pipelines writing batches directly to `collection.sqlite`.
  */
 
 import { listenAgentCompleted, listenAgentFailed, runOnce } from "@/lib/agent";
 import { commands } from "@/lib/core/bindings";
-import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
@@ -31,22 +31,53 @@ import {
 	formatPaperBibtex,
 	formatPaperCitationText,
 	inferVenueKind,
-	isExcludedByDoiPrefix,
 	isFrontmatterTitle,
 	isPlaceholderAbstract,
 	isWorkshopOrCompanionVenue,
-	loadItemsFromIndexedDb,
 	normalizePaperKeywords,
-	patchItemsInIndexedDb,
 	reconstructOpenAlexAbstract,
-	resetIndexedDbSyncCacheForTests,
-	saveItemsToIndexedDb,
 	VENUE_SPEC_BY_ID,
 	type VenueCcfRank,
 	type VenueConfig,
 	type VenueDomain,
 	type VenueKind,
 } from "@/lib/plaza/collection-enrichment";
+import {
+	type ArxivCategoryWatermark,
+	type ArxivLatestRecord,
+	bumpCollectionRevision,
+	type CollectionClearScope,
+	type CollectionConfigUpdateInput,
+	type CollectionListPapersQuery,
+	type CollectionOverviewOut,
+	type CollectionPaperDetailResult,
+	type CollectionPaperPatchInput,
+	type CollectionPapersPageResult,
+	type CollectionStateSummary,
+	type CollectionSummarySnapshot,
+	type CollectionUpsertPapersInput,
+	type CollectionVenueWatermarkUpdate,
+	clearCollection,
+	collectionStore,
+	DEFAULT_ARXIV_CATEGORIES,
+	DEFAULT_COLLECTION_VENUES,
+	ensureCollectionSummaryHydrated,
+	fetchCollectionOverview,
+	fetchCollectionStateSummary,
+	getCollectionPaperDetail,
+	getCollectionPapersByIds,
+	getCollectionSummarySnapshot,
+	isPreloadingCollection,
+	listCollectionPapers,
+	patchCollectionPapers,
+	purgeLegacyCollectionBrowserStorage,
+	resetCollectionStoreForTests,
+	setPreloadingCollectionFlag,
+	subscribeCollectionSummary,
+	subscribePreloadingCollection,
+	updateCollectionConfig,
+	upsertCollectionPapers,
+} from "@/lib/plaza/collection-store";
 import {
 	createPoliteFetchJson,
 	createPoliteFetchText,
@@ -66,9 +97,24 @@ import { getVaultPath } from "@/lib/vault/store";
 import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 
 export type {
+	ArxivCategoryWatermark,
+	ArxivLatestRecord,
+	CollectionClearScope,
+	CollectionConfigUpdateInput,
+	CollectionListPapersQuery,
+	CollectionOverviewOut,
+	CollectionPaperDetailResult,
 	CollectionPaperItem,
+	CollectionPaperPatchInput,
+	CollectionPapersPageResult,
 	CollectionSourceType,
+	CollectionStateSummary,
+	CollectionSummarySnapshot,
+	CollectionUpsertPapersInput,
+	CollectionVenueWatermarkUpdate,
 	DblpVenueSpec,
+	FetchJsonFn,
+	FetchTextFn,
 	VenueCcfRank,
 	VenueConfig,
 	VenueDomain,
@@ -77,10 +123,20 @@ export type {
 export {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
+	bumpCollectionRevision,
+	clearCollection,
+	collectionStore,
 	DBLP_2026_VENUE_SPECS,
+	DEFAULT_ARXIV_CATEGORIES,
+	DEFAULT_COLLECTION_VENUES,
 	derivePaperKeywords,
+	enrichArxivItemsBatch,
 	enrichDblpItemsBatch,
+	enrichSinglePaperOnDemand,
+	ensureCollectionSummaryHydrated,
 	extractSpringerHtmlAbstract,
+	fetchCollectionOverview,
+	fetchCollectionStateSummary,
 	fetchCoolPapersVenuePapers,
 	fetchCsdlVenuePapers,
 	fetchDataCiteLipicsPapers,
@@ -90,92 +146,33 @@ export {
 	fetchVenueStructuredPapers,
 	formatPaperBibtex,
 	formatPaperCitationText,
+	getCollectionPaperDetail,
+	getCollectionPapersByIds,
+	getCollectionSummarySnapshot,
 	inferVenueKind,
 	isConfirmedVenueAcceptance,
 	isFrontmatterTitle,
 	isPlaceholderAbstract,
+	isPreloadingCollection,
 	isWorkshopOrCompanionVenue,
+	listCollectionPapers,
 	normalizePaperKeywords,
 	parseAcceptedVenueArxivXml,
 	parseCoolPapersVenueHtml,
 	parseOfficialVenueProgramHtml,
-	patchItemsInIndexedDb,
+	patchCollectionPapers,
+	purgeLegacyCollectionBrowserStorage,
 	reconstructOpenAlexAbstract,
+	subscribeCollectionSummary,
+	subscribePreloadingCollection,
+	updateCollectionConfig,
+	upsertCollectionPapers,
 	VENUE_SPEC_BY_ID,
 };
 
-export const DEFAULT_ARXIV_CATEGORIES = ["cs.SE", "cs.CR", "cs.PL"] as const;
-
-export type ArxivLatestRecord = {
-	arxivId: string;
-	title: string;
-	publishedAt: string;
-	categoriesKey: string;
-	checkedAt: string;
-};
-
-export type ArxivCategoryWatermark = {
-	latestPublishedAt: string;
-	latestArxivId: string;
-	lastSyncedAt: string;
-	/** Oldest `<published>` ISO timestamp contiguously synced during 2026 backfill. */
-	oldestSyncedPublishedAt?: string;
-	/** Upstream 2026 total count reported by `<opensearch:totalResults>`. */
-	remoteTotal?: number;
-	/** True once 2026 backfill has walked all the way back to `2026-01-01`. */
-	historyComplete?: boolean;
-};
-
-export type CollectionState = {
-	categories: string[];
-	venues: VenueConfig[];
-	items: CollectionPaperItem[];
-	lastRefreshedAt: string | null;
-	latestArxiv: ArxivLatestRecord | null;
-	arxivWatermarks?: Record<string, ArxivCategoryWatermark>;
-};
-
-const STORAGE_KEY = "plaza:collection:state:v2";
-const LOCAL_STORAGE_MAX_ITEMS = 80;
 const TARGET_YEAR = 2026;
 
-export const DEFAULT_COLLECTION_VENUES: readonly VenueConfig[] =
-	DBLP_2026_VENUE_SPECS.map((spec) => ({
-		id: spec.id,
-		name: spec.name,
-		url: spec.url,
-		mode: "auto",
-		kind: spec.kind,
-		domain: spec.domain,
-		ccfRank: spec.ccfRank,
-		dblpStream: spec.dblpStream,
-	}));
-
-type Listener = (state: CollectionState) => void;
-const listeners = new Set<Listener>();
-
-type PreloadListener = (preloading: boolean) => void;
-const preloadListeners = new Set<PreloadListener>();
-let preloadingFlag = false;
-
-function setPreloadingFlag(next: boolean): void {
-	if (preloadingFlag === next) return;
-	preloadingFlag = next;
-	for (const l of preloadListeners) l(next);
-}
-
-export function isPreloadingCollection(): boolean {
-	return preloadingFlag;
-}
-
-export function subscribePreloadingCollection(
-	listener: PreloadListener,
-): () => void {
-	preloadListeners.add(listener);
-	return () => {
-		preloadListeners.delete(listener);
-	};
-}
+const attemptedDetailEnrichIds = new Set<string>();
 
 export function matchesAnyArxivCategory(
 	paper: CollectionPaperItem,
@@ -188,363 +185,10 @@ export function matchesAnyArxivCategory(
 	);
 }
 
-/** Reset in-memory collection cache (primarily for unit tests). */
+/** Reset transient in-memory summary & enrichment flags (primarily for unit tests). */
 export function resetCollectionMemoryForTests(): void {
-	memoryState = null;
-	idbHydrated = false;
-	idbHydrationPromise = null;
-	replacedVenueIds.clear();
 	attemptedDetailEnrichIds.clear();
-	resetIndexedDbSyncCacheForTests();
-}
-
-let memoryState: CollectionState | null = null;
-let idbHydrated = false;
-let idbHydrationPromise: Promise<CollectionState> | null = null;
-const replacedVenueIds = new Set<string>();
-const attemptedDetailEnrichIds = new Set<string>();
-
-function migrateCachedVenues(venues: VenueConfig[]): VenueConfig[] {
-	const migrated = venues.map((venue) => {
-		const spec = VENUE_SPEC_BY_ID.get(venue.id);
-		if (spec) {
-			return {
-				...venue,
-				name: spec.name,
-				url: spec.url,
-				mode: "auto" as const,
-				kind: spec.kind,
-				domain: spec.domain,
-				ccfRank: spec.ccfRank,
-				dblpStream: spec.dblpStream,
-			};
-		}
-		return {
-			...venue,
-			kind: inferVenueKind(venue),
-		};
-	});
-
-	const byId = new Map(migrated.map((v) => [v.id, v]));
-	const ordered: VenueConfig[] = [];
-	for (const def of DEFAULT_COLLECTION_VENUES) {
-		ordered.push(byId.get(def.id) ?? def);
-		byId.delete(def.id);
-	}
-	for (const custom of byId.values()) {
-		ordered.push(custom);
-	}
-	return ordered;
-}
-
-function sanitizeCachedItems(
-	items: CollectionPaperItem[],
-): CollectionPaperItem[] {
-	const out: CollectionPaperItem[] = [];
-	for (const item of items) {
-		if (!Array.isArray(item.authors) || item.authors.length === 0) {
-			if (item.sourceType === "venue") continue;
-		}
-		const cleanedTitle = item.title
-			.replace(
-				/\s*(?:Distinguished Paper|Virtual Attendance|Artifact Available|Artifact Evaluated)\s*$/gi,
-				"",
-			)
-			.trim();
-		if (!cleanedTitle) continue;
-		if (item.sourceType === "venue" && isFrontmatterTitle(cleanedTitle)) {
-			continue;
-		}
-		const normalizedAbstract = isPlaceholderAbstract(
-			item.abstract,
-			item.sourceLabel,
-		)
-			? ""
-			: item.abstract;
-		const spec = item.venueId ? VENUE_SPEC_BY_ID.get(item.venueId) : undefined;
-		if (
-			item.sourceType === "venue" &&
-			isExcludedByDoiPrefix(item.doi, spec?.excludeDoiPrefixes)
-		) {
-			continue;
-		}
-		const keywords = normalizePaperKeywords(item.keywords);
-		const normalizedId =
-			item.sourceType === "venue" && item.venueId
-				? buildVenuePaperId(item.venueId, item.doi, item.arxivId, cleanedTitle)
-				: item.id;
-		const recommendedAt =
-			typeof item.recommendedAt === "string" && item.recommendedAt.trim()
-				? item.recommendedAt.trim()
-				: undefined;
-		const { recommendedAt: _rawRec, ...restItem } = item;
-		out.push({
-			...restItem,
-			id: normalizedId,
-			title: cleanedTitle,
-			abstract: normalizedAbstract,
-			venueKind: item.venueKind ?? spec?.kind,
-			venueDomain: item.venueDomain ?? spec?.domain,
-			ccfRank: item.ccfRank ?? spec?.ccfRank,
-			citationCount: item.citationCount ?? 0,
-			keywords,
-			...(recommendedAt ? { recommendedAt } : {}),
-		});
-	}
-	return out;
-}
-
-export function loadCollectionState(): CollectionState {
-	if (memoryState) return memoryState;
-	const raw = readJsonStorage<Partial<CollectionState> | null>(
-		STORAGE_KEY,
-		null,
-	);
-	const categories =
-		Array.isArray(raw?.categories) && raw.categories.length > 0
-			? raw.categories
-			: [...DEFAULT_ARXIV_CATEGORIES];
-	const venues =
-		Array.isArray(raw?.venues) && raw.venues.length > 0
-			? migrateCachedVenues(raw.venues)
-			: [...DEFAULT_COLLECTION_VENUES];
-	const items = Array.isArray(raw?.items)
-		? sanitizeCachedItems(raw.items).filter((item) =>
-				matchesAnyArxivCategory(item, categories),
-			)
-		: [];
-	const arxivWatermarks =
-		raw?.arxivWatermarks && typeof raw.arxivWatermarks === "object"
-			? raw.arxivWatermarks
-			: {};
-	const loaded: CollectionState = {
-		categories,
-		venues,
-		items,
-		lastRefreshedAt:
-			typeof raw?.lastRefreshedAt === "string" ? raw.lastRefreshedAt : null,
-		latestArxiv: raw?.latestArxiv ?? null,
-		arxivWatermarks,
-	};
-	memoryState = loaded;
-	return loaded;
-}
-
-function stripHeavyFieldsForLocalStorage(
-	item: CollectionPaperItem,
-): CollectionPaperItem {
-	if (!item.bibtex) return item;
-	const { bibtex: _bibtex, ...rest } = item;
-	return rest;
-}
-
-function toCompactLocalStorageState(state: CollectionState): CollectionState {
-	const slice =
-		state.items.length > LOCAL_STORAGE_MAX_ITEMS
-			? state.items.slice(0, LOCAL_STORAGE_MAX_ITEMS)
-			: state.items;
-	let hasBibtex = false;
-	for (const item of slice) {
-		if (item.bibtex) {
-			hasBibtex = true;
-			break;
-		}
-	}
-	const compactItems = hasBibtex
-		? slice.map(stripHeavyFieldsForLocalStorage)
-		: slice;
-	if (compactItems === state.items) return state;
-	return {
-		...state,
-		items: compactItems,
-	};
-}
-
-export function saveCollectionState(next: CollectionState): void {
-	const stamped: CollectionState = {
-		...next,
-		items: next.items.filter((item) =>
-			matchesAnyArxivCategory(item, next.categories),
-		),
-	};
-	memoryState = stamped;
-	writeJsonStorage(STORAGE_KEY, toCompactLocalStorageState(stamped));
-
-	if (idbHydrated || typeof indexedDB === "undefined") {
-		void saveItemsToIndexedDb(stamped.items);
-	} else {
-		// Prevent overwriting IndexedDB's full paper pool with localStorage's compact head slice
-		// if a save happens before `hydrateCollectionStateFromIdb()` has completed.
-		void (async () => {
-			const existingIdb = await loadItemsFromIndexedDb();
-			idbHydrated = true;
-			const latest = loadCollectionState();
-			if (!existingIdb || existingIdb.length === 0) {
-				await saveItemsToIndexedDb(latest.items);
-				return;
-			}
-			const sanitized = sanitizeCachedItems(existingIdb).filter(
-				(item) =>
-					matchesAnyArxivCategory(item, latest.categories) &&
-					!(
-						item.sourceType === "venue" &&
-						item.venueId &&
-						replacedVenueIds.has(item.venueId)
-					),
-			);
-			const merged = mergeCollectionItems([latest.items, sanitized]);
-			await saveItemsToIndexedDb(merged);
-			if (merged.length > latest.items.length) {
-				const hydratedState: CollectionState = { ...latest, items: merged };
-				memoryState = hydratedState;
-				for (const listener of listeners) {
-					listener(hydratedState);
-				}
-			}
-		})();
-	}
-
-	for (const listener of listeners) {
-		listener(stamped);
-	}
-}
-
-/**
- * Mark a batch of collection papers as recommended (`recommendedAt` ISO timestamp)
- * using incremental in-memory patching and a single IndexedDB `store.put(...)` transaction
- * for ONLY the updated records (never clearing or rewriting the full pool).
- */
-export async function markCollectionPapersRecommended(
-	paperIds: readonly string[],
-	recommendedAt: string = new Date().toISOString(),
-): Promise<CollectionState> {
-	const targetIds = new Set(paperIds.map((id) => id.trim()).filter(Boolean));
-	if (targetIds.size === 0) {
-		return loadCollectionState();
-	}
-
-	const applyInMemoryPatch = (
-		base: CollectionState,
-	): { nextState: CollectionState; patchedItems: CollectionPaperItem[] } => {
-		const patchedItems: CollectionPaperItem[] = [];
-		let mutated = false;
-		const nextItems = base.items.map((item) => {
-			if (!targetIds.has(item.id) || item.recommendedAt) {
-				return item;
-			}
-			mutated = true;
-			const updated: CollectionPaperItem = {
-				...item,
-				recommendedAt,
-			};
-			patchedItems.push(updated);
-			return updated;
-		});
-		if (!mutated) {
-			return { nextState: base, patchedItems };
-		}
-		const nextState: CollectionState = {
-			...base,
-			items: nextItems,
-		};
-		memoryState = nextState;
-
-		let headMutated = false;
-		const headLimit = Math.min(nextItems.length, LOCAL_STORAGE_MAX_ITEMS);
-		for (let i = 0; i < headLimit; i++) {
-			if (nextItems[i] !== base.items[i]) {
-				headMutated = true;
-				break;
-			}
-		}
-		if (headMutated) {
-			writeJsonStorage(STORAGE_KEY, toCompactLocalStorageState(nextState));
-		}
-		for (const listener of listeners) {
-			listener(nextState);
-		}
-		return { nextState, patchedItems };
-	};
-
-	const initial = loadCollectionState();
-	const firstPass = applyInMemoryPatch(initial);
-	if (firstPass.patchedItems.length > 0) {
-		await patchItemsInIndexedDb(firstPass.patchedItems);
-	}
-
-	// If IndexedDB was not yet hydrated and some target IDs live outside localStorage's compact head slice,
-	// hydrate once and patch any remaining records.
-	if (
-		!idbHydrated &&
-		typeof indexedDB !== "undefined" &&
-		firstPass.patchedItems.length < targetIds.size
-	) {
-		const hydrated = await hydrateCollectionStateFromIdb();
-		const secondPass = applyInMemoryPatch(hydrated);
-		if (secondPass.patchedItems.length > 0) {
-			await patchItemsInIndexedDb(secondPass.patchedItems);
-		}
-		return secondPass.nextState;
-	}
-
-	return firstPass.nextState;
-}
-
-/**
- * Hydrate full `2026-Now` preloaded pool from IndexedDB into memory state.
- */
-export async function hydrateCollectionStateFromIdb(): Promise<CollectionState> {
-	const current = loadCollectionState();
-	if (idbHydrated) return current;
-	if (idbHydrationPromise) return idbHydrationPromise;
-
-	idbHydrationPromise = (async () => {
-		const idbItems = await loadItemsFromIndexedDb();
-		idbHydrated = true;
-		const latest = loadCollectionState();
-		if (!idbItems || idbItems.length === 0) return latest;
-		const sanitized = sanitizeCachedItems(idbItems).filter(
-			(item) =>
-				matchesAnyArxivCategory(item, latest.categories) &&
-				!(
-					item.sourceType === "venue" &&
-					item.venueId &&
-					replacedVenueIds.has(item.venueId)
-				),
-		);
-		if (sanitized.length === 0) return latest;
-		const merged = mergeCollectionItems([latest.items, sanitized]);
-		const latestById = new Map(latest.items.map((i) => [i.id, i]));
-		const hasMetadataUpgrade =
-			merged.length !== latest.items.length ||
-			merged.some((m) => {
-				const prev = latestById.get(m.id);
-				if (!prev) return true;
-				return (
-					m.recommendedAt !== prev.recommendedAt ||
-					m.bibtex !== prev.bibtex ||
-					m.abstract.length > prev.abstract.length
-				);
-			});
-		if (!hasMetadataUpgrade) return latest;
-		const next: CollectionState = { ...latest, items: merged };
-		memoryState = next;
-		for (const listener of listeners) {
-			listener(next);
-		}
-		return next;
-	})().finally(() => {
-		idbHydrationPromise = null;
-	});
-
-	return idbHydrationPromise;
-}
-
-export function subscribeCollectionState(listener: Listener): () => void {
-	listeners.add(listener);
-	return () => {
-		listeners.delete(listener);
-	};
+	resetCollectionStoreForTests();
 }
 
 function hasTauriRuntime(): boolean {
@@ -1289,6 +933,7 @@ export async function syncArxivCategoriesIncremental(
 	transport?: {
 		fetchText?: FetchTextFn;
 		fetchJson?: FetchJsonFn;
+		categoryCounts?: Readonly<Record<string, number>>;
 		onCategoryStatus?: (
 			category: string,
 			status: "refreshing" | "done" | "error",
@@ -1303,6 +948,7 @@ export async function syncArxivCategoriesIncremental(
 	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
 	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
 	const onCategoryStatus = transport?.onCategoryStatus;
+	const categoryCounts = transport?.categoryCounts;
 	const cleanCats = categories.map((c) => c.trim()).filter(Boolean);
 	const nextWatermarks: Record<string, ArxivCategoryWatermark> = {
 		...existingWatermarks,
@@ -1323,12 +969,18 @@ export async function syncArxivCategoriesIncremental(
 	const warmCategories: string[] = [];
 
 	for (const cat of cleanCats) {
-		const hasCached = existingItems.some(
+		const hasCachedInItems = existingItems.some(
 			(i) =>
 				i.sourceType === "arxiv" &&
 				(i.sourceLabel === cat || i.categories.includes(cat)),
 		);
-		if (incremental && hasCached && existingWatermarks[cat]) {
+		const hasCachedCount = (categoryCounts?.[cat] ?? 0) > 0;
+		const wm = existingWatermarks[cat];
+		if (
+			incremental &&
+			(hasCachedInItems || hasCachedCount) &&
+			wm?.latestArxivId
+		) {
 			warmCategories.push(cat);
 		} else {
 			coldStartCategories.push(cat);
@@ -1395,9 +1047,15 @@ export async function syncArxivCategoriesIncremental(
 							lastSyncedAt: nowIso,
 						};
 					}
-					const unseen = combinedCat.filter(
-						(item) => !knownArxivIds.has(item.id),
-					);
+					const unseen =
+						knownArxivIds.size > 0
+							? combinedCat.filter((item) => !knownArxivIds.has(item.id))
+							: combinedCat.filter(
+									(item) =>
+										stripVersion(item.arxivId ?? item.id) !==
+											stripVersion(wm.latestArxivId) &&
+										item.publishedAt >= wm.latestPublishedAt,
+								);
 					if (unseen.length > 0) {
 						rawDeltaGroups.push(unseen);
 					}
@@ -1498,7 +1156,8 @@ let activePreloadRunId = 0;
  * Background preloader that walks `2026-Now` arXiv categories backward using
  * sliding `submittedDate:[202601010000 TO toStamp]` windows (`start=0`, polite rate limit)
  * until every category reaches `2026-01-01` (`historyComplete: true`).
- * Persists `oldestSyncedPublishedAt` after each page so interrupted sessions resume seamlessly.
+ * Persists batches and `oldestSyncedPublishedAt` watermarks directly to `collection.sqlite`
+ * after each page so interrupted sessions resume seamlessly with zero full-pool JS arrays.
  */
 export async function preloadAll2026ArxivInBackground(
 	categories?: readonly string[],
@@ -1509,7 +1168,7 @@ export async function preloadAll2026ArxivInBackground(
 		fetchJson?: FetchJsonFn;
 	},
 ): Promise<void> {
-	const initialSnap = loadCollectionState();
+	const initialSnap = await fetchCollectionStateSummary();
 	const baseCats = (
 		categories && categories.length > 0
 			? [...categories]
@@ -1518,12 +1177,12 @@ export async function preloadAll2026ArxivInBackground(
 		.map((c) => c.trim())
 		.filter(Boolean);
 	const pendingCats = baseCats.filter(
-		(cat) => !initialSnap.arxivWatermarks?.[cat]?.historyComplete,
+		(cat) => !initialSnap.arxivWatermarks[cat]?.historyComplete,
 	);
 	if (pendingCats.length === 0) return;
 
 	const runId = ++activePreloadRunId;
-	setPreloadingFlag(true);
+	setPreloadingCollectionFlag(true);
 	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
 	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
 
@@ -1535,9 +1194,7 @@ export async function preloadAll2026ArxivInBackground(
 	};
 	const cursors = new Map<string, CatCursor>();
 	for (const cat of pendingCats) {
-		const wm = initialSnap.arxivWatermarks?.[cat];
-		// Only resume from `oldestSyncedPublishedAt` if a prior contiguous cursor recorded it;
-		// legacy pre-watermark caches start from `"209912312359"` to heal any mid-year gaps.
+		const wm = initialSnap.arxivWatermarks[cat];
 		const resumeIso = wm?.oldestSyncedPublishedAt;
 		cursors.set(cat, {
 			toStamp: resumeIso ? toArxivUpperDateStamp(resumeIso) : "209912312359",
@@ -1557,6 +1214,7 @@ export async function preloadAll2026ArxivInBackground(
 				string,
 				Partial<ArxivCategoryWatermark>
 			> = {};
+			const preferredCategories = collectionStore.getState().categories;
 
 			for (const cat of activeCats) {
 				if (runId !== activePreloadRunId) return;
@@ -1566,7 +1224,7 @@ export async function preloadAll2026ArxivInBackground(
 				try {
 					const pageRes = await fetchArxivCategoryPageWithRetry(
 						cat,
-						loadCollectionState().categories,
+						preferredCategories,
 						perPage,
 						{
 							startOffset: curCursor.startOffset,
@@ -1637,24 +1295,22 @@ export async function preloadAll2026ArxivInBackground(
 			}
 
 			if (runId !== activePreloadRunId) break;
-			const cur = loadCollectionState();
-			const existingIdSet = new Set(cur.items.map((i) => i.id));
 			const batchMerged =
 				pageGroups.length > 0 ? mergeCollectionItems(pageGroups) : [];
+			const existingInDb =
+				batchMerged.length > 0
+					? await getCollectionPapersByIds(batchMerged.map((i) => i.id))
+					: [];
+			const existingIdSet = new Set(existingInDb.map((i) => i.id));
 			const unseenBatch = batchMerged.filter((i) => !existingIdSet.has(i.id));
 			const enrichedUnseen =
 				unseenBatch.length > 0
 					? await enrichArxivItemsBatch(unseenBatch, fetchJsonFn, 135)
 					: [];
 
-			const latestCur = loadCollectionState();
-			const nextItems =
-				enrichedUnseen.length > 0
-					? mergeCollectionItems([latestCur.items, enrichedUnseen])
-					: latestCur.items;
-
+			const latestCur = await fetchCollectionStateSummary();
 			const nextWms: Record<string, ArxivCategoryWatermark> = {
-				...(latestCur.arxivWatermarks ?? {}),
+				...latestCur.arxivWatermarks,
 			};
 			const nowIso = new Date().toISOString();
 			for (const [cat, patch] of Object.entries(watermarkUpdates)) {
@@ -1683,13 +1339,13 @@ export async function preloadAll2026ArxivInBackground(
 				};
 			}
 
-			if (
-				enrichedUnseen.length > 0 ||
-				Object.keys(watermarkUpdates).length > 0
-			) {
-				saveCollectionState({
-					...latestCur,
-					items: nextItems,
+			if (enrichedUnseen.length > 0) {
+				await upsertCollectionPapers({
+					items: enrichedUnseen,
+					arxivWatermarks: nextWms,
+				});
+			} else if (Object.keys(watermarkUpdates).length > 0) {
+				await updateCollectionConfig({
 					arxivWatermarks: nextWms,
 				});
 			}
@@ -1698,15 +1354,14 @@ export async function preloadAll2026ArxivInBackground(
 		}
 	} finally {
 		if (runId === activePreloadRunId) {
-			setPreloadingFlag(false);
+			setPreloadingCollectionFlag(false);
 		}
 	}
 }
 
 /**
  * Paginate deeper into 2026 arXiv submissions per category using each category's own
- * `oldestSyncedPublishedAt` cursor (rather than dividing total pool size across categories)
- * and merge into the persisted Paper Collection state.
+ * `oldestSyncedPublishedAt` cursor and persist directly to `collection.sqlite`.
  */
 export async function fetchMoreArxivCollection(options?: {
 	categories?: readonly string[];
@@ -1716,8 +1371,8 @@ export async function fetchMoreArxivCollection(options?: {
 		fetchText?: FetchTextFn;
 		fetchJson?: FetchJsonFn;
 	};
-}): Promise<{ state: CollectionState; addedCount: number }> {
-	const current = loadCollectionState();
+}): Promise<{ summary: CollectionStateSummary; addedCount: number }> {
+	const current = await fetchCollectionStateSummary();
 	const categories = (
 		options?.categories && options.categories.length > 0
 			? [...options.categories]
@@ -1728,6 +1383,7 @@ export async function fetchMoreArxivCollection(options?: {
 	const maxPerCat = options?.maxResultsPerCategory ?? 300;
 	const fetchTextFn = options?.transport?.fetchText ?? politePlazaFetchText;
 	const fetchJsonFn = options?.transport?.fetchJson ?? politePlazaFetchJson;
+	const nowIso = new Date().toISOString();
 
 	if (typeof options?.startOffset === "number") {
 		const fetched = await fetchArxivCollection(
@@ -1736,39 +1392,26 @@ export async function fetchMoreArxivCollection(options?: {
 			options.startOffset,
 			options.transport,
 		);
-		const latestSnap = loadCollectionState();
-		const merged = mergeCollectionItems([latestSnap.items, fetched.items]);
-		const addedCount = Math.max(0, merged.length - latestSnap.items.length);
-		const nextState: CollectionState = {
-			...latestSnap,
-			items: merged,
-			lastRefreshedAt: new Date().toISOString(),
-		};
-		saveCollectionState(nextState);
-		return { state: nextState, addedCount };
+		const summary = await upsertCollectionPapers({
+			items: fetched.items,
+			lastRefreshedAt: nowIso,
+			...(fetched.latest ? { latestArxiv: fetched.latest } : {}),
+		});
+		const addedCount = Math.max(0, summary.totalCount - current.totalCount);
+		return { summary, addedCount };
 	}
 
 	const pageGroups: CollectionPaperItem[][] = [];
-	const wmPatches: Record<string, Partial<ArxivCategoryWatermark>> = {};
+	const wmPatches: Record<
+		string,
+		Partial<ArxivCategoryWatermark> & { newestItem?: CollectionPaperItem }
+	> = {};
 
 	for (const cat of categories) {
-		const wm = current.arxivWatermarks?.[cat];
+		const wm = current.arxivWatermarks[cat];
 		if (wm?.historyComplete) continue;
 
-		let oldestForCat = wm?.oldestSyncedPublishedAt;
-		if (!oldestForCat) {
-			for (const item of current.items) {
-				if (
-					item.sourceType === "arxiv" &&
-					(item.sourceLabel === cat || item.categories.includes(cat))
-				) {
-					if (!oldestForCat || item.publishedAt < oldestForCat) {
-						oldestForCat = item.publishedAt;
-					}
-				}
-			}
-		}
-
+		const oldestForCat = wm?.oldestSyncedPublishedAt;
 		const toStamp = oldestForCat
 			? toArxivUpperDateStamp(oldestForCat)
 			: "209912312359";
@@ -1795,61 +1438,59 @@ export async function fetchMoreArxivCollection(options?: {
 					? (pageRes.totalResults ?? wm?.remoteTotal)
 					: wm?.remoteTotal,
 			historyComplete: pageRes.historyComplete,
+			newestItem: pageRes.items[0],
 		};
 	}
 
-	const latestSnap = loadCollectionState();
-	const existingIds = new Set(latestSnap.items.map((i) => i.id));
 	const rawBatch =
 		pageGroups.length > 0 ? mergeCollectionItems(pageGroups) : [];
+	const existingInDb =
+		rawBatch.length > 0
+			? await getCollectionPapersByIds(rawBatch.map((i) => i.id))
+			: [];
+	const existingIds = new Set(existingInDb.map((i) => i.id));
 	const unseen = rawBatch.filter((i) => !existingIds.has(i.id));
 	const enriched =
 		unseen.length > 0
 			? await enrichArxivItemsBatch(unseen, fetchJsonFn, 150)
 			: [];
 
-	const merged =
-		enriched.length > 0
-			? mergeCollectionItems([latestSnap.items, enriched])
-			: latestSnap.items;
-	const addedCount = Math.max(0, merged.length - latestSnap.items.length);
-	const nowIso = new Date().toISOString();
+	const latestSnap = await fetchCollectionStateSummary();
 	const nextWatermarks: Record<string, ArxivCategoryWatermark> = {
-		...(latestSnap.arxivWatermarks ?? {}),
+		...latestSnap.arxivWatermarks,
 	};
 	for (const [cat, patch] of Object.entries(wmPatches)) {
+		const { newestItem, ...wmFields } = patch;
 		const prev = nextWatermarks[cat];
 		if (prev) {
 			nextWatermarks[cat] = {
 				...prev,
-				...patch,
+				...wmFields,
 				historyComplete: Boolean(prev.historyComplete || patch.historyComplete),
 			};
-		} else {
-			const newestCat = merged.find(
-				(i) =>
-					i.sourceType === "arxiv" &&
-					(i.sourceLabel === cat || i.categories.includes(cat)),
-			);
-			if (newestCat) {
-				nextWatermarks[cat] = {
-					latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
-					latestPublishedAt: newestCat.publishedAt,
-					lastSyncedAt: nowIso,
-					...patch,
-				};
-			}
+		} else if (newestItem) {
+			nextWatermarks[cat] = {
+				latestArxivId: stripVersion(newestItem.arxivId ?? newestItem.id),
+				latestPublishedAt: newestItem.publishedAt,
+				lastSyncedAt: nowIso,
+				...wmFields,
+			};
 		}
 	}
 
-	const nextState: CollectionState = {
-		...latestSnap,
-		items: merged,
-		arxivWatermarks: nextWatermarks,
-		lastRefreshedAt: nowIso,
-	};
-	saveCollectionState(nextState);
-	return { state: nextState, addedCount };
+	const summary =
+		enriched.length > 0
+			? await upsertCollectionPapers({
+					items: enriched,
+					arxivWatermarks: nextWatermarks,
+					lastRefreshedAt: nowIso,
+				})
+			: await updateCollectionConfig({
+					arxivWatermarks: nextWatermarks,
+					lastRefreshedAt: nowIso,
+				});
+	const addedCount = Math.max(0, summary.totalCount - current.totalCount);
+	return { summary, addedCount };
 }
 
 /**
@@ -2026,7 +1667,6 @@ export function parseResearchrHtml(
 					);
 				if (!titleAnchor) continue;
 
-				// Clone anchor and strip award/attendance badge elements before reading title text.
 				const anchorClone = titleAnchor.cloneNode(true) as HTMLElement;
 				for (const badge of anchorClone.querySelectorAll(
 					".pull-right, .output-badge, .badge, [data-facet-badge]",
@@ -2058,8 +1698,6 @@ export function parseResearchrHtml(
 						}
 					}
 				}
-				// Real accepted papers on conf.researchr.org always have a .performers block with authors;
-				// schedule modal entries ("ICSE Yoga", "Welcome", coffee breaks) do not.
 				if (authors.length === 0) continue;
 
 				const normTitle = title.toLowerCase();
@@ -2199,7 +1837,7 @@ type VenueFetchBundle = {
 
 /**
  * Multi-channel 2026 venue full fetcher combining:
- * 1. OpenAlex + Crossref (`cursor` paginated up to 1,200 papers),
+ * 1. OpenAlex + Crossref,
  * 2. Official DBLP SPARQL (`https://sparql.dblp.org/sparql`) + OpenAlex DOI/Title batch enrichment,
  * 3. Semantic Scholar Bulk Search + arXiv Confirmed Accepted-Venue Metadata fallback.
  */
@@ -2259,7 +1897,7 @@ export async function extractVenueWithAgent(
 
 	const resolved = await resolveConfiguredTranslateAgent();
 	if (!resolved.agentId) {
-		throw new Error("请先在设置中配置并启用 Agent 以执行网页智能提取");
+		throw new Error("请先在设置中配置并启用 Agent 以执行网页提取");
 	}
 	const prompt = [
 		`You are an academic paper extractor for ${venue.name} (${venue.url}).`,
@@ -2413,6 +2051,10 @@ export async function fetchSingleVenuePapers(
 	return bundle.items;
 }
 
+/**
+ * Pure helper that replaces stale rows for `venueId` while carrying forward
+ * `recommendedAt` timestamps across matching `(id, doi, arxivId, title)`.
+ */
 export function applyFreshVenueItems(
 	pool: readonly CollectionPaperItem[],
 	venueId: string,
@@ -2422,7 +2064,6 @@ export function applyFreshVenueItems(
 	if (freshVenueItems.length === 0) {
 		return [...pool];
 	}
-	replacedVenueIds.add(venueId);
 
 	const recommendedById = new Map<string, string>();
 	const recommendedByDoi = new Map<string, string>();
@@ -2477,90 +2118,55 @@ export function applyFreshVenueItems(
 	return mergeCollectionItems([preservedFresh, rest]);
 }
 
-/**
- * Full multi-page, multi-channel update for a single Venue.
- */
-async function syncVenueFull(venue: VenueConfig): Promise<{
-	venuePatch: Partial<VenueConfig>;
-	fullItems: CollectionPaperItem[];
-}> {
-	const snap = loadCollectionState();
-	const cachedForVenue = snap.items.filter(
-		(i) =>
-			i.sourceType === "venue" &&
-			(i.venueId === venue.id || (!i.venueId && i.sourceLabel === venue.name)),
-	);
-	const nowIso = new Date().toISOString();
-
-	const fullBundle = await fetchSingleVenueBundle(venue, false, {
-		maxPages: 25,
-	});
-	if (fullBundle.items.length === 0 && cachedForVenue.length > 0) {
-		throw new Error(`No papers returned when refreshing ${venue.name}`);
-	}
-	if (
-		cachedForVenue.length >= 80 &&
-		fullBundle.items.length > 0 &&
-		fullBundle.items.length < Math.floor(cachedForVenue.length * 0.4)
-	) {
-		throw new Error(
-			`Incomplete upstream response when refreshing ${venue.name}`,
-		);
-	}
-	const combinedCount = fullBundle.items.length;
-
-	return {
-		venuePatch: {
-			lastFetchedAt: nowIso,
-			latestPublishedAt:
-				fullBundle.latestPublishedAt ?? venue.latestPublishedAt ?? null,
-			remoteTotalCount: Math.max(fullBundle.remoteTotalCount, combinedCount),
-			paperCount: combinedCount,
-		},
-		fullItems: fullBundle.items,
-	};
-}
-
-const inflightVenueLoads = new Map<string, Promise<CollectionState>>();
+const inflightVenueLoads = new Map<string, Promise<CollectionStateSummary>>();
 
 /**
- * Priority-load (full multi-page update) a specific 2026 venue when selected in UI.
+ * Priority-load (full multi-page update) a specific 2026 venue and atomically
+ * replace its rows in `collection.sqlite` while preserving `recommended_at`.
  */
 export async function ensureVenueLoaded(
 	venueId: string,
-): Promise<CollectionState> {
+): Promise<CollectionStateSummary> {
 	const existing = inflightVenueLoads.get(venueId);
 	if (existing) return existing;
 
 	const task = (async () => {
-		await hydrateCollectionStateFromIdb();
-		const state = loadCollectionState();
-		const venue = state.venues.find((v) => v.id === venueId);
-		if (!venue) return state;
+		const summary = await fetchCollectionStateSummary();
+		const venue = summary.venues.find((v) => v.id === venueId);
+		if (!venue) return summary;
 
-		const result = await syncVenueFull(venue);
-		const latest = loadCollectionState();
-		const merged = applyFreshVenueItems(
-			latest.items,
-			venueId,
-			result.fullItems,
-			venue.name,
-		);
-		const updatedVenues = latest.venues.map((v) =>
-			v.id === venueId
-				? {
-						...v,
-						...result.venuePatch,
-					}
-				: v,
-		);
-		const next: CollectionState = {
-			...latest,
-			venues: updatedVenues,
-			items: merged,
-		};
-		saveCollectionState(next);
-		return next;
+		const previousCount = venue.paperCount ?? 0;
+		const nowIso = new Date().toISOString();
+		const fullBundle = await fetchSingleVenueBundle(venue, false, {
+			maxPages: 25,
+		});
+
+		if (fullBundle.items.length === 0 && previousCount > 0) {
+			throw new Error(`No papers returned when refreshing ${venue.name}`);
+		}
+		if (
+			previousCount >= 80 &&
+			fullBundle.items.length > 0 &&
+			fullBundle.items.length < Math.floor(previousCount * 0.4)
+		) {
+			throw new Error(
+				`Incomplete upstream response when refreshing ${venue.name}`,
+			);
+		}
+
+		const combinedCount = fullBundle.items.length;
+		return await upsertCollectionPapers({
+			items: fullBundle.items,
+			replaceVenueId: venue.id,
+			replaceSourceLabel: venue.name,
+			venueUpdate: {
+				venueId: venue.id,
+				lastFetchedAt: nowIso,
+				latestPublishedAt:
+					fullBundle.latestPublishedAt ?? venue.latestPublishedAt ?? null,
+				remoteTotalCount: Math.max(fullBundle.remoteTotalCount, combinedCount),
+			},
+		});
 	})().finally(() => {
 		inflightVenueLoads.delete(venueId);
 	});
@@ -2587,34 +2193,64 @@ export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
 }
 
 /**
- * Guarantee complete abstract, citation count, authentic keywords, and bibliographic info
- * when clicking a paper card, persisting enriched fields back into local state.
+ * Guarantee complete abstract, citation count, authentic keywords, BibTeX, and
+ * bibliographic info when clicking a paper card, persisting enriched fields
+ * back to `collection.sqlite` via `plazaCollectionPatchPapers`.
  */
 export async function ensurePaperFullDetails(
 	paper: CollectionPaperItem,
 ): Promise<CollectionPaperItem> {
-	if (!shouldEnrichPaperOnDemand(paper)) return paper;
-	attemptedDetailEnrichIds.add(paper.id);
+	let basePaper: CollectionPaperItem = paper;
+	try {
+		const dbDetail = await getCollectionPaperDetail(paper.id);
+		if (dbDetail) {
+			const { citationText: _cite, ...detailFields } = dbDetail;
+			basePaper = detailFields;
+		}
+	} catch {
+		// Non-Tauri unit test or offline fallback: proceed with `paper`.
+	}
+
+	if (!shouldEnrichPaperOnDemand(basePaper)) {
+		return basePaper;
+	}
+	attemptedDetailEnrichIds.add(basePaper.id);
 
 	const enriched = await enrichSinglePaperOnDemand(
-		paper,
+		basePaper,
 		politePlazaFetchJson,
 		politePlazaFetchText,
 	);
-	const cur = loadCollectionState();
-	const idx = cur.items.findIndex((i) => i.id === paper.id);
-	if (idx >= 0) {
-		const existing = cur.items[idx];
-		const finalized =
-			existing?.recommendedAt && !enriched.recommendedAt
-				? { ...enriched, recommendedAt: existing.recommendedAt }
-				: enriched;
-		const nextItems = [...cur.items];
-		nextItems[idx] = finalized;
-		saveCollectionState({ ...cur, items: nextItems });
-		return finalized;
+	const finalized: CollectionPaperItem = {
+		...enriched,
+		...(basePaper.recommendedAt && !enriched.recommendedAt
+			? { recommendedAt: basePaper.recommendedAt }
+			: {}),
+		bibtex: enriched.bibtex || formatPaperBibtex(enriched),
+	};
+
+	try {
+		await patchCollectionPapers([
+			{
+				id: finalized.id,
+				abstract: finalized.abstract || null,
+				doi: finalized.doi ?? null,
+				arxivId: finalized.arxivId ?? null,
+				pdfUrl: finalized.pdfUrl ?? null,
+				volume: finalized.volume ?? null,
+				issue: finalized.issue ?? null,
+				pages: finalized.pages ?? null,
+				venueFull: finalized.venueFull ?? null,
+				citationCount: finalized.citationCount ?? 0,
+				keywords: finalized.keywords ?? [],
+				bibtex: finalized.bibtex ?? null,
+			},
+		]);
+	} catch {
+		// Non-Tauri unit test fallback: still return the enriched paper.
 	}
-	return enriched;
+
+	return finalized;
 }
 
 /**
@@ -2714,23 +2350,26 @@ export function mergeCollectionItems(
 }
 
 /**
- * True once a venue has already been fetched or has cached papers in local state.
+ * True once a venue has already been fetched or has persisted papers in SQLite.
  */
 export function isVenueAlreadyLoaded(
 	venue: VenueConfig,
-	items: readonly CollectionPaperItem[],
+	items?: readonly CollectionPaperItem[],
 ): boolean {
-	if (venue.lastFetchedAt) {
+	if (venue.lastFetchedAt || (venue.paperCount ?? 0) > 0) {
 		return true;
 	}
-	return items.some(
-		(item) => item.sourceType === "venue" && item.venueId === venue.id,
-	);
+	if (items && items.length > 0) {
+		return items.some(
+			(item) => item.sourceType === "venue" && item.venueId === venue.id,
+		);
+	}
+	return false;
 }
 
 /**
  * Refresh ONLY `arXiv` categories (either all configured categories or a single
- * sub-category such as `cs.SE`), never touching `Venue` items or triggering Venue requests.
+ * sub-category such as `cs.SE`), persisting incremental deltas directly to `collection.sqlite`.
  */
 export async function refreshArxivCollection(options?: {
 	categories?: string[];
@@ -2740,75 +2379,68 @@ export async function refreshArxivCollection(options?: {
 		category: string,
 		status: "refreshing" | "done" | "error",
 	) => void;
-}): Promise<CollectionState> {
-	const existingState = loadCollectionState();
-	const targetCategories = options?.categories ?? existingState.categories;
+}): Promise<CollectionStateSummary> {
+	const existingSummary = await fetchCollectionStateSummary();
+	const targetCategories = options?.categories ?? existingSummary.categories;
 	const savedCategories = options?.replaceCategories
 		? targetCategories
-		: existingState.categories;
+		: existingSummary.categories;
 	const incremental = options?.incremental !== false;
 
-	let mergedItems = existingState.items;
-	let latestArxiv = existingState.latestArxiv;
-	let nextWatermarks = existingState.arxivWatermarks ?? {};
-	let coldStartCats: string[] = [];
+	if (options?.replaceCategories) {
+		await updateCollectionConfig({ categories: savedCategories });
+	}
 
 	const arxivSync = await syncArxivCategoriesIncremental(
 		targetCategories,
-		existingState.items,
-		nextWatermarks,
+		[],
+		existingSummary.arxivWatermarks,
 		incremental,
 		{
+			categoryCounts: existingSummary.categoryCounts,
 			onCategoryStatus: options?.onCategoryStatus,
 		},
 	);
-	nextWatermarks = arxivSync.nextWatermarks;
-	coldStartCats = arxivSync.coldStartCategories;
-	if (arxivSync.deltaItems.length > 0) {
-		mergedItems = mergeCollectionItems([
-			arxivSync.deltaItems,
-			loadCollectionState().items,
-		]);
-	} else {
-		mergedItems = loadCollectionState().items;
-	}
-	if (arxivSync.latest) {
-		latestArxiv = arxivSync.latest;
-	}
 
-	const latestSnap = loadCollectionState();
-	const nextState: CollectionState = {
-		...latestSnap,
-		categories: savedCategories,
-		items: mergedItems,
-		lastRefreshedAt: new Date().toISOString(),
-		latestArxiv,
-		arxivWatermarks: {
-			...(latestSnap.arxivWatermarks ?? {}),
-			...nextWatermarks,
-		},
+	const latestSnap = await fetchCollectionStateSummary();
+	const mergedWatermarks: Record<string, ArxivCategoryWatermark> = {
+		...latestSnap.arxivWatermarks,
+		...arxivSync.nextWatermarks,
 	};
-	saveCollectionState(nextState);
+	const nowIso = new Date().toISOString();
+	const latestArxiv = arxivSync.latest ?? latestSnap.latestArxiv;
+
+	const nextSummary =
+		arxivSync.deltaItems.length > 0
+			? await upsertCollectionPapers({
+					items: arxivSync.deltaItems,
+					arxivWatermarks: mergedWatermarks,
+					lastRefreshedAt: nowIso,
+					latestArxiv,
+				})
+			: await updateCollectionConfig({
+					arxivWatermarks: mergedWatermarks,
+					lastRefreshedAt: nowIso,
+					...(latestArxiv ? { latestArxiv } : {}),
+				});
 
 	const incompleteCats = targetCategories
 		.map((c) => c.trim())
 		.filter(
-			(c) => Boolean(c) && !nextState.arxivWatermarks?.[c]?.historyComplete,
+			(c) => Boolean(c) && !nextSummary.arxivWatermarks[c]?.historyComplete,
 		);
-	if (incompleteCats.length > 0 || coldStartCats.length > 0) {
+	if (incompleteCats.length > 0 || arxivSync.coldStartCategories.length > 0) {
 		const catsToPreload = Array.from(
-			new Set([...coldStartCats, ...incompleteCats]),
+			new Set([...arxivSync.coldStartCategories, ...incompleteCats]),
 		);
 		void preloadAll2026ArxivInBackground(catsToPreload);
 	}
-	return loadCollectionState();
+	return nextSummary;
 }
 
 /**
  * Refresh ONLY `Venue` entries (either all venues, a filtered subset, or a single
- * venue such as `ase-2026`), never touching `arXiv`.
- * When `skipLoaded` is true (used only for cold-start initialization), venues that
- * have already been loaded are skipped.
+ * venue such as `ase-2026`), persisting each venue atomically to `collection.sqlite`.
  */
 export async function refreshVenueCollection(options?: {
 	venues?: VenueConfig[];
@@ -2821,9 +2453,18 @@ export async function refreshVenueCollection(options?: {
 		index: number,
 		total: number,
 	) => void;
-}): Promise<CollectionState> {
-	await hydrateCollectionStateFromIdb();
-	const current = loadCollectionState();
+}): Promise<CollectionStateSummary> {
+	let current = await fetchCollectionStateSummary();
+	if (options?.venues && options.venues.length > 0) {
+		const currentIds = new Set(current.venues.map((v) => v.id));
+		if (
+			options.venues.length !== current.venues.length ||
+			options.venues.some((v) => !currentIds.has(v.id))
+		) {
+			current = await updateCollectionConfig({ venues: options.venues });
+		}
+	}
+
 	const baseVenues = options?.venues ?? current.venues;
 	const idSet =
 		options?.venueIds && options.venueIds.length > 0
@@ -2831,7 +2472,7 @@ export async function refreshVenueCollection(options?: {
 			: null;
 	const targets = baseVenues.filter((v) => {
 		if (idSet && !idSet.has(v.id)) return false;
-		if (options?.skipLoaded && isVenueAlreadyLoaded(v, current.items)) {
+		if (options?.skipLoaded && isVenueAlreadyLoaded(v)) {
 			return false;
 		}
 		return true;
@@ -2850,7 +2491,8 @@ export async function refreshVenueCollection(options?: {
 			const target = targets[idx];
 			if (!target) continue;
 			const liveVenue =
-				loadCollectionState().venues.find((v) => v.id === target.id) ?? target;
+				collectionStore.getState().venues.find((v) => v.id === target.id) ??
+				target;
 			options?.onVenueProgress?.(liveVenue, idx + 1, targets.length);
 			options?.onVenueStatus?.(
 				liveVenue,
@@ -2873,11 +2515,36 @@ export async function refreshVenueCollection(options?: {
 		),
 	);
 
-	const finalState = loadCollectionState();
-	const nextState: CollectionState = {
-		...finalState,
+	return updateCollectionConfig({
 		lastRefreshedAt: new Date().toISOString(),
-	};
-	saveCollectionState(nextState);
-	return nextState;
+	});
+}
+
+/**
+ * Refresh both `arXiv` and `Venue` portals in `collection.sqlite`.
+ */
+export async function refreshAllCollection(options?: {
+	incrementalArxiv?: boolean;
+	skipLoadedVenues?: boolean;
+	onCategoryStatus?: (
+		category: string,
+		status: "refreshing" | "done" | "error",
+	) => void;
+	onVenueProgress?: (venue: VenueConfig, index: number, total: number) => void;
+	onVenueStatus?: (
+		venue: VenueConfig,
+		status: "refreshing" | "done" | "error",
+		index: number,
+		total: number,
+	) => void;
+}): Promise<CollectionStateSummary> {
+	await refreshArxivCollection({
+		incremental: options?.incrementalArxiv !== false,
+		onCategoryStatus: options?.onCategoryStatus,
+	});
+	return refreshVenueCollection({
+		skipLoaded: options?.skipLoadedVenues ?? false,
+		onVenueProgress: options?.onVenueProgress,
+		onVenueStatus: options?.onVenueStatus,
+	});
 }

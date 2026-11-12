@@ -1,12 +1,13 @@
 /**
  * Native 广场 panel: Paper Collection (2026–Now arXiv + 28 DBLP 2026 Venues).
  *
- * Two-stage flow:
+ * Two-stage flow backed by `collection.sqlite`:
  * 1. Portal Hub: Separate `arXiv` (`cs.SE`, `cs.CR`, `cs.PL`, `cs.AI`, …) and
- *    `Venue` (`Conference` + `Journal`, all 2026 from DBLP) entry cards.
+ *    `Venue` (`Conference` + `Journal`, all 2026 from DBLP) entry cards powered
+ *    by `CollectionSummarySnapshot` (zero paper rows in JS memory).
  * 2. List View: Top navigation bar with source switcher, `arXiv`-only time filter
- *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 100-paper initial slice with
- *    +50 preloaded Load More, and full detail dialog on card click.
+ *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 100-paper paginated SQLite query
+ *    with +50 Load More increments, and full detail dialog on card click.
  */
 
 import {
@@ -26,7 +27,14 @@ import {
 	Square,
 	Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
 import {
@@ -55,28 +63,32 @@ import { notifyError } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import { lookupSubmit } from "@/lib/paper/import-actions";
+import { libraryStore } from "@/lib/paper/library-store";
 import {
+	type CollectionListPapersQuery,
 	type CollectionPaperItem,
 	type CollectionSourceType,
-	type CollectionState,
+	clearCollection,
 	DEFAULT_ARXIV_CATEGORIES,
+	ensureCollectionSummaryHydrated,
 	ensureVenueLoaded,
 	fetchMoreArxivCollection,
-	hydrateCollectionStateFromIdb,
+	getCollectionSummarySnapshot,
 	inferVenueKind,
 	isPreloadingCollection,
-	loadCollectionState,
-	matchesAnyArxivCategory,
+	listCollectionPapers,
+	refreshAllCollection,
 	refreshArxivCollection,
 	refreshVenueCollection,
-	saveCollectionState,
-	subscribeCollectionState,
+	subscribeCollectionSummary,
 	subscribePreloadingCollection,
+	updateCollectionConfig,
 	type VenueConfig,
 	type VenueDomain,
 } from "@/lib/plaza/collection";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
 import { importPlazaPaper } from "@/lib/plaza/import";
+import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
 type ViewStage = "hub" | "list";
@@ -92,10 +104,33 @@ const COLLECTION_ICON_BTN_CLASS =
 const COLLECTION_CARD_IMPORT_BTN_CLASS =
 	"bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/20 hover:bg-blue-600 hover:text-white dark:bg-blue-500/20 dark:text-blue-200 dark:ring-blue-400/35 dark:hover:bg-blue-500 dark:hover:text-white";
 
+function checkPaperImported(
+	paper: CollectionPaperItem,
+	importedSet: ReadonlySet<string>,
+): boolean {
+	if (importedSet.has(paper.id)) return true;
+	if (paper.coolPapersId && importedSet.has(paper.coolPapersId.toLowerCase())) {
+		return true;
+	}
+	if (paper.arxivId) {
+		const bare = bareArxivId(paper.arxivId);
+		if (bare && importedSet.has(bare)) return true;
+		if (importedSet.has(paper.arxivId)) return true;
+	}
+	if (paper.doi && importedSet.has(paper.doi.toLowerCase())) return true;
+	return false;
+}
+
 export function PlazaCollectionView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
-	const [state, setState] = useState<CollectionState>(loadCollectionState);
-	const [preloading, setPreloading] = useState<boolean>(isPreloadingCollection);
+	const summary = useSyncExternalStore(
+		subscribeCollectionSummary,
+		getCollectionSummarySnapshot,
+	);
+	const preloading = useSyncExternalStore(
+		subscribePreloadingCollection,
+		isPreloadingCollection,
+	);
 
 	const [viewStage, setViewStage] = useState<ViewStage>("hub");
 	const [activeSource, setActiveSource] =
@@ -107,7 +142,15 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		useState<DomainFilter>("all");
 	const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
 	const [timeRange, setTimeRange] = useState<TimeRangeFilter>("all");
-	const [displayLimit, setDisplayLimit] = useState(INITIAL_DISPLAY_COUNT);
+
+	// Paginated slice state (never holds full 20,000-paper pool in React memory)
+	const [pageItems, setPageItems] = useState<CollectionPaperItem[]>([]);
+	const [pageTotal, setPageTotal] = useState(0);
+	const [pageHasMore, setPageHasMore] = useState(false);
+	const [loadingPage, setLoadingPage] = useState(false);
+	const [loadingMorePage, setLoadingMorePage] = useState(false);
+	const loadedTargetRef = useRef(INITIAL_DISPLAY_COUNT);
+	const listReqSeqRef = useRef(0);
 
 	const [refreshingArxiv, setRefreshingArxiv] = useState(false);
 	const [refreshingVenue, setRefreshingVenue] = useState(false);
@@ -138,23 +181,153 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		null,
 	);
 
-	// Hydrate local cache from IndexedDB on open; never auto-fetch arXiv or Venue
+	// Hydrate lightweight SQLite summary on open; never auto-fetch arXiv or Venue
 	useEffect(() => {
-		const unsubState = subscribeCollectionState((next) => setState(next));
-		const unsubPreload = subscribePreloadingCollection((flag) =>
-			setPreloading(flag),
-		);
-		void hydrateCollectionStateFromIdb().then((hydrated) => setState(hydrated));
-		return () => {
-			unsubState();
-			unsubPreload();
-		};
+		void ensureCollectionSummaryHydrated().catch((err) => {
+			notifyError(errorText(err));
+		});
 	}, []);
+
+	const syncLibraryImported = useCallback(
+		async (items: readonly CollectionPaperItem[]) => {
+			const arxivQueries = items
+				.map((p) => p.arxivId)
+				.filter((id): id is string => Boolean(id));
+			if (arxivQueries.length === 0) return;
+			try {
+				const matched = await importedIdsInLibrary(arxivQueries, {
+					limit: Number.POSITIVE_INFINITY,
+				});
+				if (matched.length === 0) return;
+				setImportedIds((prev) => {
+					const next = new Set(prev);
+					for (const raw of matched) {
+						next.add(raw);
+						const bare = bareArxivId(raw);
+						if (bare) next.add(bare);
+					}
+					return next;
+				});
+			} catch {
+				// Ignore when no Vault is open
+			}
+		},
+		[],
+	);
+
+	useEffect(() => {
+		if (pageItems.length === 0) return;
+		void syncLibraryImported(pageItems);
+		return libraryStore.subscribe((state, prevState) => {
+			if (state.papers !== prevState.papers) {
+				void syncLibraryImported(pageItems);
+			}
+		});
+	}, [pageItems, syncLibraryImported]);
+
+	const resetPagination = useCallback(() => {
+		loadedTargetRef.current = INITIAL_DISPLAY_COUNT;
+		setSelectedIds(new Set());
+	}, []);
+
+	const listQuery = useMemo<CollectionListPapersQuery>(() => {
+		if (activeSource === "arxiv") {
+			return {
+				sourceType: "arxiv",
+				category: selectedCategory,
+				timePreset: timeRange,
+			};
+		}
+		return {
+			sourceType: "venue",
+			venueKind: venueKindFilter === "all" ? null : venueKindFilter,
+			venueDomain: venueDomainFilter === "all" ? null : venueDomainFilter,
+			venueId: selectedVenueId,
+		};
+	}, [
+		activeSource,
+		selectedCategory,
+		selectedVenueId,
+		timeRange,
+		venueDomainFilter,
+		venueKindFilter,
+	]);
+
+	// Fetch visible page from `collection.sqlite` whenever list filters or store `revision` change
+	useEffect(() => {
+		if (viewStage !== "list" || summary.revision < 0) return;
+		const seq = ++listReqSeqRef.current;
+		const limit = Math.min(
+			1000,
+			Math.max(INITIAL_DISPLAY_COUNT, loadedTargetRef.current),
+		);
+		setLoadingPage(true);
+
+		void listCollectionPapers({
+			...listQuery,
+			limit,
+			offset: 0,
+		})
+			.then((res) => {
+				if (seq !== listReqSeqRef.current) return;
+				setPageItems(res.items);
+				setPageTotal(res.total);
+				setPageHasMore(res.hasMore);
+			})
+			.catch((err) => {
+				if (seq !== listReqSeqRef.current) return;
+				notifyError(errorText(err));
+			})
+			.finally(() => {
+				if (seq === listReqSeqRef.current) {
+					setLoadingPage(false);
+				}
+			});
+	}, [listQuery, summary.revision, viewStage]);
+
+	const handleLoadMorePage = useCallback(async () => {
+		if (loadingMorePage || loadingPage || !pageHasMore) return;
+		const seq = listReqSeqRef.current;
+		setLoadingMorePage(true);
+		try {
+			const res = await listCollectionPapers({
+				...listQuery,
+				limit: LOAD_MORE_STEP,
+				offset: pageItems.length,
+			});
+			if (seq !== listReqSeqRef.current) return;
+			setPageItems((prev) => {
+				const seen = new Set(prev.map((p) => p.id));
+				const merged = [...prev];
+				for (const item of res.items) {
+					if (!seen.has(item.id)) {
+						seen.add(item.id);
+						merged.push(item);
+					}
+				}
+				loadedTargetRef.current = Math.max(
+					INITIAL_DISPLAY_COUNT,
+					merged.length,
+				);
+				return merged;
+			});
+			setPageTotal(res.total);
+			setPageHasMore(res.hasMore);
+		} catch (err) {
+			if (seq === listReqSeqRef.current) {
+				notifyError(errorText(err));
+			}
+		} finally {
+			if (seq === listReqSeqRef.current) {
+				setLoadingMorePage(false);
+			}
+		}
+	}, [listQuery, loadingMorePage, loadingPage, pageHasMore, pageItems.length]);
 
 	const handleRefreshArxiv = useCallback(
 		async (targetCategories?: string[], replaceCategories = false) => {
 			if (refreshingArxiv) return;
-			const cats = targetCategories ?? state.categories;
+			const cats = targetCategories ?? summary.categories;
 			const label =
 				targetCategories && targetCategories.length === 1
 					? (targetCategories[0] ?? "arXiv")
@@ -172,7 +345,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				return next;
 			});
 			try {
-				const next = await refreshArxivCollection({
+				await refreshArxivCollection({
 					categories: cats,
 					replaceCategories,
 					incremental: true,
@@ -191,7 +364,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						}
 					},
 				});
-				setState(next);
 			} catch (err) {
 				notifyError(errorText(err));
 			} finally {
@@ -204,7 +376,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				});
 			}
 		},
-		[refreshingArxiv, state.categories],
+		[refreshingArxiv, summary.categories],
 	);
 
 	const handleRefreshVenue = useCallback(
@@ -215,7 +387,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				const singleId = targetVenueIds[0];
 				if (!singleId || loadingVenueId === singleId) return;
 				const singleName =
-					state.venues.find((v) => v.id === singleId)?.name ?? venuePortalLabel;
+					summary.venues.find((v) => v.id === singleId)?.name ??
+					venuePortalLabel;
 				setLoadingVenueId(singleId);
 				setVenueRefreshLabel(singleName);
 				setRefreshingVenueIds((prev) => new Set(prev).add(singleId));
@@ -225,8 +398,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					return next;
 				});
 				try {
-					const next = await ensureVenueLoaded(singleId);
-					setState(next);
+					await ensureVenueLoaded(singleId);
 					setRefreshedVenueIds((prev) => new Set(prev).add(singleId));
 				} catch (err) {
 					notifyError(errorText(err));
@@ -243,7 +415,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			}
 
 			if (refreshingVenue) return;
-			const scopedIds = targetVenueIds ?? state.venues.map((v) => v.id);
+			const scopedIds = targetVenueIds ?? summary.venues.map((v) => v.id);
 			setRefreshingVenue(true);
 			setVenueRefreshLabel(venuePortalLabel);
 			setRefreshedVenueIds((prev) => {
@@ -252,8 +424,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				return next;
 			});
 			try {
-				const next = await refreshVenueCollection({
-					venues: state.venues,
+				await refreshVenueCollection({
+					venues: summary.venues,
 					venueIds: targetVenueIds,
 					skipLoaded: false,
 					onVenueProgress: (venue, idx, total) => {
@@ -278,7 +450,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						}
 					},
 				});
-				setState(next);
 			} catch (err) {
 				notifyError(errorText(err));
 			} finally {
@@ -291,15 +462,89 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				});
 			}
 		},
-		[loadingVenueId, refreshingVenue, state.venues, t],
+		[loadingVenueId, refreshingVenue, summary.venues, t],
 	);
 
-	const handleEnterArxiv = useCallback((category: string | null) => {
-		setActiveSource("arxiv");
-		setSelectedCategory(category);
-		setDisplayLimit(INITIAL_DISPLAY_COUNT);
-		setViewStage("list");
-	}, []);
+	const handleRefreshAll = useCallback(async () => {
+		if (refreshingArxiv || refreshingVenue) return;
+		const cats = summary.categories;
+		const venueIds = summary.venues.map((v) => v.id);
+		const venuePortalLabel = t("plaza.collection.source.venue");
+
+		setRefreshingArxiv(true);
+		setRefreshingVenue(true);
+		setArxivRefreshLabel("arXiv");
+		setRefreshingCategories(new Set(cats));
+		setRefreshedCategories(new Set());
+		setRefreshedVenueIds(new Set());
+
+		try {
+			await refreshAllCollection({
+				incrementalArxiv: true,
+				skipLoadedVenues: false,
+				onCategoryStatus: (cat, status) => {
+					if (status === "refreshing") {
+						setRefreshingCategories((prev) => new Set(prev).add(cat));
+						return;
+					}
+					setRefreshingCategories((prev) => {
+						const next = new Set(prev);
+						next.delete(cat);
+						return next;
+					});
+					if (status === "done") {
+						setRefreshedCategories((prev) => new Set(prev).add(cat));
+					}
+				},
+				onVenueProgress: (venue, idx, total) => {
+					setArxivRefreshLabel(null);
+					setRefreshingArxiv(false);
+					setVenueRefreshLabel(
+						total > 1
+							? `${venuePortalLabel} · ${venue.name} (${idx}/${total})`
+							: venue.name,
+					);
+				},
+				onVenueStatus: (venue, status) => {
+					if (status === "refreshing") {
+						setRefreshingVenueIds((prev) => new Set(prev).add(venue.id));
+						return;
+					}
+					setRefreshingVenueIds((prev) => {
+						const next = new Set(prev);
+						next.delete(venue.id);
+						return next;
+					});
+					if (status === "done") {
+						setRefreshedVenueIds((prev) => new Set(prev).add(venue.id));
+					}
+				},
+			});
+		} catch (err) {
+			notifyError(errorText(err));
+		} finally {
+			setRefreshingArxiv(false);
+			setRefreshingVenue(false);
+			setArxivRefreshLabel(null);
+			setVenueRefreshLabel(null);
+			setRefreshingCategories(new Set());
+			setRefreshingVenueIds((prev) => {
+				const next = new Set(prev);
+				for (const id of venueIds) next.delete(id);
+				return next;
+			});
+		}
+	}, [refreshingArxiv, refreshingVenue, summary.categories, summary.venues, t]);
+
+	const handleEnterArxiv = useCallback(
+		(category: string | null) => {
+			setActiveSource("arxiv");
+			setSelectedCategory(category);
+			resetPagination();
+			setViewStage("list");
+		},
+		[resetPagination],
+	);
 
 	const handleEnterVenue = useCallback(
 		(kind: VenueKindFilter, venueId: string | null) => {
@@ -307,25 +552,50 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			setVenueKindFilter(kind);
 			setVenueDomainFilter("all");
 			setSelectedVenueId(venueId);
-			setDisplayLimit(INITIAL_DISPLAY_COUNT);
+			resetPagination();
 			setViewStage("list");
 		},
-		[],
+		[resetPagination],
 	);
 
-	const updateConfig = useCallback(
-		(updater: (prev: CollectionState) => CollectionState) => {
-			setState((prev) => {
-				const next = updater(prev);
-				saveCollectionState(next);
-				return next;
+	const handleCategoriesChange = useCallback(
+		(cats: string[]) => {
+			if (selectedCategory && !cats.includes(selectedCategory)) {
+				setSelectedCategory(null);
+				resetPagination();
+			}
+			void updateCollectionConfig({ categories: cats }).catch((err) => {
+				notifyError(errorText(err));
 			});
 		},
-		[],
+		[resetPagination, selectedCategory],
+	);
+
+	const handleVenuesChange = useCallback((venues: VenueConfig[]) => {
+		void updateCollectionConfig({ venues }).catch((err) => {
+			notifyError(errorText(err));
+		});
+	}, []);
+
+	const handleRemoveVenue = useCallback(
+		(venueId: string) => {
+			if (selectedVenueId === venueId) {
+				setSelectedVenueId(null);
+				resetPagination();
+			}
+			const nextVenues = summary.venues.filter((v) => v.id !== venueId);
+			void (async () => {
+				await clearCollection("venue", venueId);
+				await updateCollectionConfig({ venues: nextVenues });
+			})().catch((err) => {
+				notifyError(errorText(err));
+			});
+		},
+		[resetPagination, selectedVenueId, summary.venues],
 	);
 
 	const filteredVenuesForBar = useMemo(() => {
-		return state.venues.filter((v) => {
+		return summary.venues.filter((v) => {
 			if (venueKindFilter !== "all" && inferVenueKind(v) !== venueKindFilter) {
 				return false;
 			}
@@ -334,118 +604,39 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			}
 			return true;
 		});
-	}, [state.venues, venueDomainFilter, venueKindFilter]);
+	}, [summary.venues, venueDomainFilter, venueKindFilter]);
 
-	const visiblePapers = useMemo(() => {
-		const now = Date.now();
-
-		return state.items.filter((paper: CollectionPaperItem) => {
-			if (paper.sourceType !== activeSource) return false;
-
-			if (activeSource === "arxiv") {
-				if (!matchesAnyArxivCategory(paper, state.categories)) {
-					return false;
-				}
-				if (
-					selectedCategory &&
-					paper.sourceLabel !== selectedCategory &&
-					!paper.categories.includes(selectedCategory)
-				) {
-					return false;
-				}
-				// Time range applies ONLY to arXiv (`2026-Now`, `30d`, `7d`)
-				if (timeRange === "all") {
-					if (paper.year < 2026) return false;
-				} else {
-					const days = timeRange === "7d" ? 7 : 30;
-					const ts = Date.parse(paper.publishedAt);
-					if (!Number.isNaN(ts) && now - ts > days * 86_400_000) {
-						return false;
-					}
-				}
-			} else {
-				const vKind = paper.venueKind ?? "conference";
-				if (venueKindFilter !== "all" && vKind !== venueKindFilter) {
-					return false;
-				}
-				if (
-					venueDomainFilter !== "all" &&
-					paper.venueDomain !== venueDomainFilter
-				) {
-					return false;
-				}
-				if (selectedVenueId && paper.venueId !== selectedVenueId) {
-					return false;
-				}
-			}
-
-			return true;
-		});
+	const venueChipCounts = useMemo(() => {
+		const map = new Map<string, number>();
+		let sum = 0;
+		for (const v of filteredVenuesForBar) {
+			const cnt = v.paperCount ?? 0;
+			map.set(v.id, cnt);
+			sum += cnt;
+		}
+		const total =
+			venueKindFilter === "all" && venueDomainFilter === "all"
+				? summary.venueCount
+				: sum;
+		return { total, map };
 	}, [
-		activeSource,
-		selectedCategory,
-		selectedVenueId,
-		state.categories,
-		state.items,
-		timeRange,
+		filteredVenuesForBar,
+		summary.venueCount,
 		venueDomainFilter,
 		venueKindFilter,
 	]);
 
-	const displayedPapers = useMemo(
-		() => visiblePapers.slice(0, displayLimit),
-		[displayLimit, visiblePapers],
-	);
-
-	const arxivChipCounts = useMemo(() => {
-		const map = new Map<string, number>();
-		let total = 0;
-		for (const cat of state.categories) map.set(cat, 0);
-		for (const p of state.items) {
-			if (p.sourceType !== "arxiv" || p.year < 2026) continue;
-			if (!matchesAnyArxivCategory(p, state.categories)) continue;
-			total += 1;
-			for (const cat of state.categories) {
-				if (p.sourceLabel === cat || p.categories.includes(cat)) {
-					map.set(cat, (map.get(cat) ?? 0) + 1);
-				}
-			}
-		}
-		return { total, map };
-	}, [state.categories, state.items]);
-
-	const venueChipCounts = useMemo(() => {
-		const map = new Map<string, number>();
-		let total = 0;
-		for (const v of filteredVenuesForBar) map.set(v.id, 0);
-		for (const p of state.items) {
-			if (p.sourceType !== "venue") continue;
-			const vKind = p.venueKind ?? "conference";
-			if (venueKindFilter !== "all" && vKind !== venueKindFilter) continue;
-			if (venueDomainFilter !== "all" && p.venueDomain !== venueDomainFilter) {
-				continue;
-			}
-			total += 1;
-			if (p.venueId && map.has(p.venueId)) {
-				map.set(p.venueId, (map.get(p.venueId) ?? 0) + 1);
-			}
-		}
-		return { total, map };
-	}, [filteredVenuesForBar, state.items, venueDomainFilter, venueKindFilter]);
-
 	const isActiveArxivHistoryComplete = useMemo(() => {
-		const targetCats = selectedCategory ? [selectedCategory] : state.categories;
+		const targetCats = selectedCategory
+			? [selectedCategory]
+			: summary.categories;
 		return (
 			targetCats.length > 0 &&
 			targetCats.every((cat) =>
-				Boolean(state.arxivWatermarks?.[cat]?.historyComplete),
+				Boolean(summary.arxivWatermarks?.[cat]?.historyComplete),
 			)
 		);
-	}, [selectedCategory, state.arxivWatermarks, state.categories]);
-
-	const handleRevealNext50 = useCallback(() => {
-		setDisplayLimit((prev) => prev + LOAD_MORE_STEP);
-	}, []);
+	}, [selectedCategory, summary.arxivWatermarks, summary.categories]);
 
 	const handlePullDeeperRemoteArxiv = useCallback(async () => {
 		if (loadingMoreRemote || refreshingArxiv) return;
@@ -453,24 +644,28 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		try {
 			const targetCats = selectedCategory
 				? [selectedCategory]
-				: state.categories;
-			const { state: next } = await fetchMoreArxivCollection({
+				: summary.categories;
+			loadedTargetRef.current += LOAD_MORE_STEP;
+			await fetchMoreArxivCollection({
 				categories: targetCats,
 				maxResultsPerCategory: 150,
 			});
-			setState(next);
-			setDisplayLimit((prev) => prev + LOAD_MORE_STEP);
 		} catch (err) {
 			notifyError(errorText(err));
 		} finally {
 			setLoadingMoreRemote(false);
 		}
-	}, [loadingMoreRemote, refreshingArxiv, selectedCategory, state.categories]);
+	}, [
+		loadingMoreRemote,
+		refreshingArxiv,
+		selectedCategory,
+		summary.categories,
+	]);
 
 	const selectedVenueName = useMemo(() => {
 		if (!selectedVenueId) return null;
-		return state.venues.find((v) => v.id === selectedVenueId)?.name ?? null;
-	}, [selectedVenueId, state.venues]);
+		return summary.venues.find((v) => v.id === selectedVenueId)?.name ?? null;
+	}, [selectedVenueId, summary.venues]);
 
 	const activeRefreshingVenueIds = useMemo(() => {
 		if (!loadingVenueId || refreshingVenueIds.has(loadingVenueId)) {
@@ -481,19 +676,19 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const isHubArxivRefreshed =
 		!refreshingArxiv &&
-		state.categories.length > 0 &&
-		state.categories.every((cat) => refreshedCategories.has(cat));
+		summary.categories.length > 0 &&
+		summary.categories.every((cat) => refreshedCategories.has(cat));
 
 	const isHubVenueRefreshed =
 		!refreshingVenue &&
-		state.venues.length > 0 &&
-		state.venues.every((v) => refreshedVenueIds.has(v.id));
+		summary.venues.length > 0 &&
+		summary.venues.every((v) => refreshedVenueIds.has(v.id));
 
 	const isAllArxivRefreshed = isHubArxivRefreshed;
 	const isAllArxivRefreshing =
 		refreshingArxiv &&
-		state.categories.length > 0 &&
-		state.categories.every((cat) => refreshingCategories.has(cat));
+		summary.categories.length > 0 &&
+		summary.categories.every((cat) => refreshingCategories.has(cat));
 
 	const isAllFilteredVenuesRefreshing =
 		refreshingVenue &&
@@ -590,12 +785,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const toggleSelectAllDisplayed = useCallback(() => {
 		setSelectedIds((prev) => {
 			const allSelected =
-				displayedPapers.length > 0 &&
-				displayedPapers.every((p) => prev.has(p.id));
+				pageItems.length > 0 && pageItems.every((p) => prev.has(p.id));
 			if (allSelected) return new Set();
-			return new Set(displayedPapers.map((p) => p.id));
+			return new Set(pageItems.map((p) => p.id));
 		});
-	}, [displayedPapers]);
+	}, [pageItems]);
 
 	const importPapers = useCallback(
 		async (targets: CollectionPaperItem[]) => {
@@ -617,7 +811,16 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				if (done.length === 0) return;
 				setImportedIds((prev) => {
 					const next = new Set(prev);
-					for (const p of done) next.add(p.id);
+					for (const p of done) {
+						next.add(p.id);
+						if (p.coolPapersId) next.add(p.coolPapersId.toLowerCase());
+						if (p.arxivId) {
+							next.add(p.arxivId);
+							const bare = bareArxivId(p.arxivId);
+							if (bare) next.add(bare);
+						}
+						if (p.doi) next.add(p.doi.toLowerCase());
+					}
 					return next;
 				});
 				setSelectedIds((prev) => {
@@ -657,8 +860,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 
 	const selectedPapers = useMemo(
-		() => visiblePapers.filter((p) => selectedIds.has(p.id)),
-		[selectedIds, visiblePapers],
+		() => pageItems.filter((p) => selectedIds.has(p.id)),
+		[pageItems, selectedIds],
 	);
 
 	return (
@@ -693,22 +896,48 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							) : (
 								<span className="font-mono tabular-nums">
 									{t("plaza.collection.papersCount", {
-										count: state.items.length,
+										count: summary.totalCount,
 									})}
 								</span>
 							)}
 						</div>
 
 						<div className="flex items-center gap-1.5">
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon-sm"
+										disabled={refreshingArxiv || refreshingVenue}
+										onClick={() => void handleRefreshAll()}
+										aria-label={t("plaza.collection.refresh")}
+										className={cn(
+											"group/refresh-btn",
+											COLLECTION_ICON_BTN_CLASS,
+										)}
+									>
+										{refreshingArxiv || refreshingVenue ? (
+											<Loader2 className="size-3.5 animate-spin text-brand" />
+										) : isHubArxivRefreshed && isHubVenueRefreshed ? (
+											<>
+												<Check className="size-3.5 text-emerald-500 group-hover/refresh-btn:hidden" />
+												<RefreshCw className="hidden size-3.5 group-hover/refresh-btn:block" />
+											</>
+										) : (
+											<RefreshCw className="size-3.5" />
+										)}
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent>{t("plaza.collection.refresh")}</TooltipContent>
+							</Tooltip>
+
 							<CollectionConfigPopover
-								arxivCategories={state.categories}
-								venues={state.venues}
-								onChangeCategories={(cats) => {
-									updateConfig((prev) => ({ ...prev, categories: cats }));
-								}}
-								onChangeVenues={(venues) =>
-									updateConfig((prev) => ({ ...prev, venues }))
-								}
+								arxivCategories={summary.categories}
+								venues={summary.venues}
+								onChangeCategories={handleCategoriesChange}
+								onChangeVenues={handleVenuesChange}
+								onRemoveVenue={handleRemoveVenue}
 							/>
 						</div>
 					</div>
@@ -716,10 +945,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					{/* Two-Card Portal Hub */}
 					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto">
 						<CollectionPortalHub
-							categories={state.categories}
-							venues={state.venues}
-							items={state.items}
-							arxivWatermarks={state.arxivWatermarks}
+							categories={summary.categories}
+							venues={summary.venues}
+							arxivCount={summary.arxivCount}
+							venueCount={summary.venueCount}
+							conferenceCount={summary.conferenceCount}
+							journalCount={summary.journalCount}
+							categoryCounts={summary.categoryCounts}
+							arxivWatermarks={summary.arxivWatermarks}
 							preloadingArxiv={preloading}
 							refreshingArxiv={refreshingArxiv}
 							refreshedArxiv={isHubArxivRefreshed}
@@ -772,7 +1005,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										data-active={activeSource === kind}
 										onClick={() => {
 											setActiveSource(kind);
-											setDisplayLimit(INITIAL_DISPLAY_COUNT);
+											resetPagination();
 										}}
 										className="magpie-seg-btn"
 									>
@@ -791,7 +1024,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											data-active={timeRange === range}
 											onClick={() => {
 												setTimeRange(range);
-												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+												resetPagination();
 											}}
 											className="magpie-seg-btn"
 										>
@@ -811,7 +1044,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												onClick={() => {
 													setVenueKindFilter(vk);
 													setSelectedVenueId(null);
-													setDisplayLimit(INITIAL_DISPLAY_COUNT);
+													resetPagination();
 												}}
 												className="magpie-seg-btn"
 											>
@@ -829,7 +1062,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												onClick={() => {
 													setVenueDomainFilter(dom);
 													setSelectedVenueId(null);
-													setDisplayLimit(INITIAL_DISPLAY_COUNT);
+													resetPagination();
 												}}
 												className="magpie-seg-btn"
 											>
@@ -890,12 +1123,12 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											variant="ghost"
 											size="icon-sm"
 											onClick={toggleSelectAllDisplayed}
-											disabled={displayedPapers.length === 0}
+											disabled={pageItems.length === 0}
 											aria-label={t("plaza.collection.toggleSelectAll")}
 											className={COLLECTION_ICON_BTN_CLASS}
 										>
-											{displayedPapers.length > 0 &&
-											displayedPapers.every((p) => selectedIds.has(p.id)) ? (
+											{pageItems.length > 0 &&
+											pageItems.every((p) => selectedIds.has(p.id)) ? (
 												<CheckSquare className="size-3.5 text-brand" />
 											) : (
 												<Square className="size-3.5" />
@@ -908,17 +1141,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								</Tooltip>
 
 								<CollectionConfigPopover
-									arxivCategories={state.categories}
-									venues={state.venues}
-									onChangeCategories={(cats) => {
-										if (selectedCategory && !cats.includes(selectedCategory)) {
-											setSelectedCategory(null);
-										}
-										updateConfig((prev) => ({ ...prev, categories: cats }));
-									}}
-									onChangeVenues={(venues) =>
-										updateConfig((prev) => ({ ...prev, venues }))
-									}
+									arxivCategories={summary.categories}
+									venues={summary.venues}
+									onChangeCategories={handleCategoriesChange}
+									onChangeVenues={handleVenuesChange}
+									onRemoveVenue={handleRemoveVenue}
 								/>
 
 								<Tooltip>
@@ -960,7 +1187,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									data-active={selectedCategory === null}
 									onClick={() => {
 										setSelectedCategory(null);
-										setDisplayLimit(INITIAL_DISPLAY_COUNT);
+										resetPagination();
 									}}
 									className="magpie-chip shrink-0"
 								>
@@ -971,14 +1198,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									) : null}
 									<span>{t("plaza.collection.allTags")}</span>
 									<span className="text-muted-foreground tabular-nums">
-										{arxivChipCounts.total}
+										{summary.arxivCount}
 									</span>
 								</button>
-								{state.categories.map((cat) => {
+								{summary.categories.map((cat) => {
 									const catRefreshing =
 										refreshingCategories.has(cat) ||
 										(preloading &&
-											!state.arxivWatermarks?.[cat]?.historyComplete);
+											!summary.arxivWatermarks?.[cat]?.historyComplete);
 									const catRefreshed =
 										!catRefreshing && refreshedCategories.has(cat);
 									return (
@@ -990,7 +1217,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												setSelectedCategory((prev) =>
 													prev === cat ? null : cat,
 												);
-												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+												resetPagination();
 											}}
 											className="magpie-chip shrink-0 font-mono"
 										>
@@ -1001,7 +1228,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											) : null}
 											<span>{cat}</span>
 											<span className="text-muted-foreground tabular-nums">
-												{arxivChipCounts.map.get(cat) ?? 0}
+												{summary.categoryCounts[cat] ?? 0}
 											</span>
 										</button>
 									);
@@ -1014,7 +1241,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									data-active={selectedVenueId === null}
 									onClick={() => {
 										setSelectedVenueId(null);
-										setDisplayLimit(INITIAL_DISPLAY_COUNT);
+										resetPagination();
 									}}
 									className="magpie-chip shrink-0"
 								>
@@ -1042,7 +1269,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												setSelectedVenueId((prev) =>
 													prev === v.id ? null : v.id,
 												);
-												setDisplayLimit(INITIAL_DISPLAY_COUNT);
+												resetPagination();
 											}}
 											className="magpie-chip shrink-0"
 										>
@@ -1067,9 +1294,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						)}
 					</div>
 
-					{/* Main Paper List (100 initial, +50 per Load More from preloaded pool) */}
+					{/* Main Paper List (100 initial, +50 per Load More from SQLite) */}
 					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
-						{isCurrentViewRefreshing && visiblePapers.length === 0 ? (
+						{(isCurrentViewRefreshing || loadingPage) &&
+						pageItems.length === 0 ? (
 							<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
 								<Loader2 className="size-4 animate-spin" />
 								<span>
@@ -1080,10 +1308,10 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										: t("plaza.collection.loading")}
 								</span>
 							</div>
-						) : visiblePapers.length === 0 ? (
+						) : pageItems.length === 0 ? (
 							<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
 								<p className="text-muted-foreground text-xs">
-									{state.items.length === 0
+									{summary.totalCount === 0
 										? t("plaza.collection.empty")
 										: t("plaza.collection.emptyFiltered")}
 								</p>
@@ -1107,40 +1335,45 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							</div>
 						) : (
 							<div className="grid gap-2.5">
-								{displayedPapers.map((paper) => (
+								{pageItems.map((paper) => (
 									<CollectionPaperCard
 										key={paper.id}
 										paper={paper}
 										selected={selectedIds.has(paper.id)}
-										imported={importedIds.has(paper.id)}
+										imported={checkPaperImported(paper, importedIds)}
 										onToggleSelect={() => toggleSelect(paper.id)}
 										onImport={() => void importPapers([paper])}
 										onOpenDetail={() => setDetailPaper(paper)}
 									/>
 								))}
 
-								{/* Preloaded Pagination Footer (+50 per click) */}
+								{/* Paginated Footer (+50 per click) */}
 								<div className="flex flex-col items-center justify-center gap-2 py-3">
-									{displayLimit < visiblePapers.length ? (
+									{pageHasMore && pageItems.length < pageTotal ? (
 										<Button
 											type="button"
 											variant="outline"
 											size="sm"
-											onClick={handleRevealNext50}
+											disabled={loadingMorePage || loadingPage}
+											onClick={() => void handleLoadMorePage()}
 											className={cn(
 												"h-8 gap-1.5 px-4 text-xs",
 												COLLECTION_OUTLINE_BTN_CLASS,
 											)}
 										>
-											<ChevronDown className="size-3.5" />
+											{loadingMorePage ? (
+												<Loader2 className="size-3.5 animate-spin" />
+											) : (
+												<ChevronDown className="size-3.5" />
+											)}
 											<span>
 												{t("plaza.collection.loadMoreStep", {
 													step: Math.min(
 														LOAD_MORE_STEP,
-														visiblePapers.length - displayLimit,
+														Math.max(1, pageTotal - pageItems.length),
 													),
-													shown: displayedPapers.length,
-													total: visiblePapers.length,
+													shown: pageItems.length,
+													total: pageTotal,
 												})}
 											</span>
 										</Button>
@@ -1148,7 +1381,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										<div className="flex flex-wrap items-center justify-center gap-2">
 											<span className="text-muted-foreground text-xs tabular-nums">
 												{t("plaza.collection.showingAll", {
-													total: visiblePapers.length,
+													total: Math.max(pageTotal, pageItems.length),
 												})}
 											</span>
 											{activeSource === "arxiv" &&
@@ -1193,13 +1426,18 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			<CollectionPaperDetailDialog
 				paper={detailPaper}
 				open={detailPaper !== null}
-				imported={detailPaper ? importedIds.has(detailPaper.id) : false}
+				imported={
+					detailPaper !== null && checkPaperImported(detailPaper, importedIds)
+				}
 				onOpenChange={(open) => {
 					if (!open) setDetailPaper(null);
 				}}
 				onImport={(p) => importPapers([p])}
 				onPaperUpdated={(updated) => {
 					setDetailPaper(updated);
+					setPageItems((prev) =>
+						prev.map((it) => (it.id === updated.id ? updated : it)),
+					);
 				}}
 			/>
 		</div>
@@ -1218,7 +1456,7 @@ function CollectionPaperCard({
 	selected: boolean;
 	imported: boolean;
 	onToggleSelect: () => void;
-	onImport: () => void;
+	onImport: () => Promise<void> | void;
 	onOpenDetail: () => void;
 }) {
 	const { t } = useTranslation("sidebar");
@@ -1392,11 +1630,13 @@ function CollectionConfigPopover({
 	venues,
 	onChangeCategories,
 	onChangeVenues,
+	onRemoveVenue,
 }: {
 	arxivCategories: string[];
 	venues: VenueConfig[];
 	onChangeCategories: (next: string[]) => void;
 	onChangeVenues: (next: VenueConfig[]) => void;
+	onRemoveVenue: (venueId: string) => void;
 }) {
 	const { t } = useTranslation("sidebar");
 	const [catSearch, setCatSearch] = useState("");
@@ -1553,9 +1793,7 @@ function CollectionConfigPopover({
 								</button>
 								<button
 									type="button"
-									onClick={() =>
-										onChangeVenues(venues.filter((item) => item.id !== v.id))
-									}
+									onClick={() => onRemoveVenue(v.id)}
 									className="text-muted-foreground hover:text-destructive"
 									aria-label={t("plaza.feeds.remove")}
 								>
@@ -1598,12 +1836,12 @@ function CollectionConfigPopover({
 								onClick={addVenue}
 								disabled={!newVenueLabel.trim() || !newVenueUrl.trim()}
 								className={cn(
-									"h-6 gap-1 px-2 text-caption",
+									"h-7 gap-1 text-caption",
 									COLLECTION_PRIMARY_BTN_CLASS,
 								)}
 							>
 								<Plus className="size-3" />
-								{t("lookup.add")}
+								{t("plaza.feeds.add")}
 							</Button>
 						</div>
 					</div>

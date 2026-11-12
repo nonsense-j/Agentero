@@ -39,10 +39,13 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { errorText } from "@/lib/core/error";
+import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
-import type {
-	CollectionPaperItem,
-	CollectionState,
+import {
+	type CollectionPaperItem,
+	type CollectionSummarySnapshot,
+	getCollectionPapersByIds,
 } from "@/lib/plaza/collection";
 import {
 	createDeepDiscoverSession,
@@ -124,7 +127,8 @@ function ToolCallChip({ tool }: { tool: DeepToolCallRecord }) {
 }
 
 export function DiscoverDeepView({
-	collection,
+	summary,
+	onObservePapers,
 	importedSet,
 	isPaperImported,
 	onBackToHub,
@@ -132,7 +136,8 @@ export function DiscoverDeepView({
 	onImportPaper,
 	onBatchImport,
 }: {
-	collection: CollectionState;
+	summary: CollectionSummarySnapshot;
+	onObservePapers?: (papers: readonly CollectionPaperItem[]) => void;
 	importedSet: ReadonlySet<string>;
 	isPaperImported: (
 		paper: CollectionPaperItem,
@@ -162,9 +167,15 @@ export function DiscoverDeepView({
 		new Set(),
 	);
 	const [batchBusy, setBatchBusy] = useState(false);
+	const [collectionById, setCollectionById] = useState<
+		Map<string, CollectionPaperItem>
+	>(() => new Map());
 
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	const stickToBottomRef = useRef(true);
+	const trayReqSeqRef = useRef(0);
+	const onObservePapersRef = useRef(onObservePapers);
+	onObservePapersRef.current = onObservePapers;
 
 	useEffect(() => {
 		void initDeepDiscoverAgents();
@@ -180,13 +191,51 @@ export function DiscoverDeepView({
 
 	const isRunning = store.runningRuntimeSessionId !== null;
 
-	const collectionById = useMemo(() => {
-		const map = new Map<string, CollectionPaperItem>();
-		for (const item of collection.items) {
-			map.set(item.id, item);
+	const curatedGroupsRaw = activeSession?.curatedGroups;
+	const sampledIdsRaw = activeSession?.sampledIds;
+	const pinnedIdsRaw = activeSession?.pinnedIds;
+
+	const neededIdsKey = useMemo(() => {
+		if (!curatedGroupsRaw && !sampledIdsRaw && !pinnedIdsRaw) return "";
+		const seen = new Set<string>();
+		const ids: string[] = [];
+		const add = (id: string) => {
+			if (id && !seen.has(id)) {
+				seen.add(id);
+				ids.push(id);
+			}
+		};
+		for (const group of curatedGroupsRaw ?? []) {
+			for (const entry of group.items) add(entry.id);
 		}
-		return map;
-	}, [collection.items]);
+		for (const id of sampledIdsRaw ?? []) add(id);
+		for (const id of pinnedIdsRaw ?? []) add(id);
+		return ids.join("\u0000");
+	}, [curatedGroupsRaw, sampledIdsRaw, pinnedIdsRaw]);
+
+	useEffect(() => {
+		if (summary.revision < 0) return;
+		if (!neededIdsKey) {
+			setCollectionById(new Map());
+			return;
+		}
+		const ids = neededIdsKey.split("\u0000");
+		const seq = ++trayReqSeqRef.current;
+		void getCollectionPapersByIds(ids)
+			.then((papers) => {
+				if (seq !== trayReqSeqRef.current) return;
+				const map = new Map<string, CollectionPaperItem>();
+				for (const p of papers) {
+					map.set(p.id, p);
+				}
+				setCollectionById(map);
+				onObservePapersRef.current?.(papers);
+			})
+			.catch((err) => {
+				if (seq !== trayReqSeqRef.current) return;
+				notifyError(errorText(err));
+			});
+	}, [neededIdsKey, summary.revision]);
 
 	const resolvedCuratedGroups = useMemo(() => {
 		if (!activeSession) return [];
@@ -260,9 +309,9 @@ export function DiscoverDeepView({
 			if (!trimmed || isRunning) return;
 			stickToBottomRef.current = true;
 			setDraft("");
-			await sendDeepDiscoverTurn(trimmed, collection);
+			await sendDeepDiscoverTurn(trimmed);
 		},
-		[collection, isRunning],
+		[isRunning],
 	);
 
 	const handleSnowball = useCallback(
@@ -603,7 +652,7 @@ export function DiscoverDeepView({
 										<button
 											key={starter}
 											type="button"
-											disabled={isRunning || collection.items.length === 0}
+											disabled={isRunning || summary.totalCount === 0}
 											onClick={() => void submitPrompt(starter)}
 											className="magpie-card rounded-xl p-3 text-left text-foreground text-xs leading-relaxed transition-colors hover:border-brand/40 disabled:opacity-50"
 										>
@@ -757,7 +806,7 @@ export function DiscoverDeepView({
 								<Button
 									type="submit"
 									size="icon-sm"
-									disabled={!draft.trim() || collection.items.length === 0}
+									disabled={!draft.trim() || summary.totalCount === 0}
 									aria-label={t("plaza.discover.send")}
 									className="shrink-0 rounded-lg"
 								>

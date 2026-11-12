@@ -31,11 +31,6 @@ import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { isTauri } from "@/lib/core/tauri";
-import {
-	type CollectionState,
-	loadCollectionState,
-} from "@/lib/plaza/collection";
-import { ensureCollectionSnapshotSynced } from "@/lib/plaza/collection-sync";
 
 const STORAGE_KEY = "plaza:discover:deep-sessions:v1";
 const MAX_SESSIONS = 24;
@@ -873,10 +868,7 @@ function buildPriorTranscript(messages: DeepChatMessage[]): string | undefined {
 
 let launchingTurn = false;
 
-export async function sendDeepDiscoverTurn(
-	rawPrompt: string,
-	collectionState?: CollectionState,
-): Promise<void> {
+export async function sendDeepDiscoverTurn(rawPrompt: string): Promise<void> {
 	const prompt = rawPrompt.trim();
 	if (!prompt) return;
 	if (launchingTurn || storeState.runningRuntimeSessionId) return;
@@ -936,9 +928,6 @@ export async function sendDeepDiscoverTurn(
 	);
 
 	try {
-		const snapshotSource = collectionState ?? loadCollectionState();
-		await ensureCollectionSnapshotSynced(snapshotSource);
-
 		const accepted = await runOnce({
 			agentId: storeState.selectedAgentId ?? undefined,
 			sessionId: resumeSessionId,

@@ -1,16 +1,15 @@
 /**
  * Native 广场 panel: Paper Recommend (`agentero:plaza/arxiv-rec`).
  *
- * Two-stage local-first recommendation flow over `Paper Collection`:
+ * Two-stage SQLite-backed recommendation flow over `Paper Collection`:
  * 1. Keyword Hub (`stage === "select"`): top header with collection pool status
  *    and top-right `Recommend` action, `Recent Keywords` chips (freely
  *    toggleable down to 0 selected, removable, custom keyword input), and
  *    `All Keywords` with a stationary Top-N `Slider` above the interactive
- *    word cloud (default Top 50, adjustable 15–150).
+ *    word cloud (default Top 50, adjustable 15–150, sliced locally in O(1)).
  * 2. Recommended Papers (`stage === "results"`): displays the selected keywords
  *    at top and pushes 15 unrecommended papers per batch. Recommended status is
- *    persisted as `recommendedAt` on `CollectionPaperItem` metadata (no history
- *    list bloat).
+ *    persisted as `recommended_at` in `collection.sqlite`.
  */
 
 import {
@@ -33,7 +32,14 @@ import {
 	Tag,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
 import {
@@ -57,32 +63,32 @@ import { lookupSubmit } from "@/lib/paper/import-actions";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionPaperItem,
-	type CollectionState,
-	hydrateCollectionStateFromIdb,
+	ensureCollectionSummaryHydrated,
+	getCollectionSummarySnapshot,
 	isPreloadingCollection,
-	loadCollectionState,
-	saveCollectionState,
-	subscribeCollectionState,
+	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
-import { scheduleCollectionSnapshotSync } from "@/lib/plaza/collection-sync";
 import { importPlazaPaper } from "@/lib/plaza/import";
 import { bareArxivId, importedIdsInLibrary } from "@/lib/plaza/imported";
 import {
 	addCustomRecentKeyword,
+	type CollectionWordCloudResult,
+	createDefaultRecommendPoolState,
 	DEFAULT_RECOMMEND_BATCH_SIZE,
 	DEFAULT_WORD_CLOUD_TOP_N,
+	fetchCollectionWordCloud,
+	fetchRecommendPoolState,
 	getActiveSelectedTerms,
-	getWordCloudKeywords,
 	isKeywordSelected,
-	loadRecommendPoolState,
 	MAX_WORD_CLOUD_TOP_N,
 	MIN_WORD_CLOUD_TOP_N,
 	type RecommendedPaperItem,
 	type RecommendKeywordChip,
 	type RecommendPoolState,
-	recommendFromCollection,
+	recommendNextFromCollection,
 	removeRecentKeyword,
+	resetRecommendedHistory,
 	saveRecommendPoolState,
 	setWordCloudTopN,
 	toggleRecentKeywordById,
@@ -95,6 +101,14 @@ import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 type RecommendStage = "select" | "results";
 
 const WORD_CLOUD_STEP = 5;
+const SLIDER_PERSIST_DEBOUNCE_MS = 180;
+
+const EMPTY_WORD_CLOUD: CollectionWordCloudResult = {
+	keywords: [],
+	totalUniqueKeywords: 0,
+	totalCandidatePapers: 0,
+	unrecommendedPaperCount: 0,
+};
 
 function checkPaperImported(
 	paper: CollectionPaperItem,
@@ -115,13 +129,22 @@ function checkPaperImported(
 
 export function PlazaArxivRecView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
-	const [collection, setCollection] =
-		useState<CollectionState>(loadCollectionState);
-	const [preloading, setPreloading] = useState<boolean>(isPreloadingCollection);
+	const summary = useSyncExternalStore(
+		subscribeCollectionSummary,
+		getCollectionSummarySnapshot,
+	);
+	const preloading = useSyncExternalStore(
+		subscribePreloadingCollection,
+		isPreloadingCollection,
+	);
 
 	const [poolState, setPoolState] = useState<RecommendPoolState>(
-		loadRecommendPoolState,
+		createDefaultRecommendPoolState,
 	);
+	const [fullWordCloud, setFullWordCloud] =
+		useState<CollectionWordCloudResult>(EMPTY_WORD_CLOUD);
+	const [wordCloudLoading, setWordCloudLoading] = useState(false);
+
 	const [stage, setStage] = useState<RecommendStage>("select");
 	const [recommendedItems, setRecommendedItems] = useState<
 		RecommendedPaperItem[]
@@ -131,6 +154,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 	const [newKeyword, setNewKeyword] = useState("");
 	const [addingKeyword, setAddingKeyword] = useState(false);
 	const [busy, setBusy] = useState(false);
+	const [resettingHistory, setResettingHistory] = useState(false);
 	const [translations, setTranslations] = useState<Record<string, string>>({});
 	const [translating, setTranslating] = useState(false);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -142,27 +166,120 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 
 	const keywordInputRef = useRef<HTMLInputElement | null>(null);
 	const resultsScrollRef = useRef<HTMLDivElement | null>(null);
+	const latestPoolStateRef = useRef<RecommendPoolState>(poolState);
+	const userMutatedPoolRef = useRef(false);
+	const dirtyPoolStateRef = useRef(false);
+	const saveTimerRef = useRef<number | null>(null);
+	const inFlightSaveRef = useRef<Promise<void> | null>(null);
+	const wordCloudReqSeqRef = useRef(0);
 
-	// Hydrate Paper Collection from IndexedDB & keep subscribed to updates
+	const flushPoolSave = useCallback(async () => {
+		if (saveTimerRef.current !== null) {
+			window.clearTimeout(saveTimerRef.current);
+			saveTimerRef.current = null;
+		}
+		if (inFlightSaveRef.current) {
+			await inFlightSaveRef.current;
+		}
+		while (dirtyPoolStateRef.current) {
+			dirtyPoolStateRef.current = false;
+			const snapshot = latestPoolStateRef.current;
+			const task = saveRecommendPoolState(snapshot)
+				.then(() => undefined)
+				.catch((err) => {
+					notifyError(errorText(err));
+				});
+			inFlightSaveRef.current = task;
+			await task;
+			inFlightSaveRef.current = null;
+		}
+	}, []);
+
+	const schedulePoolSave = useCallback(
+		(delayMs = 0) => {
+			dirtyPoolStateRef.current = true;
+			if (saveTimerRef.current !== null) {
+				window.clearTimeout(saveTimerRef.current);
+				saveTimerRef.current = null;
+			}
+			if (delayMs <= 0) {
+				void flushPoolSave();
+				return;
+			}
+			saveTimerRef.current = window.setTimeout(() => {
+				saveTimerRef.current = null;
+				void flushPoolSave();
+			}, delayMs);
+		},
+		[flushPoolSave],
+	);
+
 	useEffect(() => {
-		const unsubState = subscribeCollectionState((next) => {
-			setCollection(next);
-		});
-		const unsubPreload = subscribePreloadingCollection((flag) =>
-			setPreloading(flag),
-		);
-		void hydrateCollectionStateFromIdb().then((hydrated) => {
-			setCollection(hydrated);
-		});
 		return () => {
-			unsubState();
-			unsubPreload();
+			if (saveTimerRef.current !== null) {
+				window.clearTimeout(saveTimerRef.current);
+				saveTimerRef.current = null;
+			}
+			if (dirtyPoolStateRef.current) {
+				dirtyPoolStateRef.current = false;
+				void saveRecommendPoolState(latestPoolStateRef.current).catch(
+					() => undefined,
+				);
+			}
 		};
 	}, []);
 
-	// Sync imported status against Library store
+	// Hydrate summary + recommend pool state from SQLite on mount
+	useEffect(() => {
+		let cancelled = false;
+		void ensureCollectionSummaryHydrated().catch((err) => {
+			if (!cancelled) notifyError(errorText(err));
+		});
+		void fetchRecommendPoolState()
+			.then((loaded) => {
+				if (cancelled || userMutatedPoolRef.current) return;
+				latestPoolStateRef.current = loaded;
+				setPoolState(loaded);
+			})
+			.catch((err) => {
+				if (!cancelled) notifyError(errorText(err));
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	// Fetch Top-150 word cloud from SQLite when summary revision changes; slice Top-N locally in O(1)
+	useEffect(() => {
+		if (summary.revision < 0) return;
+		if (!summary.hydrated && summary.totalCount === 0) return;
+		if (summary.totalCount === 0) {
+			setFullWordCloud(EMPTY_WORD_CLOUD);
+			setWordCloudLoading(false);
+			return;
+		}
+
+		const seq = ++wordCloudReqSeqRef.current;
+		setWordCloudLoading(true);
+		void fetchCollectionWordCloud(MAX_WORD_CLOUD_TOP_N)
+			.then((cloud) => {
+				if (seq !== wordCloudReqSeqRef.current) return;
+				setFullWordCloud(cloud);
+			})
+			.catch((err) => {
+				if (seq !== wordCloudReqSeqRef.current) return;
+				notifyError(errorText(err));
+			})
+			.finally(() => {
+				if (seq === wordCloudReqSeqRef.current) {
+					setWordCloudLoading(false);
+				}
+			});
+	}, [summary.hydrated, summary.revision, summary.totalCount]);
+
+	// Sync imported status against Library store ONLY for currently recommended batch
 	const syncLibraryImported = useCallback(
-		async (items: CollectionPaperItem[]) => {
+		async (items: readonly CollectionPaperItem[]) => {
 			const arxivQueries = items
 				.map((p) => p.arxivId)
 				.filter((id): id is string => Boolean(id));
@@ -189,23 +306,13 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 	);
 
 	useEffect(() => {
-		void syncLibraryImported(collection.items);
+		void syncLibraryImported(recommendedItems);
 		return libraryStore.subscribe((state, prevState) => {
 			if (state.papers !== prevState.papers) {
-				void syncLibraryImported(collection.items);
+				void syncLibraryImported(recommendedItems);
 			}
 		});
-	}, [collection.items, syncLibraryImported]);
-
-	const stats = useMemo(() => {
-		let arxiv = 0;
-		let venue = 0;
-		for (const item of collection.items) {
-			if (item.sourceType === "arxiv") arxiv += 1;
-			else venue += 1;
-		}
-		return { total: collection.items.length, arxiv, venue };
-	}, [collection.items]);
+	}, [recommendedItems, syncLibraryImported]);
 
 	useEffect(() => {
 		if (addingKeyword) {
@@ -214,14 +321,17 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 	}, [addingKeyword]);
 
 	const updatePoolState = useCallback(
-		(updater: (prev: RecommendPoolState) => RecommendPoolState) => {
-			setPoolState((prev) => {
-				const next = updater(prev);
-				saveRecommendPoolState(next);
-				return next;
-			});
+		(
+			updater: (prev: RecommendPoolState) => RecommendPoolState,
+			debounceMs = 0,
+		) => {
+			userMutatedPoolRef.current = true;
+			const next = updater(latestPoolStateRef.current);
+			latestPoolStateRef.current = next;
+			setPoolState(next);
+			schedulePoolSave(debounceMs);
 		},
-		[],
+		[schedulePoolSave],
 	);
 
 	const activeTerms = useMemo(
@@ -229,20 +339,11 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		[poolState],
 	);
 
-	const wordCloud = useMemo(
-		() =>
-			getWordCloudKeywords(
-				collection.items,
-				poolState.wordCloudTopN || DEFAULT_WORD_CLOUD_TOP_N,
-			),
-		[collection.items, poolState.wordCloudTopN],
-	);
-
 	const sliderMax = Math.max(
 		MIN_WORD_CLOUD_TOP_N,
 		Math.min(
 			MAX_WORD_CLOUD_TOP_N,
-			wordCloud.totalUniqueKeywords || MAX_WORD_CLOUD_TOP_N,
+			fullWordCloud.totalUniqueKeywords || MAX_WORD_CLOUD_TOP_N,
 		),
 	);
 
@@ -251,27 +352,25 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		Math.min(poolState.wordCloudTopN || DEFAULT_WORD_CLOUD_TOP_N, sliderMax),
 	);
 
+	const visibleCloudKeywords = useMemo(
+		() => fullWordCloud.keywords.slice(0, effectiveTopN),
+		[fullWordCloud.keywords, effectiveTopN],
+	);
+
 	const cloudBounds = useMemo(() => {
-		if (wordCloud.keywords.length === 0) return { min: 0, max: 0 };
+		if (visibleCloudKeywords.length === 0) return { min: 0, max: 0 };
 		let min = Number.POSITIVE_INFINITY;
 		let max = 0;
-		for (const kw of wordCloud.keywords) {
+		for (const kw of visibleCloudKeywords) {
 			if (kw.count < min) min = kw.count;
 			if (kw.count > max) max = kw.count;
 		}
 		return { min: Number.isFinite(min) ? min : 0, max };
-	}, [wordCloud.keywords]);
+	}, [visibleCloudKeywords]);
 
-	const excludeIdsForRecommend = useMemo(() => {
-		if (importedIds.size === 0) return importedIds;
-		const combined = new Set<string>(importedIds);
-		for (const item of collection.items) {
-			if (checkPaperImported(item, importedIds)) {
-				combined.add(item.id);
-			}
-		}
-		return combined;
-	}, [collection.items, importedIds]);
+	const hasRecommendedHistory =
+		Boolean(poolState.lastRecommendedAt) ||
+		fullWordCloud.unrecommendedPaperCount < fullWordCloud.totalCandidatePapers;
 
 	const handleToggleRecentChip = useCallback(
 		(id: string) => {
@@ -330,11 +429,11 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		if (busy || activeTerms.length === 0) return;
 		setBusy(true);
 		try {
-			const res = await recommendFromCollection({
-				maxBatchSize: DEFAULT_RECOMMEND_BATCH_SIZE,
-				ensureCollectionLoaded: true,
-				excludeIds: excludeIdsForRecommend,
-			});
+			await flushPoolSave();
+			const res = await recommendNextFromCollection(
+				DEFAULT_RECOMMEND_BATCH_SIZE,
+			);
+			latestPoolStateRef.current = res.state;
 			setPoolState(res.state);
 			setRecommendedItems(res.items);
 			setRecommendedKeywords(res.selectedKeywords);
@@ -346,7 +445,42 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		} finally {
 			setBusy(false);
 		}
-	}, [activeTerms.length, busy, excludeIdsForRecommend]);
+	}, [activeTerms.length, busy, flushPoolSave]);
+
+	const handleResetHistory = useCallback(
+		async (recommendAfterReset: boolean) => {
+			if (resettingHistory || busy) return;
+			setResettingHistory(true);
+			try {
+				await flushPoolSave();
+				await resetRecommendedHistory();
+				const clearedState: RecommendPoolState = {
+					...latestPoolStateRef.current,
+					lastRecommendedAt: null,
+				};
+				latestPoolStateRef.current = clearedState;
+				setPoolState(clearedState);
+				await saveRecommendPoolState(clearedState);
+				if (recommendAfterReset && activeTerms.length > 0) {
+					const res = await recommendNextFromCollection(
+						DEFAULT_RECOMMEND_BATCH_SIZE,
+					);
+					latestPoolStateRef.current = res.state;
+					setPoolState(res.state);
+					setRecommendedItems(res.items);
+					setRecommendedKeywords(res.selectedKeywords);
+					setSelectedIds(new Set());
+					setStage("results");
+					resultsScrollRef.current?.scrollTo({ top: 0 });
+				}
+			} catch (err) {
+				notifyError(errorText(err));
+			} finally {
+				setResettingHistory(false);
+			}
+		},
+		[activeTerms.length, busy, flushPoolSave, resettingHistory],
+	);
 
 	const translateAll = useCallback(async () => {
 		if (translating || recommendedItems.length === 0) return;
@@ -487,15 +621,6 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		setRecommendedItems((prev) =>
 			prev.map((it) => (it.id === updated.id ? { ...it, ...updated } : it)),
 		);
-		setCollection((prev) => {
-			const next: CollectionState = {
-				...prev,
-				items: prev.items.map((it) => (it.id === updated.id ? updated : it)),
-			};
-			saveCollectionState(next);
-			scheduleCollectionSnapshotSync(next);
-			return next;
-		});
 	}, []);
 
 	const selectedItems = useMemo(
@@ -532,35 +657,63 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								<p className="flex items-center gap-1.5 font-mono text-muted-foreground text-xs tabular-nums">
 									<Database className="size-3.5 shrink-0" />
 									{t("plaza.discover.poolSummary", {
-										total: stats.total,
-										arxiv: stats.arxiv,
-										venue: stats.venue,
+										total: summary.totalCount,
+										arxiv: summary.arxivCount,
+										venue: summary.venueCount,
 									})}
 								</p>
 							</div>
 
-							<Button
-								type="button"
-								size="sm"
-								disabled={activeTerms.length === 0 || busy}
-								onClick={() => void runRecommend()}
-								className={cn(
-									"h-8 gap-1.5 px-3.5 font-medium text-xs transition-transform active:scale-[0.98] motion-reduce:transform-none",
-									activeTerms.length > 0 && COLLECTION_PRIMARY_BTN_CLASS,
-								)}
-							>
-								{busy ? (
-									<Loader2 className="size-3.5 animate-spin" />
-								) : (
-									<Sparkles className="size-3.5" />
-								)}
-								<span>{t("plaza.arxivRec.recommend")}</span>
-								{activeTerms.length > 0 ? (
-									<span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-white/20 px-1 font-mono text-[0.6875rem] tabular-nums leading-none">
-										{activeTerms.length}
-									</span>
+							<div className="flex items-center gap-1.5">
+								{hasRecommendedHistory ? (
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<Button
+												type="button"
+												variant="outline"
+												size="icon-sm"
+												disabled={resettingHistory || busy}
+												onClick={() => void handleResetHistory(false)}
+												aria-label={t("plaza.discover.resetFilters")}
+											>
+												{resettingHistory ? (
+													<Loader2 className="size-3.5 animate-spin" />
+												) : (
+													<RotateCcw className="size-3.5" />
+												)}
+											</Button>
+										</TooltipTrigger>
+										<TooltipContent side="bottom">
+											{t("plaza.discover.resetFilters")}
+										</TooltipContent>
+									</Tooltip>
 								) : null}
-							</Button>
+
+								<Button
+									type="button"
+									size="sm"
+									disabled={
+										activeTerms.length === 0 || busy || resettingHistory
+									}
+									onClick={() => void runRecommend()}
+									className={cn(
+										"h-8 gap-1.5 px-3.5 font-medium text-xs transition-transform active:scale-[0.98] motion-reduce:transform-none",
+										activeTerms.length > 0 && COLLECTION_PRIMARY_BTN_CLASS,
+									)}
+								>
+									{busy ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<Sparkles className="size-3.5" />
+									)}
+									<span>{t("plaza.arxivRec.recommend")}</span>
+									{activeTerms.length > 0 ? (
+										<span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-white/20 px-1 font-mono text-[0.6875rem] tabular-nums leading-none">
+											{activeTerms.length}
+										</span>
+									) : null}
+								</Button>
+							</div>
 						</div>
 
 						{/* Top Section: Recent Keywords */}
@@ -708,21 +861,29 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								<h2 className="font-semibold text-foreground text-sm">
 									{t("plaza.arxivRec.allKeywords")}
 								</h2>
-								{wordCloud.totalUniqueKeywords > 0 ? (
+								{fullWordCloud.totalUniqueKeywords > 0 ? (
 									<span className="font-mono text-muted-foreground text-xs tabular-nums">
-										{wordCloud.keywords.length} /{" "}
-										{wordCloud.totalUniqueKeywords}
+										{visibleCloudKeywords.length} /{" "}
+										{fullWordCloud.totalUniqueKeywords}
 									</span>
+								) : null}
+								{wordCloudLoading ? (
+									<Loader2 className="size-3.5 animate-spin text-muted-foreground" />
 								) : null}
 							</div>
 
-							{preloading && collection.items.length === 0 ? (
+							{(preloading || !summary.hydrated || wordCloudLoading) &&
+							visibleCloudKeywords.length === 0 ? (
 								<div className="flex items-center justify-center gap-2 py-10 text-muted-foreground text-xs">
 									<Loader2 className="size-4 animate-spin" />
-									<span>{t("plaza.collection.preloading")}</span>
+									<span>
+										{preloading
+											? t("plaza.collection.preloading")
+											: t("plaza.arxivRec.computing")}
+									</span>
 								</div>
-							) : collection.items.length === 0 ||
-								wordCloud.keywords.length === 0 ? (
+							) : summary.totalCount === 0 ||
+								visibleCloudKeywords.length === 0 ? (
 								<div className="flex flex-col items-center justify-center py-8 text-center">
 									<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
 										{t("plaza.discover.poolEmptyHint")}
@@ -751,7 +912,10 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 											value={[effectiveTopN]}
 											onValueChange={([v]) => {
 												if (typeof v === "number") {
-													updatePoolState((prev) => setWordCloudTopN(prev, v));
+													updatePoolState(
+														(prev) => setWordCloudTopN(prev, v),
+														SLIDER_PERSIST_DEBOUNCE_MS,
+													);
 												}
 											}}
 											aria-label={t("plaza.arxivRec.wordCloudSize")}
@@ -779,7 +943,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 
 									{/* Interactive Word Cloud */}
 									<div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-2 py-1.5">
-										{wordCloud.keywords.map((kw: WordCloudKeyword) => {
+										{visibleCloudKeywords.map((kw: WordCloudKeyword) => {
 											const selected = isKeywordSelected(poolState, kw.term);
 											const ratio =
 												cloudBounds.max > cloudBounds.min
@@ -948,7 +1112,9 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 											type="button"
 											size="sm"
 											variant="outline"
-											disabled={busy || activeTerms.length === 0}
+											disabled={
+												busy || resettingHistory || activeTerms.length === 0
+											}
 											onClick={() => void runRecommend()}
 											className="h-7 gap-1.5 rounded-md px-2.5 text-xs"
 										>
@@ -973,7 +1139,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 						ref={resultsScrollRef}
 						className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3.5"
 					>
-						{busy && recommendedItems.length === 0 ? (
+						{(busy || resettingHistory) && recommendedItems.length === 0 ? (
 							<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
 								<Loader2 className="size-4 animate-spin" />
 								<span>{t("plaza.arxivRec.computing")}</span>
@@ -983,16 +1149,29 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
 									{t("plaza.arxivRec.noMoreUnpushed")}
 								</p>
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onClick={() => setStage("select")}
-									className="h-7 gap-1.5 text-xs"
-								>
-									<ArrowLeft className="size-3.5" />
-									{t("plaza.arxivRec.backToKeywords")}
-								</Button>
+								<div className="flex items-center gap-2">
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onClick={() => setStage("select")}
+										className="h-7 gap-1.5 text-xs"
+									>
+										<ArrowLeft className="size-3.5" />
+										{t("plaza.arxivRec.backToKeywords")}
+									</Button>
+									<Button
+										type="button"
+										variant="secondary"
+										size="sm"
+										disabled={resettingHistory || busy}
+										onClick={() => void handleResetHistory(true)}
+										className="h-7 gap-1.5 text-xs"
+									>
+										<RotateCcw className="size-3.5" />
+										{t("plaza.discover.resetFilters")}
+									</Button>
+								</div>
 							</div>
 						) : (
 							<div className="grid gap-2.5">

@@ -27,6 +27,7 @@ import {
 	type CollectionPaperItem,
 	formatPaperBibtex,
 	formatPaperCitationText,
+	getCollectionPaperDetail,
 } from "@/lib/plaza/collection";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
@@ -68,10 +69,12 @@ export function DiscoverPaperCard({
 
 	const copyToClipboard = async (kind: "citation" | "bibtex") => {
 		try {
+			const detail = await getCollectionPaperDetail(paper.id).catch(() => null);
+			const resolved = detail ?? paper;
 			const text =
 				kind === "citation"
-					? formatPaperCitationText(paper)
-					: formatPaperBibtex(paper);
+					? detail?.citationText?.trim() || formatPaperCitationText(resolved)
+					: resolved.bibtex?.trim() || formatPaperBibtex(resolved);
 			await navigator.clipboard.writeText(text);
 			setCopiedKind(kind);
 			window.setTimeout(() => {
