@@ -261,17 +261,19 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 								className="magpie-card group flex flex-col justify-between gap-5 rounded-2xl p-5 text-left transition-all hover:border-brand/45 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60 motion-reduce:transition-none"
 							>
 								<div className="space-y-3">
-									<div className="flex items-center justify-between">
-										<div className="flex size-10 items-center justify-center rounded-xl bg-brand/10 text-brand">
-											<Search className="size-5" />
+									<div className="flex items-center justify-between gap-3">
+										<div className="flex min-w-0 items-center gap-3">
+											<div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand">
+												<Search className="size-5" />
+											</div>
+											<h2 className="font-semibold text-base text-foreground">
+												{t("plaza.discover.fastTitle")}
+											</h2>
 										</div>
 										<ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-brand motion-reduce:transition-none" />
 									</div>
 
-									<div className="space-y-1.5">
-										<h2 className="font-semibold text-base text-foreground">
-											{t("plaza.discover.fastTitle")}
-										</h2>
+									<div>
 										<p className="text-muted-foreground text-xs leading-relaxed">
 											{t("plaza.discover.fastSubtitle")}
 										</p>
@@ -295,17 +297,19 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 								className="magpie-card group flex flex-col justify-between gap-5 rounded-2xl p-5 text-left transition-all hover:border-brand/45 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand/60 motion-reduce:transition-none"
 							>
 								<div className="space-y-3">
-									<div className="flex items-center justify-between">
-										<div className="flex size-10 items-center justify-center rounded-xl bg-brand/12 text-brand">
-											<Sparkles className="size-5" />
+									<div className="flex items-center justify-between gap-3">
+										<div className="flex min-w-0 items-center gap-3">
+											<div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand/12 text-brand">
+												<Sparkles className="size-5" />
+											</div>
+											<h2 className="font-semibold text-base text-foreground">
+												{t("plaza.discover.deepTitle")}
+											</h2>
 										</div>
 										<ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-brand motion-reduce:transition-none" />
 									</div>
 
-									<div className="space-y-1.5">
-										<h2 className="font-semibold text-base text-foreground">
-											{t("plaza.discover.deepTitle")}
-										</h2>
+									<div>
 										<p className="text-muted-foreground text-xs leading-relaxed">
 											{t("plaza.discover.deepSubtitle")}
 										</p>
