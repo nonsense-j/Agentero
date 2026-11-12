@@ -2881,27 +2881,3 @@ export async function refreshVenueCollection(options?: {
 	saveCollectionState(nextState);
 	return nextState;
 }
-
-/**
- * Refresh Paper Collection (`2026-Now` arXiv categories + unloaded/selected 2026 Venues).
- */
-export async function refreshPaperCollection(options?: {
-	categories?: string[];
-	venues?: VenueConfig[];
-	incremental?: boolean;
-	skipLoadedVenues?: boolean;
-}): Promise<CollectionState> {
-	try {
-		await refreshArxivCollection({
-			categories: options?.categories,
-			replaceCategories: Boolean(options?.categories),
-			incremental: options?.incremental,
-		});
-	} catch {
-		// Preserve existing arXiv items if network is offline.
-	}
-	return await refreshVenueCollection({
-		venues: options?.venues,
-		skipLoaded: options?.skipLoadedVenues ?? false,
-	});
-}

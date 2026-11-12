@@ -14,8 +14,6 @@ import {
 	ChevronRight,
 	Compass,
 	Database,
-	Loader2,
-	RefreshCw,
 	Search,
 	Sparkles,
 } from "lucide-react";
@@ -24,7 +22,6 @@ import { useTranslation } from "react-i18next";
 import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
 import { DiscoverDeepView } from "@/components/plaza/discover-deep-view";
 import { DiscoverFastView } from "@/components/plaza/discover-fast-view";
-import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -34,12 +31,9 @@ import {
 	type CollectionPaperItem,
 	type CollectionState,
 	hydrateCollectionStateFromIdb,
-	isPreloadingCollection,
 	loadCollectionState,
-	refreshPaperCollection,
 	saveCollectionState,
 	subscribeCollectionState,
-	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
 import { scheduleCollectionSnapshotSync } from "@/lib/plaza/collection-sync";
 import { importPlazaPaper } from "@/lib/plaza/import";
@@ -68,8 +62,6 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	const { t } = useTranslation("sidebar");
 	const [collection, setCollection] =
 		useState<CollectionState>(loadCollectionState);
-	const [preloading, setPreloading] = useState<boolean>(isPreloadingCollection);
-	const [refreshing, setRefreshing] = useState(false);
 
 	const [stage, setStage] = useState<DiscoverStage>("hub");
 	const [visitedFast, setVisitedFast] = useState(false);
@@ -86,16 +78,12 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 			setCollection(next);
 			scheduleCollectionSnapshotSync(next);
 		});
-		const unsubPreload = subscribePreloadingCollection((flag) =>
-			setPreloading(flag),
-		);
 		void hydrateCollectionStateFromIdb().then((hydrated) => {
 			setCollection(hydrated);
 			scheduleCollectionSnapshotSync(hydrated);
 		});
 		return () => {
 			unsubState();
-			unsubPreload();
 		};
 	}, []);
 
@@ -107,7 +95,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 				.filter((id): id is string => Boolean(id));
 			if (arxivQueries.length === 0) return;
 			try {
-				const matched = await importedIdsInLibrary(arxivQueries);
+				const matched = await importedIdsInLibrary(arxivQueries, {
+					limit: Number.POSITIVE_INFINITY,
+				});
 				if (matched.length === 0) return;
 				setImportedIds((prev) => {
 					const next = new Set(prev);
@@ -127,8 +117,10 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 
 	useEffect(() => {
 		void syncLibraryImported(collection.items);
-		return libraryStore.subscribe(() => {
-			void syncLibraryImported(collection.items);
+		return libraryStore.subscribe((state, prevState) => {
+			if (state.papers !== prevState.papers) {
+				void syncLibraryImported(collection.items);
+			}
 		});
 	}, [collection.items, syncLibraryImported]);
 
@@ -141,20 +133,6 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		}
 		return { total: collection.items.length, arxiv, venue };
 	}, [collection.items]);
-
-	const handleRefreshPool = useCallback(async () => {
-		if (refreshing) return;
-		setRefreshing(true);
-		try {
-			const next = await refreshPaperCollection();
-			setCollection(next);
-			scheduleCollectionSnapshotSync(next);
-		} catch (err) {
-			notifyError(errorText(err));
-		} finally {
-			setRefreshing(false);
-		}
-	}, [refreshing]);
 
 	const importBatchPapers = useCallback(
 		async (papers: CollectionPaperItem[]) => {
@@ -271,22 +249,6 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 									})}
 								</p>
 							</div>
-
-							<Button
-								type="button"
-								variant={stats.total === 0 ? "default" : "outline"}
-								size="sm"
-								disabled={refreshing || preloading}
-								onClick={() => void handleRefreshPool()}
-								className="h-8 gap-1.5 text-xs"
-							>
-								{refreshing || preloading ? (
-									<Loader2 className="size-3.5 animate-spin" />
-								) : (
-									<RefreshCw className="size-3.5" />
-								)}
-								{t("plaza.collection.refresh")}
-							</Button>
 						</div>
 
 						{stats.total === 0 ? (

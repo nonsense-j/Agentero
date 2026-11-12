@@ -2,10 +2,11 @@
  * Native 广场 panel: Paper Recommend (`agentero:plaza/arxiv-rec`).
  *
  * Two-stage local-first recommendation flow over `Paper Collection`:
- * 1. Keyword Hub (`stage === "select"`): centered `Recent Keywords` chips
- *    (freely toggleable down to 0 selected, removable, custom keyword input)
- *    + `All Keywords` word cloud aggregated from collection metadata (default
- *    Top 50, adjustable 15–150 via `Slider`).
+ * 1. Keyword Hub (`stage === "select"`): top header with collection pool status
+ *    and top-right `Recommend` action, `Recent Keywords` chips (freely
+ *    toggleable down to 0 selected, removable, custom keyword input), and
+ *    `All Keywords` with a stationary Top-N `Slider` above the interactive
+ *    word cloud (default Top 50, adjustable 15–150).
  * 2. Recommended Papers (`stage === "results"`): displays the selected keywords
  *    at top and pushes 15 unrecommended papers per batch. Recommended status is
  *    persisted as `recommendedAt` on `CollectionPaperItem` metadata (no history
@@ -18,6 +19,7 @@ import {
 	BookOpen,
 	Check,
 	CheckSquare,
+	Database,
 	Download,
 	Languages,
 	Loader2,
@@ -59,7 +61,6 @@ import {
 	hydrateCollectionStateFromIdb,
 	isPreloadingCollection,
 	loadCollectionState,
-	refreshPaperCollection,
 	saveCollectionState,
 	subscribeCollectionState,
 	subscribePreloadingCollection,
@@ -117,7 +118,6 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 	const [collection, setCollection] =
 		useState<CollectionState>(loadCollectionState);
 	const [preloading, setPreloading] = useState<boolean>(isPreloadingCollection);
-	const [refreshingPool, setRefreshingPool] = useState(false);
 
 	const [poolState, setPoolState] = useState<RecommendPoolState>(
 		loadRecommendPoolState,
@@ -168,7 +168,9 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 				.filter((id): id is string => Boolean(id));
 			if (arxivQueries.length === 0) return;
 			try {
-				const matched = await importedIdsInLibrary(arxivQueries);
+				const matched = await importedIdsInLibrary(arxivQueries, {
+					limit: Number.POSITIVE_INFINITY,
+				});
 				if (matched.length === 0) return;
 				setImportedIds((prev) => {
 					const next = new Set(prev);
@@ -188,10 +190,22 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 
 	useEffect(() => {
 		void syncLibraryImported(collection.items);
-		return libraryStore.subscribe(() => {
-			void syncLibraryImported(collection.items);
+		return libraryStore.subscribe((state, prevState) => {
+			if (state.papers !== prevState.papers) {
+				void syncLibraryImported(collection.items);
+			}
 		});
 	}, [collection.items, syncLibraryImported]);
+
+	const stats = useMemo(() => {
+		let arxiv = 0;
+		let venue = 0;
+		for (const item of collection.items) {
+			if (item.sourceType === "arxiv") arxiv += 1;
+			else venue += 1;
+		}
+		return { total: collection.items.length, arxiv, venue };
+	}, [collection.items]);
 
 	useEffect(() => {
 		if (addingKeyword) {
@@ -311,20 +325,6 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		},
 		[effectiveTopN, sliderMax, updatePoolState],
 	);
-
-	const handleRefreshPool = useCallback(async () => {
-		if (refreshingPool) return;
-		setRefreshingPool(true);
-		try {
-			const next = await refreshPaperCollection();
-			setCollection(next);
-			scheduleCollectionSnapshotSync(next);
-		} catch (err) {
-			notifyError(errorText(err));
-		} finally {
-			setRefreshingPool(false);
-		}
-	}, [refreshingPool]);
 
 	const runRecommend = useCallback(async () => {
 		if (busy || activeTerms.length === 0) return;
@@ -518,8 +518,51 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 			)}
 		>
 			{stage === "select" ? (
-				<div className="agentero-scroll flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6">
-					<div className="mx-auto my-auto flex w-full max-w-3xl flex-col gap-4">
+				<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-6">
+					<div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
+						{/* Header + Live Paper Collection Pool Status + Top-Right Recommend CTA */}
+						<div className="flex flex-wrap items-center justify-between gap-3">
+							<div className="space-y-1">
+								<div className="flex items-center gap-2">
+									<Sparkles className="size-4 text-brand" />
+									<h1 className="font-semibold text-base text-foreground">
+										{t("plaza.arxivRec.label")}
+									</h1>
+								</div>
+								<p className="flex items-center gap-1.5 font-mono text-muted-foreground text-xs tabular-nums">
+									<Database className="size-3.5 shrink-0" />
+									{t("plaza.discover.poolSummary", {
+										total: stats.total,
+										arxiv: stats.arxiv,
+										venue: stats.venue,
+									})}
+								</p>
+							</div>
+
+							<Button
+								type="button"
+								size="sm"
+								disabled={activeTerms.length === 0 || busy}
+								onClick={() => void runRecommend()}
+								className={cn(
+									"h-8 gap-1.5 px-3.5 font-medium text-xs transition-transform active:scale-[0.98] motion-reduce:transform-none",
+									activeTerms.length > 0 && COLLECTION_PRIMARY_BTN_CLASS,
+								)}
+							>
+								{busy ? (
+									<Loader2 className="size-3.5 animate-spin" />
+								) : (
+									<Sparkles className="size-3.5" />
+								)}
+								<span>{t("plaza.arxivRec.recommend")}</span>
+								{activeTerms.length > 0 ? (
+									<span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-white/20 px-1 font-mono text-[0.6875rem] tabular-nums leading-none">
+										{activeTerms.length}
+									</span>
+								) : null}
+							</Button>
+						</div>
+
 						{/* Top Section: Recent Keywords */}
 						<section className="magpie-card flex flex-col gap-3 rounded-2xl p-4 sm:p-5">
 							<div className="flex items-center justify-between gap-2">
@@ -658,44 +701,19 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 							</div>
 						</section>
 
-						{/* Bottom Section: All Keywords Word Cloud + Slider */}
+						{/* Bottom Section: All Keywords Slider (Top) + Word Cloud (Bottom) */}
 						<section className="magpie-card flex flex-col gap-3.5 rounded-2xl p-4 sm:p-5">
-							<div className="flex items-center justify-between gap-2">
-								<div className="flex items-center gap-2">
-									<Tag className="size-3.5 text-brand" />
-									<h2 className="font-semibold text-foreground text-sm">
-										{t("plaza.arxivRec.allKeywords")}
-									</h2>
-									{wordCloud.totalUniqueKeywords > 0 ? (
-										<span className="font-mono text-muted-foreground text-xs tabular-nums">
-											{wordCloud.keywords.length} /{" "}
-											{wordCloud.totalUniqueKeywords}
-										</span>
-									) : null}
-								</div>
-
-								<Tooltip>
-									<TooltipTrigger asChild>
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-xs"
-											disabled={refreshingPool || preloading}
-											onClick={() => void handleRefreshPool()}
-											aria-label={t("plaza.collection.refresh")}
-											className="text-muted-foreground hover:text-foreground"
-										>
-											{refreshingPool || preloading ? (
-												<Loader2 className="size-3.5 animate-spin" />
-											) : (
-												<RefreshCw className="size-3.5" />
-											)}
-										</Button>
-									</TooltipTrigger>
-									<TooltipContent side="bottom">
-										{t("plaza.collection.refresh")}
-									</TooltipContent>
-								</Tooltip>
+							<div className="flex items-center gap-2">
+								<Tag className="size-3.5 text-brand" />
+								<h2 className="font-semibold text-foreground text-sm">
+									{t("plaza.arxivRec.allKeywords")}
+								</h2>
+								{wordCloud.totalUniqueKeywords > 0 ? (
+									<span className="font-mono text-muted-foreground text-xs tabular-nums">
+										{wordCloud.keywords.length} /{" "}
+										{wordCloud.totalUniqueKeywords}
+									</span>
+								) : null}
 							</div>
 
 							{preloading && collection.items.length === 0 ? (
@@ -705,28 +723,60 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								</div>
 							) : collection.items.length === 0 ||
 								wordCloud.keywords.length === 0 ? (
-								<div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+								<div className="flex flex-col items-center justify-center py-8 text-center">
 									<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
 										{t("plaza.discover.poolEmptyHint")}
 									</p>
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										disabled={refreshingPool || preloading}
-										onClick={() => void handleRefreshPool()}
-										className="h-7 gap-1.5 text-xs"
-									>
-										{refreshingPool ? (
-											<Loader2 className="size-3.5 animate-spin" />
-										) : (
-											<RefreshCw className="size-3.5" />
-										)}
-										{t("plaza.collection.refresh")}
-									</Button>
 								</div>
 							) : (
 								<>
+									{/* Word Cloud Top-N Slider (anchored above word cloud so dragging never shifts slider vertically) */}
+									<div className="flex items-center gap-2.5 border-border/60 border-b pb-3">
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon-xs"
+											disabled={effectiveTopN <= MIN_WORD_CLOUD_TOP_N}
+											onClick={() => handleStepTopN(-WORD_CLOUD_STEP)}
+											aria-label={t("plaza.arxivRec.wordCloudSize")}
+											className="text-muted-foreground hover:text-foreground"
+										>
+											<Minus className="size-3.5" />
+										</Button>
+
+										<Slider
+											min={MIN_WORD_CLOUD_TOP_N}
+											max={sliderMax}
+											step={WORD_CLOUD_STEP}
+											value={[effectiveTopN]}
+											onValueChange={([v]) => {
+												if (typeof v === "number") {
+													updatePoolState((prev) => setWordCloudTopN(prev, v));
+												}
+											}}
+											aria-label={t("plaza.arxivRec.wordCloudSize")}
+											className="flex-1"
+										/>
+
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon-xs"
+											disabled={effectiveTopN >= sliderMax}
+											onClick={() => handleStepTopN(WORD_CLOUD_STEP)}
+											aria-label={t("plaza.arxivRec.wordCloudSize")}
+											className="text-muted-foreground hover:text-foreground"
+										>
+											<Plus className="size-3.5" />
+										</Button>
+
+										<span className="min-w-[3.75rem] text-right font-mono text-muted-foreground text-xs tabular-nums">
+											{t("plaza.arxivRec.topKeywords", {
+												count: effectiveTopN,
+											})}
+										</span>
+									</div>
+
 									{/* Interactive Word Cloud */}
 									<div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-2 py-1.5">
 										{wordCloud.keywords.map((kw: WordCloudKeyword) => {
@@ -780,82 +830,9 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 											);
 										})}
 									</div>
-
-									{/* Word Cloud Top-N Slider */}
-									<div className="flex items-center gap-2.5 border-border/60 border-t pt-3">
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-xs"
-											disabled={effectiveTopN <= MIN_WORD_CLOUD_TOP_N}
-											onClick={() => handleStepTopN(-WORD_CLOUD_STEP)}
-											aria-label={t("plaza.arxivRec.wordCloudSize")}
-											className="text-muted-foreground hover:text-foreground"
-										>
-											<Minus className="size-3.5" />
-										</Button>
-
-										<Slider
-											min={MIN_WORD_CLOUD_TOP_N}
-											max={sliderMax}
-											step={WORD_CLOUD_STEP}
-											value={[effectiveTopN]}
-											onValueChange={([v]) => {
-												if (typeof v === "number") {
-													updatePoolState((prev) => setWordCloudTopN(prev, v));
-												}
-											}}
-											aria-label={t("plaza.arxivRec.wordCloudSize")}
-											className="flex-1"
-										/>
-
-										<Button
-											type="button"
-											variant="ghost"
-											size="icon-xs"
-											disabled={effectiveTopN >= sliderMax}
-											onClick={() => handleStepTopN(WORD_CLOUD_STEP)}
-											aria-label={t("plaza.arxivRec.wordCloudSize")}
-											className="text-muted-foreground hover:text-foreground"
-										>
-											<Plus className="size-3.5" />
-										</Button>
-
-										<span className="min-w-[3.75rem] text-right font-mono text-muted-foreground text-xs tabular-nums">
-											{t("plaza.arxivRec.topKeywords", {
-												count: effectiveTopN,
-											})}
-										</span>
-									</div>
 								</>
 							)}
 						</section>
-
-						{/* Centered Primary Recommend CTA */}
-						<div className="flex justify-center pt-1">
-							<Button
-								type="button"
-								size="default"
-								disabled={activeTerms.length === 0 || busy}
-								onClick={() => void runRecommend()}
-								className={cn(
-									"h-9 gap-2 rounded-full px-6 font-medium text-sm transition-transform active:scale-[0.98] motion-reduce:transform-none",
-									activeTerms.length > 0 && COLLECTION_PRIMARY_BTN_CLASS,
-								)}
-							>
-								{busy ? (
-									<Loader2 className="size-4 animate-spin" />
-								) : (
-									<Sparkles className="size-4" />
-								)}
-								<span>{t("plaza.arxivRec.recommend")}</span>
-								{activeTerms.length > 0 ? (
-									<span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-white/20 px-1.5 font-mono text-xs tabular-nums">
-										{activeTerms.length}
-									</span>
-								) : null}
-							</Button>
-						</div>
 					</div>
 				</div>
 			) : (
@@ -1006,33 +983,16 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								<p className="max-w-sm text-muted-foreground text-xs leading-relaxed">
 									{t("plaza.arxivRec.noMoreUnpushed")}
 								</p>
-								<div className="flex flex-wrap items-center justify-center gap-2">
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										onClick={() => setStage("select")}
-										className="h-7 gap-1.5 text-xs"
-									>
-										<ArrowLeft className="size-3.5" />
-										{t("plaza.arxivRec.backToKeywords")}
-									</Button>
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										disabled={refreshingPool}
-										onClick={() => void handleRefreshPool()}
-										className="h-7 gap-1.5 text-xs"
-									>
-										{refreshingPool ? (
-											<Loader2 className="size-3.5 animate-spin" />
-										) : (
-											<RefreshCw className="size-3.5" />
-										)}
-										{t("plaza.collection.refresh")}
-									</Button>
-								</div>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={() => setStage("select")}
+									className="h-7 gap-1.5 text-xs"
+								>
+									<ArrowLeft className="size-3.5" />
+									{t("plaza.arxivRec.backToKeywords")}
+								</Button>
 							</div>
 						) : (
 							<div className="grid gap-2.5">

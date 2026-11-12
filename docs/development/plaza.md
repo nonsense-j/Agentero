@@ -207,10 +207,11 @@ papers.cool 给几乎所有链接都加了 `target="_blank"`（单个分区页�
 
 **两阶段交互流**（`src/components/plaza/plaza-arxiv-rec-view.tsx` + `src/lib/plaza/recommend-pool.ts`）：
 
-1. **Stage 1 — 居中双区关键词选择页（`stage = "select"`）**：打开面板默认停留在选择页（不自动触发推送）：
+1. **Stage 1 — 双区关键词选择页（`stage = "select"`）**：排布对齐 `Paper Discover` 门户页，默认停留在选择页（不自动触发推送；论文池刷新入口仅保留在 `Paper Collection` 内）：
+   - **顶部标题栏**：左侧展示标题与 `Paper Collection` 论文池实时统计摘要，右上角固定放置主操作按钮 **`Recommend`**（选中至少 1 个关键词后激活）。
    - **上半区 `Recent Keywords`**：胶囊芯片（`magpie-chip`）展示常用与近期推荐过的关键词；支持任意芯片自由点选/取消（包括取消最后一个选中项至 0 选中）、一键清空已选、`X` 删除任意芯片，以及行内 `+` 添加自定义关键词。
-   - **下半区 `All Keywords`（词云 + `Slider`）**：汇总本地 `Paper Collection` 全部论文的 `keywords`（缺失时回退 `derivePaperKeywords`），大小写不敏感归一并保留最佳展示大小写，默认展示 **Top 50** 高频词云（字号按词频 `rem` 比例缩放），点击任意词与上方芯片统一联动选中；词云下方提供 `Slider`（`src/components/ui/slider.tsx`，范围 `15–150`，步长 `5`）实时缩放词云规模。
-   - **主操作 `Recommend`**：选中至少 1 个关键词后可点击，从 `Paper Collection` 中排除已推荐（`recommendedAt`）与已入库论文，按关键词精确/短语/词元匹配与发表时间新近度综合打分，取出 **15 篇**进入结果页，并将临时选中的词云词合并进 `Recent Keywords`。
+   - **下半区 `All Keywords`（置顶 `Slider` + 下方词云）**：汇总本地 `Paper Collection` 全部论文的 `keywords`（缺失时回退 `derivePaperKeywords`），大小写不敏感归一并保留最佳展示大小写；**顶部固定 `Slider`**（`src/components/ui/slider.tsx`，范围 `15–150`，步长 `5`，默认 **Top 50**），**下方渲染交互词云**（字号按词频 `rem` 比例缩放），保证拖动滑块调节词云规模时滑块自身纵向位置始终固定不跳动。
+   - **主操作 `Recommend`**：从 `Paper Collection` 中排除已推荐（`recommendedAt`）与已入库论文，按关键词精确/短语/词元匹配与发表时间新近度综合打分，取出 **15 篇**进入结果页，并将临时选中的词云词合并进 `Recent Keywords`。
 2. **Stage 2 — 推荐结果页（`stage = "results"`，无历史列表）**：
    - **吸顶头部（`data-plaza-header`）**：左侧返回关键词选择页按钮 + 顶部展示本次所选关键词胶囊；右侧提供勾选批量入库、全选、一键翻译当前摘要（`runTranslate`）及「换一批（Next 15）」继续抽取下 15 篇未推荐论文。
    - **卡片流**：展示当前批次 15 篇论文，点击标题复用 `CollectionPaperDetailDialog` 查看完整摘要、关键词与 BibTeX，右侧支持应用内远程阅读 PDF（`openRemoteArxivPaper`）、打开原文及单条/批量入库（venue `coolPapersId` 走 `importPlazaPaper`，其余走 `lookupSubmit`）。
