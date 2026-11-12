@@ -253,7 +253,7 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 						) : null}
 
 						{/* Two Distinct Mode Entry Cards */}
-						<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+						<div className="flex flex-col gap-4">
 							{/* Entry 1: Fast Search */}
 							<button
 								type="button"
