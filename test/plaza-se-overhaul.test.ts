@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PLAZA_SOURCES } from "@/lib/plaza";
 import {
 	type CollectionPaperItem,
@@ -13,7 +13,7 @@ import {
 	parseArxivRssXml,
 	parseResearchrHtml,
 	reconstructOpenAlexAbstract,
-	saveCollectionState,
+	resetCollectionMemoryForTests,
 } from "@/lib/plaza/collection";
 import { ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
 import {
@@ -23,10 +23,13 @@ import {
 } from "@/lib/plaza/paper-search";
 import {
 	DEFAULT_WORD_CLOUD_TOP_N,
-	recommendFromCollection,
+	recommendNextFromCollection,
 	saveRecommendPoolState,
 	scorePaperAgainstKeywords,
 } from "@/lib/plaza/recommend-pool";
+import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
+
+vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
 
 describe("Plaza AI & SE overhaul", () => {
 	it("sets default arXiv categories to cs.SE, cs.CR, cs.PL, cs.AI", () => {
@@ -368,39 +371,39 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 		expect(scored.matchedKeywords).toEqual(["LLM", "Fuzzing"]);
 		expect(scored.score).toBeGreaterThan(3);
 
-		saveCollectionState({
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
 			categories: ["cs.AI", "cs.CR", "cs.PL", "cs.SE"],
 			venues: [...DEFAULT_COLLECTION_VENUES],
 			items: pool,
 			lastRefreshedAt: "2026-03-10T00:00:00Z",
 			latestArxiv: null,
 		});
-		saveRecommendPoolState({
-			keywords: [
-				{ id: "k1", term: "LLM", enabled: true },
-				{ id: "k2", term: "Fuzzing", enabled: true },
-				{ id: "k3", term: "Formal Verification", enabled: true },
-			],
-			selectedCloudTerms: [],
-			wordCloudTopN: DEFAULT_WORD_CLOUD_TOP_N,
-			lastRecommendedAt: null,
-		});
+		try {
+			await saveRecommendPoolState({
+				keywords: [
+					{ id: "k1", term: "LLM", enabled: true },
+					{ id: "k2", term: "Fuzzing", enabled: true },
+					{ id: "k3", term: "Formal Verification", enabled: true },
+				],
+				selectedCloudTerms: [],
+				wordCloudTopN: DEFAULT_WORD_CLOUD_TOP_N,
+				lastRecommendedAt: null,
+			});
 
-		const firstPush = await recommendFromCollection({
-			maxBatchSize: 1,
-			ensureCollectionLoaded: false,
-		});
-		expect(firstPush.items).toHaveLength(1);
-		expect(firstPush.items[0]?.id).toBe("arxiv:2601.11111");
-		expect(firstPush.items[0]?.recommendedAt).toBeTruthy();
+			const firstPush = await recommendNextFromCollection(1);
+			expect(firstPush.items).toHaveLength(1);
+			expect(firstPush.items[0]?.id).toBe("arxiv:2601.11111");
+			expect(firstPush.items[0]?.recommendedAt).toBeTruthy();
 
-		// Second push must NOT repeat arxiv:2601.11111 and must pick venue:tosem-2026:2
-		const secondPush = await recommendFromCollection({
-			maxBatchSize: 1,
-			ensureCollectionLoaded: false,
-		});
-		expect(secondPush.items).toHaveLength(1);
-		expect(secondPush.items[0]?.id).toBe("venue:tosem-2026:2");
-		expect(secondPush.items[0]?.recommendedAt).toBeTruthy();
+			// Second push must NOT repeat arxiv:2601.11111 and must pick venue:tosem-2026:2
+			const secondPush = await recommendNextFromCollection(1);
+			expect(secondPush.items).toHaveLength(1);
+			expect(secondPush.items[0]?.id).toBe("venue:tosem-2026:2");
+			expect(secondPush.items[0]?.recommendedAt).toBeTruthy();
+		} finally {
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
 	});
 });

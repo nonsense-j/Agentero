@@ -1,22 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
-import { writeJsonStorage } from "@/lib/core/storage";
+import { commands } from "@/lib/core/bindings";
 import {
 	applyFreshVenueItems,
 	backfillSpringerAbstracts,
 	type CollectionPaperItem,
+	clearCollection,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	ensureCollectionSummaryHydrated,
+	ensurePaperFullDetails,
 	extractSpringerHtmlAbstract,
+	fetchCollectionStateSummary,
 	fetchCsdlVenuePapers,
 	fetchDataCiteLipicsPapers,
 	fetchDblpSparqlVenuePapers,
 	fetchMoreArxivCollection,
 	fetchMultiChannelVenuePapers,
 	fetchVenueStructuredPapers,
+	getCollectionPapersByIds,
+	getCollectionSummarySnapshot,
 	isConfirmedVenueAcceptance,
 	isPreloadingCollection,
 	isVenueAlreadyLoaded,
-	loadCollectionState,
+	listCollectionPapers,
 	mergeCollectionItems,
 	parseAcceptedVenueArxivXml,
 	parseArxivAtomXml,
@@ -25,10 +31,16 @@ import {
 	preloadAll2026ArxivInBackground,
 	refreshVenueCollection,
 	resetCollectionMemoryForTests,
-	saveCollectionState,
+	subscribeCollectionSummary,
+	subscribePreloadingCollection,
 	syncArxivCategoriesIncremental,
+	updateCollectionConfig,
+	upsertCollectionPapers,
 	VENUE_SPEC_BY_ID,
 } from "@/lib/plaza/collection";
+import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
+
+vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
 
 describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sync", () => {
 	it("paginates OpenAlex page=1..N beyond 200 items without API-key cursor 401s and excludes ICSE-Companion DOIs", async () => {
@@ -298,78 +310,75 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(deltaSync.nextWatermarks["cs.AI"]?.latestArxivId).toBe("2605.10009");
 	});
 
-	it("keeps cs.AI disabled by default in arXiv Collection while allowing manual opt-in", () => {
+	it("keeps cs.AI disabled by default in arXiv Collection while allowing manual opt-in", async () => {
 		expect(DEFAULT_ARXIV_CATEGORIES).toEqual(["cs.SE", "cs.CR", "cs.PL"]);
 
-		const store = new Map<string, string>();
-		vi.stubGlobal("localStorage", {
-			getItem: (k: string) => store.get(k) ?? null,
-			setItem: (k: string, v: string) => {
-				store.set(k, v);
-			},
-			removeItem: (k: string) => {
-				store.delete(k);
-			},
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			venues: [...DEFAULT_COLLECTION_VENUES],
+			items: [
+				{
+					id: "arxiv:2606.00001",
+					arxivId: "2606.00001",
+					title: "Pure AI Preprint Without SE Tag",
+					authors: ["Alice"],
+					abstract:
+						"We study pure general artificial intelligence scaling laws across multimodal benchmarks.",
+					publishedAt: "2026-06-01T00:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.AI",
+					categories: ["cs.AI"],
+					url: "https://arxiv.org/abs/2606.00001",
+				},
+				{
+					id: "arxiv:2606.00002",
+					arxivId: "2606.00002",
+					title: "Automated Program Repair with Static Analysis",
+					authors: ["Bob"],
+					abstract:
+						"We propose a sound static analysis guided automated program repair framework for large-scale production software systems.",
+					publishedAt: "2026-06-02T00:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: "https://arxiv.org/abs/2606.00002",
+				},
+			],
+			lastRefreshedAt: "2026-06-02T01:00:00Z",
+			latestArxiv: null,
 		});
 
 		try {
 			// Fresh state without explicit categories uses default ["cs.SE", "cs.CR", "cs.PL"] and filters out pure cs.AI items
-			writeJsonStorage("plaza:collection:state:v2", {
-				venues: [...DEFAULT_COLLECTION_VENUES],
-				items: [
-					{
-						id: "arxiv:2606.00001",
-						arxivId: "2606.00001",
-						title: "Pure AI Preprint Without SE Tag",
-						authors: ["Alice"],
-						abstract:
-							"We study pure general artificial intelligence scaling laws across multimodal benchmarks.",
-						publishedAt: "2026-06-01T00:00:00Z",
-						year: 2026,
-						sourceType: "arxiv",
-						sourceLabel: "cs.AI",
-						categories: ["cs.AI"],
-						url: "https://arxiv.org/abs/2606.00001",
-					},
-					{
-						id: "arxiv:2606.00002",
-						arxivId: "2606.00002",
-						title: "Automated Program Repair with Static Analysis",
-						authors: ["Bob"],
-						abstract:
-							"We propose a sound static analysis guided automated program repair framework for large-scale production software systems.",
-						publishedAt: "2026-06-02T00:00:00Z",
-						year: 2026,
-						sourceType: "arxiv",
-						sourceLabel: "cs.SE",
-						categories: ["cs.SE"],
-						url: "https://arxiv.org/abs/2606.00002",
-					},
-				],
-				lastRefreshedAt: "2026-06-02T01:00:00Z",
-				latestArxiv: null,
-			});
-			resetCollectionMemoryForTests();
-
-			const initial = loadCollectionState();
+			const initial = await fetchCollectionStateSummary();
 			expect(initial.categories).toEqual(["cs.SE", "cs.CR", "cs.PL"]);
-			expect(initial.items.map((p) => p.id)).toEqual(["arxiv:2606.00002"]);
+			expect(initial.totalCount).toBe(1);
+			const initialPage = await listCollectionPapers({ sourceType: "arxiv" });
+			expect(initialPage.items.map((p) => p.id)).toEqual(["arxiv:2606.00002"]);
 
-			// If the user explicitly turns cs.AI ON, their choice persists across reload
-			saveCollectionState({
-				...initial,
+			// If the user explicitly turns cs.AI ON, their choice persists in SQLite and reactive summary updates
+			await updateCollectionConfig({
 				categories: ["cs.SE", "cs.CR", "cs.PL", "cs.AI"],
 			});
 			resetCollectionMemoryForTests();
-			const reloadedAfterOptIn = loadCollectionState();
+			const reloadedAfterOptIn = await fetchCollectionStateSummary();
 			expect(reloadedAfterOptIn.categories).toEqual([
 				"cs.SE",
 				"cs.CR",
 				"cs.PL",
 				"cs.AI",
 			]);
+			expect(reloadedAfterOptIn.totalCount).toBe(2);
+			const optedInPage = await listCollectionPapers({ sourceType: "arxiv" });
+			expect(optedInPage.items.map((p) => p.id)).toEqual([
+				"arxiv:2606.00002",
+				"arxiv:2606.00001",
+			]);
 		} finally {
-			vi.unstubAllGlobals();
+			ipc.restore();
+			resetCollectionMemoryForTests();
 		}
 	});
 
@@ -467,6 +476,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 
 		// Cold venue -> not yet loaded
 		expect(isVenueAlreadyLoaded(ase, [])).toBe(false);
+		expect(isVenueAlreadyLoaded({ ...ase, paperCount: 12 }, [])).toBe(true);
 
 		const loadedVenues = DEFAULT_COLLECTION_VENUES.map((v) => ({
 			...v,
@@ -474,16 +484,22 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}));
 		expect(isVenueAlreadyLoaded(loadedVenues[0] ?? ase, [])).toBe(true);
 
-		saveCollectionState({
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
 			categories: ["cs.SE", "cs.CR", "cs.PL"],
 			venues: loadedVenues,
 			items: [],
 			lastRefreshedAt: "2026-06-02T00:00:00Z",
 			latestArxiv: null,
 		});
-		const stateAfterSkip = await refreshVenueCollection({ skipLoaded: true });
-		expect(stateAfterSkip.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
-		expect(isPreloadingCollection()).toBe(false);
+		try {
+			const stateAfterSkip = await refreshVenueCollection({ skipLoaded: true });
+			expect(stateAfterSkip.lastRefreshedAt).toBe("2026-06-02T00:00:00Z");
+			expect(isPreloadingCollection()).toBe(false);
+		} finally {
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
 	});
 
 	it("retains ASE 2026 proceedings papers without public abstracts, excludes workshops/frontmatter, backfills S2 abstracts, and paginates DBLP SPARQL", async () => {
@@ -574,15 +590,10 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 
 		// 2. Full `fetchMultiChannelVenuePapers` when OpenAlex has 30 ACM papers (all without abstracts)
 		//    and S2 Bulk supplies preprint abstracts for matched papers without inflating count
-		const store = new Map<string, string>();
-		vi.stubGlobal("localStorage", {
-			getItem: (k: string) => store.get(k) ?? null,
-			setItem: (k: string, v: string) => {
-				store.set(k, v);
-			},
-			removeItem: (k: string) => {
-				store.delete(k);
-			},
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.SE", "cs.CR", "cs.PL"],
+			venues: [...DEFAULT_COLLECTION_VENUES],
 		});
 
 		try {
@@ -672,22 +683,23 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			);
 			expect(enrichedFirst?.arxivId).toBe("2608.12345");
 
-			// Reload from storage must NOT strip the remaining 29 abstract-less ASE 2026 papers
-			resetCollectionMemoryForTests();
-			saveCollectionState({
-				categories: ["cs.SE", "cs.CR", "cs.PL"],
-				venues: [...DEFAULT_COLLECTION_VENUES],
+			// Persisting & reading from SQLite must NOT strip the remaining 29 abstract-less ASE 2026 papers
+			await upsertCollectionPapers({
 				items: bundle.items,
+				replaceVenueId: "ase-2026",
+				replaceSourceLabel: "ASE 2026",
 				lastRefreshedAt: "2026-10-10T00:00:00Z",
-				latestArxiv: null,
 			});
 			resetCollectionMemoryForTests();
-			const reloaded = loadCollectionState();
-			expect(
-				reloaded.items.filter((i) => i.venueId === "ase-2026"),
-			).toHaveLength(30);
+			const reloadedPage = await listCollectionPapers({
+				sourceType: "venue",
+				venueId: "ase-2026",
+				limit: 100,
+			});
+			expect(reloadedPage.items).toHaveLength(30);
 		} finally {
-			vi.unstubAllGlobals();
+			ipc.restore();
+			resetCollectionMemoryForTests();
 		}
 	});
 
@@ -705,64 +717,57 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(parseArxivAtomXml(xml2025Only, 2026)).toEqual([]);
 
 		// 2. Sliding timestamp-window backfill heals incomplete cache and marks `historyComplete: true`
-		const store = new Map<string, string>();
-		vi.stubGlobal("localStorage", {
-			getItem: (k: string) => store.get(k) ?? null,
-			setItem: (k: string, v: string) => {
-				store.set(k, v);
-			},
-			removeItem: (k: string) => {
-				store.delete(k);
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.SE"],
+			venues: [...DEFAULT_COLLECTION_VENUES],
+			items: [
+				{
+					id: "arxiv:2610.00004",
+					arxivId: "2610.00004",
+					title: "Newest Cached SE Paper Four",
+					authors: ["Author 4"],
+					abstract:
+						"We present automated software verification technique four with complete empirical evaluation.",
+					publishedAt: "2026-10-04T12:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: "https://arxiv.org/abs/2610.00004",
+				},
+				{
+					id: "arxiv:2609.00003",
+					arxivId: "2609.00003",
+					title: "Cached SE Paper Three",
+					authors: ["Author 3"],
+					abstract:
+						"We present automated software verification technique three with complete empirical evaluation.",
+					publishedAt: "2026-09-03T12:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: "https://arxiv.org/abs/2609.00003",
+				},
+			],
+			lastRefreshedAt: "2026-10-05T00:00:00Z",
+			latestArxiv: null,
+			arxivWatermarks: {
+				"cs.SE": {
+					latestArxivId: "2610.00004",
+					latestPublishedAt: "2026-10-04T12:00:00Z",
+					lastSyncedAt: "2026-10-05T00:00:00Z",
+				},
 			},
 		});
 
-		try {
-			resetCollectionMemoryForTests();
-			// Seed with 2 already-cached top `cs.SE` papers (simulating an incomplete pre-watermark cache)
-			saveCollectionState({
-				categories: ["cs.SE"],
-				venues: [...DEFAULT_COLLECTION_VENUES],
-				items: [
-					{
-						id: "arxiv:2610.00004",
-						arxivId: "2610.00004",
-						title: "Newest Cached SE Paper Four",
-						authors: ["Author 4"],
-						abstract:
-							"We present automated software verification technique four with complete empirical evaluation.",
-						publishedAt: "2026-10-04T12:00:00Z",
-						year: 2026,
-						sourceType: "arxiv",
-						sourceLabel: "cs.SE",
-						categories: ["cs.SE"],
-						url: "https://arxiv.org/abs/2610.00004",
-					},
-					{
-						id: "arxiv:2609.00003",
-						arxivId: "2609.00003",
-						title: "Cached SE Paper Three",
-						authors: ["Author 3"],
-						abstract:
-							"We present automated software verification technique three with complete empirical evaluation.",
-						publishedAt: "2026-09-03T12:00:00Z",
-						year: 2026,
-						sourceType: "arxiv",
-						sourceLabel: "cs.SE",
-						categories: ["cs.SE"],
-						url: "https://arxiv.org/abs/2609.00003",
-					},
-				],
-				lastRefreshedAt: "2026-10-05T00:00:00Z",
-				latestArxiv: null,
-				arxivWatermarks: {
-					"cs.SE": {
-						latestArxivId: "2610.00004",
-						latestPublishedAt: "2026-10-04T12:00:00Z",
-						lastSyncedAt: "2026-10-05T00:00:00Z",
-					},
-				},
-			});
+		const preloadingTransitions: boolean[] = [];
+		const unsubPreloading = subscribePreloadingCollection((flag) => {
+			preloadingTransitions.push(flag);
+		});
 
+		try {
 			const windowUrls: string[] = [];
 			await preloadAll2026ArxivInBackground(["cs.SE"], 5, 2, {
 				fetchText: async (url) => {
@@ -814,25 +819,29 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				fetchJson: async <T>() => ({ results: [] }) as T,
 			});
 
-			const completedState = loadCollectionState();
-			expect(completedState.items.map((i) => i.arxivId)).toEqual([
+			expect(preloadingTransitions).toEqual([true, false]);
+			expect(isPreloadingCollection()).toBe(false);
+
+			const completedSummary = await fetchCollectionStateSummary();
+			const completedPage = await listCollectionPapers({ sourceType: "arxiv" });
+			expect(completedPage.items.map((i) => i.arxivId)).toEqual([
 				"2610.00004",
 				"2609.00003",
 				"2605.00002",
 				"2601.00001",
 			]);
-			expect(completedState.arxivWatermarks?.["cs.SE"]?.remoteTotal).toBe(4);
-			expect(completedState.arxivWatermarks?.["cs.SE"]?.historyComplete).toBe(
+			expect(completedSummary.arxivWatermarks?.["cs.SE"]?.remoteTotal).toBe(4);
+			expect(completedSummary.arxivWatermarks?.["cs.SE"]?.historyComplete).toBe(
 				true,
 			);
 			expect(windowUrls).toHaveLength(3);
 
 			// Calling `fetchMoreArxivCollection` for an incomplete single category uses THAT category's oldest timestamp
-			saveCollectionState({
-				...completedState,
+			await updateCollectionConfig({
 				categories: ["cs.SE", "cs.CR"],
+			});
+			await upsertCollectionPapers({
 				items: [
-					...completedState.items,
 					{
 						id: "arxiv:2608.00099",
 						arxivId: "2608.00099",
@@ -849,7 +858,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					},
 				],
 				arxivWatermarks: {
-					...completedState.arxivWatermarks,
+					...completedSummary.arxivWatermarks,
 					"cs.CR": {
 						latestArxivId: "2608.00099",
 						latestPublishedAt: "2026-08-20T15:10:00Z",
@@ -885,11 +894,13 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			expect(moreUrls).toHaveLength(1);
 			expect(moreUrls[0]).toContain("TO+202608201511]");
 			expect(moreRes.addedCount).toBe(1);
-			expect(moreRes.state.arxivWatermarks?.["cs.CR"]?.historyComplete).toBe(
+			expect(moreRes.summary.arxivWatermarks?.["cs.CR"]?.historyComplete).toBe(
 				true,
 			);
 		} finally {
-			vi.unstubAllGlobals();
+			unsubPreloading();
+			ipc.restore();
+			resetCollectionMemoryForTests();
 		}
 	});
 
@@ -1447,5 +1458,128 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			2026,
 		);
 		expect(coolParsed.items[0]?.keywords).toEqual([]);
+	});
+
+	it("hydrates collectionStore reactively, deduplicates concurrent initial hydration, preserves ID order in getCollectionPapersByIds, and enriches detail records via IPC", async () => {
+		resetCollectionMemoryForTests();
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.SE", "cs.PL"],
+			items: [
+				{
+					id: "arxiv:2607.00001",
+					arxivId: "2607.00001",
+					title: "First SE Paper",
+					authors: ["Alice"],
+					abstract:
+						"Complete abstract for first software engineering paper in 2026.",
+					publishedAt: "2026-07-01T00:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: "https://arxiv.org/abs/2607.00001",
+					citationCount: 2,
+					keywords: ["Program Repair"],
+				},
+				{
+					id: "venue:pldi-2026:doi:10.1145/3800001",
+					doi: "10.1145/3800001",
+					title: "Placeholder Abstract PLDI Paper",
+					authors: ["Bob"],
+					abstract: "PLDI 2026 · PLDI",
+					publishedAt: "2026-06-15T00:00:00Z",
+					year: 2026,
+					sourceType: "venue",
+					sourceLabel: "PLDI 2026",
+					venueId: "pldi-2026",
+					venueKind: "conference",
+					venueDomain: "PL/SE",
+					ccfRank: "CCF-A",
+					categories: ["PLDI 2026"],
+					url: "https://doi.org/10.1145/3800001",
+				},
+			],
+		});
+
+		const revisions: number[] = [];
+		const unsub = subscribeCollectionSummary((snap) => {
+			revisions.push(snap.revision);
+		});
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes("api.openalex.org")) {
+				return new Response(
+					JSON.stringify({
+						id: "https://openalex.org/W_pldi_1",
+						doi: "https://doi.org/10.1145/3800001",
+						cited_by_count: 9,
+						abstract_inverted_index: {
+							Sound: [0],
+							type: [1],
+							inference: [2],
+							for: [3],
+							effect: [4],
+							handlers: [5],
+							at: [6],
+							scale: [7],
+						},
+						keywords: [{ display_name: "Effect Handlers", score: 0.85 }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("{}", {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		try {
+			expect(getCollectionSummarySnapshot().hydrated).toBe(false);
+
+			// Concurrent `ensureCollectionSummaryHydrated()` calls share a single IPC round-trip
+			const [s1, s2] = await Promise.all([
+				ensureCollectionSummaryHydrated(),
+				ensureCollectionSummaryHydrated(),
+			]);
+			expect(commands.plazaCollectionStateGet).toHaveBeenCalledTimes(1);
+			expect(s1.totalCount).toBe(2);
+			expect(s2.totalCount).toBe(2);
+			expect(getCollectionSummarySnapshot().hydrated).toBe(true);
+			expect(getCollectionSummarySnapshot().revision).toBe(1);
+
+			// `getCollectionPapersByIds` preserves caller ID ordering
+			const ordered = await getCollectionPapersByIds([
+				"venue:pldi-2026:doi:10.1145/3800001",
+				"arxiv:2607.00001",
+			]);
+			expect(ordered.map((p) => p.id)).toEqual([
+				"venue:pldi-2026:doi:10.1145/3800001",
+				"arxiv:2607.00001",
+			]);
+
+			// `ensurePaperFullDetails` enriches placeholder abstract via OpenAlex and patches SQLite
+			const pldiSummary = ordered[0];
+			if (!pldiSummary) throw new Error("Missing PLDI summary");
+			const detailed = await ensurePaperFullDetails(pldiSummary);
+			expect(detailed.abstract).toBe(
+				"Sound type inference for effect handlers at scale",
+			);
+			expect(detailed.citationCount).toBe(9);
+			expect(detailed.keywords).toEqual(["Effect Handlers"]);
+			expect(detailed.bibtex).toContain("@inproceedings{");
+			expect(commands.plazaCollectionPatchPapers).toHaveBeenCalledTimes(1);
+
+			// `clearCollection("papers")` wipes papers and bumps `revision`
+			const cleared = await clearCollection("papers");
+			expect(cleared.totalCount).toBe(0);
+			expect(revisions.length).toBeGreaterThanOrEqual(3);
+		} finally {
+			unsub();
+			vi.unstubAllGlobals();
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
 	});
 });

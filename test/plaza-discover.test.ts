@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { commands } from "@/lib/core/bindings";
 import type { CollectionPaperItem } from "@/lib/plaza/collection";
 import {
 	applyCollectionToolOutputToSession,
@@ -7,7 +8,11 @@ import {
 import {
 	parseBooleanSearchQuery,
 	searchCollectionFast,
+	searchCollectionFastRemote,
 } from "@/lib/plaza/paper-search";
+import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
+
+vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
 
 describe("Plaza Paper Discover (Fast Search & Deep Search)", () => {
 	it("searches strictly within Paper Collection using boolean syntax and combinable CCF/Venue/Date filters in Fast Search", () => {
@@ -177,5 +182,85 @@ describe("Plaza Paper Discover (Fast Search & Deep Search)", () => {
 		expect(afterCurate2.session.curatedGroups[1]?.label).toBe(
 			"Snowballed Lineage",
 		);
+	});
+
+	it("delegates searchCollectionFastRemote to plazaCollectionSearch IPC with normalized filters, pagination, and activeFilterCount", async () => {
+		const ipc = installMockCollectionIpc({
+			items: [
+				{
+					id: "doi:10.1145/icse-1",
+					title: "Multi-Agent Program Repair for Rust Memory Bugs",
+					authors: ["Alice"],
+					abstract:
+						"We present an autonomous multi-agent workflow for repairing memory safety bugs.",
+					publishedAt: "2026-03-20T00:00:00Z",
+					year: 2026,
+					sourceType: "venue",
+					sourceLabel: "ICSE 2026",
+					venueId: "icse-2026",
+					venueKind: "conference",
+					venueDomain: "PL/SE",
+					ccfRank: "CCF-A",
+					categories: ["ICSE 2026"],
+					url: "https://doi.org/10.1145/icse-1",
+					doi: "10.1145/icse-1",
+					citationCount: 15,
+					keywords: ["Multi-Agent", "Program Repair"],
+				},
+				{
+					id: "arxiv:2603.00999",
+					title: "Multi-Agent Symbolic Execution Survey",
+					authors: ["Bob"],
+					abstract: "A comprehensive survey of multi-agent symbolic execution.",
+					publishedAt: "2026-03-25T00:00:00Z",
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.SE",
+					categories: ["cs.SE"],
+					url: "https://arxiv.org/abs/2603.00999",
+					arxivId: "2603.00999",
+					citationCount: 4,
+					keywords: ["Multi-Agent", "Symbolic Execution"],
+				},
+			],
+		});
+
+		try {
+			const result = await searchCollectionFastRemote(
+				'"multi-agent" -survey',
+				{
+					sourceType: "venue",
+					venueDomain: "PL/SE",
+					ccfRanks: ["CCF-A"],
+					fields: ["title", "keywords"],
+					sort: "citations",
+				},
+				{ limit: 50, offset: 0 },
+			);
+
+			expect(commands.plazaCollectionSearch).toHaveBeenCalledWith({
+				query: '"multi-agent" -survey',
+				timePreset: "all",
+				dateFrom: null,
+				dateTo: null,
+				sourceType: "venue",
+				categories: [],
+				venues: [],
+				venueKind: null,
+				venueDomain: "PL/SE",
+				ccfRanks: ["CCF-A"],
+				fields: ["title", "keywords"],
+				sort: "citations",
+				limit: 50,
+				offset: 0,
+			});
+			expect(result.totalMatched).toBe(1);
+			expect(result.activeFilterCount).toBe(4);
+			expect(result.items[0]?.paper.id).toBe("doi:10.1145/icse-1");
+			expect(result.items[0]?.paper.ccfRank).toBe("CCF-A");
+			expect(result.items[0]?.matchedFields).toEqual(["title", "keywords"]);
+		} finally {
+			ipc.restore();
+		}
 	});
 });
