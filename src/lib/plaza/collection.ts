@@ -21,6 +21,7 @@ import {
 	enrichArxivItemsBatch,
 	enrichSinglePaperOnDemand,
 	enrichVenueItemsBatch,
+	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	type FetchJsonFn,
 	type FetchTextFn,
@@ -135,6 +136,7 @@ export {
 	enrichSinglePaperOnDemand,
 	enrichVenueItemsBatch,
 	ensureCollectionSummaryHydrated,
+	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	fetchCollectionOverview,
 	fetchCollectionStateSummary,
@@ -178,6 +180,25 @@ export {
 const TARGET_YEAR = 2026;
 
 const attemptedDetailEnrichIds = new Set<string>();
+const attemptedArxivKeywordBackfillIds = new Set<string>();
+
+function markArxivKeywordEnrichAttempted(
+	items: readonly CollectionPaperItem[],
+): void {
+	const nowMs = Date.now();
+	const RECENT_WINDOW_MS = 10 * 86_400_000;
+	for (const item of items) {
+		if (!item.id) continue;
+		if ((item.keywords?.length ?? 0) > 0) {
+			attemptedArxivKeywordBackfillIds.add(item.id);
+			continue;
+		}
+		const pubMs = Date.parse(item.publishedAt);
+		if (!Number.isFinite(pubMs) || nowMs - pubMs > RECENT_WINDOW_MS) {
+			attemptedArxivKeywordBackfillIds.add(item.id);
+		}
+	}
+}
 
 export function matchesAnyArxivCategory(
 	paper: CollectionPaperItem,
@@ -193,6 +214,7 @@ export function matchesAnyArxivCategory(
 /** Reset transient in-memory summary & enrichment flags (primarily for unit tests). */
 export function resetCollectionMemoryForTests(): void {
 	attemptedDetailEnrichIds.clear();
+	attemptedArxivKeywordBackfillIds.clear();
 	resetCollectionStoreForTests();
 }
 
@@ -836,7 +858,13 @@ export async function fetchArxivCollection(
 	}
 
 	const rawMerged = mergeCollectionItems(groups);
-	const items = await enrichArxivItemsBatch(rawMerged, fetchJsonFn, 180);
+	const items = await enrichArxivItemsBatch(
+		rawMerged,
+		fetchJsonFn,
+		rawMerged.length,
+		{ fetchText: fetchTextFn, maxHtmlFallback: 24 },
+	);
+	markArxivKeywordEnrichAttempted(items);
 	const newest = items[0] ?? null;
 	const latest: ArxivLatestRecord | null = newest
 		? {
@@ -1012,8 +1040,10 @@ export async function syncArxivCategoriesIncremental(
 		enrichedDelta = await enrichArxivItemsBatch(
 			mergedWarmDelta,
 			fetchJsonFn,
-			180,
+			mergedWarmDelta.length,
+			{ fetchText: fetchTextFn, maxHtmlFallback: 24 },
 		);
+		markArxivKeywordEnrichAttempted(enrichedDelta);
 	}
 
 	let coldFetchedItems: CollectionPaperItem[] = [];
@@ -1274,12 +1304,26 @@ export async function preloadAll2026ArxivInBackground(
 				batchMerged.length > 0
 					? await getCollectionPapersByIds(batchMerged.map((i) => i.id))
 					: [];
-			const existingIdSet = new Set(existingInDb.map((i) => i.id));
-			const unseenBatch = batchMerged.filter((i) => !existingIdSet.has(i.id));
+			const existingById = new Map(existingInDb.map((i) => [i.id, i]));
+			const needsUpsertBatch = batchMerged.filter((i) => {
+				const prev = existingById.get(i.id);
+				if (!prev) return true;
+				return (
+					(prev.keywords?.length ?? 0) === 0 &&
+					!attemptedArxivKeywordBackfillIds.has(i.id)
+				);
+			});
 			const enrichedUnseen =
-				unseenBatch.length > 0
-					? await enrichArxivItemsBatch(unseenBatch, fetchJsonFn, 135)
+				needsUpsertBatch.length > 0
+					? await enrichArxivItemsBatch(
+							needsUpsertBatch,
+							fetchJsonFn,
+							needsUpsertBatch.length,
+						)
 					: [];
+			if (enrichedUnseen.length > 0) {
+				markArxivKeywordEnrichAttempted(enrichedUnseen);
+			}
 
 			const latestCur = await fetchCollectionStateSummary();
 			const nextWms: Record<string, ArxivCategoryWatermark> = {
@@ -1434,12 +1478,26 @@ export async function fetchMoreArxivCollection(options?: {
 		rawBatch.length > 0
 			? await getCollectionPapersByIds(rawBatch.map((i) => i.id))
 			: [];
-	const existingIds = new Set(existingInDb.map((i) => i.id));
-	const unseen = rawBatch.filter((i) => !existingIds.has(i.id));
+	const existingById = new Map(existingInDb.map((i) => [i.id, i]));
+	const unseenOrUnenriched = rawBatch.filter((i) => {
+		const prev = existingById.get(i.id);
+		if (!prev) return true;
+		return (
+			(prev.keywords?.length ?? 0) === 0 &&
+			!attemptedArxivKeywordBackfillIds.has(i.id)
+		);
+	});
 	const enriched =
-		unseen.length > 0
-			? await enrichArxivItemsBatch(unseen, fetchJsonFn, 150)
+		unseenOrUnenriched.length > 0
+			? await enrichArxivItemsBatch(
+					unseenOrUnenriched,
+					fetchJsonFn,
+					unseenOrUnenriched.length,
+				)
 			: [];
+	if (enriched.length > 0) {
+		markArxivKeywordEnrichAttempted(enriched);
+	}
 
 	const latestSnap = await fetchCollectionStateSummary();
 	const nextWatermarks: Record<string, ArxivCategoryWatermark> = {
@@ -1504,8 +1562,12 @@ export async function searchArxivCollection(
 			idUrl,
 			"application/atom+xml,text/xml,*/*",
 		);
-		return parseArxivAtomXml(xml, null, {
+		const parsed = parseArxivAtomXml(xml, null, {
 			preferredCategories: cleanCats,
+		});
+		return enrichArxivItemsBatch(parsed, politePlazaFetchJson, parsed.length, {
+			fetchText: politePlazaFetchText,
+			maxHtmlFallback: 5,
 		});
 	}
 
@@ -1551,7 +1613,8 @@ export async function searchArxivCollection(
 			}),
 		);
 	}
-	return mergeCollectionItems(groups);
+	const merged = mergeCollectionItems(groups);
+	return enrichArxivItemsBatch(merged, politePlazaFetchJson, merged.length);
 }
 
 type VenueFetchBundle = {
@@ -2004,13 +2067,13 @@ export async function ensureVenueLoaded(
 
 /**
  * True when opening a paper card's detail dialog should run on-demand enrichment:
- * missing/placeholder abstract, missing citation count, or one-time DOI keyword check.
+ * missing/placeholder abstract, missing citation count, or one-time DOI/arXiv keyword check.
  */
 export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
 	if (isPlaceholderAbstract(paper.abstract, paper.sourceLabel)) return true;
 	if (paper.citationCount === undefined) return true;
 	if (
-		paper.doi &&
+		(paper.doi || paper.arxivId) &&
 		(!paper.keywords || paper.keywords.length === 0) &&
 		!attemptedDetailEnrichIds.has(paper.id)
 	) {
@@ -2195,8 +2258,119 @@ export function isVenueAlreadyLoaded(
 }
 
 /**
+ * Backfill authentic OpenAlex / `arxiv.org/html/<id>` keywords and citation counts
+ * for already-cached arXiv rows in `collection.sqlite` that currently have `keywords: []`
+ * (including pre-existing unenriched rows and recent preprints once OpenAlex indexes them).
+ */
+export async function backfillMissingArxivKeywords(
+	categories: readonly string[],
+	transport?: {
+		fetchText?: FetchTextFn;
+		fetchJson?: FetchJsonFn;
+		deferDoneStatus?: boolean;
+		onCategoryStatus?: (
+			category: string,
+			status: "refreshing" | "done" | "error",
+		) => void;
+	},
+): Promise<number> {
+	const fetchJsonFn = transport?.fetchJson ?? politePlazaFetchJson;
+	const fetchTextFn = transport?.fetchText ?? politePlazaFetchText;
+	const cleanCats = Array.from(
+		new Set(categories.map((c) => c.trim()).filter(Boolean)),
+	);
+	if (cleanCats.length === 0) return 0;
+
+	const PAGE_LIMIT = 500;
+	const SLICE_SIZE = 240;
+	let totalPatched = 0;
+
+	for (const cat of cleanCats) {
+		let offset = 0;
+		let isFirstMissingSlice = true;
+		let emittedRefreshing = false;
+
+		try {
+			while (offset < 50_000) {
+				const page = await listCollectionPapers({
+					sourceType: "arxiv",
+					category: cat,
+					sort: "newest",
+					limit: PAGE_LIMIT,
+					offset,
+				});
+				if (page.items.length === 0) break;
+
+				const candidates = page.items.filter(
+					(p) =>
+						Boolean(p.arxivId) &&
+						(!p.keywords || p.keywords.length === 0) &&
+						!attemptedArxivKeywordBackfillIds.has(p.id),
+				);
+
+				if (candidates.length > 0 && !emittedRefreshing) {
+					emittedRefreshing = true;
+					transport?.onCategoryStatus?.(cat, "refreshing");
+				}
+
+				for (let i = 0; i < candidates.length; i += SLICE_SIZE) {
+					const slice = candidates.slice(i, i + SLICE_SIZE);
+					const enrichedSlice = await enrichArxivItemsBatch(
+						slice,
+						fetchJsonFn,
+						slice.length,
+						{
+							fetchText: fetchTextFn,
+							maxHtmlFallback: isFirstMissingSlice && offset === 0 ? 20 : 0,
+						},
+					);
+					isFirstMissingSlice = false;
+					markArxivKeywordEnrichAttempted(enrichedSlice);
+
+					const origById = new Map(slice.map((p) => [p.id, p]));
+					const patches: CollectionPaperPatchInput[] = [];
+					for (const item of enrichedSlice) {
+						const orig = origById.get(item.id);
+						const gainedKeywords = (item.keywords?.length ?? 0) > 0;
+						const gainedCitations =
+							(item.citationCount ?? 0) > (orig?.citationCount ?? 0);
+						const gainedDoi = !orig?.doi && Boolean(item.doi);
+						if (!gainedKeywords && !gainedCitations && !gainedDoi) continue;
+						patches.push({
+							id: item.id,
+							doi: item.doi ?? null,
+							citationCount: item.citationCount ?? 0,
+							keywords: item.keywords ?? [],
+						});
+					}
+					if (patches.length > 0) {
+						await patchCollectionPapers(patches);
+						totalPatched += patches.length;
+					}
+				}
+
+				if (!page.hasMore) break;
+				offset += page.items.length;
+			}
+
+			if (emittedRefreshing && !transport?.deferDoneStatus) {
+				transport?.onCategoryStatus?.(cat, "done");
+			}
+		} catch (err) {
+			if (emittedRefreshing) {
+				transport?.onCategoryStatus?.(cat, "error");
+			}
+			throw err;
+		}
+	}
+
+	return totalPatched;
+}
+
+/**
  * Refresh ONLY `arXiv` categories (either all configured categories or a single
- * sub-category such as `cs.SE`), persisting incremental deltas directly to `collection.sqlite`.
+ * sub-category such as `cs.SE`), persisting incremental deltas and backfilling any
+ * missing arXiv keywords directly in `collection.sqlite`.
  */
 export async function refreshArxivCollection(options?: {
 	categories?: string[];
@@ -2213,6 +2387,9 @@ export async function refreshArxivCollection(options?: {
 }): Promise<CollectionStateSummary> {
 	const existingSummary = await fetchCollectionStateSummary();
 	const targetCategories = options?.categories ?? existingSummary.categories;
+	const cleanTargetCats = Array.from(
+		new Set(targetCategories.map((c) => c.trim()).filter(Boolean)),
+	);
 	const savedCategories = options?.replaceCategories
 		? targetCategories
 		: existingSummary.categories;
@@ -2221,6 +2398,20 @@ export async function refreshArxivCollection(options?: {
 	if (options?.replaceCategories) {
 		await updateCollectionConfig({ categories: savedCategories });
 	}
+
+	const erroredCats = new Set<string>();
+	const holdDoneStatus = options?.onCategoryStatus
+		? (cat: string, status: "refreshing" | "done" | "error") => {
+				if (status === "error") {
+					erroredCats.add(cat);
+					options.onCategoryStatus?.(cat, "error");
+					return;
+				}
+				if (status === "refreshing") {
+					options.onCategoryStatus?.(cat, "refreshing");
+				}
+			}
+		: undefined;
 
 	const arxivSync = await syncArxivCategoriesIncremental(
 		targetCategories,
@@ -2231,7 +2422,7 @@ export async function refreshArxivCollection(options?: {
 			...options?.transport,
 			categoryCounts: existingSummary.categoryCounts,
 			deferIncompleteDoneStatus: true,
-			onCategoryStatus: options?.onCategoryStatus,
+			onCategoryStatus: holdDoneStatus,
 		},
 	);
 
@@ -2243,7 +2434,7 @@ export async function refreshArxivCollection(options?: {
 	const nowIso = new Date().toISOString();
 	const latestArxiv = arxivSync.latest ?? latestSnap.latestArxiv;
 
-	const nextSummary =
+	let nextSummary =
 		arxivSync.deltaItems.length > 0
 			? await upsertCollectionPapers({
 					items: arxivSync.deltaItems,
@@ -2257,20 +2448,40 @@ export async function refreshArxivCollection(options?: {
 					...(latestArxiv ? { latestArxiv } : {}),
 				});
 
-	const incompleteCats = targetCategories
-		.map((c) => c.trim())
-		.filter(
-			(c) => Boolean(c) && !nextSummary.arxivWatermarks[c]?.historyComplete,
-		);
+	const incompleteCats = cleanTargetCats.filter(
+		(c) => !nextSummary.arxivWatermarks[c]?.historyComplete,
+	);
+	let mutatedAfterInitialSync = false;
 	if (incompleteCats.length > 0 || arxivSync.coldStartCategories.length > 0) {
 		const catsToPreload = Array.from(
 			new Set([...arxivSync.coldStartCategories, ...incompleteCats]),
 		);
 		await preloadAll2026ArxivInBackground(catsToPreload, 120, 1000, {
 			...options?.transport,
-			onCategoryStatus: options?.onCategoryStatus,
+			onCategoryStatus: holdDoneStatus,
 		});
-		return await fetchCollectionStateSummary();
+		mutatedAfterInitialSync = true;
+	}
+
+	const patchedCount = await backfillMissingArxivKeywords(cleanTargetCats, {
+		...options?.transport,
+		deferDoneStatus: true,
+		onCategoryStatus: holdDoneStatus,
+	});
+	if (patchedCount > 0) {
+		mutatedAfterInitialSync = true;
+	}
+
+	if (options?.onCategoryStatus) {
+		for (const cat of cleanTargetCats) {
+			if (!erroredCats.has(cat)) {
+				options.onCategoryStatus(cat, "done");
+			}
+		}
+	}
+
+	if (mutatedAfterInitialSync) {
+		nextSummary = await fetchCollectionStateSummary();
 	}
 	return nextSummary;
 }

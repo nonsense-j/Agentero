@@ -976,6 +976,11 @@ export type OpenAlexWork = {
 		pdf_url?: string | null;
 		source?: { id?: string | null; display_name?: string | null } | null;
 	} | null;
+	locations?: Array<{
+		landing_page_url?: string | null;
+		pdf_url?: string | null;
+		source?: { id?: string | null; display_name?: string | null } | null;
+	}> | null;
 	open_access?: {
 		is_oa?: boolean | null;
 		oa_url?: string | null;
@@ -986,7 +991,8 @@ export type OpenAlexWork = {
 };
 
 export const OPENALEX_SELECT =
-	"id,type,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,biblio,primary_location,open_access,authorships";
+	"id,type,title,publication_year,publication_date,doi,ids,cited_by_count,abstract_inverted_index,keywords,biblio,primary_location,locations,open_access,authorships";
+const OPENALEX_ARXIV_SELECT = "doi,ids,title,cited_by_count,keywords,locations";
 export const MAILTO = "agentero@users.noreply.github.com";
 
 export function cleanDoi(raw: string | null | undefined): string | undefined {
@@ -1022,16 +1028,40 @@ export function buildVenuePaperId(
 	return `venue:${venueId}:${slug || "paper"}`;
 }
 
+const ARXIV_ID_EXTRACT_RE =
+	/(?:arxiv\.org\/(?:abs|pdf|html)\/|10\.48550\/arxiv\.)(\d{4}\.\d{4,5})/i;
+
+function stripArxivVersion(raw: string | null | undefined): string {
+	return (raw ?? "").trim().replace(/v\d+$/i, "");
+}
+
+function extractAllArxivIdsFromOpenAlex(row: OpenAlexWork): string[] {
+	const found: string[] = [];
+	const seen = new Set<string>();
+	const pushFrom = (raw: string | null | undefined) => {
+		if (!raw) return;
+		const m = ARXIV_ID_EXTRACT_RE.exec(raw);
+		if (!m?.[1]) return;
+		const id = m[1].toLowerCase();
+		if (!seen.has(id)) {
+			seen.add(id);
+			found.push(id);
+		}
+	};
+
+	pushFrom(row.ids?.arxiv);
+	pushFrom(row.doi);
+	pushFrom(row.primary_location?.landing_page_url);
+	pushFrom(row.primary_location?.pdf_url);
+	for (const loc of row.locations ?? []) {
+		pushFrom(loc?.landing_page_url);
+		pushFrom(loc?.pdf_url);
+	}
+	return found;
+}
+
 function extractArxivIdFromOpenAlex(row: OpenAlexWork): string | undefined {
-	const fromIds = row.ids?.arxiv ?? "";
-	const m1 = /arxiv\.org\/abs\/(\d{4}\.\d{4,5})/i.exec(fromIds);
-	if (m1?.[1]) return m1[1];
-	const doi = cleanDoi(row.doi);
-	const m2 = /^10\.48550\/arxiv\.(\d{4}\.\d{4,5})/i.exec(doi ?? "");
-	if (m2?.[1]) return m2[1];
-	const landing = row.primary_location?.landing_page_url ?? "";
-	const m3 = /arxiv\.org\/abs\/(\d{4}\.\d{4,5})/i.exec(landing);
-	return m3?.[1] || undefined;
+	return extractAllArxivIdsFromOpenAlex(row)[0];
 }
 
 function normTitleKey(title: string): string {
@@ -1892,62 +1922,6 @@ export async function enrichVenueItemsBatch(
 	return enriched;
 }
 
-/**
- * Batch-enrich arXiv items with OpenAlex `cited_by_count` and paper-level `work.keywords`
- * using `10.48550/arxiv.<id>` DOIs (falling back to 0-credit singletons when rate-limited).
- */
-export async function enrichArxivItemsBatch(
-	items: CollectionPaperItem[],
-	fetchJson: FetchJsonFn,
-	maxLookup = 180,
-): Promise<CollectionPaperItem[]> {
-	if (items.length === 0) return [];
-	const withDefaults = items.map((item) => ({
-		...item,
-		citationCount: item.citationCount ?? 0,
-		keywords: normalizePaperKeywords(item.keywords),
-	}));
-
-	const candidates = withDefaults.filter((i) => i.arxivId).slice(0, maxLookup);
-	const byArxiv = new Map<string, OpenAlexWork>();
-	const CHUNK = 50;
-
-	for (let i = 0; i < candidates.length; i += CHUNK) {
-		const batch = candidates.slice(i, i + CHUNK);
-		const filter = `doi:${batch.map((p) => `https://doi.org/10.48550/arxiv.${p.arxivId}`).join("|")}`;
-		try {
-			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=${CHUNK}&select=doi,ids,cited_by_count,keywords&mailto=${MAILTO}`;
-			const res = await fetchJson<{ results?: OpenAlexWork[] }>(url);
-			for (const row of res.results ?? []) {
-				const aid = extractArxivIdFromOpenAlex(row);
-				if (aid) byArxiv.set(aid.toLowerCase(), row);
-			}
-		} catch {
-			break;
-		}
-	}
-
-	if (byArxiv.size === 0) return withDefaults;
-
-	return withDefaults.map((item) => {
-		const aid = item.arxivId?.toLowerCase();
-		const row = aid ? byArxiv.get(aid) : undefined;
-		if (!row) return item;
-		const upstream = [
-			...(item.keywords ?? []),
-			...extractOpenAlexUpstreamKeywords(row),
-		];
-		return {
-			...item,
-			doi:
-				item.doi ||
-				(item.arxivId ? `10.48550/arxiv.${item.arxivId}` : undefined),
-			citationCount: Math.max(item.citationCount ?? 0, row.cited_by_count ?? 0),
-			keywords: normalizePaperKeywords(upstream),
-		};
-	});
-}
-
 function decodeBasicHtmlEntities(raw: string): string {
 	return raw
 		.replace(/&nbsp;/gi, " ")
@@ -1964,6 +1938,280 @@ function decodeBasicHtmlEntities(raw: string): string {
 			const cp = Number.parseInt(dec, 10);
 			return Number.isFinite(cp) ? String.fromCodePoint(cp) : "";
 		});
+}
+
+/**
+ * Extract author-declared LaTeX `\keywords{...}` / `Index Terms` from public
+ * `https://arxiv.org/html/<id>` markup (`<div class="ltx_keywords">...</div>`).
+ */
+export function extractArxivHtmlKeywords(html: string): string[] {
+	if (!html) return [];
+	const rawFragments: string[] = [];
+
+	const ltxRegex =
+		/<div[^>]+class=["'][^"']*\bltx_keywords\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi;
+	for (let m = ltxRegex.exec(html); m !== null; m = ltxRegex.exec(html)) {
+		if (m[1]) rawFragments.push(m[1]);
+	}
+
+	const metaKw =
+		/<meta[^>]+name=["']keywords["'][^>]+content=["']([^"']+)["']/i.exec(
+			html,
+		)?.[1] ??
+		/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']keywords["']/i.exec(
+			html,
+		)?.[1];
+	if (metaKw) rawFragments.push(metaKw);
+
+	if (rawFragments.length === 0) return [];
+
+	const candidates: string[] = [];
+	for (const frag of rawFragments) {
+		const plain = decodeBasicHtmlEntities(
+			frag
+				.replace(/<h[1-6][^>]*>[\s\S]*?<\/h[1-6]>/gi, " ")
+				.replace(/<[^>]+>/g, " "),
+		)
+			.replace(
+				/^(?:keywords?|key\s+words?|index\s+terms?)\s*[:：.—–-]*\s*/i,
+				"",
+			)
+			.replace(/\s+/g, " ")
+			.replace(/\.+$/, "")
+			.trim();
+		if (!plain) continue;
+		for (const part of plain.split(/[,;·•\n]+/)) {
+			const leaf = part
+				.split(/\s*(?:→|->)\s*/)
+				.pop()
+				?.replace(/\.+$/, "")
+				.trim();
+			if (leaf) candidates.push(leaf);
+		}
+	}
+
+	return normalizePaperKeywords(candidates);
+}
+
+export type EnrichArxivBatchOptions = {
+	fetchText?: FetchTextFn;
+	/** Max recent unmatched preprints to inspect on `arxiv.org/html/<id>` for LaTeX `\keywords`. */
+	maxHtmlFallback?: number;
+};
+
+function mergeOpenAlexRowIntoMap(
+	map: Map<string, OpenAlexWork>,
+	key: string,
+	next: OpenAlexWork,
+): void {
+	const prev = map.get(key);
+	if (!prev) {
+		map.set(key, next);
+		return;
+	}
+	map.set(key, {
+		...prev,
+		doi: prev.doi || next.doi,
+		cited_by_count: Math.max(
+			prev.cited_by_count ?? 0,
+			next.cited_by_count ?? 0,
+		),
+		keywords: [...(prev.keywords ?? []), ...(next.keywords ?? [])],
+	});
+}
+
+/**
+ * Batch-enrich arXiv items with OpenAlex `cited_by_count` and paper-level `work.keywords`
+ * using `10.48550/arxiv.<id>` DOIs (including published records referencing arXiv in `locations`),
+ * falling back to 0-credit OpenAlex singletons on rate-limit and bounded `arxiv.org/html/<id>`
+ * author `\keywords{...}` extraction for recent preprints not yet indexed by OpenAlex.
+ */
+export async function enrichArxivItemsBatch(
+	items: CollectionPaperItem[],
+	fetchJson: FetchJsonFn,
+	maxLookup = items.length,
+	options?: EnrichArxivBatchOptions,
+): Promise<CollectionPaperItem[]> {
+	if (items.length === 0) return [];
+	const withDefaults = items.map((item) => ({
+		...item,
+		citationCount: item.citationCount ?? 0,
+		keywords: normalizePaperKeywords(item.keywords),
+	}));
+
+	const candidates = withDefaults
+		.filter((i) => Boolean(stripArxivVersion(i.arxivId)))
+		.slice(0, Math.max(0, maxLookup));
+	if (candidates.length === 0) return withDefaults;
+
+	const byArxiv = new Map<string, OpenAlexWork>();
+	const byTitle = new Map<string, OpenAlexWork>();
+	const candidateTitleKeys = new Set(
+		candidates.map((c) => normTitleKey(c.title)).filter(Boolean),
+	);
+	const CHUNK = 80;
+	let openAlexFilterFailed = false;
+
+	const indexOpenAlexRow = (row: OpenAlexWork) => {
+		for (const aid of extractAllArxivIdsFromOpenAlex(row)) {
+			mergeOpenAlexRowIntoMap(byArxiv, aid, row);
+		}
+		const tk = normTitleKey(row.title ?? row.display_name ?? "");
+		if (tk && candidateTitleKeys.has(tk)) {
+			mergeOpenAlexRowIntoMap(byTitle, tk, row);
+		}
+	};
+
+	for (let i = 0; i < candidates.length; i += CHUNK) {
+		const batch = candidates.slice(i, i + CHUNK);
+		const filter = `doi:${batch.map((p) => `10.48550/arxiv.${stripArxivVersion(p.arxivId)}`).join("|")}`;
+		try {
+			const url = `https://api.openalex.org/works?filter=${encodeURIComponent(filter)}&per-page=100&select=${OPENALEX_ARXIV_SELECT}&mailto=${MAILTO}`;
+			const res = await fetchJson<{
+				error?: string;
+				results?: OpenAlexWork[];
+			}>(url);
+			if (res.error) {
+				openAlexFilterFailed = true;
+				break;
+			}
+			for (const row of res.results ?? []) {
+				indexOpenAlexRow(row);
+			}
+		} catch {
+			openAlexFilterFailed = true;
+			break;
+		}
+	}
+
+	if (openAlexFilterFailed) {
+		const unmatchedDois = Array.from(
+			new Set(
+				candidates
+					.map((c) => stripArxivVersion(c.arxivId).toLowerCase())
+					.filter((aid) => Boolean(aid) && !byArxiv.has(aid))
+					.map((aid) => `10.48550/arxiv.${aid}`),
+			),
+		);
+		if (unmatchedDois.length > 0) {
+			const singletonByDoi = new Map<string, OpenAlexWork>();
+			await fetchOpenAlexSingletonsByDoi(
+				unmatchedDois,
+				fetchJson,
+				singletonByDoi,
+				260,
+			);
+			for (const [doiKey, row] of singletonByDoi.entries()) {
+				indexOpenAlexRow(row);
+				const m = /^10\.48550\/arxiv\.(\d{4}\.\d{4,5})$/i.exec(doiKey);
+				if (m?.[1]) {
+					mergeOpenAlexRowIntoMap(byArxiv, m[1].toLowerCase(), row);
+				}
+			}
+		}
+	}
+
+	const enriched = withDefaults.map((item) => {
+		const cleanAid = stripArxivVersion(item.arxivId).toLowerCase();
+		const row =
+			(cleanAid ? byArxiv.get(cleanAid) : undefined) ??
+			byTitle.get(normTitleKey(item.title));
+		if (!row) {
+			return {
+				...item,
+				doi:
+					item.doi ||
+					(item.arxivId
+						? `10.48550/arxiv.${stripArxivVersion(item.arxivId)}`
+						: undefined),
+			};
+		}
+		const upstream = [
+			...(item.keywords ?? []),
+			...extractOpenAlexUpstreamKeywords(row),
+		];
+		return {
+			...item,
+			doi:
+				item.doi ||
+				(item.arxivId
+					? `10.48550/arxiv.${stripArxivVersion(item.arxivId)}`
+					: undefined),
+			citationCount: Math.max(item.citationCount ?? 0, row.cited_by_count ?? 0),
+			keywords: normalizePaperKeywords(upstream),
+		};
+	});
+
+	const fetchText = options?.fetchText;
+	const maxHtmlFallback = options?.maxHtmlFallback ?? 0;
+	if (fetchText && maxHtmlFallback > 0) {
+		const nowMs = Date.now();
+		const RECENT_WINDOW_MS = 10 * 86_400_000;
+		const htmlTargetIndices: number[] = [];
+		for (let idx = 0; idx < enriched.length; idx++) {
+			const item = enriched[idx];
+			const cleanAid = stripArxivVersion(item?.arxivId).toLowerCase();
+			if (!item || !cleanAid) continue;
+			if ((item.keywords?.length ?? 0) > 0) continue;
+			if (byArxiv.has(cleanAid) || byTitle.has(normTitleKey(item.title))) {
+				continue;
+			}
+			const pubMs = Date.parse(item.publishedAt);
+			if (
+				!Number.isFinite(pubMs) ||
+				nowMs - pubMs > RECENT_WINDOW_MS ||
+				pubMs - nowMs > 2 * 86_400_000
+			) {
+				continue;
+			}
+			htmlTargetIndices.push(idx);
+			if (htmlTargetIndices.length >= maxHtmlFallback) break;
+		}
+
+		if (htmlTargetIndices.length > 0) {
+			const CONCURRENCY = 2;
+			let cursor = 0;
+			let succeeded = 0;
+			let consecutiveFailures = 0;
+
+			const worker = async () => {
+				while (cursor < htmlTargetIndices.length) {
+					if (succeeded === 0 && consecutiveFailures >= 4) break;
+					const targetIdx = htmlTargetIndices[cursor++];
+					if (targetIdx === undefined) break;
+					const target = enriched[targetIdx];
+					const cleanAid = stripArxivVersion(target?.arxivId);
+					if (!target || !cleanAid) continue;
+					try {
+						const html = await fetchText(
+							`https://arxiv.org/html/${encodeURIComponent(cleanAid)}`,
+							"text/html,application/xhtml+xml",
+						);
+						const htmlKws = extractArxivHtmlKeywords(html);
+						if (htmlKws.length > 0) {
+							enriched[targetIdx] = {
+								...target,
+								keywords: htmlKws,
+							};
+						}
+						succeeded += 1;
+						consecutiveFailures = 0;
+					} catch {
+						consecutiveFailures += 1;
+					}
+				}
+			};
+
+			await Promise.all(
+				Array.from(
+					{ length: Math.min(CONCURRENCY, htmlTargetIndices.length) },
+					() => worker(),
+				),
+			);
+		}
+	}
+
+	return enriched;
 }
 
 /**
@@ -2310,6 +2558,25 @@ export async function enrichSinglePaperOnDemand(
 				}
 			} catch {
 				// Best-effort fallback completed.
+			}
+		}
+	}
+
+	// Step 4: Public `arxiv.org/html/<id>` author LaTeX `\keywords{...}` / `Index Terms` fallback
+	if (normalizePaperKeywords(upstreamKw).length === 0 && arxivId && fetchText) {
+		const cleanAid = stripArxivVersion(arxivId);
+		if (cleanAid) {
+			try {
+				const html = await fetchText(
+					`https://arxiv.org/html/${encodeURIComponent(cleanAid)}`,
+					"text/html,application/xhtml+xml",
+				);
+				const htmlKws = extractArxivHtmlKeywords(html);
+				if (htmlKws.length > 0) {
+					upstreamKw.push(...htmlKws);
+				}
+			} catch {
+				// Best-effort fallback: paper may not have an HTML rendering or author `\keywords`.
 			}
 		}
 	}

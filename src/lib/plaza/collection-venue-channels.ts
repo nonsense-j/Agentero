@@ -41,6 +41,7 @@ const HOST_MIN_INTERVAL_MS: Record<string, number> = {
 	"api.datacite.org": 100,
 	"api.semanticscholar.org": 1400,
 	"export.arxiv.org": 3250,
+	"arxiv.org": 400,
 	"papers.cool": 300,
 	"conf.researchr.org": 250,
 	"link.springer.com": 80,
@@ -52,6 +53,7 @@ const SERIALIZED_HOSTS = new Set([
 	"conf.researchr.org",
 	"api.crossref.org",
 	"export.arxiv.org",
+	"arxiv.org",
 	"api.semanticscholar.org",
 ]);
 
@@ -2392,11 +2394,7 @@ export async function fetchMultiChannelVenuePapers(
 		});
 		arxivTotal = arxivRes.totalResults;
 		if (arxivRes.items.length > 0) {
-			arxivVenueItems = await enrichArxivItemsBatch(
-				arxivRes.items,
-				fetchJson,
-				225,
-			);
+			arxivVenueItems = await enrichArxivItemsBatch(arxivRes.items, fetchJson);
 		}
 	}
 
