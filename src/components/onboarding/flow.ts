@@ -9,6 +9,7 @@ export const onboardingFlow = defineStepper([
 	{ id: "agent" },
 	{ id: "translate" },
 	{ id: "layout" },
+	{ id: "openalex" },
 	{ id: "vault" },
 ]);
 

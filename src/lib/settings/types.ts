@@ -155,6 +155,8 @@ export type AppSettings = {
 	// General
 	/** EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey: string;
+	/** Optional OpenAlex API key for higher rate limits and daily credits. */
+	openAlexKey: string;
 	/** EZProxy/WebVPN prefix for paywalled PDF fallback ("" disables). */
 	institutionProxyPrefix: string;
 	/** Session cookie for institution proxy requests. */

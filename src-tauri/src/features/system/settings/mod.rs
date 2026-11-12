@@ -72,6 +72,9 @@ pub struct AppSettings {
     /// EasyScholar key for journal ranking and impact-factor lookups.
     #[serde(default)]
     pub easy_scholar_key: String,
+    /// Optional OpenAlex API key for higher rate limits and daily credits.
+    #[serde(default)]
+    pub open_alex_key: String,
     #[serde(default)]
     pub network_proxy_enabled: bool,
     #[serde(default = "default_network_proxy_url")]
@@ -449,6 +452,7 @@ impl Default for AppSettings {
         Self {
             shortcut_overrides: HashMap::new(),
             easy_scholar_key: String::new(),
+            open_alex_key: String::new(),
             network_proxy_enabled: false,
             network_proxy_url: default_network_proxy_url(),
             institution_proxy_prefix: String::new(),
@@ -1073,6 +1077,18 @@ impl AppSettingsStore {
             Some(key.to_string())
         }
     }
+
+    /// Resolve the configured OpenAlex API key. Returns None when unset or when
+    /// the stored value is a UI mask (`*`-only), so probes never send masks.
+    pub fn open_alex_key(&self) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let key = guard.open_alex_key.trim();
+        if key.is_empty() || is_translate_api_key_mask(key) {
+            None
+        } else {
+            Some(key.to_string())
+        }
+    }
 }
 
 fn read_file(path: &PathBuf) -> (AppSettings, bool) {
@@ -1154,6 +1170,9 @@ fn redact_secrets(mut settings: AppSettings) -> AppSettings {
     if !settings.easy_scholar_key.trim().is_empty() {
         settings.easy_scholar_key = mask_translate_api_key(&settings.easy_scholar_key);
     }
+    if !settings.open_alex_key.trim().is_empty() {
+        settings.open_alex_key = mask_translate_api_key(&settings.open_alex_key);
+    }
     if !settings.decision.api_key.trim().is_empty() {
         settings.decision.api_key = mask_translate_api_key(&settings.decision.api_key);
     }
@@ -1187,6 +1206,9 @@ fn merge_secrets(incoming: &mut AppSettings, previous: &AppSettings) {
     if is_translate_api_key_mask(&incoming.easy_scholar_key) {
         incoming.easy_scholar_key = previous.easy_scholar_key.clone();
     }
+    if is_translate_api_key_mask(&incoming.open_alex_key) {
+        incoming.open_alex_key = previous.open_alex_key.clone();
+    }
     if is_translate_api_key_mask(&incoming.decision.api_key) {
         incoming.decision.api_key = previous.decision.api_key.clone();
     }
@@ -1209,6 +1231,7 @@ fn normalize(s: &mut AppSettings) {
         s.mcp_port = default_mcp_port();
     }
     s.easy_scholar_key = s.easy_scholar_key.trim().to_string();
+    s.open_alex_key = s.open_alex_key.trim().to_string();
     s.decision.api_key = s.decision.api_key.trim().to_string();
     let provider = s.decision.provider.trim().to_ascii_lowercase();
     s.decision.provider = if provider.is_empty() {

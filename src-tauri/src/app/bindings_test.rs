@@ -21,6 +21,8 @@ pub(crate) fn export_typescript_bindings() {
             crate::features::system::settings::commands::network_system_proxy,
             crate::features::system::settings::commands::list_system_fonts,
             crate::features::system::settings::commands::easy_scholar_probe,
+            crate::features::system::settings::commands::open_alex_probe,
+            crate::features::system::settings::commands::open_alex_key_get,
             crate::features::system::settings::commands::institution_proxy_probe,
             crate::features::system::settings::commands::institution_access_detect,
             crate::features::system::settings::commands::institution_proxy_login_open,

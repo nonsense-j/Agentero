@@ -734,3 +734,55 @@ pub async fn easy_scholar_probe(app: AppHandle) -> ApiResult<bool> {
     };
     ApiResult::ok(ok)
 }
+
+/// Probe an OpenAlex API key (either `api_key` override or the stored setting)
+/// against a lightweight OpenAlex singleton work endpoint.
+#[tauri::command]
+#[specta::specta]
+pub async fn open_alex_probe(app: AppHandle, api_key: Option<String>) -> ApiResult<bool> {
+    use crate::features::system::settings::is_translate_api_key_mask;
+
+    let store = app.state::<AppSettingsStore>();
+    let resolved = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty() && !is_translate_api_key_mask(k))
+        .or_else(|| store.open_alex_key());
+    let Some(key) = resolved else {
+        return ApiResult::ok(false);
+    };
+    let url = format!(
+        "https://api.openalex.org/works/W2741809807?select=id&api_key={}",
+        urlencoding::encode(&key)
+    );
+    let client = match crate::core::http::client_with(
+        std::time::Duration::from_secs(12),
+        crate::core::http::DEFAULT_REDIRECT_LIMIT,
+        agentero_core::features::paper::scholar_api::client::USER_AGENT,
+    ) {
+        Ok(c) => c,
+        Err(_) => return ApiResult::ok(false),
+    };
+    let ok = match client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => res
+            .json::<serde_json::Value>()
+            .await
+            .map(|json| json.get("id").and_then(|v| v.as_str()).is_some())
+            .unwrap_or(false),
+        _ => false,
+    };
+    ApiResult::ok(ok)
+}
+
+/// Resolve the stored OpenAlex API key for internal Plaza batch enrichment while
+/// keeping `AppSettings.openAlexKey` masked in UI state.
+#[tauri::command]
+#[specta::specta]
+pub fn open_alex_key_get(app: AppHandle) -> ApiResult<Option<String>> {
+    let store = app.state::<AppSettingsStore>();
+    ApiResult::ok(store.open_alex_key())
+}

@@ -152,6 +152,17 @@
 			"probeFail": "不可用",
 			"probeProbing": "检测中…"
 		},
+		"openAlex": {
+			"section": "OpenAlex",
+			"keyLabel": "API Key",
+			"placeholder": "填写 OpenAlex API Key（可选）",
+			"openKeyPage": "获取免费 API Key",
+			"confirm": "确定",
+			"probeIdle": "可选（当前使用公共额度）",
+			"probeOk": "可用",
+			"probeFail": "Key 无效或不可用",
+			"probeProbing": "检测中…"
+		},
 		"plaza": {
 			"label": "广场"
 		},

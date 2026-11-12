@@ -199,6 +199,7 @@ export function clampEditorLineHeight(value: number): number {
 export const DEFAULT_SETTINGS: AppSettings = {
 	shortcutOverrides: {},
 	easyScholarKey: "",
+	openAlexKey: "",
 	institutionProxyPrefix: "",
 	institutionProxyCookie: "",
 	institutionProxyType: "ezproxy",

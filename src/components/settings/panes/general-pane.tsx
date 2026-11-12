@@ -51,6 +51,7 @@ import { EasyScholarSettingsBlock } from "./general/easy-scholar-settings-block"
 import { FinderIntegrationRow } from "./general/finder-integration-row";
 import { InstitutionAccessBlock } from "./general/institution-access-block";
 import { McpSettingsBlock } from "./general/mcp-settings-block";
+import { OpenAlexSettingsBlock } from "./general/open-alex-settings-block";
 import { PrivacySettingsBlock } from "./general/privacy-settings-block";
 import { TerminalAppRow } from "./general/terminal-app-row";
 
@@ -67,6 +68,9 @@ export function GeneralPane({
 	const [proxyUrlDraft, setProxyUrlDraft] = useState(settings.networkProxyUrl);
 	const [easyScholarKeyDraft, setEasyScholarKeyDraft] = useState(
 		settings.easyScholarKey,
+	);
+	const [openAlexKeyDraft, setOpenAlexKeyDraft] = useState(
+		settings.openAlexKey,
 	);
 	// OS system proxy detected by the Host (Windows "Internet Settings"); used
 	// automatically while the app proxy is off — surface it for transparency.
@@ -102,6 +106,10 @@ export function GeneralPane({
 	useEffect(() => {
 		setEasyScholarKeyDraft(settings.easyScholarKey);
 	}, [settings.easyScholarKey]);
+
+	useEffect(() => {
+		setOpenAlexKeyDraft(settings.openAlexKey);
+	}, [settings.openAlexKey]);
 
 	useEffect(() => {
 		if (!isTauri()) return;
@@ -394,6 +402,19 @@ export function GeneralPane({
 						easyScholarKey: trimmed,
 					});
 					setEasyScholarKeyDraft(next.easyScholarKey);
+				}}
+			/>
+			<OpenAlexSettingsBlock
+				savedKey={settings.openAlexKey}
+				keyDraft={openAlexKeyDraft}
+				onKeyDraftChange={setOpenAlexKeyDraft}
+				onCommitKey={async (value) => {
+					const trimmed = value.trim();
+					const next = await saveSettingsAsync({
+						...settings,
+						openAlexKey: trimmed,
+					});
+					setOpenAlexKeyDraft(next.openAlexKey);
 				}}
 			/>
 			<SettingsSectionLabel>{t("general.sections.mcp")}</SettingsSectionLabel>

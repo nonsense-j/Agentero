@@ -231,6 +231,9 @@ pub fn run() {
                     crate::features::paper::import::refresh_parser_config(
                         &handle.state::<AppSettingsStore>(),
                     );
+                    agentero_core::features::paper::scholar_api::client::set_openalex_api_key(
+                        handle.state::<AppSettingsStore>().open_alex_key(),
+                    );
                 });
             }
             {
@@ -288,6 +291,9 @@ pub fn run() {
             &settings.network_proxy_url,
         )?;
         crate::features::paper::import::refresh_parser_config(&settings_store);
+        agentero_core::features::paper::scholar_api::client::set_openalex_api_key(
+            settings_store.open_alex_key(),
+        );
         let _ = agents.set_proxy(
             settings.network_proxy_enabled,
             settings.network_proxy_url.clone(),

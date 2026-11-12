@@ -4,7 +4,7 @@
 //! wrapping so that individual sources only need to build URLs and parse
 //! responses.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -32,6 +32,65 @@ const GLOBAL_CONCURRENCY: usize = 4;
 
 /// Semantic Scholar API host that `auth_headers` gates on.
 const S2_API_HOST_PREFIX: &str = "https://api.semanticscholar.org/";
+
+/// OpenAlex API host that `with_openalex_api_key` gates on.
+const OPENALEX_API_HOST_PREFIX: &str = "https://api.openalex.org/";
+
+fn openalex_key_store() -> &'static RwLock<Option<String>> {
+    static KEY: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+    KEY.get_or_init(|| RwLock::new(None))
+}
+
+/// Update the process-wide OpenAlex API key configured in desktop settings.
+/// Passing `None` or an empty string falls back to `OPENALEX_API_KEY` or the
+/// unauthenticated polite pool.
+pub fn set_openalex_api_key(key: Option<String>) {
+    let cleaned = key
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.chars().all(|c| c == '*'));
+    if let Ok(mut guard) = openalex_key_store().write() {
+        *guard = cleaned;
+    }
+}
+
+/// Resolve the active OpenAlex API key (settings override first, then `OPENALEX_API_KEY`).
+pub fn openalex_api_key() -> Option<String> {
+    if let Ok(guard) = openalex_key_store().read() {
+        if let Some(ref key) = *guard {
+            return Some(key.clone());
+        }
+    }
+    env_credential("OPENALEX_API_KEY")
+}
+
+/// Pure URL rewriter for OpenAlex query-parameter authentication (`api_key=`).
+fn append_openalex_api_key(url: &str, key: Option<&str>) -> String {
+    if !url.starts_with(OPENALEX_API_HOST_PREFIX) || url.contains("api_key=") {
+        return url.to_string();
+    }
+    let Some(clean_key) = key.map(str::trim).filter(|k| !k.is_empty()) else {
+        return url.to_string();
+    };
+    let (without_frag, frag) = match url.split_once('#') {
+        Some((base, f)) => (base, Some(f)),
+        None => (url, None),
+    };
+    let sep = if without_frag.contains('?') { '&' } else { '?' };
+    let mut out = format!(
+        "{without_frag}{sep}api_key={}",
+        urlencoding::encode(clean_key)
+    );
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
+/// Append the configured `api_key=` parameter to `api.openalex.org` URLs when present.
+pub fn with_openalex_api_key(url: &str) -> String {
+    append_openalex_api_key(url, openalex_api_key().as_deref())
+}
 
 /// Optional BYOK credential read from the environment at request time.
 /// Empty/whitespace values are ignored so the unauthenticated free tier stays
@@ -91,14 +150,26 @@ pub async fn get_text(url: &str) -> Result<String, ApiError> {
 pub async fn get_text_with_timeout(url: &str, timeout: Duration) -> Result<String, ApiError> {
     let _permit = acquire_permit().await;
     let client = http_client(timeout)?;
-    let mut request = client.get(url);
-    for (name, value) in auth_headers(url) {
+    let effective_url = with_openalex_api_key(url);
+    let mut request = client.get(&effective_url);
+    for (name, value) in auth_headers(&effective_url) {
         request = request.header(name, value);
     }
     let res = request
         .send()
         .await
         .map_err(|e| ApiError::Network(e.to_string()))?;
+    if res.status().as_u16() == 401 && effective_url != url {
+        let mut fallback = client.get(url);
+        for (name, value) in auth_headers(url) {
+            fallback = fallback.header(name, value);
+        }
+        let retry = fallback
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        return handle_response(retry).await;
+    }
     handle_response(res).await
 }
 
@@ -327,6 +398,36 @@ mod tests {
         assert!(auth_headers("https://api.openalex.org/works?search=x").is_empty());
         assert!(
             auth_headers("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi").is_empty()
+        );
+    }
+
+    #[test]
+    fn append_openalex_api_key_rewrites_only_openalex_urls() {
+        assert_eq!(
+            append_openalex_api_key(
+                "https://api.openalex.org/works?search=x&mailto=test@example.com",
+                Some(" demo_key_123 ")
+            ),
+            "https://api.openalex.org/works?search=x&mailto=test@example.com&api_key=demo_key_123"
+        );
+        assert_eq!(
+            append_openalex_api_key("https://api.openalex.org/works/W2741809807", Some("abc")),
+            "https://api.openalex.org/works/W2741809807?api_key=abc"
+        );
+        assert_eq!(
+            append_openalex_api_key(
+                "https://api.openalex.org/works/W2741809807?api_key=existing",
+                Some("abc")
+            ),
+            "https://api.openalex.org/works/W2741809807?api_key=existing"
+        );
+        assert_eq!(
+            append_openalex_api_key("https://api.crossref.org/works", Some("abc")),
+            "https://api.crossref.org/works"
+        );
+        assert_eq!(
+            append_openalex_api_key("https://api.openalex.org/works?search=x", Some("   ")),
+            "https://api.openalex.org/works?search=x"
         );
     }
 }

@@ -152,6 +152,17 @@
 			"probeFail": "Unavailable",
 			"probeProbing": "Checking…"
 		},
+		"openAlex": {
+			"section": "OpenAlex",
+			"keyLabel": "API key",
+			"placeholder": "Optional OpenAlex API key",
+			"openKeyPage": "Get a free API key",
+			"confirm": "Confirm",
+			"probeIdle": "Optional (public pool)",
+			"probeOk": "Available",
+			"probeFail": "Invalid key",
+			"probeProbing": "Checking…"
+		},
 		"plaza": {
 			"label": "Plaza"
 		},

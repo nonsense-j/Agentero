@@ -35,6 +35,16 @@ export const commands = {
 	 */
 	easyScholarProbe: () => __TAURI_INVOKE<ApiResult<boolean>>("easy_scholar_probe"),
 	/**
+	 *  Probe an OpenAlex API key (either `api_key` override or the stored setting)
+	 *  against a lightweight OpenAlex singleton work endpoint.
+	 */
+	openAlexProbe: (apiKey: string | null) => __TAURI_INVOKE<ApiResult<boolean>>("open_alex_probe", { apiKey }),
+	/**
+	 *  Resolve the stored OpenAlex API key for internal Plaza batch enrichment while
+	 *  keeping `AppSettings.openAlexKey` masked in UI state.
+	 */
+	openAlexKeyGet: () => __TAURI_INVOKE<ApiResult<string | null>>("open_alex_key_get"),
+	/**
 	 *  Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
 	 *  known paywalled DOI through the rewrite and checking the response is a
 	 *  PDF. Optional `prefix_override` tests a specific gateway or CARSI publisher
@@ -1525,6 +1535,8 @@ export type AppSettings_Deserialize = {
 	shortcutOverrides?: { [key in string]: ShortcutBinding_Deserialize | null },
 	/**  EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey?: string,
+	/**  Optional OpenAlex API key for higher rate limits and daily credits. */
+	openAlexKey?: string,
 	networkProxyEnabled?: boolean,
 	networkProxyUrl?: string,
 	/**
@@ -1652,6 +1664,8 @@ export type AppSettings_Serialize = {
 	shortcutOverrides: { [key in string]: ShortcutBinding_Serialize | null },
 	/**  EasyScholar key for journal ranking and impact-factor lookups. */
 	easyScholarKey: string,
+	/**  Optional OpenAlex API key for higher rate limits and daily credits. */
+	openAlexKey: string,
 	networkProxyEnabled: boolean,
 	networkProxyUrl: string,
 	/**

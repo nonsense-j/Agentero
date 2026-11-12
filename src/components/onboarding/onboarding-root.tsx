@@ -7,6 +7,7 @@ import type { AgentStepHandle } from "@/components/onboarding/steps/agent-step";
 import { AgentStep } from "@/components/onboarding/steps/agent-step";
 import { LayoutStep } from "@/components/onboarding/steps/layout-step";
 import { NodeStep } from "@/components/onboarding/steps/node-step";
+import { OpenAlexStep } from "@/components/onboarding/steps/openalex-step";
 import { ProxyStep } from "@/components/onboarding/steps/proxy-step";
 import { ThemeStep } from "@/components/onboarding/steps/theme-step";
 import { TranslateStep } from "@/components/onboarding/steps/translate-step";
@@ -206,7 +207,9 @@ function OnboardingDialog({ onVaultCreated }: { onVaultCreated: () => void }) {
 		}
 	}, [skippedSteps, stepper]);
 
-	const gated = ["translate", "layout"].includes(stepper.current.id);
+	const gated = ["translate", "layout", "openalex"].includes(
+		stepper.current.id,
+	);
 	const canNext = gated
 		? gate?.id === stepper.current.id && gate.allowed
 		: true;
@@ -276,6 +279,15 @@ function OnboardingDialog({ onVaultCreated }: { onVaultCreated: () => void }) {
 						onNextChange={reportGate}
 					/>
 				);
+			case "openalex":
+				return (
+					<OpenAlexStep
+						settings={settings}
+						patch={patch}
+						onUseDefault={() => void stepper.next()}
+						onNextChange={reportGate}
+					/>
+				);
 			case "vault":
 				return <VaultChoiceStep onCreate={onCreateVault} />;
 		}
@@ -295,6 +307,8 @@ function OnboardingDialog({ onVaultCreated }: { onVaultCreated: () => void }) {
 				return { title: t("translate.title"), desc: t("translate.desc") };
 			case "layout":
 				return { title: t("layout.title"), desc: undefined };
+			case "openalex":
+				return { title: t("openalex.title"), desc: t("openalex.desc") };
 			case "vault":
 				return { title: t("vault.title"), desc: t("vault.desc") };
 			default:

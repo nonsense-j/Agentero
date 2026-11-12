@@ -336,6 +336,11 @@ function normalizePartial(
 	} else {
 		merged.easyScholarKey = parsed.easyScholarKey.trim();
 	}
+	if (typeof parsed.openAlexKey !== "string") {
+		merged.openAlexKey = DEFAULT_SETTINGS.openAlexKey;
+	} else {
+		merged.openAlexKey = parsed.openAlexKey.trim();
+	}
 	if (typeof parsed.networkProxyEnabled !== "boolean") {
 		merged.networkProxyEnabled = DEFAULT_SETTINGS.networkProxyEnabled;
 	}

@@ -155,6 +155,16 @@ pub fn try_run_collection_mcp() -> Option<i32> {
 }
 
 fn serve(db_path: PathBuf) -> Result<(), String> {
+    let settings_store = crate::features::system::settings::AppSettingsStore::load();
+    if let Ok(res) = settings_store.get() {
+        let _ = crate::core::http::configure_proxy(
+            res.settings.network_proxy_enabled,
+            &res.settings.network_proxy_url,
+        );
+    }
+    agentero_core::features::paper::scholar_api::client::set_openalex_api_key(
+        settings_store.open_alex_key(),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

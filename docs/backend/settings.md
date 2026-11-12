@@ -6,6 +6,9 @@
 | `settings_set` | 合并写入并广播 `settings:changed` |
 | `institution_access_detect` | 无痕 WebView 探测当前网络是否可直连 IEEE Xplore / ACM DL 全文 |
 | `institution_proxy_probe` | 探测已保存或指定（`prefix_override`）机构网关 / CARSI 出版商会话 |
+| `easy_scholar_probe` | 探测已保存的 EasyScholar Key 是否可用 |
+| `open_alex_probe` | 探测传入或已保存的 OpenAlex API Key 是否有效 |
+| `open_alex_key_get` | 为前端广场批量富化返回未脱敏的 `openAlexKey`（UI 状态快照仍以 `*` 掩码返回） |
 
 - 路径：`$XDG_CONFIG_HOME/agentero/settings.json`（macOS 通常 `~/.config/agentero/`）。
 - `plazaEnabled`：是否显示并加载广场（默认开）。关闭后侧栏不渲染广场节点，已开的广场 tab 关闭，且不挂载 `PlazaView`（含站点代理 iframe / 订阅轮询）。
