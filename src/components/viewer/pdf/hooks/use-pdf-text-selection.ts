@@ -73,9 +73,11 @@ const SELECTABLE_PDF_TEXT =
 export function releaseNativeSelectionForPdfPointer({
 	host,
 	target,
+	event,
 }: {
 	host: HTMLElement;
 	target: EventTarget | null;
+	event?: Pick<PointerEvent, "preventDefault">;
 }): void {
 	const element =
 		target instanceof Element
@@ -84,6 +86,15 @@ export function releaseNativeSelectionForPdfPointer({
 				? target.parentElement
 				: null;
 	if (element?.closest(SELECTABLE_PDF_TEXT)) return;
+	if (element?.closest("[data-pdf-chrome]")) return;
+	if (element?.closest("[data-embed-pdf-page]")) {
+		event?.preventDefault();
+		// Canceling the pointer default keeps WebKit from moving focus off a
+		// previously focused tree or tab, so claim the reading surface explicitly.
+		element
+			.closest<HTMLElement>("[data-pdf-viewport]")
+			?.focus({ preventScroll: true });
+	}
 	// CodeMirror is contenteditable: if it keeps focus, its DOM observer can
 	// adopt the browser selection dragged across the split.
 	const active = document.activeElement;
@@ -296,6 +307,7 @@ export function usePdfTextSelection({
 			releaseNativeSelectionForPdfPointer({
 				host,
 				target: event.target,
+				event,
 			});
 		};
 		const onPointerUp = (event: PointerEvent) => {
