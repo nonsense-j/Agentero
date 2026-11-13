@@ -786,3 +786,474 @@ pub fn open_alex_key_get(app: AppHandle) -> ApiResult<Option<String>> {
     let store = app.state::<AppSettingsStore>();
     ApiResult::ok(store.open_alex_key())
 }
+
+/// Optional field overrides when probing or listing models before saving.
+#[derive(Debug, Clone, Default, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct KeywordLlmOverrideArgs {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// HTTP status and assistant text returned by a Host keyword-LLM completion.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct KeywordLlmChatResult {
+    pub status: u16,
+    pub content: String,
+}
+
+fn default_base_for_provider(provider: &str) -> &'static str {
+    use crate::features::system::settings::{
+        DEFAULT_OPENAI_COMPATIBLE_BASE_URL, DEFAULT_OPEN_ROUTER_BASE_URL,
+        KEYWORD_LLM_PROVIDER_OPENROUTER,
+    };
+    if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
+        DEFAULT_OPEN_ROUTER_BASE_URL
+    } else {
+        DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+    }
+}
+
+fn strip_trailing_ci_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    if value.len() < suffix.len() {
+        return None;
+    }
+    let split = value.len() - suffix.len();
+    if value.is_char_boundary(split) && value[split..].eq_ignore_ascii_case(suffix) {
+        Some(&value[..split])
+    } else {
+        None
+    }
+}
+
+fn resolve_openai_compatible_url(
+    base_url: &str,
+    default_root: &str,
+    suffix: &str,
+) -> Result<Url, String> {
+    let trimmed = base_url.trim();
+    let raw = if trimmed.is_empty() {
+        default_root
+    } else {
+        trimmed
+    };
+    let mut cleaned = raw.trim_end_matches('/');
+    if let Some(rest) = strip_trailing_ci_suffix(cleaned, "/chat/completions") {
+        cleaned = rest.trim_end_matches('/');
+    } else if let Some(rest) = strip_trailing_ci_suffix(cleaned, "/models") {
+        cleaned = rest.trim_end_matches('/');
+    }
+    let mut url = Url::parse(cleaned).map_err(|e| e.to_string())?;
+    let scheme = url.scheme();
+    if (scheme != "http" && scheme != "https") || url.host_str().is_none() {
+        return Err("keyword LLM base URL must be http(s)".into());
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    let full_path = if path.is_empty() {
+        format!("/v1{suffix}")
+    } else {
+        format!("{path}{suffix}")
+    };
+    url.set_path(&full_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn merge_keyword_llm_overrides(
+    store: &AppSettingsStore,
+    args: Option<KeywordLlmOverrideArgs>,
+) -> crate::features::system::settings::KeywordLlmSettings {
+    use crate::features::system::settings::is_translate_api_key_mask;
+
+    let mut merged = store.keyword_llm_raw().unwrap_or_default();
+    if let Some(ov) = args {
+        if let Some(provider) = ov.provider {
+            merged.provider = provider.trim().to_string();
+        }
+        if let Some(base_url) = ov.base_url {
+            merged.base_url = base_url.trim().to_string();
+        }
+        if let Some(model) = ov.model {
+            merged.model = model.trim().to_string();
+        }
+        if let Some(api_key) = ov.api_key {
+            let trimmed = api_key.trim();
+            if trimmed.is_empty() {
+                merged.api_key.clear();
+            } else if !is_translate_api_key_mask(trimmed) {
+                merged.api_key = trimmed.to_string();
+            }
+        }
+    }
+    merged
+}
+
+fn is_openrouter_host(url: &Url) -> bool {
+    url.host_str()
+        .is_some_and(|h| h.eq_ignore_ascii_case("openrouter.ai"))
+}
+
+fn build_keyword_llm_client(
+    timeout_secs: u64,
+) -> Result<reqwest::Client, crate::core::error::AppError> {
+    crate::core::http::client_with(
+        std::time::Duration::from_secs(timeout_secs),
+        crate::core::http::DEFAULT_REDIRECT_LIMIT,
+        agentero_core::features::paper::scholar_api::client::USER_AGENT,
+    )
+}
+
+fn extract_chat_message_content(json: &serde_json::Value) -> String {
+    let Some(content) = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+    else {
+        return String::new();
+    };
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    if let Some(parts) = content.as_array() {
+        let mut out = String::new();
+        for part in parts {
+            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                out.push_str(t);
+            }
+        }
+        return out;
+    }
+    String::new()
+}
+
+/// Probe the keyword-extraction LLM configuration (either field overrides or
+/// stored settings). OpenRouter default `:free` preset checks `/auth/key` at
+/// zero token cost; other models and BYOK OpenAI-compatible endpoints run a
+/// minimal `/chat/completions` probe.
+#[tauri::command]
+#[specta::specta]
+pub async fn keyword_llm_probe(
+    app: AppHandle,
+    args: Option<KeywordLlmOverrideArgs>,
+) -> ApiResult<bool> {
+    use crate::features::system::settings::{
+        resolve_keyword_llm_config, DEFAULT_OPEN_ROUTER_MODEL,
+    };
+
+    let store = app.state::<AppSettingsStore>();
+    let merged = merge_keyword_llm_overrides(&store, args);
+    let Some(cfg) = resolve_keyword_llm_config(&merged) else {
+        return ApiResult::ok(false);
+    };
+    let default_root = default_base_for_provider(&cfg.provider);
+    let Ok(chat_url) =
+        resolve_openai_compatible_url(&cfg.base_url, default_root, "/chat/completions")
+    else {
+        return ApiResult::ok(false);
+    };
+    let Ok(client) = build_keyword_llm_client(15) else {
+        return ApiResult::ok(false);
+    };
+
+    if is_openrouter_host(&chat_url) && cfg.model == DEFAULT_OPEN_ROUTER_MODEL {
+        let Some(ref key) = cfg.api_key else {
+            return ApiResult::ok(false);
+        };
+        let Ok(auth_url) = resolve_openai_compatible_url(&cfg.base_url, default_root, "/auth/key")
+        else {
+            return ApiResult::ok(false);
+        };
+        let ok = match client
+            .get(auth_url)
+            .header("Accept", "application/json")
+            .bearer_auth(key)
+            .send()
+            .await
+        {
+            Ok(res) if res.status().is_success() => res
+                .json::<serde_json::Value>()
+                .await
+                .map(|json| json.get("data").is_some())
+                .unwrap_or(false),
+            _ => false,
+        };
+        return ApiResult::ok(ok);
+    }
+
+    let primary_body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    });
+    let fallback_body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [{"role": "user", "content": "ping"}],
+    });
+
+    let send_probe = |body: &serde_json::Value| {
+        let mut req = client
+            .post(chat_url.clone())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        if let Some(ref key) = cfg.api_key {
+            req = req.bearer_auth(key);
+        }
+        req.send()
+    };
+
+    let mut resp = match send_probe(&primary_body).await {
+        Ok(r) => r,
+        Err(_) => return ApiResult::ok(false),
+    };
+    if resp.status().as_u16() == 400 {
+        resp = match send_probe(&fallback_body).await {
+            Ok(r) => r,
+            Err(_) => return ApiResult::ok(false),
+        };
+    }
+    if !resp.status().is_success() {
+        return ApiResult::ok(false);
+    }
+    let ok = resp
+        .json::<serde_json::Value>()
+        .await
+        .map(|json| json.get("choices").is_some())
+        .unwrap_or(false);
+    ApiResult::ok(ok)
+}
+
+/// Fetch available models from an OpenAI-compatible `/models` endpoint (using
+/// either field overrides or stored settings). For OpenRouter, `:free` models
+/// (starting with `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+#[tauri::command]
+#[specta::specta]
+pub async fn keyword_llm_models_list(
+    app: AppHandle,
+    args: Option<KeywordLlmOverrideArgs>,
+) -> ApiResult<Vec<String>> {
+    use crate::features::system::settings::{
+        is_translate_api_key_mask, normalize_keyword_llm_provider, DEFAULT_OPEN_ROUTER_MODEL,
+        KEYWORD_LLM_PROVIDER_OPENROUTER,
+    };
+    use std::collections::BTreeSet;
+
+    let store = app.state::<AppSettingsStore>();
+    let merged = merge_keyword_llm_overrides(&store, args);
+    let provider = normalize_keyword_llm_provider(&merged.provider);
+    let default_root = default_base_for_provider(provider);
+    let models_url = match resolve_openai_compatible_url(&merged.base_url, default_root, "/models")
+    {
+        Ok(u) => u,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+    };
+    let client = match build_keyword_llm_client(15) {
+        Ok(c) => c,
+        Err(e) => return map_err(e),
+    };
+    let mut req = client
+        .get(models_url.clone())
+        .header("Accept", "application/json");
+    let key = merged.api_key.trim();
+    if !key.is_empty() && !is_translate_api_key_mask(key) {
+        req = req.bearer_auth(key);
+    }
+    let resp = match req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            return ApiResult::err(agentero_core::error::AppError::message(format!(
+                "Keyword LLM models HTTP {}",
+                r.status().as_u16()
+            )))
+        }
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+    };
+
+    let items = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.as_array());
+    let mut all_ids = BTreeSet::new();
+    if let Some(list) = items {
+        for item in list {
+            let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+                continue;
+            };
+            if !id.is_empty() {
+                all_ids.insert(id.to_string());
+            }
+        }
+    }
+
+    if provider == KEYWORD_LLM_PROVIDER_OPENROUTER || is_openrouter_host(&models_url) {
+        let mut free_set = BTreeSet::new();
+        let mut paid_set = BTreeSet::new();
+        for id in all_ids {
+            if id.to_ascii_lowercase().ends_with(":free") {
+                free_set.insert(id);
+            } else {
+                paid_set.insert(id);
+            }
+        }
+        let mut out = Vec::with_capacity(free_set.len() + paid_set.len() + 1);
+        free_set.remove(DEFAULT_OPEN_ROUTER_MODEL);
+        paid_set.remove(DEFAULT_OPEN_ROUTER_MODEL);
+        out.push(DEFAULT_OPEN_ROUTER_MODEL.to_string());
+        out.extend(free_set);
+        out.extend(paid_set);
+        return ApiResult::ok(out);
+    }
+
+    ApiResult::ok(all_ids.into_iter().collect())
+}
+
+/// Run a Host-proxied OpenAI-compatible chat completion using the stored
+/// keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
+#[tauri::command]
+#[specta::specta]
+pub async fn keyword_llm_chat_complete(
+    app: AppHandle,
+    system_prompt: String,
+    user_prompt: String,
+    max_tokens: Option<u32>,
+) -> ApiResult<Option<KeywordLlmChatResult>> {
+    let store = app.state::<AppSettingsStore>();
+    let Some(cfg) = store.keyword_llm_config() else {
+        return ApiResult::ok(None);
+    };
+    let default_root = default_base_for_provider(&cfg.provider);
+    let chat_url =
+        match resolve_openai_compatible_url(&cfg.base_url, default_root, "/chat/completions") {
+            Ok(u) => u,
+            Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+        };
+    let client = match build_keyword_llm_client(24) {
+        Ok(c) => c,
+        Err(e) => return map_err(e),
+    };
+
+    let messages = serde_json::json!([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]);
+    let mut primary_body = serde_json::json!({
+        "model": cfg.model,
+        "temperature": 0,
+        "max_tokens": max_tokens.unwrap_or(700),
+        "messages": messages,
+    });
+    if is_openrouter_host(&chat_url) {
+        primary_body["reasoning"] = serde_json::json!({"effort": "minimal", "exclude": true});
+    }
+    let fallback_body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    });
+
+    let send_chat = |body: &serde_json::Value| {
+        let mut req = client
+            .post(chat_url.clone())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        if let Some(ref key) = cfg.api_key {
+            req = req.bearer_auth(key);
+        }
+        req.send()
+    };
+
+    let mut resp = match send_chat(&primary_body).await {
+        Ok(r) => r,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+    };
+    if resp.status().as_u16() == 400 {
+        resp = match send_chat(&fallback_body).await {
+            Ok(r) => r,
+            Err(e) => {
+                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()))
+            }
+        };
+    }
+
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return ApiResult::ok(Some(KeywordLlmChatResult {
+            status,
+            content: String::new(),
+        }));
+    }
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+    };
+    let content = extract_chat_message_content(&json);
+    ApiResult::ok(Some(KeywordLlmChatResult { status, content }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_openai_compatible_url;
+
+    #[test]
+    fn resolves_openai_compatible_endpoints_without_double_suffix() {
+        let default_root = "https://api.openai.com/v1";
+        assert_eq!(
+            resolve_openai_compatible_url("", default_root, "/chat/completions")
+                .unwrap()
+                .as_str(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            resolve_openai_compatible_url(
+                "https://api.openai.com",
+                default_root,
+                "/chat/completions"
+            )
+            .unwrap()
+            .as_str(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            resolve_openai_compatible_url("https://api.openai.com/v1/", default_root, "/models")
+                .unwrap()
+                .as_str(),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            resolve_openai_compatible_url(
+                "https://open.bigmodel.cn/api/paas/v4/",
+                default_root,
+                "/chat/completions",
+            )
+            .unwrap()
+            .as_str(),
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+        assert_eq!(
+            resolve_openai_compatible_url(
+                "https://api.deepseek.com/v1/chat/completions",
+                default_root,
+                "/models",
+            )
+            .unwrap()
+            .as_str(),
+            "https://api.deepseek.com/v1/models"
+        );
+    }
+}

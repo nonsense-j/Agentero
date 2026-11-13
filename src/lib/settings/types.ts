@@ -157,6 +157,8 @@ export type AppSettings = {
 	easyScholarKey: string;
 	/** Optional OpenAlex API key for higher rate limits and daily credits. */
 	openAlexKey: string;
+	/** Optional fallback keyword-extraction LLM configuration (OpenRouter preset or OpenAI-compatible BYOK). */
+	keywordLlm: KeywordLlmSettings;
 	/** EZProxy/WebVPN prefix for paywalled PDF fallback ("" disables). */
 	institutionProxyPrefix: string;
 	/** Session cookie for institution proxy requests. */
@@ -456,5 +458,30 @@ export type EmbeddingSettings = {
 	/** BYOK secret; masked (`*`) when echoed back from the Host. */
 	apiKey: string;
 	/** Embedding model id, e.g. `text-embedding-3-small`, `BAAI/bge-m3`. */
+	model: string;
+};
+
+export type KeywordLlmProviderId = "openrouter" | "openaiCompatible";
+
+export const KEYWORD_LLM_PROVIDER_IDS: readonly KeywordLlmProviderId[] = [
+	"openrouter",
+	"openaiCompatible",
+] as const;
+
+export function isKeywordLlmProviderId(v: unknown): v is KeywordLlmProviderId {
+	return (
+		typeof v === "string" &&
+		(KEYWORD_LLM_PROVIDER_IDS as readonly string[]).includes(v)
+	);
+}
+
+/** Fallback keyword-extraction LLM settings (OpenRouter preset or OpenAI-compatible BYOK). */
+export type KeywordLlmSettings = {
+	provider: KeywordLlmProviderId;
+	/** OpenAI-compatible base URL; empty falls back to `https://api.openai.com/v1` in `openaiCompatible` mode. */
+	baseUrl: string;
+	/** API key; masked (`*`) when echoed back from the Host. */
+	apiKey: string;
+	/** Chat model id (e.g. `baidu/ernie-5.5-flash-preview:free`, `gpt-4o-mini`). */
 	model: string;
 };

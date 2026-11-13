@@ -27,6 +27,9 @@ import {
 	DECISION_PROVIDER_PRESETS,
 	DEFAULT_DECISION_SETTINGS,
 	DEFAULT_EMBEDDING_SETTINGS,
+	DEFAULT_KEYWORD_LLM_SETTINGS,
+	DEFAULT_OPEN_ROUTER_BASE_URL,
+	DEFAULT_OPEN_ROUTER_MODEL,
 	DEFAULT_PAPER_READER_SETTINGS,
 	DEFAULT_PDF_ASK_SETTINGS,
 	DEFAULT_SETTINGS,
@@ -45,6 +48,7 @@ import {
 	isPaperNoteMode,
 	isPdfScrollStrategy,
 	isPdfSpreadMode,
+	type KeywordLlmSettings,
 	LIBRARY_COLUMN_KEYS,
 	type LibraryColumnKey,
 	type LibraryColumnPref,
@@ -92,6 +96,7 @@ function toSettingsWire(settings: AppSettings): AppSettings_Deserialize {
 /** In-memory snapshot (source of truth between Host round-trips). */
 let cache: AppSettings = {
 	...DEFAULT_SETTINGS,
+	keywordLlm: { ...DEFAULT_KEYWORD_LLM_SETTINGS },
 	shortcutOverrides: {},
 	libraryColumns: DEFAULT_LIBRARY_COLUMNS.map((c) => ({ ...c })),
 	translate: { ...DEFAULT_TRANSLATE_SETTINGS },
@@ -108,6 +113,7 @@ let loadPromise: Promise<AppSettings> | null = null;
 function cloneSettings(s: AppSettings): AppSettings {
 	return {
 		...s,
+		keywordLlm: { ...s.keywordLlm },
 		shortcutOverrides: normalizeShortcutOverrides(s.shortcutOverrides),
 		libraryColumns: s.libraryColumns.map((c) => ({ ...c })),
 		pdfAsk: { ...s.pdfAsk },
@@ -309,6 +315,8 @@ function normalizePartial(
 		downloadFulltextWhenNoRemotePreview?: boolean;
 		/** @deprecated pre-#242 single editor font preset */
 		editorFontFamily?: string;
+		openRouterKey?: string;
+		openRouterModel?: string;
 	},
 ): AppSettings {
 	const {
@@ -319,6 +327,8 @@ function normalizePartial(
 		downloadFulltextToLocal: _d1,
 		downloadFulltextWhenNoRemotePreview: _d2,
 		editorFontFamily: legacyEditorFontFamily,
+		openRouterKey: legacyOpenRouterKey,
+		openRouterModel: legacyOpenRouterModel,
 		...rest
 	} = parsed;
 	const merged = { ...DEFAULT_SETTINGS, ...rest };
@@ -341,6 +351,11 @@ function normalizePartial(
 	} else {
 		merged.openAlexKey = parsed.openAlexKey.trim();
 	}
+	merged.keywordLlm = normalizeKeywordLlmSettings(
+		(parsed as { keywordLlm?: Partial<KeywordLlmSettings> }).keywordLlm,
+		legacyOpenRouterKey,
+		legacyOpenRouterModel,
+	);
 	if (typeof parsed.networkProxyEnabled !== "boolean") {
 		merged.networkProxyEnabled = DEFAULT_SETTINGS.networkProxyEnabled;
 	}
@@ -549,6 +564,57 @@ function normalizeDecisionSettings(raw: unknown): DecisionSettings {
 	base.baseUrl = baseUrl || preset.baseUrl;
 	const model = typeof partial.model === "string" ? partial.model.trim() : "";
 	base.model = model || preset.model;
+	return base;
+}
+
+function normalizeKeywordLlmSettings(
+	raw: unknown,
+	legacyKey?: string,
+	legacyModel?: string,
+): KeywordLlmSettings {
+	const base: KeywordLlmSettings = { ...DEFAULT_KEYWORD_LLM_SETTINGS };
+	const partial =
+		raw && typeof raw === "object" ? (raw as Partial<KeywordLlmSettings>) : {};
+	const rawProvider =
+		typeof partial.provider === "string"
+			? partial.provider.trim().toLowerCase()
+			: "";
+	if (rawProvider === "openaicompatible" || rawProvider === "custom") {
+		base.provider = "openaiCompatible";
+	} else {
+		base.provider = "openrouter";
+	}
+	if (typeof partial.apiKey === "string") {
+		base.apiKey = partial.apiKey.trim();
+	}
+	// Do not strip trailing slash here so typing e.g. ".../v1/" is not eaten mid-keystroke.
+	if (typeof partial.baseUrl === "string") {
+		base.baseUrl = partial.baseUrl.trim();
+	} else if (base.provider === "openaiCompatible") {
+		base.baseUrl = "";
+	}
+	if (typeof partial.model === "string") {
+		base.model = partial.model.trim();
+	} else if (base.provider === "openaiCompatible") {
+		base.model = "";
+	}
+	const trimmedLegacyKey =
+		typeof legacyKey === "string" ? legacyKey.trim() : "";
+	const trimmedLegacyModel =
+		typeof legacyModel === "string" ? legacyModel.trim() : "";
+	if (!base.apiKey && trimmedLegacyKey) {
+		base.apiKey = trimmedLegacyKey;
+		if (
+			trimmedLegacyModel &&
+			(!base.model || base.model === DEFAULT_OPEN_ROUTER_MODEL)
+		) {
+			base.model = trimmedLegacyModel;
+		}
+	}
+	if (base.provider === "openrouter") {
+		if (!base.baseUrl) base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
+		if (!base.model) base.model = DEFAULT_OPEN_ROUTER_MODEL;
+	}
 	return base;
 }
 

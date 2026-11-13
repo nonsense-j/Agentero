@@ -9,10 +9,14 @@
 | `easy_scholar_probe` | 探测已保存的 EasyScholar Key 是否可用 |
 | `open_alex_probe` | 探测传入或已保存的 OpenAlex API Key 是否有效 |
 | `open_alex_key_get` | 为前端广场批量富化返回未脱敏的 `openAlexKey`（UI 状态快照仍以 `*` 掩码返回） |
+| `keyword_llm_probe` | 探测传入或已保存的关键词提取模型配置是否可用（OpenRouter 走 `/auth/key` + `/models` 校验，BYOK OpenAI 兼容走 `/models` 或最小 `/chat/completions` 校验） |
+| `keyword_llm_models_list` | 拉取当前配置（或传入覆盖参数）的 OpenAI 兼容 `/models` 模型列表；OpenRouter 会将 `:free` 模型（含默认 `baidu/ernie-5.5-flash-preview:free`）排在前面并保留全部可用模型 |
+| `keyword_llm_chat_complete` | 在 Rust Host 侧携带真实 Key 与代理配置向 OpenRouter 或自定义 BYOK `/chat/completions` 发起关键词提取请求 |
 
 - 路径：`$XDG_CONFIG_HOME/agentero/settings.json`（macOS 通常 `~/.config/agentero/`）。
 - `plazaEnabled`：是否显示并加载广场（默认开）。关闭后侧栏不渲染广场节点，已开的广场 tab 关闭，且不挂载 `PlazaView`（含站点代理 iframe / 订阅轮询）。
 - `plazaHiddenSources`：被隐藏的广场来源 id 列表（默认空）。侧栏广场子行按此过滤；右键广场父节点逐条勾选显隐。
+- `keywordLlm`（`provider` / `baseUrl` / `apiKey` / `model`）：论文关键词提取模型配置。`provider` 支持 `openrouter`（预设 `https://openrouter.ai/api/v1`，默认模型 `baidu/ernie-5.5-flash-preview:free`，不限制 `:free` 后缀）与 `openaiCompatible`（BYOK，默认遵循 `/v1/chat/completions` 与 `/v1/models`，缺省根地址 `https://api.openai.com/v1`）；`apiKey` 跨 IPC 统一以等长 `*` 掩码脱敏，旧版 `openRouterKey` / `openRouterModel` 在读取时自动迁移并清除遗留字段。
 - `mcpEnabled` / `mcpPort`：内置 loopback Streamable HTTP MCP server 开关与端口（默认关、8765）。
 - `onboardingDone` / `featureTourDone`：首次运行向导与 Vault 打开后的功能导引是否已完成（默认 `false`）。前端完成/跳过后写入；Host schema 必须保留这两个字段，否则 `settings_set` 会静默丢掉，下次启动再次弹出（#398）。
 - `wikiEmbedFontSize` / `markdownMaxWidth`：双链嵌入正文字号（12–20，默认 13）和 Markdown 编辑列最大宽度（`0` 或 640 / 720 / 800 / 960 / 1120，默认 `0` 全宽）。Host schema 必须保留这两个字段，否则保存时会丢掉，下次启动回到默认值（#733）。

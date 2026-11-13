@@ -163,6 +163,25 @@
 			"probeFail": "Key 无效或不可用",
 			"probeProbing": "检测中…"
 		},
+		"keywordLlm": {
+			"section": "关键词提取模型",
+			"providerLabel": "提供方",
+			"providerOpenRouter": "OpenRouter",
+			"providerOpenAiCompatible": "OpenAI 兼容（BYOK）",
+			"baseUrlLabel": "Base URL",
+			"keyLabel": "API Key",
+			"modelLabel": "模型",
+			"keyPlaceholderOpenRouter": "填写 OpenRouter API Key（可选）",
+			"keyPlaceholderByok": "填写 API Key（本地服务可留空）",
+			"modelPlaceholderByok": "输入模型 ID（如 gpt-4o-mini）",
+			"openKeyPage": "获取免费 API Key",
+			"refreshModels": "刷新模型列表",
+			"confirm": "确定",
+			"probeIdle": "可选（未配置）",
+			"probeOk": "可用",
+			"probeFail": "不可用或 Key 无效",
+			"probeProbing": "检测中…"
+		},
 		"plaza": {
 			"label": "广场"
 		},

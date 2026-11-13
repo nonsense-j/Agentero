@@ -163,6 +163,25 @@
 			"probeFail": "Invalid key",
 			"probeProbing": "Checking…"
 		},
+		"keywordLlm": {
+			"section": "Keyword extraction LLM",
+			"providerLabel": "Provider",
+			"providerOpenRouter": "OpenRouter",
+			"providerOpenAiCompatible": "OpenAI-compatible (BYOK)",
+			"baseUrlLabel": "Base URL",
+			"keyLabel": "API key",
+			"modelLabel": "Model",
+			"keyPlaceholderOpenRouter": "Optional OpenRouter API key",
+			"keyPlaceholderByok": "API key (optional for local endpoints)",
+			"modelPlaceholderByok": "Model ID (e.g. gpt-4o-mini)",
+			"openKeyPage": "Get a free API key",
+			"refreshModels": "Refresh models",
+			"confirm": "Confirm",
+			"probeIdle": "Optional",
+			"probeOk": "Available",
+			"probeFail": "Unavailable or invalid key",
+			"probeProbing": "Checking…"
+		},
 		"plaza": {
 			"label": "Plaza"
 		},

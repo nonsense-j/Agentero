@@ -28,6 +28,7 @@ Onboarding 关闭、Vault 首次打开后，`useFeatureTour` 用 driver.js 高�
 | Agent | `agent` | 扫描本机 ACP Agent、安装可托管 Agent、探测、设默认（可跳过）；安装期间卡片显示 `agent-lifecycle:progress` 进度与阶段，并提供取消（X）按钮静默中止安装。下方另列**本地桌面应用**（ChatGPT / 千问办公 / WorkBuddy）：不支持 ACP，已装高亮、未装灰度，均标注「暂不支持」，不可选 | `scanCatalog` / `probeCatalogAgent` / `ensureCatalogAgent` / `useAgentToolLifecycle` / `probeDesktopApps` |
 | 翻译 | `translate` | 选择「用自己的翻译 API」或「内置免费翻译」，选前者则填 Key 并测试 | `probeCommercialMtProvider` |
 | 图表公式 | `layout` | 选择「配置云端服务」或「本地免费模型」，选前者则填 Key 并测试 | `probeLayoutProvider` |
+| 关键词检索 | `openalex` | 可选配置 OpenAlex API Key（主索引）与关键词提取模型（支持 `OpenRouter` 预设或自定义 `Base URL` / `API Key` / `Model` 的 OpenAI 兼容 BYOK，缺失关键词时兜底抽取），或选择公共通道跳过 | `probeOpenAlexKey` / `probeKeywordLlm` / `fetchKeywordLlmModels` |
 | 收尾 | `vault` | 创建 Vault / 从 Zotero 导入 / 稍后再说 | `createNewVault()` / `migrateZoteroFromWelcome()`（`src/lib/vault/actions.ts`） |
 
 Agent 的可选性由当前依赖是否可用决定（`acpCommandAvailable`）；内置 ACP 适配器不能代替所需的 Agent CLI，保留历史注册、默认项或成功探测记录不代表当前可用。

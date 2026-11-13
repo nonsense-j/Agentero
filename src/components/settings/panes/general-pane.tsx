@@ -50,6 +50,7 @@ import { ConnectorSettingsBlock } from "./general/connector-settings-block";
 import { EasyScholarSettingsBlock } from "./general/easy-scholar-settings-block";
 import { FinderIntegrationRow } from "./general/finder-integration-row";
 import { InstitutionAccessBlock } from "./general/institution-access-block";
+import { KeywordLlmSettingsBlock } from "./general/keyword-llm-settings-block";
 import { McpSettingsBlock } from "./general/mcp-settings-block";
 import { OpenAlexSettingsBlock } from "./general/open-alex-settings-block";
 import { PrivacySettingsBlock } from "./general/privacy-settings-block";
@@ -417,6 +418,7 @@ export function GeneralPane({
 					setOpenAlexKeyDraft(next.openAlexKey);
 				}}
 			/>
+			<KeywordLlmSettingsBlock settings={settings} patch={patch} />
 			<SettingsSectionLabel>{t("general.sections.mcp")}</SettingsSectionLabel>
 			<McpSettingsBlock settings={settings} patch={patch} />
 			<PrivacySettingsBlock />

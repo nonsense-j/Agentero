@@ -45,6 +45,34 @@ export const commands = {
 	 */
 	openAlexKeyGet: () => __TAURI_INVOKE<ApiResult<string | null>>("open_alex_key_get"),
 	/**
+	 *  Probe the keyword-extraction LLM configuration (either field overrides or
+	 *  stored settings). OpenRouter default `:free` preset checks `/auth/key` at
+	 *  zero token cost; other models and BYOK OpenAI-compatible endpoints run a
+	 *  minimal `/chat/completions` probe.
+	 */
+	keywordLlmProbe: (args: {
+	provider?: string | null,
+	baseUrl?: string | null,
+	apiKey?: string | null,
+	model?: string | null,
+} | null) => __TAURI_INVOKE<ApiResult<boolean>>("keyword_llm_probe", { args }),
+	/**
+	 *  Fetch available models from an OpenAI-compatible `/models` endpoint (using
+	 *  either field overrides or stored settings). For OpenRouter, `:free` models
+	 *  (starting with `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+	 */
+	keywordLlmModelsList: (args: {
+	provider?: string | null,
+	baseUrl?: string | null,
+	apiKey?: string | null,
+	model?: string | null,
+} | null) => __TAURI_INVOKE<ApiResult<string[]>>("keyword_llm_models_list", { args }),
+	/**
+	 *  Run a Host-proxied OpenAI-compatible chat completion using the stored
+	 *  keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
+	 */
+	keywordLlmChatComplete: (systemPrompt: string, userPrompt: string, maxTokens: number | null) => __TAURI_INVOKE<ApiResult<KeywordLlmChatResult | null>>("keyword_llm_chat_complete", { systemPrompt, userPrompt, maxTokens }),
+	/**
 	 *  Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
 	 *  known paywalled DOI through the rewrite and checking the response is a
 	 *  PDF. Optional `prefix_override` tests a specific gateway or CARSI publisher
@@ -1532,6 +1560,8 @@ export type AppSettings_Deserialize = {
 	easyScholarKey?: string,
 	/**  Optional OpenAlex API key for higher rate limits and daily credits. */
 	openAlexKey?: string,
+	/**  Optional LLM endpoint for fallback paper keyword extraction. */
+	keywordLlm?: KeywordLlmSettings,
 	networkProxyEnabled?: boolean,
 	networkProxyUrl?: string,
 	/**
@@ -1661,6 +1691,8 @@ export type AppSettings_Serialize = {
 	easyScholarKey: string,
 	/**  Optional OpenAlex API key for higher rate limits and daily credits. */
 	openAlexKey: string,
+	/**  Optional LLM endpoint for fallback paper keyword extraction. */
+	keywordLlm: KeywordLlmSettings,
 	networkProxyEnabled: boolean,
 	networkProxyUrl: string,
 	/**
@@ -3703,6 +3735,35 @@ string |
 Json[] | 
 /**  JSON object. */
 { [key in string]: Json };
+
+/**  HTTP status and assistant text returned by a Host keyword-LLM completion. */
+export type KeywordLlmChatResult = {
+	status: number,
+	content: string,
+};
+
+/**  Optional field overrides when probing or listing models before saving. */
+export type KeywordLlmOverrideArgs = {
+	provider?: string | null,
+	baseUrl?: string | null,
+	apiKey?: string | null,
+	model?: string | null,
+};
+
+/**
+ *  Keyword-extraction fallback LLM configuration (OpenRouter preset or
+ *  custom OpenAI-compatible BYOK endpoint).
+ */
+export type KeywordLlmSettings = {
+	/**  `openrouter` (preset) | `openaiCompatible` (BYOK). */
+	provider?: string,
+	/**  OpenAI-compatible API base URL (e.g. `https://openrouter.ai/api/v1` or `https://api.openai.com/v1`). */
+	baseUrl?: string,
+	/**  API key; masked (`*`) when echoed back from the Host. */
+	apiKey?: string,
+	/**  Chat model id (e.g. `baidu/ernie-5.5-flash-preview:free`, `gpt-4o-mini`). */
+	model?: string,
+};
 
 export type LayoutProviderConfig = {
 	apiKey?: string,

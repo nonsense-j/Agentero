@@ -111,19 +111,27 @@
 		"probeFail": "请检查你的 Key 后重试"
 	},
 	"openalex": {
-		"title": "OpenAlex 学术索引配置（可选）",
-		"desc": "Agentero 会通过 OpenAlex 同步论文元数据、关键词与引文网络。填入免费 API Key 可获得更高并发与每日额度。",
-		"configureOwn": "配置 OpenAlex API Key",
-		"configureOwnDesc": "填入免费账号的 API Key，提升广场论文池、关键词与引文检索速度。",
+		"title": "论文关键词与学术索引配置（可选）",
+		"desc": "OpenAlex 提供主力论文元数据、关键词与引文检索；可选配置 OpenRouter 或 OpenAI 兼容模型，为未收录的顶会期刊论文兜底抽取关键词。",
+		"configureOwn": "配置 OpenAlex 与关键词模型",
+		"configureOwnDesc": "填入 OpenAlex Key 与 OpenRouter 或 OpenAI 兼容（BYOK）模型，兼顾高速同步与顶会关键词补全。",
 		"useDefault": "暂时跳过（推荐）",
 		"useDefaultDesc": "直接使用默认公共额度，无需配置；之后随时可以在「设置 → 通用」中填写。",
-		"openDocsLabel": "获取免费 API Key",
+		"primaryLabel": "OpenAlex",
+		"keywordLlmLabel": "关键词提取模型（可选）",
+		"providerOpenRouter": "OpenRouter",
+		"providerOpenAiCompatible": "OpenAI 兼容（BYOK）",
+		"openDocsLabel": "获取免费 Key",
 		"apiKeyPlaceholder": "OpenAlex API Key",
+		"baseUrlPlaceholder": "Base URL（如 https://api.openai.com/v1）",
+		"keywordKeyPlaceholder": "API Key（可选）",
+		"keywordModelPlaceholder": "模型 ID",
+		"refreshModels": "刷新模型列表",
 		"test": "测试",
 		"probeIdle": "尚未测试",
 		"probeProbing": "测试中…",
 		"probeOk": "可用",
-		"probeFail": "请检查你的 Key 后重试"
+		"probeFail": "请检查配置后重试"
 	},
 	"vault": {
 		"title": "建一个自己的文献库",
