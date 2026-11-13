@@ -22,9 +22,18 @@ import {
 	Square,
 	TriangleAlert,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
-import { PlazaSurveyIcon } from "@/components/icons/plaza-icons";
+import {
+	PlazaCollectionIcon,
+	PlazaSurveyIcon,
+} from "@/components/icons/plaza-icons";
 import { SurveyAgentPicker } from "@/components/plaza/survey-agent-picker";
 import { SurveyPaperPicker } from "@/components/plaza/survey-paper-picker";
 import {
@@ -49,7 +58,15 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { errorText } from "@/lib/core/error";
+import { notifyError } from "@/lib/core/notify";
+import { isTauri } from "@/lib/core/tauri";
 import { cn } from "@/lib/core/utils";
+import {
+	ensureCollectionSummaryHydrated,
+	getCollectionSummarySnapshot,
+	subscribeCollectionSummary,
+} from "@/lib/plaza/collection";
 import {
 	initSurveyAgents,
 	selectSurveyRun,
@@ -210,6 +227,10 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 	const activeRunId = usePaperSurveyStore((s) => s.activeRunId);
 	const agentCount = usePaperSurveyStore((s) => s.agents.length);
 	const selectedAgentId = usePaperSurveyStore((s) => s.selectedAgentId);
+	const summary = useSyncExternalStore(
+		subscribeCollectionSummary,
+		getCollectionSummarySnapshot,
+	);
 
 	const [topic, setTopic] = useState(lastDraft.topic);
 	const [format, setFormat] = useState<SurveyFormat>(lastDraft.format);
@@ -223,6 +244,16 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 
 	useEffect(() => {
 		void initSurveyAgents();
+		if (!isTauri()) return;
+		void ensureCollectionSummaryHydrated().catch((err) => {
+			notifyError(errorText(err));
+		});
+	}, []);
+
+	const handleLoadToComposer = useCallback((run: SurveyRun) => {
+		setPapers(run.seeds.map((s) => s.path));
+		setTopic(run.topic);
+		setFormat(run.format);
 	}, []);
 
 	const activeRun = useMemo(
@@ -316,7 +347,34 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 						</Tooltip>
 					) : null}
 				</div>
-				<SurveyAgentPicker />
+				<div className="flex items-center gap-1.5">
+					{summary.hydrated || summary.preloading ? (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span className="inline-flex h-7 items-center gap-1.5 rounded-md border bg-muted/35 px-2 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+									{summary.preloading && summary.totalCount === 0 ? (
+										<Loader2 className="size-3 shrink-0 animate-spin" />
+									) : (
+										<PlazaCollectionIcon className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+									)}
+									<span>{summary.totalCount.toLocaleString()}</span>
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="bottom">
+								{summary.preloading && summary.totalCount === 0
+									? t("plaza.collection.preloading")
+									: summary.totalCount > 0
+										? t("plaza.discover.poolSummary", {
+												total: summary.totalCount,
+												arxiv: summary.arxivCount,
+												venue: summary.venueCount,
+											})
+										: t("plaza.discover.poolEmptyHint")}
+							</TooltipContent>
+						</Tooltip>
+					) : null}
+					<SurveyAgentPicker />
+				</div>
 			</header>
 
 			<ResizableGroup
@@ -341,8 +399,14 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 							e.preventDefault();
 							void start();
 						}}
-						className="flex h-full min-h-0 flex-col gap-4 bg-muted/15 p-4"
+						className="agentero-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-muted/15 p-4"
 					>
+						<SurveyPaperPicker
+							selected={papers}
+							onChange={setPapers}
+							className="min-h-[10rem] flex-1"
+						/>
+
 						<div className="flex shrink-0 flex-col gap-1.5">
 							<label
 								htmlFor="survey-topic"
@@ -409,8 +473,6 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 							})}
 						</fieldset>
 
-						<SurveyPaperPicker selected={papers} onChange={setPapers} />
-
 						<div className="flex shrink-0 flex-col gap-1.5">
 							{agentCount === 0 ? (
 								<p className="text-amber-600 text-xs dark:text-amber-400">
@@ -429,6 +491,13 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 								)}
 								{t("plaza.survey.start")}
 							</Button>
+							{summary.hydrated &&
+							!summary.preloading &&
+							summary.totalCount === 0 ? (
+								<p className="text-[0.6875rem] text-muted-foreground leading-snug">
+									{t("plaza.discover.poolEmptyHint")}
+								</p>
+							) : null}
 						</div>
 					</form>
 				</ResizablePanel>
@@ -442,7 +511,11 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 				>
 					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto px-6 py-5">
 						{activeRun ? (
-							<SurveyRunView key={activeRun.id} run={activeRun} />
+							<SurveyRunView
+								key={activeRun.id}
+								run={activeRun}
+								onLoadToComposer={handleLoadToComposer}
+							/>
 						) : (
 							<EmptyHero
 								recent={runs.slice(0, 4)}

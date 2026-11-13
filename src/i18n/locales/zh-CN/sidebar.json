@@ -333,7 +333,7 @@
 			"thinking": "思考过程"
 		},
 		"survey": {
-			"label": "论文综述",
+			"label": "Paper Survey",
 			"papers": "论文",
 			"searchPapers": "搜索论文库…",
 			"clearSelection": "清空选择",
@@ -374,6 +374,9 @@
 			"copyLatex": "复制 LaTeX",
 			"copyBibtex": "复制 BibTeX",
 			"exportLatex": "导出 .tex 和 .bib",
+			"exportReport": "导出 HTML",
+			"exportedReport": "已导出 {{file}}",
+			"editInComposer": "填入左侧编辑",
 			"copyCite": "复制 \\cite",
 			"copyFailed": "无法复制到剪贴板。",
 			"openPaper": "打开论文",

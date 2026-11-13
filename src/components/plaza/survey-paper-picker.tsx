@@ -13,6 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
 	InputGroup,
 	InputGroupAddon,
+	InputGroupButton,
 	InputGroupInput,
 } from "@/components/ui/input-group";
 import {
@@ -53,10 +54,12 @@ export function SurveyPaperPicker({
 	selected,
 	onChange,
 	disabled,
+	className,
 }: {
 	selected: readonly string[];
 	onChange: (paths: string[]) => void;
 	disabled?: boolean;
+	className?: string;
 }) {
 	const { t } = useTranslation("sidebar");
 	const papers = useLibraryStore((s) => s.papers);
@@ -109,7 +112,7 @@ export function SurveyPaperPicker({
 	const etAl = t("plaza.survey.etAl");
 
 	return (
-		<div className="flex min-h-0 flex-1 flex-col gap-2">
+		<div className={cn("flex min-h-[10rem] flex-1 flex-col gap-2", className)}>
 			<div className="flex h-6 items-center justify-between gap-2">
 				<span className="flex items-center gap-1.5 font-medium text-muted-foreground text-xs">
 					{t("plaza.survey.papers")}
@@ -174,9 +177,21 @@ export function SurveyPaperPicker({
 					disabled={!vaultPath}
 					className="text-xs"
 				/>
+				{query ? (
+					<InputGroupAddon align="inline-end">
+						<InputGroupButton
+							size="icon-xs"
+							onClick={() => setQuery("")}
+							aria-label={t("plaza.collection.clearSearch")}
+							className="text-muted-foreground hover:text-foreground"
+						>
+							<X className="size-3" />
+						</InputGroupButton>
+					</InputGroupAddon>
+				) : null}
 			</InputGroup>
 
-			<div className="relative min-h-[10rem] flex-1 overflow-hidden rounded-xl border bg-background/60">
+			<div className="relative min-h-[6rem] flex-1 overflow-hidden rounded-xl border bg-background/60">
 				{!vaultPath ? (
 					<p className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-xs leading-relaxed">
 						{t("plaza.survey.noVault")}

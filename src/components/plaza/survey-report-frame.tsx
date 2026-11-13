@@ -132,24 +132,30 @@ export function SurveyReportFrame({
 
 	if (html === null) {
 		return (
-			<div className="flex flex-col gap-3 p-6">
-				<Skeleton className="h-6 w-2/3" />
-				<Skeleton className="h-4 w-full" />
-				<Skeleton className="h-4 w-11/12" />
-				<Skeleton className="h-40 w-full" />
-				<Skeleton className="h-4 w-4/5" />
+			<div className="bg-muted/25 p-3 sm:p-4">
+				<div className="flex flex-col gap-3 rounded-lg border bg-background p-6 shadow-xs">
+					<Skeleton className="h-6 w-2/3" />
+					<Skeleton className="h-4 w-full" />
+					<Skeleton className="h-4 w-11/12" />
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-4 w-4/5" />
+				</div>
 			</div>
 		);
 	}
 
 	return (
-		<iframe
-			ref={frameRef}
-			title={title}
-			sandbox={FRAME_SANDBOX}
-			srcDoc={html}
-			style={{ height }}
-			className="block w-full border-0 bg-white"
-		/>
+		<div className="bg-muted/25 p-3 sm:p-4">
+			<div className="overflow-hidden rounded-lg border bg-white shadow-xs">
+				<iframe
+					ref={frameRef}
+					title={title}
+					sandbox={FRAME_SANDBOX}
+					srcDoc={html}
+					style={{ height }}
+					className="block w-full border-0 bg-white"
+				/>
+			</div>
+		</div>
 	);
 }

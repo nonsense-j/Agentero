@@ -14,6 +14,7 @@ import {
 	FileText,
 	Library,
 	Loader2,
+	PenLine,
 	RotateCcw,
 	Square,
 	Trash2,
@@ -54,6 +55,7 @@ import { buildSurveyLatex } from "@/lib/plaza/survey-export";
 import {
 	cancelSurvey,
 	exportSurveyLatex,
+	exportSurveyReport,
 	openSurveyReport,
 	removeSurvey,
 	rerunSurvey,
@@ -341,23 +343,16 @@ function ReportCard({
 						</p>
 					) : null}
 				</div>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							type="button"
-							variant="outline"
-							size="icon-sm"
-							onClick={() => void openSurveyReport(runId)}
-							aria-label={t("plaza.openInSystemBrowser")}
-							className="shrink-0"
-						>
-							<ExternalLink className="size-3.5" />
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent side="bottom">
-						{t("plaza.openInSystemBrowser")}
-					</TooltipContent>
-				</Tooltip>
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					onClick={() => void openSurveyReport(runId)}
+					className="h-7 shrink-0 gap-1.5 px-2.5 text-xs"
+				>
+					<ExternalLink className="size-3.5" />
+					{t("plaza.openInSystemBrowser")}
+				</Button>
 			</header>
 			<div className="border-t">
 				<SurveyReportFrame
@@ -460,7 +455,52 @@ function SeedsBadge({ run }: { run: SurveyRun }) {
 	);
 }
 
-export function SurveyRunView({ run }: { run: SurveyRun }) {
+function LoadToComposerButton({ onLoad }: { onLoad: () => void }) {
+	const { t } = useTranslation("sidebar");
+	const [loaded, setLoaded] = useState(false);
+	const timer = useRef<number | null>(null);
+	useEffect(
+		() => () => {
+			if (timer.current) window.clearTimeout(timer.current);
+		},
+		[],
+	);
+	const label = t("plaza.survey.editInComposer");
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-sm"
+					onClick={() => {
+						onLoad();
+						setLoaded(true);
+						if (timer.current) window.clearTimeout(timer.current);
+						timer.current = window.setTimeout(() => setLoaded(false), 1200);
+					}}
+					aria-label={label}
+					className="text-muted-foreground"
+				>
+					{loaded ? (
+						<Check className="size-3.5 text-brand" />
+					) : (
+						<PenLine className="size-3.5" />
+					)}
+				</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">{label}</TooltipContent>
+		</Tooltip>
+	);
+}
+
+export function SurveyRunView({
+	run,
+	onLoadToComposer,
+}: {
+	run: SurveyRun;
+	onLoadToComposer?: (run: SurveyRun) => void;
+}) {
 	const { t } = useTranslation("sidebar");
 	const running = run.status === "running";
 	const now = useNow(running);
@@ -469,10 +509,22 @@ export function SurveyRunView({ run }: { run: SurveyRun }) {
 		(running ? now : new Date(run.updatedAt).getTime()) -
 		new Date(run.createdAt).getTime();
 	const FormatIcon = run.format === "report" ? FileText : AlignLeft;
-	const paragraph = run.result?.kind === "paragraph" ? run.result : undefined;
+	const paragraph =
+		run.status === "completed" && run.result?.kind === "paragraph"
+			? run.result
+			: undefined;
+	const report =
+		run.status === "completed" && run.result?.kind === "report"
+			? run.result
+			: undefined;
 
 	return (
-		<div className="mx-auto flex w-full max-w-3xl flex-col gap-4 pb-6">
+		<div
+			className={cn(
+				"mx-auto flex w-full flex-col gap-4 pb-6",
+				run.format === "report" ? "max-w-4xl" : "max-w-3xl",
+			)}
+		>
 			<header className="flex items-start justify-between gap-3">
 				<div className="min-w-0 space-y-1.5">
 					<h2 className="select-text font-semibold text-base text-foreground leading-snug">
@@ -496,16 +548,21 @@ export function SurveyRunView({ run }: { run: SurveyRun }) {
 				</div>
 				<div className="flex shrink-0 items-center gap-0.5">
 					{running ? (
-						<Button
-							type="button"
-							variant="outline"
-							size="sm"
-							onClick={() => void cancelSurvey(run.id)}
-							className="h-7 gap-1.5 px-2.5 text-xs"
-						>
-							<Square className="size-3 fill-current" />
-							{t("plaza.survey.stop")}
-						</Button>
+						<>
+							{onLoadToComposer ? (
+								<LoadToComposerButton onLoad={() => onLoadToComposer(run)} />
+							) : null}
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={() => void cancelSurvey(run.id)}
+								className="ml-1 h-7 gap-1.5 px-2.5 text-xs"
+							>
+								<Square className="size-3 fill-current" />
+								{t("plaza.survey.stop")}
+							</Button>
+						</>
 					) : (
 						<>
 							{paragraph ? (
@@ -539,6 +596,33 @@ export function SurveyRunView({ run }: { run: SurveyRun }) {
 										{t("plaza.survey.exportLatex")}
 									</TooltipContent>
 								</Tooltip>
+							) : null}
+							{report ? (
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={exporting}
+									onClick={async () => {
+										setExporting(true);
+										try {
+											await exportSurveyReport(run.id);
+										} finally {
+											setExporting(false);
+										}
+									}}
+									className="mr-1 h-7 gap-1.5 px-2.5 text-xs"
+								>
+									{exporting ? (
+										<Loader2 className="size-3.5 animate-spin" />
+									) : (
+										<FileDown className="size-3.5" />
+									)}
+									{t("plaza.survey.exportReport")}
+								</Button>
+							) : null}
+							{onLoadToComposer ? (
+								<LoadToComposerButton onLoad={() => onLoadToComposer(run)} />
 							) : null}
 							<Tooltip>
 								<TooltipTrigger asChild>
