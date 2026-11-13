@@ -104,6 +104,7 @@
 		"useDefault": "Skip for now",
 		"useDefaultDesc": "Continue without an API key and configure a cloud layout provider later in Settings.",
 		"openDocsLabel": "Get an API key",
+		"selfHostedHint": "Using a self-hosted MinerU? Choose \"Skip for now\" to skip this step, then turn on \"Self-hosted API\" under Settings → Layout Analysis and fill in the base URL.",
 		"test": "Test",
 		"probeIdle": "Not tested yet",
 		"probeProbing": "Testing…",

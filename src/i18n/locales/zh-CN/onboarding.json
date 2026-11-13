@@ -104,6 +104,7 @@
 		"useDefault": "暂时跳过",
 		"useDefaultDesc": "暂不填写 API Key，之后随时可以在设置中配置云端版面解析服务。",
 		"openDocsLabel": "获取 API Key",
+		"selfHostedHint": "使用自建 MinerU？选「暂时跳过」跳过这一步，稍后在「设置 → 版面解析」中打开「自建 API」并填写 Base URL。",
 		"test": "测试",
 		"probeIdle": "尚未测试",
 		"probeProbing": "测试中…",
