@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { extractIntroduction } from "@/lib/plaza/survey-context";
+import type { PaperMetadata } from "@/lib/paper/types";
+import {
+	extractIntroduction,
+	extractTexIntroduction,
+} from "@/lib/plaza/survey-context";
 import {
 	assignCiteKeys,
 	buildBibtexEntry,
@@ -7,9 +11,14 @@ import {
 	buildSurveyLatex,
 	makeCiteKey,
 	renderReportHtml,
+	type SurveyCitationMeta,
 	sanitizeReportHtml,
 } from "@/lib/plaza/survey-export";
 import { orderedCiteIds, parseSurveyOutput } from "@/lib/plaza/survey-parse";
+import {
+	dedupeSurveyCitations,
+	mergeCitationWithLibrary,
+} from "@/lib/plaza/survey-store";
 import type { SurveyParagraphResult } from "@/lib/plaza/survey-types";
 
 describe("Paper Survey parsing", () => {
@@ -214,5 +223,221 @@ describe("Paper Survey seed context", () => {
 		expect(
 			extractIntroduction("## 1 引言\n中文引言。\n## 2 相关工作\n不应出现"),
 		).toBe("中文引言。");
+	});
+
+	it("extracts TeX Introduction inline, strips floats/macros/comments and stops at next section", () => {
+		const tex = [
+			"\\documentclass{article}",
+			"\\begin{document}",
+			"\\section{Introduction}\\label{sec:intro}",
+			"% full-line comment",
+			"Fuzzers reach \\textbf{95\\% coverage} on \\emph{real \\textit{targets}}~\\citep[see][]{afl2016}. % trailing comment",
+			"\\begin{figure*}[t]\\caption{Hidden figure}\\end{figure*}",
+			"\\begin{table}[h]\\caption{Hidden table}\\end{table}",
+			"\\subsection{Contributions}",
+			"As shown in Section~\\ref{sec:method} and Eq.~\\eqref{eq:loss}, we propose X.",
+			"\\subsubsection{Scope}",
+			"Scoped details.",
+			"\\section{Related Work}",
+			"Must not leak.",
+			"\\end{document}",
+		].join("\n");
+		const intro = extractTexIntroduction(new Map([["main.tex", tex]]));
+		expect(intro).toContain("Fuzzers reach 95% coverage on real targets.");
+		expect(intro).toContain("### Contributions");
+		expect(intro).toContain("#### Scope");
+		expect(intro).toContain("Scoped details.");
+		expect(intro).not.toMatch(
+			/Hidden figure|Hidden table|trailing comment|Must not leak|\\label|\\citep|\\ref|\\eqref|\\textbf/,
+		);
+
+		const cjk = extractTexIntroduction(
+			new Map([
+				[
+					"paper.tex",
+					"\\begin{document}\\section*{引言}\n中文导论内容。\n\\end{document}",
+				],
+			]),
+		);
+		expect(cjk).toBe("中文导论内容。");
+	});
+
+	it("expands \\input and \\include up to depth 2 and falls back to standalone intro.tex", () => {
+		const expanded = extractTexIntroduction(
+			new Map([
+				[
+					"main.tex",
+					"\\documentclass{article}\n\\begin{document}\n\\input{sections/intro}\n\\include{sections/related.tex}\n\\end{document}",
+				],
+				[
+					"sections/intro.tex",
+					"\\section{Introduction}\nLead paragraph.\n\\input{sections/contrib}",
+				],
+				[
+					"sections/contrib.tex",
+					"\\subsection{Key Ideas}\nDepth-two contribution.\n\\input{sections/too_deep}",
+				],
+				["sections/too_deep.tex", "Depth-three should not expand."],
+				["sections/related.tex", "\\section{Related Work}\nPrior systems."],
+			]),
+		);
+		expect(expanded).toContain("Lead paragraph.");
+		expect(expanded).toContain("Depth-two contribution.");
+		expect(expanded).not.toContain("Depth-three should not expand.");
+		expect(expanded).not.toContain("Prior systems.");
+
+		const fallback = extractTexIntroduction(
+			new Map([
+				[
+					"main.tex",
+					"\\documentclass{article}\\begin{document}\\section{Method}Only method.\\end{document}",
+				],
+				[
+					"sections/01-introduction.tex",
+					"Standalone \\emph{intro} prose.\n\\subsection{Motivation}\nWhy it matters.",
+				],
+			]),
+		);
+		expect(fallback).toContain("Standalone intro prose.");
+		expect(fallback).toContain("Why it matters.");
+		expect(fallback).not.toContain("Only method.");
+	});
+});
+
+function makeLibraryPaper(
+	overrides: Partial<PaperMetadata> &
+		Pick<PaperMetadata, "id" | "path" | "title">,
+): PaperMetadata {
+	return {
+		type: "other",
+		authors: ["Alice Smith"],
+		year: 2024,
+		tags: [],
+		status: "completed",
+		is_read: false,
+		added_at: "",
+		updated_at: "",
+		...overrides,
+	};
+}
+
+describe("Paper Survey library-first citation deduplication", () => {
+	const libPaper = makeLibraryPaper({
+		id: "2401.01234",
+		path: "papers/smith-2024-fuzzing",
+		title: "Coverage‐Guided Fuzzing: A New Look",
+		authors: ["Alice Smith", "Bob Jones"],
+		year: 2024,
+		arxiv_id: "2401.01234v2",
+		bibtex_key: "smith2024fuzzing",
+		zotero_item_type: "preprint",
+	});
+
+	const richCollection: SurveyCitationMeta = {
+		source: "collection",
+		paperId: "doi:10.1145/3597503.3639123",
+		title: "Coverage-Guided Fuzzing: A New Look",
+		authors: ["Alice Smith", "Bob Jones"],
+		year: 2024,
+		venue: "Proceedings of ICSE 2024",
+		doi: "10.1145/3597503.3639123",
+		arxivId: "2401.01234",
+		abstract: "Collection abstract.",
+		upstreamBibtex:
+			"@inproceedings{DBLP:conf/icse/SmithJ24,\n  title = {Coverage-Guided Fuzzing: A New Look},\n  booktitle = {ICSE},\n  year = {2024},\n}",
+		entryType: "inproceedings",
+		volume: "1",
+		issue: "2",
+		pages: "10-22",
+	};
+
+	it("upgrades Collection/external citations matching Library by arXiv, DOI, or title", () => {
+		const byArxiv = mergeCitationWithLibrary(richCollection, [libPaper]);
+		expect(byArxiv).toMatchObject({
+			source: "library",
+			libraryPath: "papers/smith-2024-fuzzing",
+			preferredKey: "smith2024fuzzing",
+			venue: "Proceedings of ICSE 2024",
+			doi: "10.1145/3597503.3639123",
+			arxivId: "2401.01234v2",
+			abstract: "Collection abstract.",
+			upstreamBibtex: richCollection.upstreamBibtex,
+			volume: "1",
+			issue: "2",
+			pages: "10-22",
+		});
+
+		const doiLib = makeLibraryPaper({
+			id: "p2",
+			path: "papers/doi-paper",
+			title: "Different Short Title",
+			doi: "10.1145/3597503.3639123",
+			bibtex_key: "myDoiKey",
+		});
+		const byDoi = mergeCitationWithLibrary(
+			{
+				source: "external",
+				title: "Unnormalized Variant",
+				authors: ["Alice Smith"],
+				doi: "https://doi.org/10.1145/3597503.3639123",
+			},
+			[doiLib],
+		);
+		expect(byDoi.source).toBe("library");
+		expect(byDoi.libraryPath).toBe("papers/doi-paper");
+		expect(byDoi.preferredKey).toBe("myDoiKey");
+
+		const byTitle = mergeCitationWithLibrary(
+			{
+				source: "external",
+				title: "coverage guided fuzzing a new look",
+				authors: ["A. Smith"],
+			},
+			[libPaper],
+		);
+		expect(byTitle.source).toBe("library");
+		expect(byTitle.libraryPath).toBe("papers/smith-2024-fuzzing");
+		expect(byTitle.preferredKey).toBe("smith2024fuzzing");
+	});
+
+	it("deduplicates colliding S1 seed and Collection ID in either order while keeping preferredKey", () => {
+		const seedMeta: SurveyCitationMeta = {
+			source: "library",
+			paperId: libPaper.id,
+			libraryPath: libPaper.path,
+			preferredKey: libPaper.bibtex_key,
+			title: libPaper.title,
+			authors: libPaper.authors,
+			year: libPaper.year ?? undefined,
+			arxivId: libPaper.arxiv_id ?? undefined,
+		};
+		const metas = new Map<string, SurveyCitationMeta>([
+			["S1", seedMeta],
+			["doi:10.1145/3597503.3639123", richCollection],
+		]);
+
+		for (const order of [
+			["S1", "doi:10.1145/3597503.3639123"],
+			["doi:10.1145/3597503.3639123", "S1"],
+		]) {
+			const { unique, idToIndex } = dedupeSurveyCitations(order, metas, [
+				libPaper,
+			]);
+			expect(unique).toHaveLength(1);
+			expect(idToIndex.get("S1")).toBe(0);
+			expect(idToIndex.get("doi:10.1145/3597503.3639123")).toBe(0);
+			const citations = buildCitations(unique);
+			expect(citations[0]).toMatchObject({
+				key: "smith2024fuzzing",
+				source: "library",
+				libraryPath: "papers/smith-2024-fuzzing",
+				venue: "Proceedings of ICSE 2024",
+				doi: "10.1145/3597503.3639123",
+				abstract: "Collection abstract.",
+			});
+			expect(
+				citations[0].bibtex.startsWith("@inproceedings{smith2024fuzzing,"),
+			).toBe(true);
+		}
 	});
 });

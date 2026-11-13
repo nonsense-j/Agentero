@@ -73,8 +73,16 @@ Rules for the block:
 - The block must be valid JSON (double quotes, no comments, no trailing commas).`;
 
 const REPORT_CONTRACT = `## Output: Long Report (standalone illustrated HTML)
-Write a comprehensive but not overly detailed survey report: roughly 1800-2500 words plus 2-4 figures or tables, at most about 4 A4 pages when printed.
-Suggested structure: title and short abstract; background and problem definition; a taxonomy of approaches (as a figure); method families with a comparison table; trends or a timeline; open challenges and future directions; conclusion.
+Write an editorial-grade academic survey report with a strict A4 print budget (at most 4 A4 pages when printed): **1,500-2,200 English words** (or **2,400-3,600 Chinese characters** when writing in Chinese), plus **2-3 inline \`<svg>\` figures** and **1 structured comparison \`<table>\`**. Match the language of the user's topic.
+
+Suggested structure:
+1. Title, concise deck/metadata line, and a 3-5 sentence abstract;
+2. Background and problem formulation;
+3. Taxonomy of approaches with a \`<figure>\` method-taxonomy diagram;
+4. Method families and a structured comparison \`<table>\` (cite representative works with \`[[cite:ID]]\` inside cells);
+5. Architectural / capability trade-offs with a second \`<figure>\` diagram (pipeline, trade-off space, or evolution timeline);
+6. Open challenges, future directions, and brief conclusion;
+7. \`<section id="references"><h2>References</h2>${SURVEY_REFERENCES_MARKER}</section>\` at the end of \`<body>\` (translate the heading to the report language).
 
 Your final reply contains, in this order:
 1. One fenced block tagged \`survey-json\`:
@@ -83,12 +91,13 @@ Your final reply contains, in this order:
 \`\`\`
 2. The complete HTML document from \`<!DOCTYPE html>\` to \`</html>\`, in a fenced \`html\` block.
 
-HTML rules:
-- One self-contained file: all CSS inline in a \`<style>\` element; figures and diagrams as inline \`<svg>\` or HTML/CSS; tables as \`<table>\`.
-- No \`<script>\`, no event handlers, no external URLs for fonts, images, stylesheets or icons.
-- Do not size \`html\` / \`body\` with \`100vh\` or \`height: 100%\`; the document must flow to its natural height. Make it print-friendly (A4, readable on white).
-- Cite inline right after the claim with tokens \`[[cite:ID]]\` or \`[[cite:ID1|ID2]]\` (ids as defined below). Do not number citations and do not write a reference list yourself.
-- End \`<body>\` with \`<section id="references"><h2>References</h2>${SURVEY_REFERENCES_MARKER}</section>\` (translate the heading to the report language); the reference list is inserted there.
+HTML, editorial A4 layout, and print rules:
+- One self-contained file: all CSS inline in a \`<style>\` element; no \`<script>\`, no \`on*\` event handlers, and no external URLs for fonts, images, stylesheets, or icons.
+- A4 sheet geometry & print rules: center the main container with \`max-width: 210mm; margin: 0 auto; padding: 14mm 16mm\` on a clean white surface; include \`@page { size: A4; margin: 14mm }\`, \`figure, table { break-inside: avoid }\`, and \`h2, h3 { break-after: avoid }\`.
+- Never size \`html\` or \`body\` with \`100vh\` or \`height: 100%\`; the document must flow to its natural height.
+- Clean academic CSS typography: legible body copy (~10.5pt-11pt, \`line-height: 1.55\`), clear section hierarchy, restrained scholarly palette (dark ink, subtle slate rules, 1-2 muted accent hues that remain crisp on white paper), and compact table styling (\`border-collapse: collapse\`).
+- Visuals: include 2-3 \`<figure>\` elements using inline \`<svg viewBox="0 0 720 ...">\` (\`width: 100%; height: auto\`, generous box padding so labels never clip or overlap, \`<figcaption>\`) — e.g., a method taxonomy diagram and an architecture/trade-off diagram — plus 1 structured comparison \`<table>\` with \`[[cite:ID]]\` cells.
+- Cite inline right after claims and in table cells with tokens \`[[cite:ID]]\` or \`[[cite:ID1|ID2]]\` (ids as defined below). Do not number citations manually and do not write a reference list yourself; \`${SURVEY_REFERENCES_MARKER}\` is replaced automatically.
 - \`references\` in the JSON block lists every cited id.`;
 
 export function buildSurveyPrompt(input: {

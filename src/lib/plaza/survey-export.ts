@@ -372,9 +372,10 @@ const REPORT_STYLE = `<style data-agentero-survey>
 html,body{height:auto!important;min-height:0!important}
 a.cite{text-decoration:none;color:inherit;font-weight:600}
 .cites{white-space:nowrap;font-size:.85em;color:#2563eb}
+figure,table{break-inside:avoid}
 #references ol{padding-left:1.6em;font-size:.9em;line-height:1.5}
 #references li{margin:.25em 0;word-break:break-word}
-@page{size:A4;margin:18mm}
+@page{size:A4;margin:14mm}
 @media print{a{color:inherit}}
 </style>`;
 

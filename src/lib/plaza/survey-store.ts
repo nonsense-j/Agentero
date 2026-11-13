@@ -29,9 +29,16 @@ import {
 	saveModelPref,
 	warmAgent,
 } from "@/lib/agent";
+import { commands } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
+import { callApi } from "@/lib/core/ipc";
 import { notifyError, notifySuccess } from "@/lib/core/notify";
-import { basenameOf, joinPath } from "@/lib/core/path";
+import {
+	basenameOf,
+	joinPath,
+	normalizeRelPaperPath,
+	sameRelPaperPath,
+} from "@/lib/core/path";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { isTauri } from "@/lib/core/tauri";
 import { libraryStore, refreshLibrary } from "@/lib/paper/library-store";
@@ -476,6 +483,16 @@ export async function cancelSurvey(runId: string): Promise<void> {
 	}
 }
 
+async function allowLocalFsScope(
+	path: string | null | undefined,
+): Promise<void> {
+	const trimmed = path?.trim();
+	if (!trimmed || trimmed.startsWith("remote:") || !isTauri()) return;
+	await callApi(() => commands.vaultAllowFsScope(trimmed)).catch(
+		() => undefined,
+	);
+}
+
 export async function removeSurvey(runId: string): Promise<void> {
 	const run = getRun(runId);
 	if (!run) return;
@@ -490,7 +507,9 @@ export async function removeSurvey(runId: string): Promise<void> {
 	persistRuns(remaining);
 	reportHtmlCache.delete(runId);
 	if (run.result?.kind === "report" && isTauri()) {
-		void removeVaultPath(run.result.htmlPath).catch(() => undefined);
+		const htmlPath = run.result.htmlPath;
+		await allowLocalFsScope(run.vaultPath);
+		void removeVaultPath(htmlPath).catch(() => undefined);
 		void cacheCopyPath(runId)
 			.then((p) => removeVaultPath(p))
 			.catch(() => undefined);
@@ -623,15 +642,224 @@ async function resolveCitationMetas(
 	return out;
 }
 
-/** Same paper cited under two ids (seed handle + collection id) shares one key. */
-function paperIdentity(meta: SurveyCitationMeta, citeId: string): string {
-	const doi = meta.doi?.toLowerCase().trim();
-	if (doi) return `doi:${doi}`;
-	const arxiv = meta.arxivId?.toLowerCase().replace(/v\d+$/, "").trim();
-	if (arxiv) return `arxiv:${arxiv}`;
-	const title = meta.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-	if (title) return `title:${title}`;
-	return `id:${meta.paperId ?? citeId}`;
+function normalizeDoi(raw?: string | null): string | null {
+	const cleaned = raw
+		?.trim()
+		.toLowerCase()
+		.replace(/^https?:\/\/(?:dx\.)?doi\.org\//, "")
+		.replace(/^doi:\s*/, "")
+		.trim();
+	return cleaned || null;
+}
+
+function normalizeArxivId(raw?: string | null): string | null {
+	const cleaned = raw
+		?.trim()
+		.toLowerCase()
+		.replace(/^https?:\/\/arxiv\.org\/(?:abs|pdf)\//, "")
+		.replace(/\.pdf$/, "")
+		.replace(/^arxiv:\s*/, "")
+		.replace(/v\d+$/, "")
+		.trim();
+	return cleaned || null;
+}
+
+function normalizeTitleKey(raw?: string | null): string | null {
+	const cleaned = raw
+		?.normalize("NFKC")
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, "");
+	return cleaned || null;
+}
+
+function metaDoiKey(meta: SurveyCitationMeta): string | null {
+	return (
+		normalizeDoi(meta.doi) ??
+		(meta.paperId?.toLowerCase().startsWith("doi:")
+			? normalizeDoi(meta.paperId.slice(4))
+			: null)
+	);
+}
+
+function metaArxivKey(meta: SurveyCitationMeta): string | null {
+	return (
+		normalizeArxivId(meta.arxivId) ??
+		(meta.paperId?.toLowerCase().startsWith("arxiv:")
+			? normalizeArxivId(meta.paperId.slice(6))
+			: null)
+	);
+}
+
+function paperArxivKey(p: PaperMetadata): string | null {
+	if (p.arxiv_id) return normalizeArxivId(p.arxiv_id);
+	const id = p.id.trim();
+	if (/^arxiv:/i.test(id)) return normalizeArxivId(id.slice(6));
+	if (/^\d{4}\.\d{4,5}(?:v\d+)?$/i.test(id)) return normalizeArxivId(id);
+	return null;
+}
+
+function paperDoiKey(p: PaperMetadata): string | null {
+	if (p.doi) return normalizeDoi(p.doi);
+	const id = p.id.trim();
+	if (/^doi:/i.test(id)) return normalizeDoi(id.slice(4));
+	if (/^10\.\d{4,9}\//.test(id)) return normalizeDoi(id);
+	return null;
+}
+
+function pickNonEmpty(
+	primary?: string | null,
+	secondary?: string | null,
+): string | undefined {
+	if (primary?.trim()) return primary;
+	if (secondary?.trim()) return secondary;
+	return undefined;
+}
+
+function mergeCitationMetas(
+	primary: SurveyCitationMeta,
+	secondary: SurveyCitationMeta,
+): SurveyCitationMeta {
+	if (primary.source !== "library" && secondary.source === "library") {
+		return mergeCitationMetas(secondary, primary);
+	}
+	const source =
+		primary.source === "library" || secondary.source === "library"
+			? "library"
+			: primary.source === "collection" || secondary.source === "collection"
+				? "collection"
+				: primary.source;
+	const upgradedEntryType =
+		!primary.entryType ||
+		(primary.entryType === "misc" && !primary.venue?.trim())
+			? (secondary.entryType ?? primary.entryType)
+			: primary.entryType;
+	return {
+		source,
+		paperId: pickNonEmpty(primary.paperId, secondary.paperId),
+		libraryPath: pickNonEmpty(primary.libraryPath, secondary.libraryPath),
+		preferredKey: pickNonEmpty(primary.preferredKey, secondary.preferredKey),
+		title: pickNonEmpty(primary.title, secondary.title) ?? primary.title,
+		authors: primary.authors.length > 0 ? primary.authors : secondary.authors,
+		year: primary.year ?? secondary.year,
+		venue: pickNonEmpty(primary.venue, secondary.venue),
+		doi: pickNonEmpty(primary.doi, secondary.doi),
+		arxivId: pickNonEmpty(primary.arxivId, secondary.arxivId),
+		url: pickNonEmpty(primary.url, secondary.url),
+		abstract: pickNonEmpty(primary.abstract, secondary.abstract),
+		upstreamBibtex: pickNonEmpty(
+			primary.upstreamBibtex,
+			secondary.upstreamBibtex,
+		),
+		entryType: upgradedEntryType,
+		volume: pickNonEmpty(primary.volume, secondary.volume),
+		issue: pickNonEmpty(primary.issue, secondary.issue),
+		pages: pickNonEmpty(primary.pages, secondary.pages),
+	};
+}
+
+/**
+ * Upgrade a Collection / external citation when it matches any paper in the
+ * user's Library (by path, normalized DOI, versionless arXiv ID, or
+ * Unicode-normalized title), preserving Library identity (`source: "library"`,
+ * `libraryPath`, `preferredKey`) while keeping richer Collection metadata.
+ */
+export function mergeCitationWithLibrary(
+	meta: SurveyCitationMeta,
+	libraryPapers: readonly PaperMetadata[],
+): SurveyCitationMeta {
+	if (libraryPapers.length === 0) return meta;
+	const doi = metaDoiKey(meta);
+	const arxiv = metaArxivKey(meta);
+	const title = normalizeTitleKey(meta.title);
+
+	const matched =
+		(meta.libraryPath
+			? libraryPapers.find((p) => sameRelPaperPath(p.path, meta.libraryPath))
+			: undefined) ??
+		(doi ? libraryPapers.find((p) => paperDoiKey(p) === doi) : undefined) ??
+		(arxiv
+			? libraryPapers.find((p) => paperArxivKey(p) === arxiv)
+			: undefined) ??
+		(title
+			? libraryPapers.find((p) => normalizeTitleKey(p.title) === title)
+			: undefined);
+
+	if (!matched) return meta;
+	return mergeCitationMetas(libraryMeta(matched), meta);
+}
+
+/** Canonical identity keys for deduplicating the same paper across cite handles. */
+function paperIdentityKeys(meta: SurveyCitationMeta, citeId: string): string[] {
+	const keys: string[] = [];
+	if (meta.libraryPath?.trim()) {
+		keys.push(
+			`library:${normalizeRelPaperPath(meta.libraryPath).toLowerCase()}`,
+		);
+	}
+	const doi = metaDoiKey(meta);
+	if (doi) keys.push(`doi:${doi}`);
+	const arxiv = metaArxivKey(meta);
+	if (arxiv) keys.push(`arxiv:${arxiv}`);
+	const title = normalizeTitleKey(meta.title);
+	if (title) keys.push(`title:${title}`);
+	if (keys.length === 0) keys.push(`id:${meta.paperId ?? citeId}`);
+	return keys;
+}
+
+export function dedupeSurveyCitations(
+	orderedIds: readonly string[],
+	metas: ReadonlyMap<string, SurveyCitationMeta>,
+	libraryPapers: readonly PaperMetadata[],
+): { unique: SurveyCitationMeta[]; idToIndex: Map<string, number> } {
+	const keyToIndex = new Map<string, number>();
+	const unique: SurveyCitationMeta[] = [];
+	const idToIndex = new Map<string, number>();
+	for (const id of orderedIds) {
+		const raw = metas.get(id);
+		if (!raw) continue;
+		const merged = mergeCitationWithLibrary(raw, libraryPapers);
+		const keys = paperIdentityKeys(merged, id);
+		let idx: number | undefined;
+		for (const k of keys) {
+			const found = keyToIndex.get(k);
+			if (found !== undefined) {
+				idx = found;
+				break;
+			}
+		}
+		if (idx === undefined) {
+			idx = unique.length;
+			unique.push(merged);
+		} else {
+			unique[idx] = mergeCitationMetas(unique[idx], merged);
+		}
+		for (const k of paperIdentityKeys(unique[idx], id)) {
+			keyToIndex.set(k, idx);
+		}
+		idToIndex.set(id, idx);
+	}
+	return { unique, idToIndex };
+}
+
+function runLibraryPapers(run: SurveyRun): PaperMetadata[] {
+	const out: PaperMetadata[] = [...libraryStore.getState().papers];
+	for (const seed of run.seeds) {
+		if (out.some((p) => sameRelPaperPath(p.path, seed.path))) continue;
+		out.push({
+			path: seed.path,
+			id: seed.id,
+			type: "other",
+			title: seed.title,
+			authors: seed.authors,
+			year: seed.year ?? null,
+			tags: [],
+			status: "completed",
+			is_read: false,
+			added_at: "",
+			updated_at: "",
+		});
+	}
+	return out;
 }
 
 async function buildResult(
@@ -639,24 +867,14 @@ async function buildResult(
 	parsed: ParsedSurvey,
 ): Promise<SurveyResult> {
 	const metas = await resolveCitationMetas(run, parsed);
-	const identityToIndex = new Map<string, number>();
-	const unique: SurveyCitationMeta[] = [];
-	const idToUnique = new Map<string, number>();
-	for (const id of orderedCiteIds(parsed)) {
-		const meta = metas.get(id);
-		if (!meta) continue;
-		const identity = paperIdentity(meta, id);
-		let idx = identityToIndex.get(identity);
-		if (idx === undefined) {
-			idx = unique.length;
-			unique.push(meta);
-			identityToIndex.set(identity, idx);
-		}
-		idToUnique.set(id, idx);
-	}
+	const { unique, idToIndex } = dedupeSurveyCitations(
+		orderedCiteIds(parsed),
+		metas,
+		runLibraryPapers(run),
+	);
 	const citations = buildCitations(unique);
 	const idToKey = new Map(
-		[...idToUnique].map(([id, idx]) => [id, citations[idx].key]),
+		[...idToIndex].map(([id, idx]) => [id, citations[idx].key]),
 	);
 	if (parsed.kind === "paragraph") {
 		return {
@@ -730,16 +948,17 @@ function reportFileName(run: SurveyRun): string {
 
 async function writeReportHtml(run: SurveyRun, html: string): Promise<string> {
 	const name = reportFileName(run);
-	if (run.vaultPath) {
+	if (run.vaultPath && !run.vaultPath.startsWith("remote:")) {
 		const path = joinVaultPath(
 			run.vaultPath,
 			`.agentero/${SURVEY_DIR}/${name}`,
 		);
 		try {
+			await allowLocalFsScope(run.vaultPath);
 			await writeVaultFile(path, html);
 			return path;
 		} catch {
-			// Remote / read-only vault: fall back to app data.
+			// Read-only / inaccessible vault: fall back to app data.
 		}
 	}
 	const path = joinPath(joinPath(await appDataDir(), SURVEY_DIR), name);
@@ -759,6 +978,7 @@ export async function loadSurveyReportHtml(runId: string): Promise<string> {
 	if (run?.result?.kind !== "report")
 		throw new Error(i18n.t("sidebar:plaza.survey.errors.reportMissing"));
 	try {
+		await allowLocalFsScope(run.vaultPath);
 		const html = await readVaultFile(run.result.htmlPath);
 		reportHtmlCache.set(runId, html);
 		return html;
@@ -780,6 +1000,33 @@ export async function openSurveyReport(runId: string): Promise<void> {
 		await openPath(copy);
 	} catch (err) {
 		notifyError(errorText(err));
+	}
+}
+
+/** Export the standalone HTML report to a user-chosen path. */
+export async function exportSurveyReport(runId: string): Promise<boolean> {
+	const run = getRun(runId);
+	if (run?.result?.kind !== "report") return false;
+	try {
+		const html = await loadSurveyReportHtml(runId);
+		const { save } = await import("@tauri-apps/plugin-dialog");
+		const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+		const outPath = await save({
+			defaultPath: `${texFileStem(run.result.title || run.topic)}.html`,
+			filters: [{ name: "HTML", extensions: ["html"] }],
+		});
+		if (!outPath) return false;
+		await writeTextFile(outPath, html);
+		notifySuccess(
+			i18n.t("sidebar:plaza.survey.exportedReport", {
+				file: basenameOf(outPath),
+				defaultValue: "Exported {{file}}",
+			}),
+		);
+		return true;
+	} catch (err) {
+		notifyError(errorText(err));
+		return false;
 	}
 }
 
@@ -811,6 +1058,11 @@ export async function exportSurveyLatex(runId: string): Promise<boolean> {
 			filters: [{ name: "LaTeX", extensions: ["tex"] }],
 		});
 		if (!texPath) return false;
+		const rawDir = texPath.replace(/[\\/][^\\/]+$/, "");
+		const dir = /^[A-Za-z]:$/.test(rawDir) ? `${rawDir}\\` : rawDir;
+		if (dir && dir !== texPath) {
+			await allowLocalFsScope(dir);
+		}
 		const result = run.result;
 		const bib = buildSurveyLatex(result).bib;
 		let bibPath = `${texPath.replace(/\.tex$/i, "")}.bib`;
