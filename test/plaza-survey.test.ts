@@ -178,13 +178,14 @@ describe("Paper Survey report HTML", () => {
 
 	it("neutralizes slash-separated handlers, unquoted js URLs and protocol-relative assets", () => {
 		const html = sanitizeReportHtml(
-			'<svg/onload=alert(1)><image href="//evil/x.png"/></svg><a href=javascript:alert(1)>x</a><img alt=">" onerror="y()" src="//cdn/x.png"><div style="background:url(//h/a.png)">one = two</div><a href="https://doi.org/1">ok</a>',
+			'<svg/onload=alert(1)><image href="//evil/x.png"/></svg><a href=javascript:alert(1)>x</a><img alt=">" onerror="y()" src="//cdn/x.png"><div style="background:url(//h/a.png)">one = two</div><a href="https://doi.org/1">ok</a><a href="https://x.org/a/one=1">q</a>',
 		);
 		expect(html).not.toMatch(
 			/onload|onerror|javascript:|\/\/evil|\/\/cdn|\/\/h\//,
 		);
 		expect(html).toContain("one = two");
 		expect(html).toContain('href="https://doi.org/1"');
+		expect(html).toContain('<a href="https://x.org/a/one=1">q</a>');
 	});
 });
 

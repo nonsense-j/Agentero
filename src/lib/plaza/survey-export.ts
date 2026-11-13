@@ -280,28 +280,42 @@ export function escapeHtml(text: string): string {
 		.replace(/"/g, "&quot;");
 }
 
-/** Attribute value: double-quoted, single-quoted or unquoted. */
-const ATTR_VALUE = String.raw`(?:"[^"]*"|'[^']*'|[^\s>]+)`;
-/** Remote URL value (`https://…`, `http://…`, protocol-relative `//…`). */
-const REMOTE_VALUE = String.raw`(?:"\s*(?:https?:)?//[^"]*"|'\s*(?:https?:)?//[^']*'|(?:https?:)?//[^\s>]*)`;
-const HANDLER_ATTR_RE = new RegExp(
-	String.raw`[\s/]on[a-z]+\s*=\s*${ATTR_VALUE}`,
-	"gi",
-);
-const JS_URL_ATTR_RE =
-	/[\s/][a-z:-]+\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*'|javascript:[^\s>]*)/gi;
-const REMOTE_SRC_ATTR_RE = new RegExp(
-	String.raw`[\s/](?:src|srcset|poster|background|xlink:href)\s*=\s*${REMOTE_VALUE}`,
-	"gi",
-);
 /** One start tag; quoted attribute values may contain `>`. */
 const TAG_RE = /<[a-zA-Z][^\s/>]*(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-/** SVG elements that fetch their plain `href`. */
-const SVG_FETCH_TAG_RE = /^<(image|use|feimage)\b/i;
-const REMOTE_HREF_ATTR_RE = new RegExp(
-	String.raw`[\s/]href\s*=\s*${REMOTE_VALUE}`,
-	"gi",
-);
+const TAG_PARTS_RE = /^<([a-zA-Z][^\s/>]*)([\s\S]*?)(\/?)>$/;
+/** One attribute: name, optional double/single-quoted or unquoted value. */
+const ATTR_RE = /([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?/g;
+/** Attributes that fetch a resource when their value is remote. */
+const FETCH_ATTRS = new Set([
+	"src",
+	"srcset",
+	"poster",
+	"background",
+	"xlink:href",
+]);
+/** SVG elements that also fetch their plain `href`. */
+const SVG_FETCH_TAGS = new Set(["image", "use", "feimage"]);
+const REMOTE_URL_RE = /(?:^|[\s,])(?:https?:)?\/\//i;
+
+/** Rebuild one start tag from its attributes, dropping unsafe ones. */
+function sanitizeTag(tag: string): string {
+	const parts = tag.match(TAG_PARTS_RE);
+	if (!parts) return tag;
+	const [, name, rest, selfClose] = parts;
+	const fetchesHref = SVG_FETCH_TAGS.has(name.toLowerCase());
+	const kept: string[] = [];
+	for (const m of rest.matchAll(ATTR_RE)) {
+		const attr = m[1].toLowerCase();
+		const value = (m[2] ?? "").replace(/^["']|["']$/g, "").trim();
+		if (attr.startsWith("on")) continue;
+		if (/^javascript:/i.test(value)) continue;
+		const fetches = FETCH_ATTRS.has(attr) || (fetchesHref && attr === "href");
+		if (fetches && REMOTE_URL_RE.test(value)) continue;
+		kept.push(m[2] ? `${m[1]}=${m[2]}` : m[1]);
+	}
+	const attrs = kept.length > 0 ? ` ${kept.join(" ")}` : "";
+	return `<${name}${attrs}${selfClose ? " /" : ""}>`;
+}
 
 /**
  * Strip scripts, handlers, embeds and network assets: the report is opened
@@ -318,15 +332,7 @@ export function sanitizeReportHtml(html: string): string {
 		)
 		.replace(/<(iframe|object|embed|frame|base|link|applet)\b[^>]*\/?>/gi, "")
 		.replace(/<meta\b[^>]*http-equiv[^>]*>/gi, "")
-		.replace(TAG_RE, (tag) => {
-			const clean = tag
-				.replace(HANDLER_ATTR_RE, " ")
-				.replace(JS_URL_ATTR_RE, " ")
-				.replace(REMOTE_SRC_ATTR_RE, " ");
-			return SVG_FETCH_TAG_RE.test(clean)
-				? clean.replace(REMOTE_HREF_ATTR_RE, " ")
-				: clean;
-		})
+		.replace(TAG_RE, sanitizeTag)
 		.replace(/@import\b[^;]*;?/gi, "")
 		.replace(/url\(\s*['"]?\s*(?:https?:)?\/\/[^)]*\)/gi, "none")
 		.replace(/(min-|max-)?height\s*:\s*100d?vh\s*;?/gi, "");
