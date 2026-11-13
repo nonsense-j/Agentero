@@ -15,6 +15,7 @@ import {
 	Loader2,
 	Package,
 	Plug,
+	RefreshCw,
 	ScanSearch,
 	Search,
 	Settings,
@@ -73,6 +74,8 @@ const KIND_ICONS: Partial<Record<string, BackgroundTaskIcon>> = {
 	recognizeMetadata: "scan",
 	paperRead: "read",
 	nodeInstall: "download",
+	plazaArxivRefresh: "refresh",
+	plazaVenueRefresh: "refresh",
 };
 
 function taskIcon(task: BackgroundTask | undefined): BackgroundTaskIcon {
@@ -125,6 +128,8 @@ function iconGlyph(icon: BackgroundTaskIcon) {
 			return <ScanSearch className={cls} aria-hidden />;
 		case "list":
 			return <ListOrdered className={cls} aria-hidden />;
+		case "refresh":
+			return <RefreshCw className={cls} aria-hidden />;
 	}
 }
 

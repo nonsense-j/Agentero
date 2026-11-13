@@ -17,7 +17,9 @@ export type LocalActivityKind =
 	| "paperRead"
 	| "zoteroMigrate"
 	| "layoutRun"
-	| "nodeInstall";
+	| "nodeInstall"
+	| "plazaArxivRefresh"
+	| "plazaVenueRefresh";
 
 /** Panel row identity: a projected JobCenter kind, or a local activity. */
 export type BackgroundTaskKind = JobKind | LocalActivityKind;
@@ -34,7 +36,8 @@ export type BackgroundTaskIcon =
 	| "read"
 	| "plug"
 	| "scan"
-	| "list";
+	| "list"
+	| "refresh";
 
 export type BackgroundTaskStatus =
 	| "queued"

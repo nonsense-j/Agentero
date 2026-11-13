@@ -249,7 +249,11 @@
 		"paperReadFailed": "Paper reading failed",
 		"connector": "Saving Connector attachment",
 		"connectorComplete": "Connector attachment ready",
-		"connectorFailed": "Connector attachment failed"
+		"connectorFailed": "Connector attachment failed",
+		"plazaArxivRefresh": "Refresh arXiv",
+		"plazaVenueRefresh": "Refresh Venue",
+		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
+		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
 	},
 	"reminders": {
 		"dismiss": "Don't remind me again",

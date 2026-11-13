@@ -249,7 +249,11 @@
 		"paperReadFailed": "精读失败",
 		"connector": "正在保存 Connector 附件",
 		"connectorComplete": "Connector 附件已就绪",
-		"connectorFailed": "Connector 附件失败"
+		"connectorFailed": "Connector 附件失败",
+		"plazaArxivRefresh": "刷新 arXiv",
+		"plazaVenueRefresh": "刷新 Venue",
+		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
+		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
 	},
 	"reminders": {
 		"dismiss": "不再提醒",

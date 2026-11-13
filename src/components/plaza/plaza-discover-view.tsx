@@ -45,11 +45,14 @@ import {
 	ensureCollectionSummaryHydrated,
 	getCollectionSummarySnapshot,
 	isPreloadingCollection,
-	refreshAllCollection,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
 import { importCollectionPapers } from "@/lib/plaza/collection-import";
+import {
+	refreshAllInBackground,
+	useCollectionRefreshStore,
+} from "@/lib/plaza/collection-refresh";
 import {
 	addCollectionPaperKeys,
 	isCollectionPaperImported,
@@ -74,7 +77,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	const [stage, setStage] = useState<DiscoverStage>("hub");
 	const [visitedFast, setVisitedFast] = useState(false);
 	const [visitedDeep, setVisitedDeep] = useState(false);
-	const [refreshing, setRefreshing] = useState(false);
+	const refreshingArxiv = useCollectionRefreshStore((s) => s.refreshingArxiv);
+	const refreshingVenue = useCollectionRefreshStore((s) => s.refreshingVenue);
+	const refreshing = refreshingArxiv || refreshingVenue;
 
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
 	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
@@ -128,14 +133,7 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 
 	const handleRefreshPool = useCallback(async () => {
 		if (refreshing || preloading) return;
-		setRefreshing(true);
-		try {
-			await refreshAllCollection();
-		} catch (err) {
-			notifyError(errorText(err));
-		} finally {
-			setRefreshing(false);
-		}
+		await refreshAllInBackground();
 	}, [preloading, refreshing]);
 
 	const importBatchPapers = useCallback(

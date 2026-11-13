@@ -72,15 +72,11 @@ import {
 	clearCollection,
 	DEFAULT_ARXIV_CATEGORIES,
 	ensureCollectionSummaryHydrated,
-	ensureVenueLoaded,
 	fetchMoreArxivCollection,
 	getCollectionSummarySnapshot,
 	inferVenueKind,
 	isPreloadingCollection,
 	listCollectionPapers,
-	refreshAllCollection,
-	refreshArxivCollection,
-	refreshVenueCollection,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 	updateCollectionConfig,
@@ -88,6 +84,12 @@ import {
 	type VenueDomain,
 } from "@/lib/plaza/collection";
 import { importCollectionPapers } from "@/lib/plaza/collection-import";
+import {
+	refreshAllInBackground,
+	refreshArxivInBackground,
+	refreshVenueInBackground,
+	useCollectionRefreshStore,
+} from "@/lib/plaza/collection-refresh";
 import { ARXIV_ALL_CATEGORIES } from "@/lib/plaza/feeds";
 import {
 	addCollectionPaperKeys,
@@ -142,27 +144,26 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const loadedTargetRef = useRef(INITIAL_DISPLAY_COUNT);
 	const listReqSeqRef = useRef(0);
 
-	const [refreshingArxiv, setRefreshingArxiv] = useState(false);
-	const [refreshingVenue, setRefreshingVenue] = useState(false);
-	const [arxivRefreshLabel, setArxivRefreshLabel] = useState<string | null>(
-		null,
+	const refreshingArxiv = useCollectionRefreshStore((s) => s.refreshingArxiv);
+	const refreshingVenue = useCollectionRefreshStore((s) => s.refreshingVenue);
+	const arxivRefreshLabel = useCollectionRefreshStore(
+		(s) => s.arxivRefreshLabel,
 	);
-	const [venueRefreshLabel, setVenueRefreshLabel] = useState<string | null>(
-		null,
+	const venueRefreshLabel = useCollectionRefreshStore(
+		(s) => s.venueRefreshLabel,
 	);
-	const [refreshingCategories, setRefreshingCategories] = useState<Set<string>>(
-		new Set(),
+	const refreshingCategories = useCollectionRefreshStore(
+		(s) => s.refreshingCategories,
 	);
-	const [refreshedCategories, setRefreshedCategories] = useState<Set<string>>(
-		new Set(),
+	const refreshedCategories = useCollectionRefreshStore(
+		(s) => s.refreshedCategories,
 	);
-	const [refreshingVenueIds, setRefreshingVenueIds] = useState<Set<string>>(
-		new Set(),
+	const refreshingVenueIds = useCollectionRefreshStore(
+		(s) => s.refreshingVenueIds,
 	);
-	const [refreshedVenueIds, setRefreshedVenueIds] = useState<Set<string>>(
-		new Set(),
+	const refreshedVenueIds = useCollectionRefreshStore(
+		(s) => s.refreshedVenueIds,
 	);
-	const [loadingVenueId, setLoadingVenueId] = useState<string | null>(null);
 	const [loadingMoreRemote, setLoadingMoreRemote] = useState(false);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
@@ -304,216 +305,28 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [listQuery, loadingMorePage, loadingPage, pageHasMore, pageItems.length]);
 
 	const handleRefreshArxiv = useCallback(
-		async (targetCategories?: string[], replaceCategories = false) => {
-			if (refreshingArxiv) return;
-			const cats = targetCategories ?? summary.categories;
-			const label =
-				targetCategories && targetCategories.length === 1
-					? (targetCategories[0] ?? "arXiv")
-					: "arXiv";
-			setRefreshingArxiv(true);
-			setArxivRefreshLabel(label);
-			setRefreshingCategories((prev) => {
-				const next = new Set(prev);
-				for (const c of cats) next.add(c);
-				return next;
+		async (targetCategories?: string[]) => {
+			await refreshArxivInBackground({
+				categories: targetCategories,
+				incremental: true,
 			});
-			setRefreshedCategories((prev) => {
-				const next = new Set(prev);
-				for (const c of cats) next.delete(c);
-				return next;
-			});
-			try {
-				await refreshArxivCollection({
-					categories: cats,
-					replaceCategories,
-					incremental: true,
-					onCategoryStatus: (cat, status) => {
-						if (status === "refreshing") {
-							setRefreshingCategories((prev) => new Set(prev).add(cat));
-							return;
-						}
-						setRefreshingCategories((prev) => {
-							const s = new Set(prev);
-							s.delete(cat);
-							return s;
-						});
-						if (status === "done") {
-							setRefreshedCategories((prev) => new Set(prev).add(cat));
-						}
-					},
-				});
-			} catch (err) {
-				notifyError(errorText(err));
-			} finally {
-				setRefreshingArxiv(false);
-				setArxivRefreshLabel(null);
-				setRefreshingCategories((prev) => {
-					const next = new Set(prev);
-					for (const c of cats) next.delete(c);
-					return next;
-				});
-			}
 		},
-		[refreshingArxiv, summary.categories],
+		[],
 	);
 
-	const handleRefreshVenue = useCallback(
-		async (targetVenueIds?: string[]) => {
-			const venuePortalLabel = t("plaza.collection.source.venue");
-
-			if (targetVenueIds && targetVenueIds.length === 1) {
-				const singleId = targetVenueIds[0];
-				if (!singleId || loadingVenueId === singleId) return;
-				const singleName =
-					summary.venues.find((v) => v.id === singleId)?.name ??
-					venuePortalLabel;
-				setLoadingVenueId(singleId);
-				setVenueRefreshLabel(singleName);
-				setRefreshingVenueIds((prev) => new Set(prev).add(singleId));
-				setRefreshedVenueIds((prev) => {
-					const next = new Set(prev);
-					next.delete(singleId);
-					return next;
-				});
-				try {
-					await ensureVenueLoaded(singleId);
-					setRefreshedVenueIds((prev) => new Set(prev).add(singleId));
-				} catch (err) {
-					notifyError(errorText(err));
-				} finally {
-					setLoadingVenueId((prev) => (prev === singleId ? null : prev));
-					setVenueRefreshLabel((prev) => (prev === singleName ? null : prev));
-					setRefreshingVenueIds((prev) => {
-						const next = new Set(prev);
-						next.delete(singleId);
-						return next;
-					});
-				}
-				return;
-			}
-
-			if (refreshingVenue) return;
-			const scopedIds = targetVenueIds ?? summary.venues.map((v) => v.id);
-			setRefreshingVenue(true);
-			setVenueRefreshLabel(venuePortalLabel);
-			setRefreshedVenueIds((prev) => {
-				const next = new Set(prev);
-				for (const id of scopedIds) next.delete(id);
-				return next;
-			});
-			try {
-				await refreshVenueCollection({
-					venues: summary.venues,
-					venueIds: targetVenueIds,
-					skipLoaded: false,
-					onVenueProgress: (venue, idx, total) => {
-						setVenueRefreshLabel(
-							total > 1
-								? `${venuePortalLabel} · ${venue.name} (${idx}/${total})`
-								: venue.name,
-						);
-					},
-					onVenueStatus: (venue, status) => {
-						if (status === "refreshing") {
-							setRefreshingVenueIds((prev) => new Set(prev).add(venue.id));
-							return;
-						}
-						setRefreshingVenueIds((prev) => {
-							const next = new Set(prev);
-							next.delete(venue.id);
-							return next;
-						});
-						if (status === "done") {
-							setRefreshedVenueIds((prev) => new Set(prev).add(venue.id));
-						}
-					},
-				});
-			} catch (err) {
-				notifyError(errorText(err));
-			} finally {
-				setRefreshingVenue(false);
-				setVenueRefreshLabel(null);
-				setRefreshingVenueIds((prev) => {
-					const next = new Set(prev);
-					for (const id of scopedIds) next.delete(id);
-					return next;
-				});
-			}
-		},
-		[loadingVenueId, refreshingVenue, summary.venues, t],
-	);
+	const handleRefreshVenue = useCallback(async (targetVenueIds?: string[]) => {
+		await refreshVenueInBackground({
+			venueIds: targetVenueIds,
+			skipLoaded: false,
+		});
+	}, []);
 
 	const handleRefreshAll = useCallback(async () => {
-		if (refreshingArxiv || refreshingVenue) return;
-		const cats = summary.categories;
-		const venueIds = summary.venues.map((v) => v.id);
-		const venuePortalLabel = t("plaza.collection.source.venue");
-
-		setRefreshingArxiv(true);
-		setRefreshingVenue(true);
-		setArxivRefreshLabel("arXiv");
-		setRefreshingCategories(new Set(cats));
-		setRefreshedCategories(new Set());
-		setRefreshedVenueIds(new Set());
-
-		try {
-			await refreshAllCollection({
-				incrementalArxiv: true,
-				skipLoadedVenues: false,
-				onCategoryStatus: (cat, status) => {
-					if (status === "refreshing") {
-						setRefreshingCategories((prev) => new Set(prev).add(cat));
-						return;
-					}
-					setRefreshingCategories((prev) => {
-						const next = new Set(prev);
-						next.delete(cat);
-						return next;
-					});
-					if (status === "done") {
-						setRefreshedCategories((prev) => new Set(prev).add(cat));
-					}
-				},
-				onVenueProgress: (venue, idx, total) => {
-					setArxivRefreshLabel(null);
-					setRefreshingArxiv(false);
-					setVenueRefreshLabel(
-						total > 1
-							? `${venuePortalLabel} · ${venue.name} (${idx}/${total})`
-							: venue.name,
-					);
-				},
-				onVenueStatus: (venue, status) => {
-					if (status === "refreshing") {
-						setRefreshingVenueIds((prev) => new Set(prev).add(venue.id));
-						return;
-					}
-					setRefreshingVenueIds((prev) => {
-						const next = new Set(prev);
-						next.delete(venue.id);
-						return next;
-					});
-					if (status === "done") {
-						setRefreshedVenueIds((prev) => new Set(prev).add(venue.id));
-					}
-				},
-			});
-		} catch (err) {
-			notifyError(errorText(err));
-		} finally {
-			setRefreshingArxiv(false);
-			setRefreshingVenue(false);
-			setArxivRefreshLabel(null);
-			setVenueRefreshLabel(null);
-			setRefreshingCategories(new Set());
-			setRefreshingVenueIds((prev) => {
-				const next = new Set(prev);
-				for (const id of venueIds) next.delete(id);
-				return next;
-			});
-		}
-	}, [refreshingArxiv, refreshingVenue, summary.categories, summary.venues, t]);
+		await refreshAllInBackground({
+			incrementalArxiv: true,
+			skipLoadedVenues: false,
+		});
+	}, []);
 
 	const handleEnterArxiv = useCallback(
 		(category: string | null) => {
@@ -646,12 +459,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		return summary.venues.find((v) => v.id === selectedVenueId)?.name ?? null;
 	}, [selectedVenueId, summary.venues]);
 
-	const activeRefreshingVenueIds = useMemo(() => {
-		if (!loadingVenueId || refreshingVenueIds.has(loadingVenueId)) {
-			return refreshingVenueIds;
-		}
-		return new Set(refreshingVenueIds).add(loadingVenueId);
-	}, [loadingVenueId, refreshingVenueIds]);
+	const activeRefreshingVenueIds = refreshingVenueIds;
 
 	const isHubArxivRefreshed =
 		!refreshingArxiv &&
@@ -684,7 +492,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				: refreshingArxiv
 			: selectedVenueId
 				? activeRefreshingVenueIds.has(selectedVenueId)
-				: refreshingVenue || Boolean(loadingVenueId);
+				: refreshingVenue;
 
 	const isCurrentViewRefreshed =
 		!isCurrentViewRefreshing &&
@@ -696,28 +504,19 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				? refreshedVenueIds.has(selectedVenueId)
 				: isAllFilteredVenuesRefreshed);
 
-	const hubRefreshTarget = arxivRefreshLabel ?? venueRefreshLabel;
+	const hubRefreshTarget = useMemo(() => {
+		const parts = [arxivRefreshLabel, venueRefreshLabel].filter(
+			(part): part is string => Boolean(part),
+		);
+		return parts.length > 0 ? parts.join(" · ") : null;
+	}, [arxivRefreshLabel, venueRefreshLabel]);
 
 	const listRefreshTarget = useMemo(() => {
 		if (activeSource === "arxiv") {
 			return arxivRefreshLabel;
 		}
-		if (selectedVenueId) {
-			if (loadingVenueId === selectedVenueId) {
-				return selectedVenueName ?? venueRefreshLabel;
-			}
-			return refreshingVenue ? venueRefreshLabel : null;
-		}
-		return venueRefreshLabel ?? selectedVenueName;
-	}, [
-		activeSource,
-		arxivRefreshLabel,
-		loadingVenueId,
-		refreshingVenue,
-		selectedVenueId,
-		selectedVenueName,
-		venueRefreshLabel,
-	]);
+		return refreshingVenue ? venueRefreshLabel : null;
+	}, [activeSource, arxivRefreshLabel, refreshingVenue, venueRefreshLabel]);
 
 	const scopedRefreshLabel = useMemo(() => {
 		const base = t("plaza.collection.refresh");
