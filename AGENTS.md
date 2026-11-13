@@ -21,6 +21,7 @@ Agentero 是一个基于 Tauri 2 + React 19 的本地优先科研工作台，产
 - 如果修改了 Template 下的 Skill 和 AGENTS.md ，需要对应更新版本号。
 - 修改后需同步更新相关文档，bug_fix文档只在这个问题对之后其他项目开发或者这个bug有利用价值的时候才写。
 - 修改完成后，把当次相关的改动按照 commit 部分的要求提交。
+- 上游同步（`poco-ai/Agentero`）：禁止直接 `git pull` / `git merge`；必须按 [`.agents/skills/upstream-sync/SKILL.md`](.agents/skills/upstream-sync/SKILL.md) 执行水位线分流与选择性移植。
 
 ## Windows 注意事项
 

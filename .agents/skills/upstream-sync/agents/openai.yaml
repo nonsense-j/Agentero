@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentero Upstream Sync"
+  short_description: "Triage and selectively port upstream Agentero commits"
+  default_prompt: "Use $upstream-sync to fetch upstream/main, triage commits against our fork divergence map, and selectively port safe changes."
