@@ -164,7 +164,6 @@ export {
 export {
 	CITATION_FOCUS_FLASH_MS,
 	clearLayoutDocumentResult,
-	expandFocusBboxForOverlay,
 	type FocusedLayoutSnapshot,
 	type FocusedLayoutState,
 	getLayoutDocumentResult,
