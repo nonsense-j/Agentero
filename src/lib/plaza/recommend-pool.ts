@@ -16,7 +16,7 @@ import { commands } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
 import {
 	type CollectionPaperItem,
-	derivePaperKeywords,
+	normalizePaperKeywords,
 } from "@/lib/plaza/collection-enrichment";
 import {
 	bumpCollectionRevision,
@@ -24,6 +24,11 @@ import {
 	clearCollection,
 	fromPaperSummaryDto,
 } from "@/lib/plaza/collection-store";
+import {
+	canonicalizePaperKeyword,
+	cleanKeywordSurface,
+	normalizeKeywordKey,
+} from "@/lib/plaza/keyword-synonyms";
 
 export const DEFAULT_RECOMMEND_BATCH_SIZE = 15;
 export const DEFAULT_WORD_CLOUD_TOP_N = 50;
@@ -71,7 +76,7 @@ export type RecommendNextResult = {
 };
 
 export const DEFAULT_RECOMMEND_KEYWORDS: readonly RecommendKeywordChip[] = [
-	{ id: "kw-llm-agent", term: "LLM Agent", enabled: true },
+	{ id: "kw-ai-agent", term: "AI Agent", enabled: true },
 	{ id: "kw-program-analysis", term: "Program Analysis", enabled: true },
 	{ id: "kw-vuln", term: "Vulnerability Detection", enabled: true },
 	{ id: "kw-fuzzing", term: "Fuzzing", enabled: true },
@@ -81,12 +86,12 @@ export const DEFAULT_RECOMMEND_KEYWORDS: readonly RecommendKeywordChip[] = [
 	{ id: "kw-smart-contract", term: "Smart Contract", enabled: false },
 ];
 
-function cleanTermDisplay(term: string): string {
-	return term.replace(/\s+/g, " ").trim();
+function canonicalizeQueryTerm(term: string): string {
+	return canonicalizePaperKeyword(term) ?? cleanKeywordSurface(term);
 }
 
 function normalizeTermKey(term: string): string {
-	return cleanTermDisplay(term).toLowerCase();
+	return normalizeKeywordKey(term);
 }
 
 function clampWordCloudTopN(topN: number): number {
@@ -122,7 +127,7 @@ function sanitizeKeywordChips(rawChips: unknown[]): RecommendKeywordChip[] {
 		if (!raw || typeof raw !== "object") continue;
 		const candidate = raw as Partial<RecommendKeywordChip>;
 		if (typeof candidate.term !== "string") continue;
-		const term = cleanTermDisplay(candidate.term);
+		const term = canonicalizeQueryTerm(candidate.term);
 		const key = normalizeTermKey(term);
 		if (!key) continue;
 
@@ -130,8 +135,17 @@ function sanitizeKeywordChips(rawChips: unknown[]): RecommendKeywordChip[] {
 		const existingIdx = seenTerms.get(key);
 		if (existingIdx !== undefined) {
 			const prev = result[existingIdx];
-			if (prev && enabled && !prev.enabled) {
-				result[existingIdx] = { ...prev, enabled: true };
+			if (prev) {
+				const nextTerm =
+					casingQuality(term) > casingQuality(prev.term) ? term : prev.term;
+				const nextEnabled = prev.enabled || enabled;
+				if (nextTerm !== prev.term || nextEnabled !== prev.enabled) {
+					result[existingIdx] = {
+						...prev,
+						term: nextTerm,
+						enabled: nextEnabled,
+					};
+				}
 			}
 			continue;
 		}
@@ -162,7 +176,7 @@ function sanitizeSelectedCloudTerms(
 	const out: string[] = [];
 	for (const entry of rawTerms) {
 		if (typeof entry !== "string") continue;
-		const cleaned = cleanTermDisplay(entry);
+		const cleaned = canonicalizeQueryTerm(entry);
 		const key = normalizeTermKey(cleaned);
 		if (!key || seen.has(key) || enabledRecentKeys.has(key)) continue;
 		seen.add(key);
@@ -291,7 +305,7 @@ export function getActiveSelectedTerms(state: RecommendPoolState): string[] {
 
 	for (const chip of state.keywords) {
 		if (!chip.enabled) continue;
-		const term = cleanTermDisplay(chip.term);
+		const term = canonicalizeQueryTerm(chip.term);
 		const key = normalizeTermKey(term);
 		if (!key || seen.has(key)) continue;
 		seen.add(key);
@@ -299,7 +313,7 @@ export function getActiveSelectedTerms(state: RecommendPoolState): string[] {
 	}
 
 	for (const rawTerm of state.selectedCloudTerms) {
-		const term = cleanTermDisplay(rawTerm);
+		const term = canonicalizeQueryTerm(rawTerm);
 		const key = normalizeTermKey(term);
 		if (!key || seen.has(key)) continue;
 		seen.add(key);
@@ -332,7 +346,7 @@ export function toggleRecommendTerm(
 	state: RecommendPoolState,
 	term: string,
 ): RecommendPoolState {
-	const cleaned = cleanTermDisplay(term);
+	const cleaned = canonicalizeQueryTerm(term);
 	const key = normalizeTermKey(cleaned);
 	if (!key) return state;
 
@@ -396,7 +410,7 @@ export function addCustomRecentKeyword(
 	state: RecommendPoolState,
 	rawTerm: string,
 ): RecommendPoolState {
-	const cleaned = cleanTermDisplay(rawTerm);
+	const cleaned = canonicalizeQueryTerm(rawTerm);
 	const key = normalizeTermKey(cleaned);
 	if (!key) return state;
 
@@ -563,29 +577,16 @@ type ComputedPaperFields = {
 function extractPaperKeywordsNormalized(
 	paper: CollectionPaperItem,
 ): PaperExtractedKeyword[] {
-	const rawSource =
-		paper.keywords && paper.keywords.length > 0
-			? paper.keywords
-			: derivePaperKeywords(
-					paper.title,
-					paper.abstract,
-					paper.categories,
-					paper.keywords,
-				);
-	if (!rawSource || rawSource.length === 0) return [];
+	const canonicalList = normalizePaperKeywords(
+		paper.keywords,
+		Number.MAX_SAFE_INTEGER,
+	);
+	if (canonicalList.length === 0) return [];
 
-	const out: PaperExtractedKeyword[] = [];
-	const seen = new Set<string>();
-	for (const raw of rawSource) {
-		if (typeof raw !== "string") continue;
-		const display = cleanTermDisplay(raw);
-		if (display.length < 2) continue;
-		const normalized = display.toLowerCase();
-		if (seen.has(normalized)) continue;
-		seen.add(normalized);
-		out.push({ display, normalized });
-	}
-	return out;
+	return canonicalList.map((display) => ({
+		display,
+		normalized: normalizeTermKey(display),
+	}));
 }
 
 function computePaperFields(paper: CollectionPaperItem): ComputedPaperFields {
@@ -700,8 +701,8 @@ function prepareQueryKeywords(
 	for (const entry of activeKeywords) {
 		if (typeof entry !== "string" && !entry.enabled) continue;
 		const rawTerm = typeof entry === "string" ? entry : entry.term;
-		const term = cleanTermDisplay(rawTerm);
-		const phrase = term.toLowerCase();
+		const term = canonicalizeQueryTerm(rawTerm);
+		const phrase = normalizeTermKey(term);
 		if (!phrase || seen.has(phrase)) continue;
 		seen.add(phrase);
 

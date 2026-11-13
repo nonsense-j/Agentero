@@ -14,13 +14,15 @@
 
 import { commands } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
-import type {
-	CollectionPaperItem,
-	CollectionSourceType,
-	VenueDomain,
-	VenueKind,
+import {
+	type CollectionPaperItem,
+	type CollectionSourceType,
+	normalizePaperKeywords,
+	type VenueDomain,
+	type VenueKind,
 } from "@/lib/plaza/collection-enrichment";
 import { fromPaperSummaryDto } from "@/lib/plaza/collection-store";
+import { canonicalizePaperKeyword } from "@/lib/plaza/keyword-synonyms";
 import {
 	cleanArxivKey,
 	cleanDoiKey,
@@ -81,6 +83,7 @@ export type FastSearchResult = {
 
 export type BooleanQueryTerm = {
 	text: string;
+	canonicalAlt?: string;
 	phrase: boolean;
 	negated: boolean;
 };
@@ -105,14 +108,14 @@ export function parseBooleanSearchQuery(raw: string): ParsedBooleanQuery {
 		[];
 	let i = 0;
 	while (i < trimmed.length) {
-		while (i < trimmed.length && /\s/.test(trimmed[i])) i += 1;
+		while (i < trimmed.length && /\s/.test(trimmed[i] ?? "")) i += 1;
 		if (i >= trimmed.length) break;
 
 		let negated = false;
 		if (
 			trimmed[i] === "-" &&
 			i + 1 < trimmed.length &&
-			!/\s/.test(trimmed[i + 1])
+			!/\s/.test(trimmed[i + 1] ?? "")
 		) {
 			negated = true;
 			i += 1;
@@ -129,7 +132,7 @@ export function parseBooleanSearchQuery(raw: string): ParsedBooleanQuery {
 			}
 		} else {
 			const start = i;
-			while (i < trimmed.length && !/\s/.test(trimmed[i])) i += 1;
+			while (i < trimmed.length && !/\s/.test(trimmed[i] ?? "")) i += 1;
 			const word = trimmed.slice(start, i).trim();
 			if (word) {
 				rawTokens.push({ text: word, phrase: false, negated });
@@ -146,7 +149,7 @@ export function parseBooleanSearchQuery(raw: string): ParsedBooleanQuery {
 			!tok.negated &&
 			(tok.text === "OR" || tok.text === "|")
 		) {
-			if (branches[branches.length - 1].length > 0) {
+			if ((branches[branches.length - 1]?.length ?? 0) > 0) {
 				branches.push([]);
 			}
 			continue;
@@ -158,15 +161,22 @@ export function parseBooleanSearchQuery(raw: string): ParsedBooleanQuery {
 		) {
 			continue;
 		}
+		const text = tok.text.toLowerCase();
+		const canonLower = !tok.negated
+			? canonicalizePaperKeyword(tok.text)?.toLowerCase()
+			: undefined;
 		const term: BooleanQueryTerm = {
-			text: tok.text.toLowerCase(),
+			text,
+			...(canonLower && canonLower !== text
+				? { canonicalAlt: canonLower }
+				: {}),
 			phrase: tok.phrase || tok.text.includes(" ") || tok.text.includes("-"),
 			negated: tok.negated,
 		};
 		if (term.negated) {
 			globalNegations.push(term);
 		} else {
-			branches[branches.length - 1].push(term);
+			branches[branches.length - 1]?.push(term);
 		}
 	}
 
@@ -176,8 +186,27 @@ export function parseBooleanSearchQuery(raw: string): ParsedBooleanQuery {
 			? { branches: [globalNegations] }
 			: { branches: [] };
 	}
+	const combinedBranches = nonEmpty.map((b) => [...b, ...globalNegations]);
+
+	// Expand multi-word conjunction branches whose combined phrase maps to a distinct
+	// canonical synonym (e.g., `Defect Detection` -> `"vulnerability detection"`).
+	const extraBranches: BooleanQueryTerm[][] = [];
+	for (const branch of combinedBranches) {
+		const pos = branch.filter((t) => !t.negated);
+		if (pos.length >= 2) {
+			const joined = pos.map((t) => t.text).join(" ");
+			const canonLower = canonicalizePaperKeyword(joined)?.toLowerCase();
+			if (canonLower && canonLower !== joined) {
+				extraBranches.push([
+					{ text: canonLower, phrase: true, negated: false },
+					...branch.filter((t) => t.negated),
+				]);
+			}
+		}
+	}
+
 	return {
-		branches: nonEmpty.map((b) => [...b, ...globalNegations]),
+		branches: [...combinedBranches, ...extraBranches],
 	};
 }
 
@@ -288,8 +317,11 @@ function scorePaperAgainstQuery(
 	const checkAbstract = enabledFields.has("abstract");
 
 	const titleLc = checkTitle ? paper.title.toLowerCase() : "";
+	const canonicalPaperKws = checkKeywords
+		? normalizePaperKeywords(paper.keywords, Number.MAX_SAFE_INTEGER)
+		: [];
 	const kwLc = checkKeywords
-		? `${(paper.keywords ?? []).join(" ")} ${paper.categories.join(" ")}`.toLowerCase()
+		? `${(paper.keywords ?? []).join(" ")} ${canonicalPaperKws.join(" ")} ${paper.categories.join(" ")}`.toLowerCase()
 		: "";
 	const absLc = checkAbstract ? paper.abstract.toLowerCase() : "";
 
@@ -303,9 +335,16 @@ function scorePaperAgainstQuery(
 		const hitSet = new Set<FastSearchField>();
 
 		for (const term of branch) {
-			const inTitle = checkTitle && titleLc.includes(term.text);
-			const inKw = checkKeywords && kwLc.includes(term.text);
-			const inAbs = checkAbstract && absLc.includes(term.text);
+			const alt = term.canonicalAlt;
+			const inTitle =
+				checkTitle &&
+				(titleLc.includes(term.text) || Boolean(alt && titleLc.includes(alt)));
+			const inKw =
+				checkKeywords &&
+				(kwLc.includes(term.text) || Boolean(alt && kwLc.includes(alt)));
+			const inAbs =
+				checkAbstract &&
+				(absLc.includes(term.text) || Boolean(alt && absLc.includes(alt)));
 			const matched = inTitle || inKw || inAbs;
 
 			if (term.negated) {
@@ -370,7 +409,7 @@ function unionCaseInsensitive(
 
 /**
  * Enrich a `venue` paper summary with missing `arxivId`, `pdfUrl`, fuller `abstract`,
- * unioned `keywords`/`categories`, and max `citationCount` from a matching `arxiv` twin.
+ * canonicalized `keywords`, unioned `categories`, and max `citationCount` from a matching `arxiv` twin.
  */
 export function mergeArxivIntoVenueItem(
 	venue: CollectionPaperItem,
@@ -382,9 +421,9 @@ export function mergeArxivIntoVenueItem(
 		venueAbsLen < 40 && arxivAbsLen > venueAbsLen
 			? arxiv.abstract
 			: venue.abstract;
-	const mergedKeywords = unionCaseInsensitive(
-		venue.keywords ?? [],
-		arxiv.keywords ?? [],
+	const mergedKeywords = normalizePaperKeywords(
+		[...(venue.keywords ?? []), ...(arxiv.keywords ?? [])],
+		Number.MAX_SAFE_INTEGER,
 	);
 	const mergedCategories = unionCaseInsensitive(
 		venue.categories,
