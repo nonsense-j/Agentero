@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { commands } from "@/lib/core/bindings";
 import {
+	DEFAULT_OPEN_ROUTER_MODEL,
+	fetchKeywordLlmModels,
+	setCachedKeywordLlmConfigForTests,
+} from "@/lib/keyword-llm";
+import {
 	setCachedOpenAlexApiKeyForTests,
 	withOpenAlexApiKey,
 } from "@/lib/openalex";
@@ -15,6 +20,7 @@ import {
 	enrichSinglePaperOnDemand,
 	ensureCollectionSummaryHydrated,
 	ensurePaperFullDetails,
+	ensureVenueLoaded,
 	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	fetchCollectionStateSummary,
@@ -29,6 +35,7 @@ import {
 	getCollectionSummarySnapshot,
 	isConfirmedVenueAcceptance,
 	isNonResearchJournalItem,
+	isPaperMetadataComplete,
 	isPreloadingCollection,
 	isVenueAlreadyLoaded,
 	listCollectionPapers,
@@ -1414,7 +1421,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		);
 		expect(structured.items[0]?.citationCount).toBe(3);
 		expect(structured.items[0]?.keywords).toEqual([
-			"Multi-agent Systems",
+			"Multi-Agent System",
 			"Selenium Test Generation",
 		]);
 
@@ -1456,7 +1463,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					],
 				}) as T,
 		);
-		expect(lipics.items[0]?.keywords).toEqual(["Flaky Tests", "Microservices"]);
+		expect(lipics.items[0]?.keywords).toEqual(["Flaky Test", "Microservices"]);
 
 		// 3. `papers.cool` `<div keywords="...">` TF-IDF tokens are never surfaced as author keywords
 		const coolParsed = parseCoolPapersVenueHtml(
@@ -1579,7 +1586,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"Sound type inference for effect handlers at scale",
 			);
 			expect(detailed.citationCount).toBe(9);
-			expect(detailed.keywords).toEqual(["Effect Handlers"]);
+			expect(detailed.keywords).toEqual(["Effect Handler"]);
 			expect(detailed.bibtex).toContain("@inproceedings{");
 			expect(commands.plazaCollectionPatchPapers).toHaveBeenCalledTimes(1);
 
@@ -1867,7 +1874,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("enriches full arXiv batches beyond 180 items, matches merged publisher locations, falls back to 0-credit singletons + arxiv HTML keywords, and backfills existing SQLite rows on refresh", async () => {
+	it("enriches full arXiv batches beyond 180 items, matches merged publisher locations, falls back to 0-credit singletons + OpenRouter :free LLM keywords, and backfills existing SQLite rows on refresh", async () => {
 		// 1. `extractArxivHtmlKeywords` parses LaTeX `\keywords{...}` / `Index Terms` and strips broad buckets
 		const sampleHtml = `
 			<div class="ltx_keywords">
@@ -1877,7 +1884,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(extractArxivHtmlKeywords(sampleHtml)).toEqual([
 			"Static Application Security Testing",
 			"Software Security",
-			"Formal software verification",
+			"Formal Verification",
 		]);
 
 		// 2. `enrichArxivItemsBatch` enriches all 210 items across 80-DOI chunks (no 180 truncation),
@@ -1944,7 +1951,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 
 		expect(openAlexBatchUrls).toHaveLength(3); // ceil(210 / 80) = 3
 		expect(enriched210.every((p) => (p.keywords?.length ?? 0) >= 2)).toBe(true);
-		expect(enriched210[209]?.keywords).toEqual(["Fuzz Testing", "LLM Agents"]);
+		expect(enriched210[209]?.keywords).toEqual(["Fuzzing", "AI Agent"]);
 		expect(enriched210[0]?.keywords).toEqual([
 			"Symbolic Execution",
 			"Program Repair",
@@ -1952,9 +1959,9 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(enriched210[0]?.citationCount).toBe(9);
 
 		// 3. Rate-limited OpenAlex `works?filter=` (`429`) falls back to 0-credit `/works/doi:...` singletons,
-		//    and recent (`< 10d`) unmatched preprints fall back to `arxiv.org/html/<id>` author keywords.
+		//    and any OpenAlex miss (recent or old) falls back directly to OpenRouter `:free` LLM keywords.
 		const recentIso = new Date(Date.now() - 2 * 86_400_000).toISOString();
-		const mixedRecentBatch: CollectionPaperItem[] = [
+		const mixedBatch: CollectionPaperItem[] = [
 			{
 				id: "arxiv:2610.50001",
 				arxivId: "2610.50001",
@@ -1970,59 +1977,155 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				url: "https://arxiv.org/abs/2610.50001",
 			},
 			{
-				id: "arxiv:2611.90002",
-				arxivId: "2611.90002",
-				doi: "10.48550/arxiv.2611.90002",
-				title: "Brand New Day-2 Preprint Not Yet In OpenAlex",
+				id: "arxiv:2602.90002",
+				arxivId: "2602.90002",
+				doi: "10.48550/arxiv.2602.90002",
+				title: "Unindexed Preprint Falling Back To OpenRouter LLM",
 				authors: ["Bob"],
-				abstract: "Brand new preprint abstract with LaTeX keywords in HTML.",
-				publishedAt: recentIso,
+				abstract:
+					"We present homomorphic encryption with side-channel countermeasures on Lattice hardware.",
+				publishedAt: "2026-02-14T10:00:00Z",
 				year: 2026,
 				sourceType: "arxiv",
 				sourceLabel: "cs.CR",
 				categories: ["cs.CR"],
-				url: "https://arxiv.org/abs/2611.90002",
+				url: "https://arxiv.org/abs/2602.90002",
 			},
 		];
 
-		const fallbackRes = await enrichArxivItemsBatch(
-			mixedRecentBatch,
-			async <T>(url: string) => {
-				if (url.includes("/works?filter=")) {
-					throw new Error("HTTP 429 Too Many Requests");
-				}
-				if (url.includes("2610.50001")) {
-					return {
-						id: "https://openalex.org/W_singleton_1",
-						doi: "https://doi.org/10.48550/arxiv.2610.50001",
-						cited_by_count: 6,
-						keywords: [{ display_name: "Zero-Knowledge Proofs", score: 0.94 }],
-					} as T;
-				}
-				throw new Error("HTTP 404 Not Found");
-			},
-			mixedRecentBatch.length,
-			{
-				maxHtmlFallback: 5,
-				fetchText: async (url) => {
-					if (url.includes("arxiv.org/html/2611.90002")) {
-						return `<div class="ltx_keywords">Index Terms: Homomorphic Encryption; Side-Channel Analysis</div>`;
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "test-openrouter-key",
+		});
+		try {
+			const openRouterPayloads: string[] = [];
+			const fallbackRes = await enrichArxivItemsBatch(
+				mixedBatch,
+				async <T>(url: string) => {
+					if (url.includes("/works?filter=")) {
+						throw new Error("HTTP 429 Too Many Requests");
+					}
+					if (url.includes("2610.50001")) {
+						return {
+							id: "https://openalex.org/W_singleton_1",
+							doi: "https://doi.org/10.48550/arxiv.2610.50001",
+							cited_by_count: 6,
+							keywords: [
+								{ display_name: "Zero-Knowledge Proofs", score: 0.94 },
+							],
+						} as T;
+					}
+					throw new Error("HTTP 404 Not Found");
+				},
+				mixedBatch.length,
+				{
+					keywordLlmFetch: async (_input, init) => {
+						openRouterPayloads.push(String(init?.body ?? ""));
+						return new Response(
+							JSON.stringify({
+								choices: [
+									{
+										message: {
+											content: JSON.stringify({
+												"0": [
+													"Homomorphic Encryption",
+													"Side-Channel Analysis",
+												],
+											}),
+										},
+									},
+								],
+							}),
+							{ status: 200 },
+						);
+					},
+				},
+			);
+
+			expect(openRouterPayloads).toHaveLength(1);
+			expect(openRouterPayloads[0]).toContain(
+				"Unindexed Preprint Falling Back To OpenRouter LLM",
+			);
+			expect(openRouterPayloads[0]).not.toContain("Indexed Singleton Preprint");
+			expect(fallbackRes[0]?.keywords).toEqual(["Zero-Knowledge Proof"]);
+			expect(fallbackRes[0]?.citationCount).toBe(6);
+			expect(fallbackRes[1]?.keywords).toEqual([
+				"Homomorphic Encryption",
+				"Side-Channel Analysis",
+			]);
+
+			// 4. On-demand detail check for `arXiv` never scrapes `arxiv.org/html/<id>`, recovers missing
+			//    abstracts via arXiv Atom `id_list`, and falls back to OpenRouter `:free` LLM for keywords!
+			const bareArxivCard: CollectionPaperItem = {
+				id: "arxiv:2611.90003",
+				arxivId: "2611.90003",
+				title: "Card Clicked Before OpenAlex Indexing",
+				authors: ["Carol"],
+				abstract: "",
+				publishedAt: recentIso,
+				year: 2026,
+				sourceType: "arxiv",
+				sourceLabel: "cs.PL",
+				categories: ["cs.PL"],
+				citationCount: 0,
+				keywords: [],
+				url: "https://arxiv.org/abs/2611.90003",
+			};
+			expect(shouldEnrichPaperOnDemand(bareArxivCard)).toBe(true);
+			let htmlFetchedForArxiv = false;
+			const onDemandArxiv = await enrichSinglePaperOnDemand(
+				bareArxivCard,
+				async () => {
+					throw new Error("HTTP 404");
+				},
+				async (url) => {
+					if (url.includes("arxiv.org/html/")) {
+						htmlFetchedForArxiv = true;
+						return `<div class="ltx_keywords">Keywords: Gradual Typing, Dependent Types</div>`;
+					}
+					if (url.includes("id_list=2611.90003")) {
+						return `<feed xmlns="http://www.w3.org/2005/Atom">
+							<entry>
+								<id>http://arxiv.org/abs/2611.90003v1</id>
+								<summary>We formalize gradual dependent types with sound blame tracking across higher-order modules.</summary>
+							</entry>
+						</feed>`;
 					}
 					return "";
 				},
-			},
-		);
+				{
+					keywordLlmFetch: async () =>
+						new Response(
+							JSON.stringify({
+								choices: [
+									{
+										message: {
+											content: JSON.stringify({
+												"0": ["Gradual Typing", "Dependent Types"],
+											}),
+										},
+									},
+								],
+							}),
+							{ status: 200 },
+						),
+				},
+			);
+			expect(htmlFetchedForArxiv).toBe(false);
+			expect(onDemandArxiv.abstract).toBe(
+				"We formalize gradual dependent types with sound blame tracking across higher-order modules.",
+			);
+			expect(onDemandArxiv.keywords).toEqual([
+				"Gradual Typing",
+				"Dependent Type",
+			]);
+			expect(isPaperMetadataComplete(onDemandArxiv)).toBe(true);
+		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
+		}
 
-		expect(fallbackRes[0]?.keywords).toEqual(["Zero-Knowledge Proofs"]);
-		expect(fallbackRes[0]?.citationCount).toBe(6);
-		expect(fallbackRes[1]?.keywords).toEqual([
-			"Homomorphic Encryption",
-			"Side-Channel Analysis",
-		]);
-
-		// 4. On-demand detail check triggers for keyword-less `arxivId` papers & heals via `arxiv.org/html/<id>`
-		const bareArxivCard: CollectionPaperItem = {
-			id: "arxiv:2611.90003",
+		const venueCardWithArxiv: CollectionPaperItem = {
+			id: "venue:popl-2026:arxiv:2611.90003",
 			arxivId: "2611.90003",
 			title: "Card Clicked Before OpenAlex Indexing",
 			authors: ["Carol"],
@@ -2030,16 +2133,16 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"Complete abstract already present from arXiv Atom feed for card click test.",
 			publishedAt: recentIso,
 			year: 2026,
-			sourceType: "arxiv",
-			sourceLabel: "cs.PL",
-			categories: ["cs.PL"],
+			sourceType: "venue",
+			sourceLabel: "POPL 2026",
+			venueId: "popl-2026",
+			categories: ["POPL 2026"],
 			citationCount: 0,
 			keywords: [],
 			url: "https://arxiv.org/abs/2611.90003",
 		};
-		expect(shouldEnrichPaperOnDemand(bareArxivCard)).toBe(true);
-		const onDemandEnriched = await enrichSinglePaperOnDemand(
-			bareArxivCard,
+		const onDemandVenue = await enrichSinglePaperOnDemand(
+			venueCardWithArxiv,
 			async () => {
 				throw new Error("HTTP 404");
 			},
@@ -2048,9 +2151,9 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					? `<div class="ltx_keywords">Keywords: Gradual Typing, Dependent Types</div>`
 					: "",
 		);
-		expect(onDemandEnriched.keywords).toEqual([
+		expect(onDemandVenue.keywords).toEqual([
 			"Gradual Typing",
-			"Dependent Types",
+			"Dependent Type",
 		]);
 
 		// 5. `refreshArxivCollection` heals already-cached `historyComplete: true` SQLite arXiv rows lacking keywords
@@ -2159,12 +2262,12 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			</article>
 		`;
 		expect(extractArxivHtmlKeywords(acmHtml)).toEqual([
-			"quantum software engineering",
-			"runtime assurance",
-			"context binding",
-			"retained results",
-			"prespecified protocol",
-			"service recovery",
+			"Quantum Software Engineering",
+			"Runtime Assurance",
+			"Context Binding",
+			"Retained Result",
+			"Prespecified Protocol",
+			"Service Recovery",
 		]);
 
 		const inlinePipeHtml = `
@@ -2338,9 +2441,654 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		const hit = bundle.items.find((p) => p.title === targetTitle);
 		expect(hit?.keywords).toEqual([
 			"Homomorphic Encryption",
-			"Zero-Knowledge Proofs",
+			"Zero-Knowledge Proof",
 		]);
 		expect(hit?.citationCount).toBe(7);
 		expect(hit?.arxivId).toBe("2511.12345");
+	});
+
+	it("enriches incomplete arXiv papers of any age (no 10-day cutoff) via OpenAlex -> OpenRouter LLM without in-session retry loops, then permanently skips complete rows", async () => {
+		resetCollectionMemoryForTests();
+		setCachedKeywordLlmConfigForTests(null);
+		const nowMs = Date.now();
+		const recentPub = new Date(nowMs - 3 * 86_400_000).toISOString();
+		const olderPub = new Date(nowMs - 120 * 86_400_000).toISOString();
+
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.CR"],
+			venues: [...DEFAULT_COLLECTION_VENUES],
+			items: [
+				{
+					id: "arxiv:2611.70001",
+					arxivId: "2611.70001",
+					doi: "10.48550/arxiv.2611.70001",
+					title: "Recent Preprint Pending OpenAlex Indexing",
+					authors: ["Alice"],
+					abstract:
+						"We study post-quantum lattice key encapsulation mechanisms under side-channel leakage.",
+					publishedAt: recentPub,
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.CR",
+					categories: ["cs.CR"],
+					citationCount: 0,
+					keywords: [],
+					url: "https://arxiv.org/abs/2611.70001",
+				},
+				{
+					id: "arxiv:2605.10001",
+					arxivId: "2605.10001",
+					doi: "10.48550/arxiv.2605.10001",
+					title: "Older 120-Day Preprint Without OpenAlex Keywords Or Abstract",
+					authors: ["Bob"],
+					abstract: "",
+					publishedAt: olderPub,
+					year: 2026,
+					sourceType: "arxiv",
+					sourceLabel: "cs.CR",
+					categories: ["cs.CR"],
+					citationCount: 0,
+					keywords: [],
+					url: "https://arxiv.org/abs/2605.10001",
+				},
+			],
+			arxivWatermarks: {
+				"cs.CR": {
+					latestArxivId: "2611.70001",
+					latestPublishedAt: recentPub,
+					oldestSyncedPublishedAt: "2026-01-02T00:00:00Z",
+					remoteTotal: 2,
+					historyComplete: true,
+					lastSyncedAt: recentPub,
+				},
+			},
+			lastRefreshedAt: recentPub,
+		});
+
+		const probeAtomXml = `<feed xmlns="http://www.w3.org/2005/Atom">
+			<entry>
+				<id>http://arxiv.org/abs/2611.70001v1</id>
+				<published>${recentPub}</published>
+				<title>Recent Preprint Pending OpenAlex Indexing</title>
+				<summary>We study post-quantum lattice key encapsulation mechanisms under side-channel leakage.</summary>
+				<author><name>Alice</name></author>
+			</entry>
+		</feed>`;
+
+		const olderIdListXml = `<feed xmlns="http://www.w3.org/2005/Atom">
+			<entry>
+				<id>http://arxiv.org/abs/2605.10001v1</id>
+				<published>${olderPub}</published>
+				<title>Older 120-Day Preprint Without OpenAlex Keywords Or Abstract</title>
+				<summary>We construct threshold ring signatures secure against adaptive chosen-message attacks in lattice groups.</summary>
+				<author><name>Bob</name></author>
+			</entry>
+		</feed>`;
+
+		try {
+			const htmlUrls: string[] = [];
+			const firstRefreshOpenAlexUrls: string[] = [];
+
+			// Refresh 1: OpenAlex has not indexed either preprint yet and OpenRouter has no API key.
+			// Both recent AND >10d rows are attempted once (no infinite loop), and missing abstract is healed!
+			await refreshArxivCollection({
+				categories: ["cs.CR"],
+				transport: {
+					fetchText: async (url) => {
+						if (url.includes("arxiv.org/html/")) htmlUrls.push(url);
+						if (url.includes("id_list=")) return olderIdListXml;
+						return probeAtomXml;
+					},
+					fetchJson: async <T>(url: string) => {
+						firstRefreshOpenAlexUrls.push(decodeURIComponent(url));
+						return { results: [] } as T;
+					},
+				},
+			});
+
+			expect(htmlUrls).toEqual([]);
+			expect(
+				firstRefreshOpenAlexUrls.filter((u) =>
+					u.includes("doi:10.48550/arxiv."),
+				),
+			).toHaveLength(1);
+			expect(
+				firstRefreshOpenAlexUrls.some((u) => u.includes("2611.70001")),
+			).toBe(true);
+			expect(
+				firstRefreshOpenAlexUrls.some((u) => u.includes("2605.10001")),
+			).toBe(true);
+
+			// Refresh 2: OpenAlex now indexes `2611.70001`, while 120-day-old `2605.10001` STILL misses OpenAlex
+			// and falls back directly to OpenRouter `:free` LLM (no 10-day cutoff!).
+			setCachedKeywordLlmConfigForTests({
+				provider: "openrouter",
+				apiKey: "test-openrouter-key",
+			});
+			const secondRefreshOpenAlexUrls: string[] = [];
+			let secondRefreshOpenRouterCalls = 0;
+
+			await refreshArxivCollection({
+				categories: ["cs.CR"],
+				transport: {
+					fetchText: async (url) => {
+						if (url.includes("arxiv.org/html/")) htmlUrls.push(url);
+						if (url.includes("id_list=")) return olderIdListXml;
+						return probeAtomXml;
+					},
+					fetchJson: async <T>(url: string) => {
+						const decoded = decodeURIComponent(url);
+						secondRefreshOpenAlexUrls.push(decoded);
+						if (decoded.includes("10.48550/arxiv.2611.70001")) {
+							return {
+								results: [
+									{
+										doi: "https://doi.org/10.48550/arxiv.2611.70001",
+										ids: { arxiv: "https://arxiv.org/abs/2611.70001" },
+										cited_by_count: 4,
+										keywords: [
+											{
+												display_name: "Post-Quantum Cryptography",
+												score: 0.95,
+											},
+											{ display_name: "Side-Channel Analysis", score: 0.89 },
+										],
+									},
+								],
+							} as T;
+						}
+						return { results: [] } as T;
+					},
+					keywordLlmFetch: async () => {
+						secondRefreshOpenRouterCalls += 1;
+						return new Response(
+							JSON.stringify({
+								choices: [
+									{
+										message: {
+											content: JSON.stringify({
+												"0": ["Ring Signatures", "Lattice Cryptography"],
+											}),
+										},
+									},
+								],
+							}),
+							{ status: 200 },
+						);
+					},
+				},
+			});
+
+			expect(htmlUrls).toEqual([]);
+			expect(
+				secondRefreshOpenAlexUrls.some((u) => u.includes("2611.70001")),
+			).toBe(true);
+			expect(
+				secondRefreshOpenAlexUrls.some((u) => u.includes("2605.10001")),
+			).toBe(true);
+			expect(secondRefreshOpenRouterCalls).toBe(1);
+
+			const page = await listCollectionPapers({
+				sourceType: "arxiv",
+				category: "cs.CR",
+			});
+			const recentRow = page.items.find((p) => p.id === "arxiv:2611.70001");
+			const olderRow = page.items.find((p) => p.id === "arxiv:2605.10001");
+			expect(recentRow?.keywords).toEqual([
+				"Post-Quantum Cryptography",
+				"Side-Channel Analysis",
+			]);
+			expect(olderRow?.abstract).toBe(
+				"We construct threshold ring signatures secure against adaptive chosen-message attacks in lattice groups.",
+			);
+			expect(olderRow?.keywords).toEqual([
+				"Ring Signature",
+				"Lattice Cryptography",
+			]);
+			expect(recentRow && isPaperMetadataComplete(recentRow)).toBe(true);
+			expect(olderRow && isPaperMetadataComplete(olderRow)).toBe(true);
+
+			// Refresh 3: Once every paper has complete metadata, subsequent refreshes skip enrichment permanently!
+			const thirdRefreshOpenAlexUrls: string[] = [];
+			let thirdRefreshOpenRouterCalls = 0;
+			await refreshArxivCollection({
+				categories: ["cs.CR"],
+				transport: {
+					fetchText: async () => probeAtomXml,
+					fetchJson: async <T>(url: string) => {
+						thirdRefreshOpenAlexUrls.push(decodeURIComponent(url));
+						return { results: [] } as T;
+					},
+					keywordLlmFetch: async () => {
+						thirdRefreshOpenRouterCalls += 1;
+						return new Response("{}", { status: 200 });
+					},
+				},
+			});
+			expect(thirdRefreshOpenAlexUrls).toEqual([]);
+			expect(thirdRefreshOpenRouterCalls).toBe(0);
+		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
+			ipc.restore();
+			resetCollectionMemoryForTests();
+		}
+	});
+
+	it("unions Venue author + OpenAlex keywords and falls back to OpenRouter :free LLM only when keywords remain empty", async () => {
+		const sp = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sp-2026");
+		if (!sp) throw new Error("Missing sp-2026");
+
+		// Verify OpenRouter model catalog ordering (`:free` default first, then other `:free`, then paid models)
+		const models = await fetchKeywordLlmModels(
+			{ provider: "openrouter" },
+			async () =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{ id: "openai/gpt-5", name: "GPT-5" },
+							{
+								id: DEFAULT_OPEN_ROUTER_MODEL,
+								name: "Baidu: ERNIE 5.5 Flash Preview (free)",
+								context_length: 131072,
+							},
+							{
+								id: "qwen/qwen3-coder:free",
+								name: "Qwen3 Coder (free)",
+								context_length: 65536,
+							},
+						],
+					}),
+					{ status: 200 },
+				),
+		);
+		expect(models).toEqual([
+			DEFAULT_OPEN_ROUTER_MODEL,
+			"qwen/qwen3-coder:free",
+			"openai/gpt-5",
+		]);
+
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "test-openrouter-key",
+		});
+
+		try {
+			const csdlPapers = Array.from({ length: 26 }, (_, idx) => ({
+				id: `sp26-${idx + 1}`,
+				title:
+					idx === 0
+						? "Hybrid Fuzzing with Directed Symbolic Execution"
+						: idx === 1
+							? "Memory-Safe Microkernel Isolation Without Upstream Keywords"
+							: `Security Protocol Analysis Number ${idx + 1}`,
+				doi: `10.1109/SP60000.2026.${String(idx + 2).padStart(5, "0")}`,
+				contentType: "paper",
+				year: "2026",
+				pubDate: "2026-05-18",
+				pages: `${idx * 15 + 1}-${idx * 15 + 14}`,
+				abstract:
+					idx === 1
+						? "We design a capability-based Rust microkernel isolating untrusted device drivers with zero-copy IPC verification."
+						: "We present a comprehensive security analysis and evaluation across real-world systems.",
+				keywords:
+					idx === 0
+						? ["Hybrid Fuzzing", "Symbolic Execution"]
+						: idx === 1
+							? []
+							: ["Protocol Verification"],
+				authors: [{ fullName: "Grace Hopper" }],
+			}));
+
+			const openRouterPrompts: string[] = [];
+			let callAttempt = 0;
+
+			const bundle = await fetchMultiChannelVenuePapers(
+				sp,
+				2026,
+				async <T>(url: string) => {
+					const decoded = decodeURIComponent(url);
+					if (url.includes("www.computer.org/csdl/api/v1/graphql")) {
+						if (decoded.includes("proceedings(")) {
+							return {
+								data: {
+									proceedings: [
+										{
+											id: "sp-main-2026",
+											title: "2026 IEEE Symposium on Security and Privacy (SP)",
+										},
+									],
+								},
+							} as T;
+						}
+						return {
+							data: {
+								articlesByProceeding: csdlPapers,
+							},
+						} as T;
+					}
+					if (decoded.includes("api.openalex.org/works")) {
+						return {
+							results: [
+								{
+									id: "https://openalex.org/W_sp_1",
+									doi: "https://doi.org/10.1109/sp60000.2026.00002",
+									cited_by_count: 9,
+									keywords: [
+										{ display_name: "Symbolic Execution", score: 0.94 },
+										{ display_name: "Taint Tracking", score: 0.88 },
+									],
+								},
+							],
+						} as T;
+					}
+					return { results: [] } as T;
+				},
+				async () => "",
+				{
+					keywordLlmFetch: async (_input, init) => {
+						callAttempt += 1;
+						const body = JSON.parse(String(init?.body ?? "{}")) as {
+							model?: string;
+							reasoning?: { effort?: string; exclude?: boolean };
+							messages?: Array<{ role: string; content: string }>;
+						};
+						expect(body.model).toBe(DEFAULT_OPEN_ROUTER_MODEL);
+						// Simulate first-call 400 on custom reasoning check, then 200 with `<think>` block
+						if (callAttempt === 1) {
+							expect(body.reasoning).toEqual({
+								effort: "minimal",
+								exclude: true,
+							});
+							return new Response("Reasoning config unsupported", {
+								status: 400,
+							});
+						}
+						openRouterPrompts.push(body.messages?.[1]?.content ?? "");
+						return new Response(
+							JSON.stringify({
+								choices: [
+									{
+										message: {
+											content: `<think>short</think>{"items":[{"idx":0,"keywords":["Microkernel Isolation","Capability Security","Rust Verification","Device Driver Isolation"]}]}`,
+										},
+									},
+								],
+							}),
+							{ status: 200 },
+						);
+					},
+				},
+			);
+
+			expect(bundle.items).toHaveLength(26);
+			const p1 = bundle.items.find((p) =>
+				p.title.includes("Hybrid Fuzzing with Directed Symbolic Execution"),
+			);
+			const p2 = bundle.items.find((p) =>
+				p.title.includes("Memory-Safe Microkernel Isolation"),
+			);
+
+			// Paper 1 gets deduplicated & canonicalized Author ∪ OpenAlex keywords
+			expect(p1?.keywords).toEqual([
+				"Hybrid Fuzzing",
+				"Symbolic Execution",
+				"Taint Analysis",
+			]);
+			expect(p1?.citationCount).toBe(9);
+
+			// Paper 2 had neither author nor OpenAlex keywords -> extracted via OpenRouter :free
+			expect(p2?.keywords).toEqual([
+				"Microkernel Isolation",
+				"Capability Security",
+				"Rust Verification",
+				"Device Driver Isolation",
+			]);
+			// OpenRouter only received the 1 paper missing keywords (not the 25 papers with keywords!)
+			expect(openRouterPrompts).toHaveLength(1);
+			expect(openRouterPrompts[0]).toContain(
+				"Memory-Safe Microkernel Isolation",
+			);
+			expect(openRouterPrompts[0]).not.toContain("Hybrid Fuzzing");
+		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
+		}
+	});
+
+	it("applies Smart Diff on Venue refresh: deletes extra SQLite rows, skips complete rows with 0 OpenAlex/OpenRouter calls, and enriches only new or incomplete rows", async () => {
+		resetCollectionMemoryForTests();
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "test-openrouter-key",
+		});
+
+		const usenix = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "usenix-sec-2026",
+		);
+		if (!usenix) throw new Error("Missing usenix-sec-2026");
+
+		// Build 102 existing complete rows + 1 existing incomplete row (missing keywords) + 1 stale row to be deleted
+		const completeRows: CollectionPaperItem[] = Array.from(
+			{ length: 102 },
+			(_, idx) => ({
+				id: `venue:usenix-sec-2026:complete-security-paper-${idx + 1}`,
+				title: `Complete Security Paper Number ${idx + 1}`,
+				authors: ["Alice"],
+				abstract:
+					"Cached complete abstract describing formal verification and systems security evaluation.",
+				publishedAt: "2026-08-12T00:00:00Z",
+				year: 2026,
+				sourceType: "venue",
+				sourceLabel: usenix.name,
+				categories: [usenix.name, "CR", "CCF-A"],
+				url: `https://www.usenix.org/conference/usenixsecurity26/presentation/complete-${idx + 1}`,
+				pdfUrl: `https://www.usenix.org/system/files/complete-${idx + 1}.pdf`,
+				coolPapersId: `complete-${idx + 1}@usenixsecurity26@USENIX`,
+				venueId: usenix.id,
+				venueKind: "conference",
+				venueDomain: "CR",
+				ccfRank: "CCF-A",
+				citationCount: 5,
+				keywords: ["Formal Verification", "Systems Security"],
+				...(idx === 0 ? { recommendedAt: "2026-08-15T09:00:00Z" } : {}),
+			}),
+		);
+
+		const incompleteExistingRow: CollectionPaperItem = {
+			id: "venue:usenix-sec-2026:incomplete-existing-paper",
+			title: "Incomplete Existing Paper Missing Keywords",
+			authors: ["Bob"],
+			abstract:
+				"Cached complete abstract for an existing paper whose keywords were previously empty.",
+			publishedAt: "2026-08-12T00:00:00Z",
+			year: 2026,
+			sourceType: "venue",
+			sourceLabel: usenix.name,
+			categories: [usenix.name, "CR", "CCF-A"],
+			url: "https://www.usenix.org/conference/usenixsecurity26/presentation/incomplete-existing",
+			coolPapersId: "incomplete-existing@usenixsecurity26@USENIX",
+			venueId: usenix.id,
+			venueKind: "conference",
+			venueDomain: "CR",
+			ccfRank: "CCF-A",
+			citationCount: 2,
+			keywords: [],
+			recommendedAt: "2026-08-16T10:00:00Z",
+		};
+
+		const extraStaleRow: CollectionPaperItem = {
+			id: "venue:usenix-sec-2026:withdrawn-stale-paper",
+			title: "Withdrawn Stale Paper No Longer In Upstream",
+			authors: ["Mallory"],
+			abstract:
+				"This withdrawn paper is no longer on the official accepted papers page and must be removed.",
+			publishedAt: "2026-08-12T00:00:00Z",
+			year: 2026,
+			sourceType: "venue",
+			sourceLabel: usenix.name,
+			categories: [usenix.name],
+			url: "https://www.usenix.org/conference/usenixsecurity26/presentation/withdrawn",
+			venueId: usenix.id,
+			venueKind: "conference",
+			venueDomain: "CR",
+			ccfRank: "CCF-A",
+			citationCount: 0,
+			keywords: ["Obsolete"],
+		};
+
+		const ipc = installMockCollectionIpc({
+			categories: ["cs.CR"],
+			venues: DEFAULT_COLLECTION_VENUES.map((v) =>
+				v.id === usenix.id
+					? {
+							...v,
+							paperCount: 104,
+							lastFetchedAt: "2026-08-20T00:00:00Z",
+						}
+					: v,
+			),
+			items: [...completeRows, incompleteExistingRow, extraStaleRow],
+		});
+
+		// Upstream fresh list: 102 complete rows + 1 incompleteExistingRow + 1 brandNewRow (extraStaleRow removed!)
+		const makePanel = (
+			slug: string,
+			title: string,
+			idx: number,
+			total: number,
+		) => `
+			<div id="${slug}@usenixsecurity26@USENIX" class="panel paper">
+				<h2 class="title">
+					<a href="https://www.usenix.org/conference/usenixsecurity26/presentation/${slug}" title="${idx}/${total}">#${idx}</a>
+					<a id="title-${slug}@usenixsecurity26@USENIX" class="title-link" href="/venue/${slug}@usenixsecurity26@USENIX">${title}</a>
+				</h2>
+				<p class="metainfo authors"><a class="author" href="#">Alice</a></p>
+				<p id="summary-${slug}@usenixsecurity26@USENIX">Upstream abstract describing formal verification and systems security evaluation across benchmarks.</p>
+			</div>`;
+
+		const freshUpstreamHtml = [
+			...completeRows.map((r, i) =>
+				makePanel(`complete-${i + 1}`, r.title, i + 1, 104),
+			),
+			makePanel("incomplete-existing", incompleteExistingRow.title, 103, 104),
+			makePanel(
+				"brand-new-paper",
+				"Brand New Zero-Day Kernel Exploit Mitigation Paper",
+				104,
+				104,
+			),
+		].join("\n");
+
+		try {
+			const openAlexUrls: string[] = [];
+			const openRouterPayloads: string[] = [];
+
+			// Pass 1: Enrich ONLY the 1 incomplete existing row (via OpenAlex) and 1 brand-new row (via OpenRouter fallback)
+			await ensureVenueLoaded(usenix.id, {
+				fetchText: async (url) =>
+					url.includes("papers.cool/venue/USENIX-Sec.2026")
+						? freshUpstreamHtml
+						: "",
+				fetchJson: async <T>(url: string) => {
+					const decoded = decodeURIComponent(url);
+					openAlexUrls.push(decoded);
+					if (decoded.includes("Incomplete Existing Paper Missing Keywords")) {
+						return {
+							results: [
+								{
+									id: "https://openalex.org/W_inc_healed",
+									title: incompleteExistingRow.title,
+									cited_by_count: 8,
+									keywords: [{ display_name: "Memory Safety", score: 0.91 }],
+								},
+							],
+						} as T;
+					}
+					return { results: [] } as T;
+				},
+				keywordLlmFetch: async (_input, init) => {
+					const body = JSON.parse(String(init?.body ?? "{}")) as {
+						messages?: Array<{ content: string }>;
+					};
+					openRouterPayloads.push(body.messages?.[1]?.content ?? "");
+					return new Response(
+						JSON.stringify({
+							choices: [
+								{
+									message: {
+										content: JSON.stringify({
+											items: [
+												{
+													idx: 0,
+													keywords: [
+														"Kernel Exploit Mitigation",
+														"Control-Flow Integrity",
+													],
+												},
+											],
+										}),
+									},
+								},
+							],
+						}),
+						{ status: 200 },
+					);
+				},
+			});
+
+			// Only 1 batched OpenAlex title.search request for the 2 incomplete/new items (NOT the 102 complete rows!)
+			expect(openAlexUrls).toHaveLength(1);
+			expect(openAlexUrls[0]).not.toContain("Complete Security Paper Number 1");
+			expect(openRouterPayloads).toHaveLength(1);
+			expect(openRouterPayloads[0]).toContain(
+				"Brand New Zero-Day Kernel Exploit Mitigation Paper",
+			);
+
+			const afterPass1 = await listCollectionPapers({
+				sourceType: "venue",
+				venueId: usenix.id,
+				limit: 200,
+			});
+			expect(afterPass1.total).toBe(104);
+			expect(
+				afterPass1.items.some((p) => p.title === extraStaleRow.title),
+			).toBe(false);
+			const healedRow = afterPass1.items.find(
+				(p) => p.title === incompleteExistingRow.title,
+			);
+			expect(healedRow?.keywords).toEqual(["Memory Safety"]);
+			expect(healedRow?.recommendedAt).toBe("2026-08-16T10:00:00Z");
+
+			const newRow = afterPass1.items.find((p) =>
+				p.title.includes("Brand New Zero-Day Kernel Exploit Mitigation Paper"),
+			);
+			expect(newRow?.keywords).toEqual([
+				"Kernel Exploit Mitigation",
+				"Control-Flow Integrity",
+			]);
+
+			// Pass 2: Now all 104 rows in SQLite are complete -> refreshing again makes ZERO OpenAlex and ZERO OpenRouter calls!
+			openAlexUrls.length = 0;
+			openRouterPayloads.length = 0;
+			await ensureVenueLoaded(usenix.id, {
+				fetchText: async (url) =>
+					url.includes("papers.cool/venue/USENIX-Sec.2026")
+						? freshUpstreamHtml
+						: "",
+				fetchJson: async <T>(url: string) => {
+					openAlexUrls.push(url);
+					return { results: [] } as T;
+				},
+				keywordLlmFetch: async () => {
+					openRouterPayloads.push("unexpected");
+					return new Response("{}", { status: 200 });
+				},
+			});
+
+			expect(openAlexUrls).toEqual([]);
+			expect(openRouterPayloads).toEqual([]);
+		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
+			ipc.restore();
+		}
 	});
 });

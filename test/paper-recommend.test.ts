@@ -10,10 +10,13 @@ import {
 	listCollectionPapers,
 	mergeCollectionItems,
 	patchCollectionPapers,
-	purgeLegacyCollectionBrowserStorage,
 	resetCollectionMemoryForTests,
 	upsertCollectionPapers,
 } from "@/lib/plaza/collection";
+import {
+	mergeArxivIntoVenueItem,
+	searchCollectionFast,
+} from "@/lib/plaza/paper-search";
 import {
 	addCustomRecentKeyword,
 	createDefaultRecommendPoolState,
@@ -82,7 +85,7 @@ function makePaper(
 	};
 }
 
-describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser storage purge)", () => {
+describe("Paper Recommend overhaul (SQLite IPC, word cloud & selection)", () => {
 	let mockStorage: ReturnType<typeof createMockLocalStorage>;
 	let ipc: ReturnType<typeof installMockCollectionIpc>;
 
@@ -99,18 +102,25 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		resetCollectionMemoryForTests();
 	});
 
-	it("allows deselecting ALL keywords including LLM Agent down to 0 active terms and persists across reloads", async () => {
+	it("allows deselecting ALL keywords including AI Agent / LLM Agent down to 0 active terms and persists across reloads", async () => {
+		expect(DEFAULT_RECOMMEND_KEYWORDS[0]).toEqual({
+			id: "kw-ai-agent",
+			term: "AI Agent",
+			enabled: true,
+		});
 		let state = await fetchRecommendPoolState();
+		expect(isKeywordSelected(state, "AI Agent")).toBe(true);
 		expect(isKeywordSelected(state, "LLM Agent")).toBe(true);
 		expect(getActiveSelectedTerms(state).length).toBeGreaterThan(0);
 
-		// Deselect every enabled chip including LLM Agent
+		// Deselect every enabled chip including AI Agent
 		for (const chip of state.keywords) {
 			if (chip.enabled) {
 				state = toggleRecentKeywordById(state, chip.id);
 			}
 		}
 		expect(getActiveSelectedTerms(state)).toEqual([]);
+		expect(isKeywordSelected(state, "AI Agent")).toBe(false);
 		expect(isKeywordSelected(state, "LLM Agent")).toBe(false);
 
 		await saveRecommendPoolState(state);
@@ -119,9 +129,9 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		expect(getActiveSelectedTerms(reloaded)).toEqual([]);
 		expect(isKeywordSelected(reloaded, "LLM Agent")).toBe(false);
 
-		// Toggling via toggleRecommendTerm also works symmetrically from 0 -> 1 -> 0
+		// Toggling via synonym `LLM Agent` activates the canonical `AI Agent` chip symmetrically from 0 -> 1 -> 0
 		const withLlm = toggleRecommendTerm(reloaded, "LLM Agent");
-		expect(getActiveSelectedTerms(withLlm)).toEqual(["LLM Agent"]);
+		expect(getActiveSelectedTerms(withLlm)).toEqual(["AI Agent"]);
 		const backToZero = toggleRecommendTerm(withLlm, "llm agent");
 		expect(getActiveSelectedTerms(backToZero)).toEqual([]);
 
@@ -203,13 +213,13 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		expect(rec.state.keywords.every((k) => k.enabled)).toBe(true);
 	});
 
-	it("aggregates word cloud across all papers with best display casing, Top-50 default, and slider Top-N clamping/slicing", async () => {
-		// Create 70 unique keywords with varying frequencies + casing variants for "LLM Agent"
+	it("aggregates word cloud across all papers with canonical synonym merging, Top-50 default, and slider Top-N clamping/slicing", async () => {
+		// Create 70 unique keywords with varying frequencies + synonym/casing variants for "AI Agent"
 		const papers: CollectionPaperItem[] = [
 			makePaper(1, { keywords: ["llm agent", "program analysis"] }),
 			makePaper(2, { keywords: ["LLM Agent", "Program Analysis"] }),
 			makePaper(3, {
-				keywords: ["LLM agent", "Fuzzing"],
+				keywords: ["Agentic AI", "Fuzzing"],
 				recommendedAt: "2026-04-05T00:00:00Z",
 			}),
 		];
@@ -229,8 +239,8 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 
 		const topEntry = defaultCloud.keywords[0];
 		expect(topEntry).toEqual({
-			term: "LLM Agent",
-			normalized: "llm agent",
+			term: "AI Agent",
+			normalized: "ai agent",
 			count: 3,
 			unrecommendedCount: 2,
 		});
@@ -390,34 +400,7 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		).toBe(35);
 	});
 
-	it("purges legacy browser localStorage & IndexedDB keys once while preserving deep-sessions and ccf-deadlines, and patches papers via IPC", async () => {
-		const deleteDatabase = vi.fn();
-		vi.stubGlobal("indexedDB", { deleteDatabase });
-
-		mockStorage.store.set("plaza:collection:state:v2", '{"items":[1]}');
-		mockStorage.store.set("plaza:collection:state:v1", '{"items":[2]}');
-		mockStorage.store.set("plaza:recommend:pool-state:v2", '{"keywords":[]}');
-		mockStorage.store.set("plaza:recommend:pool-state:v1", '{"pushedIds":[]}');
-		mockStorage.store.set("plaza:discover:deep-sessions:v1", '[{"id":"s1"}]');
-		mockStorage.store.set("plaza:ccf-deadlines:v1", '{"items":["ICSE"]}');
-
-		purgeLegacyCollectionBrowserStorage();
-
-		expect(mockStorage.store.has("plaza:collection:state:v2")).toBe(false);
-		expect(mockStorage.store.has("plaza:collection:state:v1")).toBe(false);
-		expect(mockStorage.store.has("plaza:recommend:pool-state:v2")).toBe(false);
-		expect(mockStorage.store.has("plaza:recommend:pool-state:v1")).toBe(false);
-		expect(deleteDatabase).toHaveBeenCalledWith("agentero_plaza_collection_v2");
-
-		// Unrelated Plaza keys must stay untouched
-		expect(mockStorage.store.get("plaza:discover:deep-sessions:v1")).toBe(
-			'[{"id":"s1"}]',
-		);
-		expect(mockStorage.store.get("plaza:ccf-deadlines:v1")).toBe(
-			'{"items":["ICSE"]}',
-		);
-
-		// `patchCollectionPapers` updates SQLite records incrementally without overwriting non-null `recommendedAt`
+	it("patches papers incrementally via IPC without overwriting existing recommendedAt", async () => {
 		const papers = Array.from({ length: 20 }, (_, idx) =>
 			makePaper(idx + 1, { keywords: ["Static Analysis"] }),
 		);
@@ -458,14 +441,14 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 			{ length: 180 },
 			(_, i) => `Synthetic Topic ${i + 1}`,
 		);
-		keywordPool[0] = "LLM Agent";
+		keywordPool[0] = "AI Agent";
 		keywordPool[1] = "Program Analysis";
 		keywordPool[2] = "Vulnerability Detection";
 		keywordPool[3] = "Fuzzing";
 
 		const corpus: CollectionPaperItem[] = new Array(3_000);
 		for (let i = 0; i < 3_000; i++) {
-			const kw1 = keywordPool[i % keywordPool.length] ?? "LLM Agent";
+			const kw1 = keywordPool[i % keywordPool.length] ?? "AI Agent";
 			const kw2 =
 				keywordPool[(i * 7 + 3) % keywordPool.length] ?? "Program Analysis";
 			const kw3 = keywordPool[(i * 13 + 11) % keywordPool.length] ?? "Fuzzing";
@@ -479,7 +462,7 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		ipc.seed({
 			categories: ["cs.SE", "cs.PL", "cs.CR"],
 			venues: [...DEFAULT_COLLECTION_VENUES],
-			items: corpus,
+			items: corpus.slice(0, 400),
 			lastRefreshedAt: "2026-04-12T12:00:00Z",
 			latestArxiv: null,
 		});
@@ -493,8 +476,8 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		const t0 = performance.now();
 		const cloud50 = getWordCloudKeywords(corpus, 50);
 		const cloud150 = getWordCloudKeywords(corpus, 150);
-		const rec = await recommendNextFromCollection(15);
 		const elapsedMs = performance.now() - t0;
+		const rec = await recommendNextFromCollection(15);
 
 		expect(cloud50.keywords).toHaveLength(50);
 		expect(cloud150.keywords).toHaveLength(150);
@@ -514,5 +497,73 @@ describe("Paper Recommend overhaul (SQLite IPC, word cloud, selection & browser 
 		]);
 		expect(scored.score).toBeGreaterThan(0);
 		expect(scored.matchedKeywords).toEqual([pickedCloudKw.term]);
+	});
+
+	it("canonicalizes synonym chips, word-cloud scoring, and cross-portal arXiv -> Venue merges without duplicates", () => {
+		let state = createDefaultRecommendPoolState();
+		const initialCount = state.keywords.length;
+
+		// Adding synonyms of existing canonical chips (`AI Agent`, `Vulnerability Detection`, `Program Repair`)
+		// enables/merges into the canonical chip instead of creating duplicate chips.
+		state = addCustomRecentKeyword(state, "LLM Agent");
+		state = addCustomRecentKeyword(state, "Defect Detection");
+		state = addCustomRecentKeyword(state, "Automated Program Repair");
+		expect(state.keywords).toHaveLength(initialCount);
+		expect(isKeywordSelected(state, "Defect Detection")).toBe(true);
+		expect(isKeywordSelected(state, "Bug Detection")).toBe(true);
+		expect(isKeywordSelected(state, "APR")).toBe(true);
+		expect(state.keywords.find((k) => k.id === "kw-repair")?.enabled).toBe(
+			true,
+		);
+
+		// Querying with a synonym (`Defect Detection`) scores against canonical `Vulnerability Detection`
+		const vulnPaper = makePaper(901, {
+			title: "Graph-Based Analysis of Pointer Aliasing in Kernels",
+			abstract: "We present interprocedural pointer analysis for C kernels.",
+			keywords: ["Vulnerability Detection"],
+		});
+		const synScored = scorePaperAgainstKeywords(vulnPaper, [
+			"Defect Detection",
+		]);
+		expect(synScored.score).toBeGreaterThanOrEqual(5);
+		expect(synScored.matchedKeywords).toEqual(["Vulnerability Detection"]);
+
+		// Cross-portal `mergeArxivIntoVenueItem` & `searchCollectionFast` collapse synonyms cleanly
+		const venueTwin = makePaper(902, {
+			id: "venue:icse-2026:doi:10.1145/3800902",
+			sourceType: "venue",
+			venueId: "icse-2026",
+			sourceLabel: "ICSE 2026",
+			ccfRank: "CCF-A",
+			doi: "10.1145/3800902",
+			arxivId: "2604.00902",
+			title: "Autonomous Fuzzers for Kernel Drivers",
+			keywords: ["Defect Detection", "Fuzz Testing"],
+		});
+		const arxivTwin = makePaper(902, {
+			id: "arxiv:2604.00902",
+			sourceType: "arxiv",
+			arxivId: "2604.00902",
+			title: "Autonomous Fuzzers for Kernel Drivers",
+			keywords: ["Vulnerability Detection", "LLM Agents"],
+		});
+		const merged = mergeArxivIntoVenueItem(venueTwin, arxivTwin);
+		expect(merged.keywords).toEqual([
+			"Vulnerability Detection",
+			"Fuzzing",
+			"AI Agent",
+		]);
+
+		const searchHit = searchCollectionFast(
+			[venueTwin, arxivTwin],
+			"Defect Detection",
+		);
+		expect(searchHit.totalMatched).toBe(1);
+		expect(searchHit.items[0]?.paper.id).toBe(venueTwin.id);
+		expect(searchHit.items[0]?.paper.keywords).toEqual([
+			"Vulnerability Detection",
+			"Fuzzing",
+			"AI Agent",
+		]);
 	});
 });

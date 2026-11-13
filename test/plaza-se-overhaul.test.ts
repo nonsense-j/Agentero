@@ -7,7 +7,9 @@ import {
 	derivePaperKeywords,
 	formatPaperBibtex,
 	formatPaperCitationText,
+	isPaperMetadataComplete,
 	isPlaceholderAbstract,
+	normalizePaperKeywords,
 	parseArxivAtomXml,
 	parseArxivRssXml,
 	parseResearchrHtml,
@@ -15,11 +17,14 @@ import {
 	resetCollectionMemoryForTests,
 	VENUE_SPECS,
 } from "@/lib/plaza/collection";
+import {
+	applyCollectionToolOutputToSession,
+	type DeepDiscoverSession,
+} from "@/lib/plaza/deep-discover-store";
 import { ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
 import {
-	applyGrillOption,
-	type DeepSearchSession,
-	dedupeDiscoverPapers,
+	parseBooleanSearchQuery,
+	searchCollectionFast,
 } from "@/lib/plaza/paper-search";
 import {
 	DEFAULT_WORD_CLOUD_TOP_N,
@@ -32,20 +37,16 @@ import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
 vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
 
 describe("Plaza AI & SE overhaul", () => {
-	it("sets default arXiv categories to cs.SE, cs.CR, cs.PL, cs.AI", () => {
-		expect(DEFAULT_ARXIV_CATEGORIES).toEqual([
-			"cs.SE",
-			"cs.CR",
-			"cs.PL",
-			"cs.AI",
-		]);
+	it("sets default Collection arXiv categories to cs.SE, cs.CR, cs.PL (cs.AI off by default) while keeping cs.AI in feed chips", () => {
+		expect(DEFAULT_ARXIV_CATEGORIES).toEqual(["cs.SE", "cs.CR", "cs.PL"]);
 		expect(ARXIV_FEED_CHIPS).toEqual(["cs.SE", "cs.CR", "cs.PL", "cs.AI"]);
 	});
 
-	it("exposes the 4 Plaza modules in order: collection, discover, arxiv-rec, ccf-deadlines", () => {
+	it("exposes the 5 Plaza modules in order: collection, discover, survey, arxiv-rec, ccf-deadlines", () => {
 		expect(PLAZA_SOURCES.map((s) => s.id)).toEqual([
 			"collection",
 			"discover",
+			"survey",
 			"arxiv-rec",
 			"ccf-deadlines",
 		]);
@@ -153,14 +154,35 @@ describe("Plaza AI & SE overhaul", () => {
 		expect(isPlaceholderAbstract("ICSE 2026 · ICSE", "ICSE 2026")).toBe(true);
 		expect(isPlaceholderAbstract(abstract, "ICSE 2026")).toBe(false);
 
-		const keywords = derivePaperKeywords(
+		const noUpstreamKeywords = derivePaperKeywords(
 			"Directed Fuzzing for Smart Contracts via Static Analysis",
 			abstract,
 			["cs.SE"],
 		);
-		expect(keywords).toEqual(
-			expect.arrayContaining(["Fuzzing", "Static Analysis", "Smart Contract"]),
+		expect(noUpstreamKeywords).toEqual([]);
+
+		const keywords = derivePaperKeywords(
+			"Directed Fuzzing for Smart Contracts via Static Analysis",
+			abstract,
+			["cs.SE"],
+			["Directed Fuzzing", "Smart Contract Verification", "Computer Science"],
 		);
+		expect(keywords).toEqual([
+			"Directed Fuzzing",
+			"Smart Contract Verification",
+		]);
+
+		// Collapses shared-word synonyms on the same paper into a single canonical keyword
+		expect(
+			normalizePaperKeywords([
+				"Defect Detection",
+				"Vulnerability Detection",
+				"Bug Detection",
+				"LLM Agents; Agentic AI",
+				"Computer Science",
+				"cs.SE",
+			]),
+		).toEqual(["Vulnerability Detection", "AI Agent"]);
 
 		const sampleItem: CollectionPaperItem = {
 			id: "doi:10.1145/3770000",
@@ -185,6 +207,16 @@ describe("Plaza AI & SE overhaul", () => {
 		expect(formatPaperBibtex(sampleItem)).toContain(
 			"@inproceedings{smith2026directed,",
 		);
+		expect(isPaperMetadataComplete(sampleItem)).toBe(true);
+		expect(isPaperMetadataComplete({ ...sampleItem, keywords: [] })).toBe(
+			false,
+		);
+		expect(
+			isPaperMetadataComplete({
+				...sampleItem,
+				abstract: "ISSTA 2026 · ISSTA",
+			}),
+		).toBe(false);
 	});
 
 	it("parses fast rss.arxiv.org XML feeds with complete abstracts and derived keywords", () => {
@@ -209,9 +241,7 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 		expect(parsed[0]?.abstract).toBe(
 			"We introduce a symbolic execution engine tailored for verifying multi-agent LLM tool invocations.",
 		);
-		expect(parsed[0]?.keywords).toEqual(
-			expect.arrayContaining(["Symbolic Execution", "LLM Agent"]),
-		);
+		expect(parsed[0]?.keywords).toEqual([]);
 	});
 
 	it("parses 2026 arXiv Atom XML and drops pre-2026 entries when 2026 items exist", () => {
@@ -270,77 +300,182 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 		expect(papers[0]?.sourceLabel).toBe("ICSE 2026");
 	});
 
-	it("deduplicates discovered papers across sources and merges DOIs/arXiv IDs", () => {
-		const deduped = dedupeDiscoverPapers([
+	it("searches strictly within Paper Collection using boolean syntax and combinable CCF/Venue/Date filters in Fast Search", () => {
+		const pool: CollectionPaperItem[] = [
 			{
-				id: "dblp:1",
-				title: "Greybox Fuzzing for Smart Contracts",
+				id: "doi:10.1145/icse-1",
+				title: "Multi-Agent Program Repair for Rust Memory Bugs",
 				authors: ["Alice"],
-				abstract: "",
+				abstract:
+					"We present an autonomous multi-agent workflow for repairing memory safety bugs.",
+				publishedAt: "2026-03-20T00:00:00Z",
 				year: 2026,
-				venue: "ICSE",
-				source: "dblp",
-				sources: ["dblp"],
-				url: "https://doi.org/10.1145/12345",
-				pdfUrl: "",
-				doi: "10.1145/12345",
-				arxivId: "",
-				citationCount: 2,
-				matchedQueries: ["fuzzing"],
+				sourceType: "venue",
+				sourceLabel: "ICSE 2026",
+				venueId: "icse-2026",
+				venueKind: "conference",
+				venueDomain: "PL/SE",
+				ccfRank: "CCF-A",
+				categories: ["ICSE 2026"],
+				url: "https://doi.org/10.1145/icse-1",
+				doi: "10.1145/icse-1",
+				citationCount: 15,
+				keywords: ["Multi-Agent", "Program Repair"],
 			},
 			{
-				id: "arxiv:2601.00001",
-				title: "Greybox Fuzzing for Smart Contracts!",
-				authors: ["Alice", "Bob"],
-				abstract: "Full abstract from arXiv.",
+				id: "arxiv:2603.00999",
+				title: "Symbolic Execution and Greybox Fuzzing Survey",
+				authors: ["Bob"],
+				abstract: "A comprehensive survey of symbolic execution and fuzzing.",
+				publishedAt: "2026-03-25T00:00:00Z",
 				year: 2026,
-				venue: "arXiv",
-				source: "arxiv",
-				sources: ["arxiv"],
-				url: "https://arxiv.org/abs/2601.00001",
-				pdfUrl: "https://arxiv.org/pdf/2601.00001.pdf",
-				doi: "",
-				arxivId: "2601.00001",
-				citationCount: 5,
-				matchedQueries: ["fuzzing"],
+				sourceType: "arxiv",
+				sourceLabel: "cs.SE",
+				categories: ["cs.SE"],
+				url: "https://arxiv.org/abs/2603.00999",
+				arxivId: "2603.00999",
+				citationCount: 4,
+				keywords: ["Symbolic Execution", "Fuzzing"],
 			},
+			{
+				id: "doi:10.1145/saner-2",
+				title: "Multi-Agent Test Generation in Industry",
+				authors: ["Carol"],
+				abstract: "Evaluates multi-agent test generation without survey noise.",
+				publishedAt: "2026-01-10T00:00:00Z",
+				year: 2026,
+				sourceType: "venue",
+				sourceLabel: "SANER 2026",
+				venueId: "saner-2026",
+				venueKind: "conference",
+				venueDomain: "PL/SE",
+				ccfRank: "CCF-B",
+				categories: ["SANER 2026"],
+				url: "https://doi.org/10.1145/saner-2",
+				doi: "10.1145/saner-2",
+				citationCount: 6,
+				keywords: ["Multi-Agent", "Software Testing"],
+			},
+		];
+
+		const parsed = parseBooleanSearchQuery('"multi-agent" OR fuzzing -survey');
+		expect(parsed.branches).toHaveLength(2);
+
+		// Negation `-survey` drops arxiv:2603.00999; combinable CCF-A + arxiv drops CCF-B SANER
+		const filtered = searchCollectionFast(
+			pool,
+			'"multi-agent" OR fuzzing -survey',
+			{
+				ccfRanks: ["CCF-A", "arxiv"],
+			},
+		);
+		expect(filtered.totalMatched).toBe(1);
+		expect(filtered.items[0]?.paper.id).toBe("doi:10.1145/icse-1");
+
+		// Custom date range filter
+		const marchOnly = searchCollectionFast(pool, "", {
+			timePreset: "custom",
+			dateFrom: "2026-03-01",
+			dateTo: "2026-03-31",
+			sort: "citations",
+		});
+		expect(marchOnly.items.map((x) => x.paper.id)).toEqual([
+			"doi:10.1145/icse-1",
+			"arxiv:2603.00999",
 		]);
-		expect(deduped).toHaveLength(1);
-		expect(deduped[0]?.doi).toBe("10.1145/12345");
-		expect(deduped[0]?.arxivId).toBe("2601.00001");
-		expect(deduped[0]?.abstract).toBe("Full abstract from arXiv.");
 	});
 
-	it("refines split queries step-by-step in Grill-Me Deep Search session", () => {
-		const firstOption = {
-			id: "se-focus",
-			label: "(Recommended) SE & Program Analysis",
-			addedQueries: ["LLM vulnerability repair static analysis"],
-			recommended: true,
+	it("tracks This turn / History / Selected in the Deep Search tray across turns", () => {
+		const turn = (id: string) => ({
+			id,
+			role: "assistant" as const,
+			content: "",
+			createdAt: "2026-04-01T00:00:00Z",
+		});
+		const initial: DeepDiscoverSession = {
+			id: "deep_1",
+			title: "Multi-agent testing",
+			createdAt: "2026-04-01T00:00:00Z",
+			updatedAt: "2026-04-01T00:00:00Z",
+			agentId: "codex",
+			modelId: null,
+			providerSessionId: null,
+			messages: [turn("ast_1")],
+			tray: [],
 		};
-		const session: DeepSearchSession = {
-			originalQuery: "LLM vulnerability repair",
-			probeSummary: "Initial probe",
-			probePreviewPapers: [],
-			splitQueries: ["LLM vulnerability repair"],
-			stepIndex: 0,
-			steps: [
-				{
-					id: "granularity",
-					stepNumber: 1,
-					totalSteps: 1,
-					question: "Target scope?",
-					options: [firstOption],
+
+		// Turn 1: two curate calls merge; `keep: true` selects a paper.
+		const afterA = applyCollectionToolOutputToSession(
+			initial,
+			"mcp__agentero-collection__collection_curate",
+			{
+				structuredContent: {
+					groups: [
+						{
+							label: "Multi-Agent Repair",
+							items: [
+								{
+									id: "arxiv:2603.00001",
+									reason: "Core repair workflow",
+									keep: true,
+								},
+							],
+						},
+					],
+					suggestedFollowUps: ["Zoom into multi-agent repair"],
+					unkeepIds: [],
+					droppedUnknownIds: [],
 				},
-			],
-			answers: [],
-			readyToExecute: false,
-		};
-		const next = applyGrillOption(session, firstOption);
-		expect(next.readyToExecute).toBe(true);
-		expect(next.splitQueries).toContain(
-			"LLM vulnerability repair static analysis",
+			},
 		);
+		expect(afterA.suggestedFollowUps).toEqual(["Zoom into multi-agent repair"]);
+		const afterB = applyCollectionToolOutputToSession(
+			afterA.session,
+			"collection_curate",
+			undefined,
+			{
+				groups: [
+					{
+						label: "Benchmarks",
+						items: [{ id: "doi:10.1145/icse-2", reason: "CCF-A benchmark" }],
+					},
+				],
+			},
+		);
+		expect(
+			afterB.session.tray.map((e) => [e.id, e.turnId, Boolean(e.kept)]),
+		).toEqual([
+			["arxiv:2603.00001", "ast_1", true],
+			["doi:10.1145/icse-2", "ast_1", false],
+		]);
+
+		// Turn 2: the benchmark paper re-surfaces; the kept one moves to History, then is unkept.
+		const turn2 = {
+			...afterB.session,
+			messages: [...afterB.session.messages, turn("ast_2")],
+		};
+		const afterC = applyCollectionToolOutputToSession(
+			turn2,
+			"collection_curate",
+			{
+				groups: [
+					{
+						label: "Still relevant",
+						items: [{ id: "doi:10.1145/icse-2" }, { id: "doi:10.1145/fse-9" }],
+					},
+				],
+				unkeepIds: ["arxiv:2603.00001"],
+			},
+		);
+		const byId = new Map(afterC.session.tray.map((e) => [e.id, e]));
+		expect(byId.get("arxiv:2603.00001")).toMatchObject({ turnId: "ast_1" });
+		expect(byId.get("arxiv:2603.00001")?.kept).toBeFalsy();
+		expect(byId.get("doi:10.1145/icse-2")).toMatchObject({
+			turnId: "ast_2",
+			group: "Still relevant",
+			reason: "CCF-A benchmark",
+		});
+		expect(byId.get("doi:10.1145/fse-9")?.turnId).toBe("ast_2");
 	});
 
 	it("matches keywords and never repeats previously pushed papers in Paper Recommend", async () => {
@@ -375,7 +510,7 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 			{ id: "k1", term: "LLM", enabled: true },
 			{ id: "k2", term: "Fuzzing", enabled: true },
 		]);
-		expect(scored.matchedKeywords).toEqual(["LLM", "Fuzzing"]);
+		expect(scored.matchedKeywords).toEqual(["Large Language Model", "Fuzzing"]);
 		expect(scored.score).toBeGreaterThan(3);
 
 		resetCollectionMemoryForTests();
