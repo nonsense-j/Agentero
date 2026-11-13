@@ -36,56 +36,6 @@ export const DEFAULT_COLLECTION_VENUES: readonly VenueConfig[] =
 		ccfRank: spec.ccfRank,
 	}));
 
-const LEGACY_COLLECTION_STORAGE_KEYS = [
-	"plaza:collection:state:v2",
-	"plaza:collection:state:v1",
-	"plaza:recommend:pool-state:v2",
-	"plaza:recommend:pool-state:v1",
-] as const;
-
-const LEGACY_COLLECTION_IDB_NAME = "agentero_plaza_collection_v2";
-
-/**
- * One-time best-effort cleanup of legacy client-side `localStorage` and
- * `IndexedDB` collection/recommend keys. Preserves `plaza:discover:deep-sessions:v1`
- * and `plaza:ccf-deadlines:v1`.
- */
-export function purgeLegacyCollectionBrowserStorage(): void {
-	try {
-		if (
-			typeof localStorage !== "undefined" &&
-			localStorage &&
-			typeof localStorage.removeItem === "function"
-		) {
-			for (const key of LEGACY_COLLECTION_STORAGE_KEYS) {
-				try {
-					localStorage.removeItem(key);
-				} catch {
-					// Ignore quota / security errors per key.
-				}
-			}
-		}
-	} catch {
-		// Ignore environments without Web Storage.
-	}
-
-	try {
-		if (
-			typeof indexedDB !== "undefined" &&
-			indexedDB &&
-			typeof indexedDB.deleteDatabase === "function"
-		) {
-			indexedDB.deleteDatabase(LEGACY_COLLECTION_IDB_NAME);
-		}
-	} catch {
-		// Ignore environments without IndexedDB.
-	}
-}
-
-if (typeof window !== "undefined") {
-	purgeLegacyCollectionBrowserStorage();
-}
-
 export type ArxivLatestRecord = {
 	arxivId: string;
 	title: string;

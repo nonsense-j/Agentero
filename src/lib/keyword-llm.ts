@@ -11,6 +11,7 @@
  * avoid CORS restrictions, and honor app proxy settings.
  */
 
+import { BackgroundTaskCancelledError } from "@/lib/core/background-tasks";
 import { commands } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
 import { hasSecret, isSecretMask } from "@/lib/core/secret-mask";
@@ -431,10 +432,14 @@ async function callKeywordLlmChunkViaFetch(
 	chunk: readonly KeywordLlmInput[],
 	cfg: KeywordLlmSettings,
 	fetchFn: typeof fetch,
+	signal?: AbortSignal,
 ): Promise<{
 	byIndex: Record<string, string[]>;
 	abortRemaining: boolean;
 }> {
+	if (signal?.aborted) {
+		throw new BackgroundTaskCancelledError();
+	}
 	const chatUrl = resolveKeywordLlmChatUrl(cfg.baseUrl, cfg.provider);
 	if (!chatUrl) {
 		return { byIndex: {}, abortRemaining: true };
@@ -454,6 +459,11 @@ async function callKeywordLlmChunkViaFetch(
 	const sendOnce = async (minimalFallback: boolean): Promise<Response> => {
 		const ac = new AbortController();
 		const timer = setTimeout(() => ac.abort(), 22_000);
+		const onExternalAbort = () => ac.abort();
+		if (signal) {
+			if (signal.aborted) ac.abort();
+			else signal.addEventListener("abort", onExternalAbort, { once: true });
+		}
 		try {
 			const body: Record<string, unknown> = {
 				model,
@@ -481,12 +491,19 @@ async function callKeywordLlmChunkViaFetch(
 			});
 		} finally {
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onExternalAbort);
 		}
 	};
 
 	let resp = await sendOnce(false);
+	if (signal?.aborted) {
+		throw new BackgroundTaskCancelledError();
+	}
 	if (resp.status === 400) {
 		resp = await sendOnce(true);
+		if (signal?.aborted) {
+			throw new BackgroundTaskCancelledError();
+		}
 	}
 	if (resp.status === 401 || resp.status === 402 || resp.status === 429) {
 		return { byIndex: {}, abortRemaining: true };
@@ -503,11 +520,15 @@ async function callKeywordLlmChunkViaFetch(
 
 async function callKeywordLlmChunkViaHost(
 	chunk: readonly KeywordLlmInput[],
+	signal?: AbortSignal,
 ): Promise<{
 	byIndex: Record<string, string[]>;
 	abortRemaining: boolean;
 }> {
-	const res = await callApi(
+	if (signal?.aborted) {
+		throw new BackgroundTaskCancelledError();
+	}
+	const callPromise = callApi(
 		() =>
 			commands.keywordLlmChatComplete(
 				KEYWORD_SYSTEM_PROMPT,
@@ -516,6 +537,22 @@ async function callKeywordLlmChunkViaHost(
 			),
 		{ fallback: "Keyword LLM completion failed" },
 	);
+	const res = signal
+		? await new Promise<Awaited<typeof callPromise>>((resolve, reject) => {
+				const onAbort = () => reject(new BackgroundTaskCancelledError());
+				signal.addEventListener("abort", onAbort, { once: true });
+				callPromise.then(
+					(val) => {
+						signal.removeEventListener("abort", onAbort);
+						resolve(val);
+					},
+					(err) => {
+						signal.removeEventListener("abort", onAbort);
+						reject(err);
+					},
+				);
+			})
+		: await callPromise;
 	if (!res) {
 		return { byIndex: {}, abortRemaining: true };
 	}
@@ -542,8 +579,13 @@ export async function extractKeywordsWithKeywordLlmBatch(
 		batchSize?: number;
 		concurrency?: number;
 		fetchFn?: typeof fetch;
+		signal?: AbortSignal;
+		onProgress?: (completed: number, total: number) => void;
 	},
 ): Promise<Map<string, string[]>> {
+	if (options?.signal?.aborted) {
+		throw new BackgroundTaskCancelledError();
+	}
 	const result = new Map<string, string[]>();
 	if (items.length === 0) return result;
 
@@ -586,19 +628,30 @@ export async function extractKeywordsWithKeywordLlmBatch(
 	}
 
 	let cursor = 0;
+	let completedItems = 0;
 	let circuitBroken = false;
 	const fetchFn = options?.fetchFn ?? globalThis.fetch;
+	options?.onProgress?.(0, validItems.length);
 
 	const worker = async () => {
-		while (!circuitBroken && cursor < chunks.length) {
+		while (
+			!circuitBroken &&
+			!options?.signal?.aborted &&
+			cursor < chunks.length
+		) {
 			const idx = cursor++;
 			const chunk = chunks[idx];
 			if (!chunk) continue;
 			try {
 				const { byIndex, abortRemaining } =
 					useDirectFetch && directCfg
-						? await callKeywordLlmChunkViaFetch(chunk, directCfg, fetchFn)
-						: await callKeywordLlmChunkViaHost(chunk);
+						? await callKeywordLlmChunkViaFetch(
+								chunk,
+								directCfg,
+								fetchFn,
+								options?.signal,
+							)
+						: await callKeywordLlmChunkViaHost(chunk, options?.signal);
 				if (abortRemaining) {
 					circuitBroken = true;
 					return;
@@ -610,8 +663,19 @@ export async function extractKeywordsWithKeywordLlmBatch(
 						result.set(target.id, kws);
 					}
 				}
-			} catch {
+			} catch (err) {
+				if (options?.signal?.aborted) {
+					throw err;
+				}
 				// Best-effort fallback: never fail arXiv or Venue refresh when LLM endpoint errors.
+			} finally {
+				if (!options?.signal?.aborted) {
+					completedItems = Math.min(
+						validItems.length,
+						completedItems + chunk.length,
+					);
+					options?.onProgress?.(completedItems, validItems.length);
+				}
 			}
 		}
 	};
@@ -621,6 +685,9 @@ export async function extractKeywordsWithKeywordLlmBatch(
 			worker(),
 		),
 	);
+	if (options?.signal?.aborted) {
+		throw new BackgroundTaskCancelledError();
+	}
 
 	return result;
 }

@@ -7,6 +7,7 @@
  * without any DBLP dependency.
  */
 
+import { extractKeywordsWithKeywordLlmBatch } from "@/lib/keyword-llm";
 import { hasCachedOpenAlexApiKey } from "@/lib/openalex";
 import {
 	backfillSpringerAbstracts,
@@ -23,14 +24,19 @@ import {
 	isExcludedByDoiPrefix,
 	isFrontmatterTitle,
 	isNonResearchJournalItem,
+	isPaperMetadataComplete,
 	isPlaceholderAbstract,
 	isPositionPaperTitle,
 	isWorkshopOrCompanionVenue,
 	matchesConfiguredDoiPrefix,
 	normalizePaperKeywords,
+	scoreCameraReadyCandidateMatch,
+	throwIfAborted,
 	VENUE_SPEC_BY_ID,
 	type VenueConfig,
 	type VenueSpec,
+	wrapFetchJsonWithAbort,
+	wrapFetchTextWithAbort,
 } from "@/lib/plaza/collection-enrichment";
 
 const IS_TEST_ENV =
@@ -1493,35 +1499,52 @@ export async function fetchDataCiteLipicsPapers(
 	];
 
 	try {
-		const url = `https://api.datacite.org/dois?query=${encodeURIComponent(`id:${prefix}.*`)}&page[size]=250`;
-		const res = await fetchJson<{
-			data?: Array<{
-				id?: string;
-				attributes?: {
-					titles?: Array<{ title?: string }>;
-					creators?: Array<{
-						givenName?: string;
-						familyName?: string;
-						name?: string;
-					}>;
-					descriptions?: Array<{
-						descriptionType?: string;
-						description?: string;
-					}>;
-					subjects?: Array<{
-						subject?: string;
-						subjectScheme?: string;
-						schemeUri?: string;
-					}>;
-					url?: string;
-					contentUrl?: string | string[] | null;
-					published?: string | null;
-				};
-			}>;
-		}>(url);
+		type DataCiteRow = {
+			id?: string;
+			attributes?: {
+				titles?: Array<{ title?: string }>;
+				creators?: Array<{
+					givenName?: string;
+					familyName?: string;
+					name?: string;
+				}>;
+				descriptions?: Array<{
+					descriptionType?: string;
+					description?: string;
+				}>;
+				subjects?: Array<{
+					subject?: string;
+					subjectScheme?: string;
+					schemeUri?: string;
+				}>;
+				url?: string;
+				contentUrl?: string | string[] | null;
+				published?: string | null;
+			};
+		};
+		type DataCiteResponse = {
+			data?: DataCiteRow[];
+			meta?: { total?: number; totalPages?: number; page?: number };
+		};
+
+		const rows: DataCiteRow[] = [];
+		const MAX_PAGES = 5;
+		let totalPages = 1;
+		for (let page = 1; page <= totalPages && page <= MAX_PAGES; page++) {
+			const pageSuffix = page > 1 ? `&page[number]=${page}` : "";
+			const url = `https://api.datacite.org/dois?query=${encodeURIComponent(`id:${prefix}.*`)}&page[size]=250${pageSuffix}`;
+			const res = await fetchJson<DataCiteResponse>(url);
+			const pageRows = res.data ?? [];
+			rows.push(...pageRows);
+			const reportedPages = res.meta?.totalPages;
+			if (typeof reportedPages === "number" && reportedPages > totalPages) {
+				totalPages = reportedPages;
+			}
+			if (pageRows.length < 250) break;
+		}
 
 		const items: CollectionPaperItem[] = [];
-		for (const row of res.data ?? []) {
+		for (const row of rows) {
 			const doi = cleanDoi(row.id);
 			if (!doi?.toLowerCase().startsWith(`${prefix}.`)) continue;
 			// Skip `.0` frontmatter volume entry in LIPIcs
@@ -1932,60 +1955,299 @@ function backfillMissingMetadataFromChannel(
 	});
 }
 
-function normalizeSpellingToken(word: string): string {
-	return word
-		.replace(/^modelling$/, "modeling")
-		.replace(/^modelled$/, "modeled")
-		.replace(/^behaviours?$/, "behavior")
-		.replace(/^behaviors$/, "behavior")
-		.replace(/^artefacts?$/, "artifact")
-		.replace(/^artifacts$/, "artifact")
-		.replace(/^programmes?$/, "program")
-		.replace(/^programs$/, "program")
-		.replace(/isation$/, "ization")
-		.replace(/ising$/, "izing")
-		.replace(/ised$/, "ized")
-		.replace(/yse$/, "yze")
-		.replace(/ysing$/, "yzing")
-		.replace(/ysed$/, "yzed");
+type ExistingVenueLookup = {
+	completeItems: CollectionPaperItem[];
+	findMatch: (item: CollectionPaperItem) => {
+		matched: CollectionPaperItem | undefined;
+		isComplete: boolean;
+	};
+};
+
+function normVenueTitleKey(title: string): string {
+	return title
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase()
+		.replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
 }
 
-function tokenizeTitleForFuzzyMatch(title: string): Set<string> {
-	const tokens = new Set<string>();
-	for (const raw of title.toLowerCase().split(/[^a-z0-9]+/)) {
-		if (raw.length < 3) continue;
-		tokens.add(normalizeSpellingToken(raw));
-	}
-	return tokens;
+function stripVenueArxivVersion(raw: string | undefined | null): string {
+	if (!raw) return "";
+	return raw
+		.trim()
+		.replace(/^arxiv:/i, "")
+		.replace(/v\d+$/i, "")
+		.toLowerCase();
 }
 
-function extractAuthorSurnames(authors: readonly string[]): Set<string> {
-	const out = new Set<string>();
-	const suffixes = new Set(["jr", "sr", "ii", "iii", "iv"]);
-	for (const a of authors) {
-		const parts = a
-			.toLowerCase()
-			.replace(/[^a-z\s]+/g, " ")
-			.trim()
-			.split(/\s+/)
-			.filter((t) => t.length >= 2 && !suffixes.has(t));
-		const last = parts[parts.length - 1];
-		if (last) out.add(last);
+function buildExistingVenueLookup(
+	existingItems: readonly CollectionPaperItem[] | undefined,
+	venueName: string,
+): ExistingVenueLookup {
+	const existingList: CollectionPaperItem[] = [];
+	const byId = new Map<string, CollectionPaperItem>();
+	const byDoi = new Map<string, CollectionPaperItem>();
+	const byArxiv = new Map<string, CollectionPaperItem>();
+	const byTitle = new Map<string, CollectionPaperItem>();
+	const completeItems: CollectionPaperItem[] = [];
+
+	const isComplete = (item: CollectionPaperItem): boolean =>
+		isPaperMetadataComplete(item, venueName);
+
+	for (const ex of existingItems ?? []) {
+		if (!ex) continue;
+		existingList.push(ex);
+		if (isComplete(ex)) {
+			completeItems.push(ex);
+		}
+		if (ex.id) byId.set(ex.id, ex);
+		const d = cleanDoi(ex.doi)?.toLowerCase();
+		if (d && !isArxivDoi(d)) byDoi.set(d, ex);
+		const aid = stripVenueArxivVersion(ex.arxivId);
+		if (aid) byArxiv.set(aid, ex);
+		const tk = normVenueTitleKey(ex.title);
+		if (tk && !byTitle.has(tk)) byTitle.set(tk, ex);
 	}
-	return out;
+
+	return {
+		completeItems,
+		findMatch: (item) => {
+			const d = cleanDoi(item.doi)?.toLowerCase();
+			const aid = stripVenueArxivVersion(item.arxivId);
+			const tk = normVenueTitleKey(item.title);
+			let matched =
+				byId.get(item.id) ??
+				(d && !isArxivDoi(d) ? byDoi.get(d) : undefined) ??
+				(aid ? byArxiv.get(aid) : undefined) ??
+				(tk ? byTitle.get(tk) : undefined);
+			if (!matched && existingList.length > 0 && item.authors.length > 0) {
+				let bestScore = 0;
+				for (const ex of existingList) {
+					const res = scoreCameraReadyCandidateMatch(
+						item.title,
+						item.authors,
+						ex.title,
+						ex.authors,
+					);
+					if (res.matched && res.score > bestScore) {
+						bestScore = res.score;
+						matched = ex;
+					}
+				}
+			}
+			return {
+				matched,
+				isComplete: Boolean(matched && isComplete(matched)),
+			};
+		},
+	};
 }
 
-function computeSetJaccard(
-	a: ReadonlySet<string>,
-	b: ReadonlySet<string>,
-): number {
-	if (a.size === 0 || b.size === 0) return 0;
-	let inter = 0;
-	for (const tok of a) {
-		if (b.has(tok)) inter += 1;
+function mergeExistingIntoFreshVenueItem(
+	fresh: CollectionPaperItem,
+	existing: CollectionPaperItem,
+	venue: VenueConfig,
+): CollectionPaperItem {
+	const freshPlaceholder = isPlaceholderAbstract(fresh.abstract, venue.name);
+	const exPlaceholder = isPlaceholderAbstract(existing.abstract, venue.name);
+	const bestAbstract =
+		freshPlaceholder && !exPlaceholder
+			? existing.abstract
+			: !freshPlaceholder && exPlaceholder
+				? fresh.abstract
+				: fresh.abstract.length >= existing.abstract.length
+					? fresh.abstract
+					: existing.abstract;
+	const bestDoi = pickPreferredDoi(fresh.doi, existing.doi);
+	const bestArxivId = fresh.arxivId || existing.arxivId;
+	const bestPublishedAt =
+		fresh.publishedAt.endsWith("-01-01T00:00:00Z") &&
+		existing.publishedAt &&
+		!existing.publishedAt.endsWith("-01-01T00:00:00Z")
+			? existing.publishedAt
+			: fresh.publishedAt || existing.publishedAt;
+
+	const bestTitle =
+		existing.title &&
+		existing.doi &&
+		!isArxivDoi(existing.doi) &&
+		(!fresh.doi || isArxivDoi(fresh.doi))
+			? existing.title
+			: fresh.title;
+
+	return {
+		...fresh,
+		id: buildVenuePaperId(venue.id, bestDoi, bestArxivId, bestTitle),
+		title: bestTitle,
+		abstract: isPlaceholderAbstract(bestAbstract, venue.name)
+			? ""
+			: bestAbstract,
+		publishedAt: bestPublishedAt,
+		doi: bestDoi,
+		arxivId: bestArxivId,
+		pdfUrl:
+			fresh.pdfUrl ||
+			existing.pdfUrl ||
+			(bestArxivId ? `https://arxiv.org/pdf/${bestArxivId}.pdf` : undefined),
+		coolPapersId: fresh.coolPapersId || existing.coolPapersId,
+		volume: fresh.volume || existing.volume,
+		issue: fresh.issue || existing.issue,
+		pages: fresh.pages || existing.pages,
+		bibtex: fresh.bibtex || existing.bibtex,
+		...(fresh.recommendedAt || existing.recommendedAt
+			? { recommendedAt: fresh.recommendedAt || existing.recommendedAt }
+			: {}),
+		venueFull:
+			fresh.venueFull && fresh.venueFull !== venue.name
+				? fresh.venueFull
+				: existing.venueFull || fresh.venueFull,
+		citationCount: Math.max(
+			fresh.citationCount ?? 0,
+			existing.citationCount ?? 0,
+		),
+		keywords: normalizePaperKeywords([
+			...(fresh.keywords ?? []),
+			...(existing.keywords ?? []),
+		]),
+	};
+}
+
+function reconcileFreshWithExisting(
+	freshItems: readonly CollectionPaperItem[],
+	existingLookup: ExistingVenueLookup,
+	venue: VenueConfig,
+): {
+	items: CollectionPaperItem[];
+	incompleteOrNewIndices: number[];
+} {
+	const items: CollectionPaperItem[] = [];
+	const incompleteOrNewIndices: number[] = [];
+
+	for (let i = 0; i < freshItems.length; i++) {
+		const fresh = freshItems[i];
+		if (!fresh) continue;
+		const { matched, isComplete } = existingLookup.findMatch(fresh);
+		const merged = matched
+			? mergeExistingIntoFreshVenueItem(fresh, matched, venue)
+			: fresh;
+		items.push(merged);
+		if (!isComplete) {
+			incompleteOrNewIndices.push(items.length - 1);
+		}
 	}
-	const union = a.size + b.size - inter;
-	return union > 0 ? inter / union : 0;
+
+	return { items, incompleteOrNewIndices };
+}
+
+async function enrichSubsetInPlace(
+	items: CollectionPaperItem[],
+	targetIndices: readonly number[],
+	venue: VenueConfig,
+	fetchJson: FetchJsonFn,
+	preloadedItems?: readonly CollectionPaperItem[],
+): Promise<CollectionPaperItem[]> {
+	if (targetIndices.length === 0) return items;
+	const subset = targetIndices
+		.map((idx) => items[idx])
+		.filter((x): x is CollectionPaperItem => Boolean(x));
+	if (subset.length === 0) return items;
+
+	const enrichedSubset = await enrichVenueItemsBatch(
+		subset,
+		venue,
+		fetchJson,
+		preloadedItems,
+	);
+	const next = [...items];
+	if (enrichedSubset.length === targetIndices.length) {
+		for (let k = 0; k < targetIndices.length; k++) {
+			const targetIdx = targetIndices[k];
+			const enrichedItem = enrichedSubset[k];
+			if (targetIdx !== undefined && enrichedItem) {
+				next[targetIdx] = enrichedItem;
+			}
+		}
+		return next;
+	}
+	return backfillMissingMetadataFromChannel(next, enrichedSubset);
+}
+
+async function backfillMissingVenueKeywordsWithKeywordLlm(
+	items: CollectionPaperItem[],
+	keywordLlmFetch?: typeof fetch,
+): Promise<CollectionPaperItem[]> {
+	const missingIndices: number[] = [];
+	for (let idx = 0; idx < items.length; idx++) {
+		if (normalizePaperKeywords(items[idx]?.keywords).length === 0) {
+			missingIndices.push(idx);
+		}
+	}
+	if (missingIndices.length === 0) return items;
+
+	const batchInputs = missingIndices
+		.map((idx) => items[idx])
+		.filter((x): x is CollectionPaperItem => Boolean(x))
+		.map((p) => ({
+			id: p.id,
+			title: p.title,
+			abstract: p.abstract,
+		}));
+	if (batchInputs.length === 0) return items;
+
+	const extracted = await extractKeywordsWithKeywordLlmBatch(batchInputs, {
+		fetchFn: keywordLlmFetch,
+	});
+	if (extracted.size === 0) return items;
+
+	const next = [...items];
+	for (const idx of missingIndices) {
+		const item = next[idx];
+		if (!item) continue;
+		const llmKws = normalizePaperKeywords(extracted.get(item.id), 8);
+		if (llmKws.length > 0) {
+			next[idx] = {
+				...item,
+				keywords: llmKws,
+			};
+		}
+	}
+	return next;
+}
+
+/**
+ * Reconcile freshly extracted custom / Agent venue items against cached SQLite rows,
+ * enriching only new or incomplete items via OpenAlex + author union and Keyword LLM fallback.
+ */
+export async function finalizeVenuePapersWithSmartDiff(
+	freshItems: readonly CollectionPaperItem[],
+	venue: VenueConfig,
+	fetchJson: FetchJsonFn,
+	options?: {
+		existingItems?: readonly CollectionPaperItem[];
+		keywordLlmFetch?: typeof fetch;
+	},
+): Promise<CollectionPaperItem[]> {
+	if (freshItems.length === 0) return [];
+	const existingLookup = buildExistingVenueLookup(
+		options?.existingItems,
+		venue.name,
+	);
+	const reconciled = reconcileFreshWithExisting(
+		freshItems,
+		existingLookup,
+		venue,
+	);
+	const enriched = await enrichSubsetInPlace(
+		reconciled.items,
+		reconciled.incompleteOrNewIndices,
+		venue,
+		fetchJson,
+		existingLookup.completeItems,
+	);
+	return backfillMissingVenueKeywordsWithKeywordLlm(
+		enriched,
+		options?.keywordLlmFetch,
+	);
 }
 
 /**
@@ -1999,14 +2261,18 @@ async function mergePublisherIntoTrackRoster(
 	publisherItems: readonly CollectionPaperItem[],
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
+	options?: {
+		openAlexHydrated?: boolean;
+		existingLookup?: ExistingVenueLookup;
+		signal?: AbortSignal;
+	},
 ): Promise<CollectionPaperItem[]> {
+	throwIfAborted(options?.signal);
 	if (rosterItems.length === 0) return [];
 
 	const pubList = [...publisherItems];
 	const pubByDoi = new Map<string, number>();
 	const pubByNormTitle = new Map<string, number>();
-	const pubTokens = pubList.map((p) => tokenizeTitleForFuzzyMatch(p.title));
-	const pubSurnames = pubList.map((p) => extractAuthorSurnames(p.authors));
 
 	for (let i = 0; i < pubList.length; i++) {
 		const p = pubList[i];
@@ -2014,66 +2280,86 @@ async function mergePublisherIntoTrackRoster(
 		if (p.doi && !isArxivDoi(p.doi)) {
 			pubByDoi.set(p.doi.toLowerCase(), i);
 		}
-		const tk = p.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		const tk = normVenueTitleKey(p.title);
 		if (tk && !pubByNormTitle.has(tk)) {
 			pubByNormTitle.set(tk, i);
 		}
 	}
 
 	const usedPubIndices = new Set<number>();
+	const matchedPubIdx = new Array<number | undefined>(rosterItems.length).fill(
+		undefined,
+	);
+
+	// Pass 1: claim all exact DOI / diacritic-normalized title hits first so fuzzy passes never steal exact matches.
+	for (let rIdx = 0; rIdx < rosterItems.length; rIdx++) {
+		const r = rosterItems[rIdx];
+		if (!r) continue;
+		let matchedIdx: number | undefined;
+		if (r.doi && !isArxivDoi(r.doi)) {
+			matchedIdx = pubByDoi.get(r.doi.toLowerCase());
+		}
+		if (matchedIdx === undefined || usedPubIndices.has(matchedIdx)) {
+			const normTitle = normVenueTitleKey(r.title);
+			if (normTitle) {
+				matchedIdx = pubByNormTitle.get(normTitle);
+			}
+		}
+		if (matchedIdx !== undefined && !usedPubIndices.has(matchedIdx)) {
+			matchedPubIdx[rIdx] = matchedIdx;
+			usedPubIndices.add(matchedIdx);
+		}
+	}
+
+	// Pass 2: match camera-ready title revisions (e.g. DataCite LIPIcs / CSDL / OpenAlex) by author-team overlap + title kinship.
+	const fuzzyPairs: Array<{ rIdx: number; pIdx: number; score: number }> = [];
+	for (let rIdx = 0; rIdx < rosterItems.length; rIdx++) {
+		if (matchedPubIdx[rIdx] !== undefined) continue;
+		const r = rosterItems[rIdx];
+		if (!r || r.authors.length === 0) continue;
+		for (let pIdx = 0; pIdx < pubList.length; pIdx++) {
+			if (usedPubIndices.has(pIdx)) continue;
+			const p = pubList[pIdx];
+			if (!p || p.authors.length === 0) continue;
+			const res = scoreCameraReadyCandidateMatch(
+				r.title,
+				r.authors,
+				p.title,
+				p.authors,
+			);
+			if (res.matched) {
+				fuzzyPairs.push({ rIdx, pIdx, score: res.score });
+			}
+		}
+	}
+	fuzzyPairs.sort((a, b) => b.score - a.score);
+	for (const pair of fuzzyPairs) {
+		if (
+			matchedPubIdx[pair.rIdx] !== undefined ||
+			usedPubIndices.has(pair.pIdx)
+		) {
+			continue;
+		}
+		matchedPubIdx[pair.rIdx] = pair.pIdx;
+		usedPubIndices.add(pair.pIdx);
+	}
+
 	const merged: CollectionPaperItem[] = [];
 	const unmatchedIndices: number[] = [];
 
 	for (let rIdx = 0; rIdx < rosterItems.length; rIdx++) {
 		const r = rosterItems[rIdx];
 		if (!r) continue;
-		const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]+/g, "");
-
-		let matchedIdx: number | undefined;
-		if (r.doi && !isArxivDoi(r.doi)) {
-			matchedIdx = pubByDoi.get(r.doi.toLowerCase());
-		}
-		if (matchedIdx === undefined && normTitle) {
-			matchedIdx = pubByNormTitle.get(normTitle);
-		}
-
-		if (matchedIdx === undefined) {
-			const rTokens = tokenizeTitleForFuzzyMatch(r.title);
-			const rSurnames = extractAuthorSurnames(r.authors);
-			let bestScore = 0;
-			let bestIdx: number | undefined;
-			for (let pIdx = 0; pIdx < pubList.length; pIdx++) {
-				if (usedPubIndices.has(pIdx)) continue;
-				const pSurnameSet = pubSurnames[pIdx];
-				const pTokenSet = pubTokens[pIdx];
-				if (!pSurnameSet || !pTokenSet) continue;
-				let sharedAuthor = false;
-				for (const s of rSurnames) {
-					if (pSurnameSet.has(s)) {
-						sharedAuthor = true;
-						break;
-					}
-				}
-				if (!sharedAuthor) continue;
-				const jaccard = computeSetJaccard(rTokens, pTokenSet);
-				if (jaccard >= 0.72 && jaccard > bestScore) {
-					bestScore = jaccard;
-					bestIdx = pIdx;
-				}
-			}
-			matchedIdx = bestIdx;
-		}
-
+		const matchedIdx = matchedPubIdx[rIdx];
 		if (matchedIdx !== undefined) {
 			const pub = pubList[matchedIdx];
 			if (pub) {
-				usedPubIndices.add(matchedIdx);
 				const bestDoi = pickPreferredDoi(pub.doi, r.doi);
 				const bestArxivId = pub.arxivId || r.arxivId;
 				const bestTitle = pub.title || r.title;
 				const bestAbstract =
 					pub.abstract.length >= r.abstract.length ? pub.abstract : r.abstract;
-				merged.push({
+				let candidate: CollectionPaperItem = {
 					...r,
 					id: buildVenuePaperId(venue.id, bestDoi, bestArxivId, bestTitle),
 					title: bestTitle,
@@ -2101,16 +2387,37 @@ async function mergePublisherIntoTrackRoster(
 						...(pub.keywords ?? []),
 						...(r.keywords ?? []),
 					]),
-				});
-				if (!bestAbstract || !bestDoi) {
+				};
+				const exHit = options?.existingLookup?.findMatch(candidate);
+				if (exHit?.matched) {
+					candidate = mergeExistingIntoFreshVenueItem(
+						candidate,
+						exHit.matched,
+						venue,
+					);
+				}
+				merged.push(candidate);
+				if (
+					!exHit?.isComplete &&
+					(!candidate.abstract ||
+						!candidate.doi ||
+						!options?.openAlexHydrated ||
+						normalizePaperKeywords(candidate.keywords).length === 0)
+				) {
 					unmatchedIndices.push(merged.length - 1);
 				}
 				continue;
 			}
 		}
 
-		merged.push(r);
-		unmatchedIndices.push(merged.length - 1);
+		const exRosterHit = options?.existingLookup?.findMatch(r);
+		const fallbackItem = exRosterHit?.matched
+			? mergeExistingIntoFreshVenueItem(r, exRosterHit.matched, venue)
+			: r;
+		merged.push(fallbackItem);
+		if (!exRosterHit?.isComplete) {
+			unmatchedIndices.push(merged.length - 1);
+		}
 	}
 
 	if (unmatchedIndices.length > 0) {
@@ -2121,7 +2428,10 @@ async function mergePublisherIntoTrackRoster(
 			subset,
 			venue,
 			fetchJson,
-			pubList,
+			options?.existingLookup?.completeItems.length
+				? [...pubList, ...options.existingLookup.completeItems]
+				: pubList,
+			{ signal: options?.signal },
 		);
 		for (let k = 0; k < unmatchedIndices.length; k++) {
 			const targetIdx = unmatchedIndices[k];
@@ -2145,7 +2455,8 @@ async function mergePublisherIntoTrackRoster(
  * 3. Publisher proceedings & journals (`ICSE`, `ISSTA`, `FSE`, `PLDI`, `POPL`, `OOPSLA`, `ECOOP`,
  *    `SAS`, `S&P`, `TSE`, `TOSEM`, `ASE (J)`, `ESE`) with strict issue/DOI/frontmatter filtering.
  * 4. Official conference accepted-papers program fallback (`CCS 2026`, `ISSRE 2026`) and Springer
- *    HTML abstract backfill (`#Abs1-content`).
+ *    HTML abstract backfill (`#Abs1-content`), plus Smart Diff against `existingItems` and
+ *    Keyword LLM fallback for papers still lacking keywords.
  */
 export async function fetchMultiChannelVenuePapers(
 	venue: VenueConfig,
@@ -2154,6 +2465,10 @@ export async function fetchMultiChannelVenuePapers(
 	rawFetchText: FetchTextFn,
 	options?: {
 		maxPages?: number;
+		existingItems?: readonly CollectionPaperItem[];
+		keywordLlmFetch?: typeof fetch;
+		signal?: AbortSignal;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
 	},
 ): Promise<{
 	items: CollectionPaperItem[];
@@ -2161,15 +2476,25 @@ export async function fetchMultiChannelVenuePapers(
 	latestPublishedAt: string | null;
 	authoritativeMainTrack: boolean;
 }> {
+	throwIfAborted(options?.signal);
 	let requestCount = 0;
 	let lastError: unknown = null;
+	const abortableRawFetchJson = wrapFetchJsonWithAbort(
+		rawFetchJson,
+		options?.signal,
+	);
+	const abortableRawFetchText = wrapFetchTextWithAbort(
+		rawFetchText,
+		options?.signal,
+	);
 
 	const trackedFetchJson: FetchJsonFn = async <T = unknown>(
 		url: string,
 	): Promise<T> => {
+		throwIfAborted(options?.signal);
 		requestCount += 1;
 		try {
-			return await rawFetchJson<T>(url);
+			return await abortableRawFetchJson<T>(url);
 		} catch (err) {
 			lastError = err;
 			throw err;
@@ -2180,9 +2505,10 @@ export async function fetchMultiChannelVenuePapers(
 		url: string,
 		accept?: string,
 	): Promise<string> => {
+		throwIfAborted(options?.signal);
 		requestCount += 1;
 		try {
-			return await rawFetchText(url, accept);
+			return await abortableRawFetchText(url, accept);
 		} catch (err) {
 			lastError = err;
 			throw err;
@@ -2193,6 +2519,10 @@ export async function fetchMultiChannelVenuePapers(
 	const fetchText = createPoliteFetchText(trackedFetchText);
 	const spec = VENUE_SPEC_BY_ID.get(venue.id);
 	const maxPages = options?.maxPages ?? 25;
+	const existingLookup = buildExistingVenueLookup(
+		options?.existingItems,
+		venue.name,
+	);
 
 	// Tier 0: Curated papers.cool venue list (100% abstracts + PDFs for AI & USENIX/NDSS venues)
 	const coolRes = spec?.coolPapersVenueSlug
@@ -2204,52 +2534,50 @@ export async function fetchMultiChannelVenuePapers(
 	let authoritativeMainTrack = false;
 
 	if (coolRes.items.length >= 100) {
-		const structuredBudget = Math.min(
-			maxPages,
-			Math.max(4, Math.ceil(coolRes.items.length / 200) + 2),
-		);
-		const structured = await fetchVenueStructuredPapers(
-			venue,
-			year,
-			fetchJson,
-			{
-				maxPages: structuredBudget,
-			},
-		);
-		structuredRemoteTotal = structured.remoteTotalCount ?? 0;
-		primaryItems = backfillMissingMetadataFromChannel(
+		const reconciled = reconcileFreshWithExisting(
 			dedupeVenueChannelItems([coolRes.items]),
-			structured.items,
+			existingLookup,
+			venue,
 		);
+		primaryItems = reconciled.items;
 
-		const missingKwIndices: number[] = [];
-		for (let idx = 0; idx < primaryItems.length; idx++) {
-			if ((primaryItems[idx]?.keywords?.length ?? 0) === 0) {
-				missingKwIndices.push(idx);
-			}
-		}
-		if (missingKwIndices.length > 0) {
-			const subset = missingKwIndices
-				.map((idx) => primaryItems[idx])
-				.filter((x): x is CollectionPaperItem => Boolean(x));
-			const enrichedSubset = await enrichVenueItemsBatch(
-				subset,
-				venue,
-				fetchJson,
-				structured.items,
+		if (reconciled.incompleteOrNewIndices.length > 0) {
+			const structuredBudget = Math.min(
+				maxPages,
+				Math.max(4, Math.ceil(coolRes.items.length / 200) + 2),
 			);
-			if (enrichedSubset.length === missingKwIndices.length) {
-				for (let k = 0; k < missingKwIndices.length; k++) {
-					const targetIdx = missingKwIndices[k];
-					const enrichedItem = enrichedSubset[k];
-					if (targetIdx !== undefined && enrichedItem) {
-						primaryItems[targetIdx] = enrichedItem;
-					}
-				}
-			} else {
+			const structured =
+				reconciled.incompleteOrNewIndices.length >= 80
+					? await fetchVenueStructuredPapers(venue, year, fetchJson, {
+							maxPages: structuredBudget,
+							preloadedItems: existingLookup.completeItems,
+							signal: options?.signal,
+							onProgress: options?.onProgress,
+						})
+					: { items: [], remoteTotalCount: 0 };
+			structuredRemoteTotal = structured.remoteTotalCount ?? 0;
+			if (structured.items.length > 0) {
 				primaryItems = backfillMissingMetadataFromChannel(
 					primaryItems,
-					enrichedSubset,
+					structured.items,
+				);
+			}
+
+			const stillIncompleteIndices = reconciled.incompleteOrNewIndices.filter(
+				(idx) => {
+					const p = primaryItems[idx];
+					return Boolean(p && !isPaperMetadataComplete(p, venue.name));
+				},
+			);
+			if (stillIncompleteIndices.length > 0) {
+				primaryItems = await enrichSubsetInPlace(
+					primaryItems,
+					stillIncompleteIndices,
+					venue,
+					fetchJson,
+					existingLookup.completeItems.length > 0
+						? [...structured.items, ...existingLookup.completeItems]
+						: structured.items,
 				);
 			}
 		}
@@ -2257,30 +2585,50 @@ export async function fetchMultiChannelVenuePapers(
 	} else if (spec?.trackRosterMode === "required") {
 		// Strict Main / Research / Technical Track roster required (`ASE`, `ICPC`, `RE`, `SANER`, `ICSME`, `ESEM`)
 		const roster = await fetchOfficialTrackRoster(venue, year, fetchText);
-		const csdlRes = spec.csdlIdPrefix
-			? await fetchCsdlVenuePapers(venue, year, fetchJson)
-			: { items: [], remoteTotalCount: 0 };
-		const dataciteRes = spec.doiPrefixFilter
-			?.toLowerCase()
-			.startsWith("10.4230/")
-			? await fetchDataCiteLipicsPapers(venue, year, fetchJson)
-			: { items: [], remoteTotalCount: 0 };
-		const directPublisherItems = dedupeVenueChannelItems([
-			csdlRes.items,
-			dataciteRes.items,
-		]);
-		const structured =
-			directPublisherItems.length >= roster.items.length
+		const rosterReconciled = reconcileFreshWithExisting(
+			roster.items,
+			existingLookup,
+			venue,
+		);
+		if (
+			roster.items.length > 0 &&
+			rosterReconciled.incompleteOrNewIndices.length === 0
+		) {
+			primaryItems = rosterReconciled.items;
+		} else {
+			const csdlRes = spec.csdlIdPrefix
+				? await fetchCsdlVenuePapers(venue, year, fetchJson)
+				: { items: [], remoteTotalCount: 0 };
+			const dataciteRes = spec.doiPrefixFilter
+				?.toLowerCase()
+				.startsWith("10.4230/")
+				? await fetchDataCiteLipicsPapers(venue, year, fetchJson)
+				: { items: [], remoteTotalCount: 0 };
+			const directPublisherItems = dedupeVenueChannelItems([
+				csdlRes.items,
+				dataciteRes.items,
+			]);
+			const structuredRan = directPublisherItems.length < roster.items.length;
+			const structured = !structuredRan
 				? { items: [], remoteTotalCount: directPublisherItems.length }
 				: await fetchVenueStructuredPapers(venue, year, fetchJson, {
 						maxPages,
+						preloadedItems: existingLookup.completeItems,
+						signal: options?.signal,
+						onProgress: options?.onProgress,
 					});
-		primaryItems = await mergePublisherIntoTrackRoster(
-			roster.items,
-			dedupeVenueChannelItems([directPublisherItems, structured.items]),
-			venue,
-			fetchJson,
-		);
+			primaryItems = await mergePublisherIntoTrackRoster(
+				roster.items,
+				dedupeVenueChannelItems([directPublisherItems, structured.items]),
+				venue,
+				fetchJson,
+				{
+					openAlexHydrated: structuredRan,
+					existingLookup,
+					signal: options?.signal,
+				},
+			);
+		}
 		structuredRemoteTotal = primaryItems.length;
 		authoritativeMainTrack = true;
 	} else {
@@ -2298,23 +2646,43 @@ export async function fetchMultiChannelVenuePapers(
 			dataciteRes.items,
 		]);
 
-		const structured =
-			directPublisherItems.length >= 25
-				? { items: [], remoteTotalCount: directPublisherItems.length }
-				: await fetchVenueStructuredPapers(venue, year, fetchJson, {
-						maxPages,
-					});
+		const structuredRan = directPublisherItems.length < 25;
+		const structured = !structuredRan
+			? { items: [], remoteTotalCount: directPublisherItems.length }
+			: await fetchVenueStructuredPapers(venue, year, fetchJson, {
+					maxPages,
+					preloadedItems: existingLookup.completeItems,
+					signal: options?.signal,
+					onProgress: options?.onProgress,
+				});
 		structuredRemoteTotal = Math.max(
 			structured.remoteTotalCount ?? 0,
 			csdlRes.remoteTotalCount,
 			dataciteRes.remoteTotalCount,
 		);
 
-		primaryItems = dedupeVenueChannelItems([
-			directPublisherItems,
-			structured.items,
-			coolRes.items,
-		]);
+		const reconciled = reconcileFreshWithExisting(
+			dedupeVenueChannelItems([
+				directPublisherItems,
+				structured.items,
+				coolRes.items,
+			]),
+			existingLookup,
+			venue,
+		);
+		primaryItems = reconciled.items;
+
+		// When direct publisher feeds (`CSDL` / `DataCite`) skipped OpenAlex list pages,
+		// enrich only brand-new or incomplete items so they obtain `Author ∪ OpenAlex` keywords.
+		if (!structuredRan && reconciled.incompleteOrNewIndices.length > 0) {
+			primaryItems = await enrichSubsetInPlace(
+				primaryItems,
+				reconciled.incompleteOrNewIndices,
+				venue,
+				fetchJson,
+				existingLookup.completeItems,
+			);
+		}
 
 		if (
 			primaryItems.length > 0 &&
@@ -2339,24 +2707,38 @@ export async function fetchMultiChannelVenuePapers(
 				fetchText,
 			);
 			if (officialRes.items.length > 0) {
-				const s2Supp = spec?.s2VenueNames?.length
-					? await fetchSemanticScholarVenuePapers(venue, year, fetchJson, {
-							maxPages: 3,
-						})
-					: { items: [], totalResults: 0 };
-				const arxivSupp = spec?.arxivVenueAliases?.length
-					? await fetchArxivAcceptedForVenue(venue, year, fetchText, {
-							maxPages: 5,
-						})
-					: { items: [], totalResults: 0 };
-				const enrichedOfficial = await enrichVenueItemsBatch(
+				const officialReconciled = reconcileFreshWithExisting(
 					officialRes.items,
+					existingLookup,
 					venue,
-					fetchJson,
-					[...structured.items, ...s2Supp.items, ...arxivSupp.items],
 				);
+				let finalizedOfficial = officialReconciled.items;
+				if (officialReconciled.incompleteOrNewIndices.length > 0) {
+					const s2Supp = spec?.s2VenueNames?.length
+						? await fetchSemanticScholarVenuePapers(venue, year, fetchJson, {
+								maxPages: 3,
+							})
+						: { items: [], totalResults: 0 };
+					const arxivSupp = spec?.arxivVenueAliases?.length
+						? await fetchArxivAcceptedForVenue(venue, year, fetchText, {
+								maxPages: 5,
+							})
+						: { items: [], totalResults: 0 };
+					finalizedOfficial = await enrichSubsetInPlace(
+						officialReconciled.items,
+						officialReconciled.incompleteOrNewIndices,
+						venue,
+						fetchJson,
+						[
+							...structured.items,
+							...s2Supp.items,
+							...arxivSupp.items,
+							...existingLookup.completeItems,
+						],
+					);
+				}
 				primaryItems = dedupeVenueChannelItems([
-					enrichedOfficial,
+					finalizedOfficial,
 					primaryItems,
 				]);
 				authoritativeMainTrack = true;
@@ -2431,7 +2813,12 @@ export async function fetchMultiChannelVenuePapers(
 		});
 		arxivTotal = arxivRes.totalResults;
 		if (arxivRes.items.length > 0) {
-			arxivVenueItems = await enrichArxivItemsBatch(arxivRes.items, fetchJson);
+			arxivVenueItems = await enrichArxivItemsBatch(
+				arxivRes.items,
+				fetchJson,
+				arxivRes.items.length,
+				{ keywordLlmFetch: options?.keywordLlmFetch },
+			);
 		}
 	}
 
@@ -2439,14 +2826,29 @@ export async function fetchMultiChannelVenuePapers(
 		? dedupeVenueChannelItems([primaryItems, s2Items, arxivVenueItems])
 		: primaryItems;
 
+	if (options?.existingItems?.length) {
+		merged = reconcileFreshWithExisting(merged, existingLookup, venue).items;
+	}
+
 	// Tier 4: Public Springer HTML abstract backfill for 10.1007/* papers (`SAS 2026`, `ASE (J) 2026`, `ESE 2026`)
 	if (
 		merged.some(
-			(p) => !p.abstract && p.doi?.toLowerCase().startsWith("10.1007/"),
+			(p) =>
+				isPlaceholderAbstract(p.abstract, venue.name) &&
+				p.doi?.toLowerCase().startsWith("10.1007/"),
 		)
 	) {
-		merged = await backfillSpringerAbstracts(merged, fetchText, 220);
+		merged = await backfillSpringerAbstracts(merged, fetchText, 220, {
+			signal: options?.signal,
+			onProgress: options?.onProgress,
+		});
 	}
+
+	// Tier 5: Keyword LLM fallback for Venue papers still missing keywords after Author ∪ OpenAlex union
+	merged = await backfillMissingVenueKeywordsWithKeywordLlm(
+		merged,
+		options?.keywordLlmFetch,
+	);
 
 	if (merged.length === 0 && requestCount > 0 && lastError) {
 		throw lastError;
