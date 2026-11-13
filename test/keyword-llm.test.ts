@@ -180,8 +180,9 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 
 		expect(capturedUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
 		expect(capturedBody.model).toBe("openai/gpt-4o-mini");
+		expect(capturedBody.max_tokens).toBe(2400);
 		expect(capturedBody.reasoning).toEqual({
-			effort: "minimal",
+			effort: "low",
 			exclude: true,
 		});
 		expect(
@@ -193,6 +194,89 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 			"Unit Test Generation",
 			"Rust",
 			"Software Testing",
+		]);
+	});
+
+	it("serializes OpenRouter :free chunks and patiently retries multiple HTTP 429s + empty reasoning outputs on the configured model", async () => {
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "sk-or-free-key",
+			model: DEFAULT_OPEN_ROUTER_MODEL,
+		});
+
+		let activeRequests = 0;
+		let maxConcurrent = 0;
+		let totalCalls = 0;
+
+		const items = Array.from({ length: 8 }, (_, idx) => ({
+			id: `arxiv:2611.${10000 + idx}`,
+			title: `Automated Program Repair Study Number ${idx + 1}`,
+			abstract: "Fault localization and patch validation on real defects.",
+		}));
+
+		const out = await extractKeywordsWithKeywordLlmBatch(items, {
+			batchSize: 4,
+			fetchFn: async (_input, init) => {
+				totalCalls += 1;
+				activeRequests += 1;
+				maxConcurrent = Math.max(maxConcurrent, activeRequests);
+				await new Promise((r) => setTimeout(r, 10));
+				activeRequests -= 1;
+
+				const body = JSON.parse(String(init?.body ?? "{}")) as {
+					model?: string;
+					max_tokens?: number;
+					reasoning?: { effort?: string; exclude?: boolean };
+				};
+				// Strictly uses the user's configured model on every attempt
+				expect(body.model).toBe(DEFAULT_OPEN_ROUTER_MODEL);
+				expect(body.max_tokens).toBe(2400);
+				expect(body.reasoning).toEqual({ effort: "low", exclude: true });
+
+				// Simulate 3 consecutive 429s on chunk 1, then an empty reasoning truncation on chunk 2 before succeeding
+				if (totalCalls <= 3) {
+					return new Response('{"error":{"message":"Rate limit exceeded"}}', {
+						status: 429,
+					});
+				}
+				if (totalCalls === 5) {
+					return new Response(
+						JSON.stringify({
+							choices: [{ finish_reason: "length", message: { content: "" } }],
+						}),
+						{ status: 200 },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						choices: [
+							{
+								message: {
+									content: JSON.stringify({
+										"0": ["Program Repair", "Fault Localization"],
+										"1": ["Program Repair", "Software Testing"],
+										"2": ["Patch Validation", "Program Repair"],
+										"3": ["Automated Debugging", "Program Repair"],
+									}),
+								},
+							},
+						],
+					}),
+					{ status: 200 },
+				);
+			},
+		});
+
+		expect(maxConcurrent).toBe(1);
+		expect(totalCalls).toBe(6); // 3x 429 + 1 ok (chunk 1) + 1 empty + 1 ok (chunk 2)
+		expect(out.size).toBe(8);
+		expect(out.get("arxiv:2611.10000")).toEqual([
+			"Program Repair",
+			"Fault Localization",
+		]);
+		expect(out.get("arxiv:2611.10007")).toEqual([
+			"Automated Debugging",
+			"Program Repair",
 		]);
 	});
 

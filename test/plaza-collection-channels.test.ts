@@ -2796,7 +2796,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 						// Simulate first-call 400 on custom reasoning check, then 200 with `<think>` block
 						if (callAttempt === 1) {
 							expect(body.reasoning).toEqual({
-								effort: "minimal",
+								effort: "low",
 								exclude: true,
 							});
 							return new Response("Reasoning config unsupported", {
