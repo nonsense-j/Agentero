@@ -1,3 +1,4 @@
+import { RotateCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -5,6 +6,7 @@ import {
 	SettingsRow,
 } from "@/components/settings/settings-layout";
 import { StatusDot } from "@/components/settings/status-dot";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
@@ -18,6 +20,7 @@ import {
 	connectorSetEnabled,
 	connectorSetPort,
 } from "@/lib/paper/import/connector";
+import { connectorStatusError } from "@/lib/paper/import/connector-errors";
 import type { AppSettings } from "@/lib/settings";
 
 export function ConnectorSettingsBlock({
@@ -30,6 +33,10 @@ export function ConnectorSettingsBlock({
 	const { t } = useTranslation(["settings", "common"]);
 	const [status, setStatus] = useState<ConnectorStatus | null>(null);
 	const [busy, setBusy] = useState(false);
+	const statusError =
+		settings.connectorEnabled && status?.enabled && !status.listening
+			? connectorStatusError(status, t)
+			: null;
 
 	const refresh = useCallback(async () => {
 		if (!isTauri()) return;
@@ -55,12 +62,28 @@ export function ConnectorSettingsBlock({
 		try {
 			const next = await connectorSetEnabled(enabled);
 			setStatus(next);
-			if (enabled && next.lastError) {
-				notifyError(next.lastError);
+			const message = connectorStatusError(next, t);
+			if (enabled && message) {
+				notifyError(message);
 			}
 		} catch (e) {
 			notifyError(errorText(e));
 			patch({ connectorEnabled: false });
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const onRetry = async () => {
+		if (!isTauri()) return;
+		setBusy(true);
+		try {
+			const next = await connectorSetEnabled(true);
+			setStatus(next);
+			const message = connectorStatusError(next, t);
+			if (message) notifyError(message);
+		} catch (e) {
+			notifyError(errorText(e));
 		} finally {
 			setBusy(false);
 		}
@@ -109,11 +132,32 @@ export function ConnectorSettingsBlock({
 							<span className="ml-1.5">
 								<StatusDot tone="ok" label={t("common:listening")} />
 							</span>
+						) : statusError ? (
+							<span className="ml-1.5" role="status">
+								<StatusDot
+									tone="err"
+									label={t("general.connector.notListening")}
+								/>
+							</span>
 						) : null}
 					</>
 				}
+				description={statusError ?? undefined}
 				htmlFor="connector-port"
 			>
+				{statusError ? (
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon-sm"
+						title={t("common:tryAgain")}
+						aria-label={t("common:tryAgain")}
+						disabled={busy}
+						onClick={() => void onRetry()}
+					>
+						<RotateCw aria-hidden="true" />
+					</Button>
+				) : null}
 				<Input
 					id="connector-port"
 					type="number"

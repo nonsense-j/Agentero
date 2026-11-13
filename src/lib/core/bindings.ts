@@ -2741,6 +2741,8 @@ export type CommitStatus =
 /**  `{parent}/{id}` already holds a paper (dir + NOTES or catalog row). */
 "skipped";
 
+export type ConnectorErrorCode = "portInUse" | "bindFailed" | "serverStopped" | "invalidPort";
+
 /**
  *  Mirror of the inline `json!({ "message", "sessionId" })` in
  *  `integration::connector::state::emit_error`.
@@ -2796,6 +2798,7 @@ export type ConnectorStatus = {
 	port: number,
 	boundAddress: string | null,
 	lastError: string | null,
+	lastErrorCode: ConnectorErrorCode | null,
 	vaultPath: string | null,
 	parentDir: string,
 };
