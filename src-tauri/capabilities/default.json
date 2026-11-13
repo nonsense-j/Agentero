@@ -22,7 +22,11 @@
 		"opener:default",
 		{
 			"identifier": "opener:allow-open-path",
-			"allow": [{ "path": "$APPLOG" }, { "path": "$APPCACHE" }]
+			"allow": [
+				{ "path": "$APPLOG" },
+				{ "path": "$APPCACHE" },
+				{ "path": "$APPCACHE/surveys/*.html" }
+			]
 		},
 		"fs:default",
 		"fs:allow-read-dir",

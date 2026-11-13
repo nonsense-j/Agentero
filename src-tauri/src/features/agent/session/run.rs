@@ -238,8 +238,13 @@ fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppError> {
             full_prompt = insert_resume_transcript(&full_prompt, transcript);
         }
     }
-    let is_plaza_deep_discover = params.workflow.as_deref() == Some("plaza_deep_discover");
-    let effective_vault_path = if is_plaza_deep_discover {
+    // Plaza collection workflows run outside the vault with the session-scoped
+    // read-only `agentero-collection` MCP (Deep Search, Paper Survey).
+    let uses_collection_mcp = matches!(
+        params.workflow.as_deref(),
+        Some("plaza_deep_discover" | "plaza_survey")
+    );
+    let effective_vault_path = if uses_collection_mcp {
         None
     } else {
         params.vault_path.as_deref()
@@ -254,7 +259,7 @@ fn prepare_run_turn(params: &RunOnceParams) -> Result<RunTurnPrep, AppError> {
     };
     let mut mcp_servers = prepared.mcp_servers;
     let mut skip_warm_pool = prepared.skip_warm_pool;
-    if is_plaza_deep_discover && !params.is_acp_command {
+    if uses_collection_mcp && !params.is_acp_command {
         match crate::integration::collection_mcp::collection_mcp_server() {
             Ok(server) => {
                 mcp_servers.push(server);

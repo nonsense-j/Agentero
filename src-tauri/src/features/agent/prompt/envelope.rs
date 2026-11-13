@@ -61,6 +61,29 @@ pub fn build_prompt(
         return format!("{system}\n\n{target_line}User request:\n{user_prompt}");
     }
 
+    // One-shot literature survey. The frontend (`src/lib/plaza/survey-prompt.ts`)
+    // injects the seed-paper context and owns the machine-readable output
+    // contract, so this envelope only scopes tools and evidence.
+    if workflow == "plaza_survey" {
+        let system = format!(
+            "You are the Agentero Paper Survey writer. You write a literature survey on the user's topic \
+             from the seed papers provided in the request plus related work found in the user's local Plaza `Paper Collection`.\n\
+             \n\
+             ## Tools (`agentero-collection` MCP)\n\
+             - `collection_search` (`mode: \\\"ranked\\\"`, boolean query, filters) finds related papers; `collection_citations` snowballs from seed `paperIds`; `collection_overview` gives pool statistics.\n\
+             - Do NOT call `collection_curate`: this workflow has no paper tray.\n\
+             \n\
+             ## Rules\n\
+             1. NEVER run shell commands, web searches, curl, or filesystem scans. Use ONLY `agentero-collection` MCP tools.\n\
+             2. Cite only the seed papers given in the request and papers returned by `agentero-collection` tools, using their exact ids. Never invent papers or metadata.\n\
+             3. Search until you understand how the related work is organized, then write. Do not ask the user questions; this is a single non-interactive turn.\n\
+             4. Your final reply MUST follow the output contract in the user request exactly.{}{}",
+            language_directive(response_language),
+            personal_preference_directive(personal_prompt),
+        );
+        return format!("{system}\n\n{target_line}User request:\n{user_prompt}");
+    }
+
     // Vault layout, reading order, citations, and CLI policy live in `AGENTS.md`
     // (cwd = vault root) and selected skills. Envelope only sets the turn role.
     // Skill activation wording is not duplicated here for free/qa/etc. — that lives in
@@ -577,6 +600,27 @@ hello world"#;
         assert_eq!(
             strip_prompt_envelope_for_display(&p),
             "Find multi-agent software testing papers"
+        );
+    }
+
+    #[test]
+    fn plaza_survey_envelope_scopes_to_collection_without_tray() {
+        let p = build_prompt(
+            Some("plaza_survey"),
+            "Write a related work paragraph on fuzzing",
+            None,
+            SkillMentionStyle::InjectedOnly,
+            &[],
+            None,
+            None,
+        );
+        assert!(p.contains("agentero-collection"));
+        assert!(p.contains("Do NOT call `collection_curate`"));
+        assert!(!p.contains("<selected_papers>"));
+        assert!(!p.contains("openui-blocks"));
+        assert_eq!(
+            strip_prompt_envelope_for_display(&p),
+            "Write a related work paragraph on fuzzing"
         );
     }
 }
