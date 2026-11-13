@@ -1120,6 +1120,26 @@ pub async fn keyword_llm_models_list(
     ApiResult::ok(all_ids.into_iter().collect())
 }
 
+fn summarize_keyword_llm_error_body(raw: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(msg) = json
+            .get("error")
+            .and_then(|e| e.get("message").or(Some(e)))
+            .and_then(|m| m.as_str())
+        {
+            let trimmed: String = msg.trim().chars().take(200).collect();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    raw.trim()
+        .replace(['\r', '\n'], " ")
+        .chars()
+        .take(200)
+        .collect()
+}
+
 /// Run a Host-proxied OpenAI-compatible chat completion using the stored
 /// keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
 #[tauri::command]
@@ -1140,31 +1160,17 @@ pub async fn keyword_llm_chat_complete(
             Ok(u) => u,
             Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
         };
-    let client = match build_keyword_llm_client(24) {
+    let client = match build_keyword_llm_client(60) {
         Ok(c) => c,
         Err(e) => return map_err(e),
     };
 
+    let is_openrouter = is_openrouter_host(&chat_url);
+    let effective_max_tokens = max_tokens.unwrap_or(2400);
     let messages = serde_json::json!([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]);
-    let mut primary_body = serde_json::json!({
-        "model": cfg.model,
-        "temperature": 0,
-        "max_tokens": max_tokens.unwrap_or(700),
-        "messages": messages,
-    });
-    if is_openrouter_host(&chat_url) {
-        primary_body["reasoning"] = serde_json::json!({"effort": "minimal", "exclude": true});
-    }
-    let fallback_body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    });
 
     let send_chat = |body: &serde_json::Value| {
         let mut req = client
@@ -1178,31 +1184,95 @@ pub async fn keyword_llm_chat_complete(
         req.send()
     };
 
+    let mut primary_body = serde_json::json!({
+        "model": cfg.model,
+        "temperature": 0,
+        "max_tokens": effective_max_tokens,
+        "messages": messages,
+    });
+    if is_openrouter {
+        primary_body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
+    }
+    let fallback_body = serde_json::json!({
+        "model": cfg.model,
+        "messages": messages,
+    });
+
     let mut resp = match send_chat(&primary_body).await {
         Ok(r) => r,
-        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+        Err(e) => {
+            log::warn!(
+                "keyword_llm_chat_complete transport error model={}: {}",
+                cfg.model,
+                e
+            );
+            return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
+        }
     };
     if resp.status().as_u16() == 400 {
         resp = match send_chat(&fallback_body).await {
             Ok(r) => r,
             Err(e) => {
-                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()))
+                log::warn!(
+                    "keyword_llm_chat_complete fallback transport error model={}: {}",
+                    cfg.model,
+                    e
+                );
+                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
             }
         };
     }
 
     let status = resp.status().as_u16();
-    if !resp.status().is_success() {
+    let raw_body = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!(
+                "keyword_llm_chat_complete body read error model={}: {}",
+                cfg.model,
+                e
+            );
+            return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
+        }
+    };
+    if !(200..300).contains(&status) {
+        log::warn!(
+            "keyword_llm_chat_complete HTTP {} model={} detail={}",
+            status,
+            cfg.model,
+            summarize_keyword_llm_error_body(&raw_body)
+        );
         return ApiResult::ok(Some(KeywordLlmChatResult {
             status,
             content: String::new(),
         }));
     }
-    let json: serde_json::Value = match resp.json().await {
+
+    let json: serde_json::Value = match serde_json::from_str(&raw_body) {
         Ok(v) => v,
-        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
+        Err(e) => {
+            log::warn!(
+                "keyword_llm_chat_complete invalid JSON model={}: {}",
+                cfg.model,
+                e
+            );
+            return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
+        }
     };
     let content = extract_chat_message_content(&json);
+    if content.trim().is_empty() {
+        let finish_reason = json
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str())
+            .unwrap_or("unknown");
+        log::warn!(
+            "keyword_llm_chat_complete empty content model={} finish_reason={}",
+            cfg.model,
+            finish_reason
+        );
+    }
     ApiResult::ok(Some(KeywordLlmChatResult { status, content }))
 }
 

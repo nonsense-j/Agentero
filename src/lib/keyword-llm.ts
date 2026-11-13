@@ -428,6 +428,112 @@ function extractChatContentFromJson(json: unknown): string {
 	return "";
 }
 
+const DEFAULT_KEYWORD_LLM_MAX_TOKENS = 2400;
+const KEYWORD_LLM_REQUEST_TIMEOUT_MS = 60_000;
+const PROD_RATE_LIMIT_BACKOFF_MS = [3_000, 6_000, 12_000, 20_000] as const;
+const TEST_RATE_LIMIT_BACKOFF_MS = [15, 25, 35, 45] as const;
+const PROD_TRANSIENT_BACKOFF_MS = [2_000, 5_000] as const;
+const TEST_TRANSIENT_BACKOFF_MS = [15, 25] as const;
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) {
+		return Promise.reject(new BackgroundTaskCancelledError());
+	}
+	return new Promise<void>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new BackgroundTaskCancelledError());
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function isOpenRouterFreeTierConfig(cfg: KeywordLlmSettings): boolean {
+	if (cfg.provider !== "openrouter") return false;
+	const model = (cfg.model.trim() || DEFAULT_OPEN_ROUTER_MODEL).toLowerCase();
+	return model.endsWith(":free");
+}
+
+async function runChunkWithPatientRetries(
+	attemptOnce: () => Promise<{ status: number; content: string } | null>,
+	signal?: AbortSignal,
+): Promise<{
+	byIndex: Record<string, string[]>;
+	abortRemaining: boolean;
+}> {
+	const isFastTest = testConfigOverride !== undefined;
+	const rateBackoffs = isFastTest
+		? TEST_RATE_LIMIT_BACKOFF_MS
+		: PROD_RATE_LIMIT_BACKOFF_MS;
+	const transientBackoffs = isFastTest
+		? TEST_TRANSIENT_BACKOFF_MS
+		: PROD_TRANSIENT_BACKOFF_MS;
+
+	let rateRetryIdx = 0;
+	let transientRetryIdx = 0;
+
+	while (true) {
+		if (signal?.aborted) {
+			throw new BackgroundTaskCancelledError();
+		}
+		let outcome: { status: number; content: string } | null = null;
+		try {
+			outcome = await attemptOnce();
+		} catch (err) {
+			if (signal?.aborted || err instanceof BackgroundTaskCancelledError) {
+				throw new BackgroundTaskCancelledError();
+			}
+			const waitMs = transientBackoffs[transientRetryIdx++];
+			if (waitMs !== undefined) {
+				await sleepAbortable(waitMs, signal);
+				continue;
+			}
+			return { byIndex: {}, abortRemaining: false };
+		}
+
+		if (!outcome) {
+			return { byIndex: {}, abortRemaining: true };
+		}
+		const { status, content } = outcome;
+		if (status === 401 || status === 402) {
+			return { byIndex: {}, abortRemaining: true };
+		}
+		if (status === 429) {
+			const waitMs = rateBackoffs[rateRetryIdx++];
+			if (waitMs !== undefined) {
+				await sleepAbortable(waitMs, signal);
+				continue;
+			}
+			return { byIndex: {}, abortRemaining: true };
+		}
+		if (status === 408 || status >= 500) {
+			const waitMs = transientBackoffs[transientRetryIdx++];
+			if (waitMs !== undefined) {
+				await sleepAbortable(waitMs, signal);
+				continue;
+			}
+			return { byIndex: {}, abortRemaining: false };
+		}
+		if (status < 200 || status >= 300) {
+			return { byIndex: {}, abortRemaining: false };
+		}
+
+		const byIndex = parseKeywordBatchJson(content);
+		if (Object.keys(byIndex).length === 0) {
+			const waitMs = transientBackoffs[transientRetryIdx++];
+			if (waitMs !== undefined) {
+				await sleepAbortable(waitMs, signal);
+				continue;
+			}
+		}
+		return { byIndex, abortRemaining: false };
+	}
+}
+
 async function callKeywordLlmChunkViaFetch(
 	chunk: readonly KeywordLlmInput[],
 	cfg: KeywordLlmSettings,
@@ -458,7 +564,7 @@ async function callKeywordLlmChunkViaFetch(
 
 	const sendOnce = async (minimalFallback: boolean): Promise<Response> => {
 		const ac = new AbortController();
-		const timer = setTimeout(() => ac.abort(), 22_000);
+		const timer = setTimeout(() => ac.abort(), KEYWORD_LLM_REQUEST_TIMEOUT_MS);
 		const onExternalAbort = () => ac.abort();
 		if (signal) {
 			if (signal.aborted) ac.abort();
@@ -471,9 +577,9 @@ async function callKeywordLlmChunkViaFetch(
 			};
 			if (!minimalFallback) {
 				body.temperature = 0;
-				body.max_tokens = 700;
+				body.max_tokens = DEFAULT_KEYWORD_LLM_MAX_TOKENS;
 				if (isOpenRouterEndpoint(chatUrl)) {
-					body.reasoning = { effort: "minimal", exclude: true };
+					body.reasoning = { effort: "low", exclude: true };
 				}
 			}
 			const headers: Record<string, string> = {
@@ -495,27 +601,26 @@ async function callKeywordLlmChunkViaFetch(
 		}
 	};
 
-	let resp = await sendOnce(false);
-	if (signal?.aborted) {
-		throw new BackgroundTaskCancelledError();
-	}
-	if (resp.status === 400) {
-		resp = await sendOnce(true);
+	return runChunkWithPatientRetries(async () => {
+		let resp = await sendOnce(false);
 		if (signal?.aborted) {
 			throw new BackgroundTaskCancelledError();
 		}
-	}
-	if (resp.status === 401 || resp.status === 402 || resp.status === 429) {
-		return { byIndex: {}, abortRemaining: true };
-	}
-	if (!resp.ok) {
-		return { byIndex: {}, abortRemaining: false };
-	}
-	const json = (await resp.json()) as unknown;
-	return {
-		byIndex: parseKeywordBatchJson(extractChatContentFromJson(json)),
-		abortRemaining: false,
-	};
+		if (resp.status === 400) {
+			resp = await sendOnce(true);
+			if (signal?.aborted) {
+				throw new BackgroundTaskCancelledError();
+			}
+		}
+		if (!resp.ok) {
+			return { status: resp.status, content: "" };
+		}
+		const json = (await resp.json()) as unknown;
+		return {
+			status: resp.status,
+			content: extractChatContentFromJson(json),
+		};
+	}, signal);
 }
 
 async function callKeywordLlmChunkViaHost(
@@ -525,47 +630,36 @@ async function callKeywordLlmChunkViaHost(
 	byIndex: Record<string, string[]>;
 	abortRemaining: boolean;
 }> {
-	if (signal?.aborted) {
-		throw new BackgroundTaskCancelledError();
-	}
-	const callPromise = callApi(
-		() =>
-			commands.keywordLlmChatComplete(
-				KEYWORD_SYSTEM_PROMPT,
-				buildChunkUserPrompt(chunk),
-				700,
-			),
-		{ fallback: "Keyword LLM completion failed" },
-	);
-	const res = signal
-		? await new Promise<Awaited<typeof callPromise>>((resolve, reject) => {
-				const onAbort = () => reject(new BackgroundTaskCancelledError());
-				signal.addEventListener("abort", onAbort, { once: true });
-				callPromise.then(
-					(val) => {
-						signal.removeEventListener("abort", onAbort);
-						resolve(val);
-					},
-					(err) => {
-						signal.removeEventListener("abort", onAbort);
-						reject(err);
-					},
-				);
-			})
-		: await callPromise;
-	if (!res) {
-		return { byIndex: {}, abortRemaining: true };
-	}
-	if (res.status === 401 || res.status === 402 || res.status === 429) {
-		return { byIndex: {}, abortRemaining: true };
-	}
-	if (res.status < 200 || res.status >= 300) {
-		return { byIndex: {}, abortRemaining: false };
-	}
-	return {
-		byIndex: parseKeywordBatchJson(res.content),
-		abortRemaining: false,
-	};
+	return runChunkWithPatientRetries(async () => {
+		if (signal?.aborted) {
+			throw new BackgroundTaskCancelledError();
+		}
+		const callPromise = callApi(
+			() =>
+				commands.keywordLlmChatComplete(
+					KEYWORD_SYSTEM_PROMPT,
+					buildChunkUserPrompt(chunk),
+					DEFAULT_KEYWORD_LLM_MAX_TOKENS,
+				),
+			{ fallback: "Keyword LLM completion failed" },
+		);
+		return signal
+			? await new Promise<Awaited<typeof callPromise>>((resolve, reject) => {
+					const onAbort = () => reject(new BackgroundTaskCancelledError());
+					signal.addEventListener("abort", onAbort, { once: true });
+					callPromise.then(
+						(val) => {
+							signal.removeEventListener("abort", onAbort);
+							resolve(val);
+						},
+						(err) => {
+							signal.removeEventListener("abort", onAbort);
+							reject(err);
+						},
+					);
+				})
+			: await callPromise;
+	}, signal);
 }
 
 /**
@@ -595,6 +689,7 @@ export async function extractKeywordsWithKeywordLlmBatch(
 		!isTauri();
 
 	let directCfg: KeywordLlmSettings | null = null;
+	let activeCfg: KeywordLlmSettings | null = null;
 	if (useDirectFetch) {
 		directCfg =
 			testConfigOverride === undefined
@@ -608,11 +703,13 @@ export async function extractKeywordsWithKeywordLlmBatch(
 		}
 		const activeFetch = options?.fetchFn ?? globalThis.fetch;
 		if (typeof activeFetch !== "function") return result;
+		activeCfg = directCfg;
 	} else {
 		const storedCfg = loadSettings().keywordLlm;
 		if (!isKeywordLlmConfigured(storedCfg)) {
 			return result;
 		}
+		activeCfg = storedCfg;
 	}
 
 	const validItems = items.filter(
@@ -621,7 +718,14 @@ export async function extractKeywordsWithKeywordLlmBatch(
 	if (validItems.length === 0) return result;
 
 	const batchSize = Math.max(1, Math.min(8, options?.batchSize ?? 6));
-	const concurrency = Math.max(1, Math.min(4, options?.concurrency ?? 2));
+	const isFreeTier = Boolean(
+		activeCfg && isOpenRouterFreeTierConfig(activeCfg),
+	);
+	const defaultConcurrency = isFreeTier ? 1 : 2;
+	const concurrency = Math.max(
+		1,
+		Math.min(4, options?.concurrency ?? defaultConcurrency),
+	);
 	const chunks: KeywordLlmInput[][] = [];
 	for (let i = 0; i < validItems.length; i += batchSize) {
 		chunks.push(validItems.slice(i, i + batchSize));
@@ -643,6 +747,9 @@ export async function extractKeywordsWithKeywordLlmBatch(
 			const chunk = chunks[idx];
 			if (!chunk) continue;
 			try {
+				if (idx > 0 && isFreeTier && testConfigOverride === undefined) {
+					await sleepAbortable(1_200, options?.signal);
+				}
 				const { byIndex, abortRemaining } =
 					useDirectFetch && directCfg
 						? await callKeywordLlmChunkViaFetch(

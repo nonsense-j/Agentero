@@ -2782,7 +2782,7 @@ export async function backfillMissingArxivKeywords(
 	if (cleanCats.length === 0) return 0;
 
 	const PAGE_LIMIT = 500;
-	const SLICE_SIZE = 240;
+	const SLICE_SIZE = 30;
 	let totalPatched = 0;
 
 	for (const cat of cleanCats) {
