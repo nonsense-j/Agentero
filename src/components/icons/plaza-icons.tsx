@@ -103,6 +103,49 @@ export function PlazaRecommendIcon({
 }
 
 /**
+ * Paper Survey icon — several source papers converging into one written
+ * synthesis sheet.
+ */
+export function PlazaSurveyIcon({
+	className,
+	...props
+}: SVGProps<SVGSVGElement>) {
+	return (
+		<svg
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.75"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			className={className}
+			aria-hidden
+			{...props}
+		>
+			<title>Paper Survey</title>
+			<rect
+				x="11"
+				y="4"
+				width="10"
+				height="16"
+				rx="3"
+				fill="currentColor"
+				fillOpacity="0.08"
+			/>
+			<path d="M14 9h4" />
+			<path d="M14 12h4" />
+			<path d="M14 15h2.5" />
+			<circle cx="4.5" cy="6.5" r="1.5" />
+			<circle cx="4.5" cy="12" r="1.5" />
+			<circle cx="4.5" cy="17.5" r="1.5" />
+			<path d="M6 7.2 11 9.5" />
+			<path d="M6 12h5" />
+			<path d="M6 16.8 11 14.5" />
+		</svg>
+	);
+}
+
+/**
  * CCF Deadline icon — Magpie-inspired calendar chronometer with crisp
  * countdown dial.
  */

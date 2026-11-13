@@ -109,6 +109,7 @@ UI (AI Elements: Conversation + Message + PromptInput + Sources)
 | 命令面板 | [command-palette.md](command-palette.md) |
 | 翻译 | [translate.md](translate.md) |
 | 设置与主题 | [settings.md](settings.md) |
+| 广场 · 论文综述（Related Work 段落 / HTML 报告） | [plaza-survey.md](plaza-survey.md) |
 | 本机使用记录 | [../backend/usage.md](../backend/usage.md) |
 | 组件约定 | [components.md](components.md) |
 

@@ -14,6 +14,7 @@ import { PlazaCollectionView } from "@/components/plaza/plaza-collection-view";
 import { PlazaDiscoverView } from "@/components/plaza/plaza-discover-view";
 import { PlazaFeedsView } from "@/components/plaza/plaza-feeds-view";
 import { PlazaSkillsView } from "@/components/plaza/plaza-skills-view";
+import { PlazaSurveyView } from "@/components/plaza/plaza-survey-view";
 import { PlazaWebFrame } from "@/components/plaza/plaza-web-frame";
 import { EmptyState } from "@/components/ui/empty-state";
 import { plazaSourceForPath, plazaSourceLabel } from "@/lib/plaza";
@@ -34,6 +35,10 @@ export function PlazaView({
 
 	if (source?.panel === "discover") {
 		return <PlazaDiscoverView className={className} />;
+	}
+
+	if (source?.panel === "survey") {
+		return <PlazaSurveyView className={className} />;
 	}
 
 	if (source?.panel === "skills") {

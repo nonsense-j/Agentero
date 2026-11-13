@@ -14,6 +14,7 @@ import {
 	PlazaDeadlineIcon,
 	PlazaDiscoverIcon,
 	PlazaRecommendIcon,
+	PlazaSurveyIcon,
 } from "@/components/icons/plaza-icons";
 import type { PlazaSourceIcon } from "@/lib/plaza";
 
@@ -23,6 +24,7 @@ export const PLAZA_SOURCE_ICONS: Record<
 > = {
 	collection: PlazaCollectionIcon,
 	discover: PlazaDiscoverIcon,
+	survey: PlazaSurveyIcon,
 	coolPapers: CoolPapersIcon,
 	modelScope: ModelScopeIcon,
 	conference: Landmark,

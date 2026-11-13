@@ -21,6 +21,7 @@ export const PLAZA_VIRTUAL_PATH = "agentero:plaza";
 export type PlazaSourceIcon =
 	| "collection"
 	| "discover"
+	| "survey"
 	| "coolPapers"
 	| "modelScope"
 	| "conference"
@@ -45,6 +46,7 @@ export type PlazaSource = {
 	panel?:
 		| "collection"
 		| "discover"
+		| "survey"
 		| "arxivRec"
 		| "ccfDeadlines"
 		| "skills"
@@ -82,6 +84,15 @@ export const PLAZA_SOURCES: readonly PlazaSource[] = [
 		embedOrigin: null,
 		panel: "discover",
 		icon: "discover",
+	},
+	{
+		id: "survey",
+		path: sourcePath("survey"),
+		label: "Paper Survey",
+		url: null,
+		embedOrigin: null,
+		panel: "survey",
+		icon: "survey",
 	},
 	{
 		id: "arxiv-rec",
@@ -138,6 +149,10 @@ export function plazaSourceLabel(source: PlazaSource): string {
 		case "discover":
 			return i18n.t("sidebar:plaza.discover.label", {
 				defaultValue: "Paper Discover",
+			});
+		case "survey":
+			return i18n.t("sidebar:plaza.survey.label", {
+				defaultValue: "Paper Survey",
 			});
 		case "arxiv-rec":
 			return i18n.t("sidebar:plaza.arxivRec.label", {
