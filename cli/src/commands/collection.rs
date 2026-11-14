@@ -1,18 +1,76 @@
 //! `agentero collection *` — Plaza Paper Collection headless batch ingest,
 //! maintainer seed baker, and GitHub Releases seed importer.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agentero_core::features::paper::discovery::collection::{
     self, CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionUpsertPapersArgs,
     SeedBakeOptions, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_MODEL,
 };
 use clap::{Subcommand, ValueHint};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::CliError;
 use crate::output::to_value;
 use crate::resolve::GlobalOpts;
+
+const DEFAULT_DESKTOP_PROXY_URL: &str = "http://127.0.0.1:7890";
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DesktopNetworkSettings {
+    #[serde(default)]
+    network_proxy_enabled: bool,
+    #[serde(default = "default_desktop_proxy_url")]
+    network_proxy_url: String,
+    #[serde(default)]
+    open_alex_key: String,
+}
+
+fn default_desktop_proxy_url() -> String {
+    DEFAULT_DESKTOP_PROXY_URL.to_string()
+}
+
+fn parse_desktop_network_settings(raw: &str) -> Option<DesktopNetworkSettings> {
+    serde_json::from_str::<DesktopNetworkSettings>(raw).ok()
+}
+
+/// Auto-load outbound network proxy (`networkProxyEnabled` + `networkProxyUrl`)
+/// and optional `openAlexKey` from desktop `settings.json` (`%APPDATA%\agentero\settings.json`
+/// on Windows, `$XDG_CONFIG_HOME/agentero/settings.json` on Unix) before running
+/// `seed-bake` or `seed-import`.
+///
+/// `agentero_core::http` enforces loopback bypass (`127.0.0.1`, `localhost`, `::1`),
+/// so external OpenAlex / Semantic Scholar / GitHub requests route through the proxy
+/// while local LLM endpoints (e.g. `127.0.0.1:8011`) connect directly.
+fn apply_desktop_network_settings_from(settings_file: &Path) {
+    let Ok(raw) = std::fs::read_to_string(settings_file) else {
+        return;
+    };
+    let Some(cfg) = parse_desktop_network_settings(&raw) else {
+        return;
+    };
+    let proxy_url = cfg.network_proxy_url.trim();
+    if cfg.network_proxy_enabled && !proxy_url.is_empty() {
+        if let Err(err) = agentero_core::http::configure_proxy(true, proxy_url) {
+            log::warn!(
+                "failed to configure network proxy from {}: {err}",
+                settings_file.display()
+            );
+        }
+    }
+    let oa_key = cfg.open_alex_key.trim();
+    if !oa_key.is_empty() && !oa_key.chars().all(|c| c == '*') {
+        agentero_core::features::paper::scholar_api::client::set_openalex_api_key(Some(
+            oa_key.to_string(),
+        ));
+    }
+}
+
+fn ensure_desktop_network_settings_loaded() {
+    apply_desktop_network_settings_from(&agentero_core::paths::settings_path());
+}
 
 #[derive(Debug, Subcommand)]
 pub enum CollectionCmd {
@@ -113,6 +171,7 @@ pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliE
             skip_llm,
             delta_since,
         } => {
+            ensure_desktop_network_settings_loaded();
             let db_path = db.unwrap_or_else(collection::collection_db_path);
             let opts = SeedBakeOptions {
                 out_dir,
@@ -146,6 +205,7 @@ pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliE
             db,
             force,
         } => {
+            ensure_desktop_network_settings_loaded();
             let db_path = db.unwrap_or_else(collection::collection_db_path);
             let res = collection::seed_sync_at(
                 &db_path,
@@ -338,5 +398,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(p2.citation_count, 1);
+    }
+
+    #[test]
+    fn desktop_settings_loader_parses_proxy_and_openalex_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_file = tmp.path().join("settings.json");
+        std::fs::write(
+            &settings_file,
+            r#"{"networkProxyEnabled":true,"networkProxyUrl":"http://127.0.0.1:7890","openAlexKey":"oa-test-key-123"}"#,
+        )
+        .unwrap();
+
+        let parsed =
+            parse_desktop_network_settings(&std::fs::read_to_string(&settings_file).unwrap())
+                .unwrap();
+        assert!(parsed.network_proxy_enabled);
+        assert_eq!(parsed.network_proxy_url, "http://127.0.0.1:7890");
+        assert_eq!(parsed.open_alex_key, "oa-test-key-123");
+
+        apply_desktop_network_settings_from(&settings_file);
+        assert_eq!(
+            agentero_core::features::paper::scholar_api::client::openalex_api_key().as_deref(),
+            Some("oa-test-key-123")
+        );
+
+        // Reset global state cleanly after test
+        let _ = agentero_core::http::configure_proxy(false, "");
+        agentero_core::features::paper::scholar_api::client::set_openalex_api_key(None);
     }
 }

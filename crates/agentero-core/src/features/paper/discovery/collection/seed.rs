@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 
-use super::keywords::{canonicalize_keywords, normalize_keyword_key};
+use super::keywords::{canonicalize_keywords, normalize_keyword_key, SYNONYM_GROUPS};
 use super::models::{
     CollectionArxivWatermarkInput, CollectionPaperUpsertInput, CollectionSeedSyncArgs,
     CollectionSeedSyncOut, CollectionVenueWatermarkUpdate,
@@ -784,6 +784,11 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
     }
 
     let client = crate::http::client_with(Duration::from_secs(60), 5, crate::http::USER_AGENT)?;
+    let oa_api_key = crate::features::paper::scholar_api::client::openalex_api_key();
+    let oa_key_param = oa_api_key
+        .as_deref()
+        .map(|k| format!("&api_key={}", urlencoding::encode(k)))
+        .unwrap_or_default();
     let mut oa_enriched = 0usize;
 
     // Pass A1: OpenAlex batch lookup (`select=id,doi,ids,referenced_works`, 50/batch)
@@ -805,7 +810,7 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
             .filter_map(|t| t.openalex_id.as_deref())
             .collect();
         let url = format!(
-            "https://api.openalex.org/works?filter=openalex:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}",
+            "https://api.openalex.org/works?filter=openalex:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}{oa_key_param}",
             filter_ids.join("|")
         );
         if let Some(json) = get_json_with_backoff(&client, &url).await? {
@@ -824,7 +829,7 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
             .collect();
         let target_refs: Vec<&WorkRefTarget> = chunk.iter().map(|(t, _)| *t).collect();
         let url = format!(
-            "https://api.openalex.org/works?filter=doi:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}",
+            "https://api.openalex.org/works?filter=doi:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}{oa_key_param}",
             filter_dois.join("|")
         );
         if let Some(json) = get_json_with_backoff(&client, &url).await? {
@@ -1105,89 +1110,265 @@ fn build_chat_completions_url(base_url: &str) -> String {
     }
 }
 
+const BAKE_KEYWORD_SYSTEM_PROMPT: &str = "\
+Extract 4 to 6 canonical English academic keywords for each paper from its Title and Abstract.
+Rules:
+- Output ONLY a valid JSON object mapping each paper index string to an array of 4-6 strings, with no markdown fences and no commentary.
+- Cover BOTH (1) the research subfield or problem category (e.g., Code Generation, Vulnerability Detection, Program Repair, Smart Contract Security, Prompt Injection, Medical Image Segmentation) AND (2) the core technique or methodology class (e.g., Fuzzing, Random Testing, Unit Test Generation, Static Analysis, Symbolic Execution, Formal Verification, Type System, AI Agent, Low-Rank Adaptation).
+- Format every keyword as a general, reusable, singular noun phrase in English Title Case (1-4 words, preserving standard acronyms like LLM, RAG, eBPF, SMT) suitable for cross-paper clustering and search.
+- STRICTLY FORBID paper-coined system, method, tool, framework, model, dataset, or benchmark names and title acronyms (never output bespoke names like VulnGPT, AutoFuzz, DuFP, Tree-of-Mutations, VulnFuzz, RankSeg).
+- STRICTLY FORBID generic academic filler (paper, study, method, approach, proposed, framework, system, analysis, experiment, evaluation, performance, benchmark) and overly broad top-level disciplines (Computer Science, Software Engineering, Artificial Intelligence).
+- Even if the Abstract is missing, very short, or a conference roster placeholder, ALWAYS infer 4 to 6 accurate academic keywords from the Title and any Venue/Field context; NEVER return an empty array [].
+
+Example Input:
+[0] Title: VulnFuzz: Fuzzing Smart Contracts via Symbolic Taint Guided Mutation | Abstract: Smart contract vulnerabilities cause severe financial losses. We present VulnFuzz, combining static taint tracking with coverage-guided fuzzing and symbolic execution on EVM bytecode to uncover reentrancy and integer overflow bugs.
+[1] Title: RankSeg: Low-Rank Adaptation of Vision-Language Models for Few-Shot Medical Segmentation | Abstract: Adapting large vision-language foundation models to volumetric CT and MRI scans is memory intensive. We introduce RankSeg, using rank-decomposed cross-modal adapters that tune 0.8% parameters for few-shot organ segmentation.
+
+Example Output:
+{\"0\":[\"Smart Contract Security\",\"Vulnerability Detection\",\"Coverage-Guided Fuzzing\",\"Taint Analysis\",\"Symbolic Execution\"],\"1\":[\"Medical Image Segmentation\",\"Few-Shot Learning\",\"Vision-Language Model\",\"Low-Rank Adaptation\",\"Parameter-Efficient Fine-Tuning\"]}";
+
+fn collapse_whitespace(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_roster_placeholder_abstract(collapsed_abs: &str, source_label: &str) -> bool {
+    if collapsed_abs.is_empty() {
+        return true;
+    }
+    if collapsed_abs
+        .to_ascii_lowercase()
+        .ends_with("accepted paper")
+    {
+        return true;
+    }
+    let sl = source_label.trim();
+    if !sl.is_empty() && collapsed_abs.eq_ignore_ascii_case(sl) {
+        return true;
+    }
+    collapsed_abs.contains(" · ") && collapsed_abs.chars().count() <= 84
+}
+
+fn build_paper_context_hint(paper: &LlmPaperTarget) -> String {
+    let mut parts = Vec::new();
+    let sl = collapse_whitespace(&paper.source_label);
+    if !sl.is_empty() {
+        parts.push(sl);
+    }
+    let cats: Vec<String> = paper
+        .categories
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !cats.is_empty() {
+        parts.push(cats.join(", "));
+    }
+    parts.join("; ")
+}
+
 fn build_bake_llm_messages(chunk: &[LlmPaperTarget]) -> Value {
-    let mut user_lines = Vec::with_capacity(chunk.len() + 2);
-    user_lines.push(
-        "Extract 3 to 6 concise, domain-specific academic keywords for each paper below. \
-         Return strict JSON: {\"items\":[{\"id\":\"1\",\"keywords\":[\"Keyword A\",\"Keyword B\"]}]}. \
-         Avoid generic words like 'paper', 'method', 'system', or 'study'."
-            .to_string(),
-    );
+    let mut user_lines = Vec::with_capacity(chunk.len());
     for (idx, p) in chunk.iter().enumerate() {
-        let abs_trunc: String = p.abstract_text.trim().chars().take(1600).collect();
-        user_lines.push(format!(
-            "[{}] Title: {}\nAbstract: {}",
-            idx + 1,
-            p.title.trim(),
-            abs_trunc
-        ));
+        let title = collapse_whitespace(&p.title);
+        let abs_collapsed = collapse_whitespace(&p.abstract_text);
+        let ctx = build_paper_context_hint(p);
+        let line = if is_roster_placeholder_abstract(&abs_collapsed, &p.source_label) {
+            if ctx.is_empty() {
+                format!("[{idx}] Title: {title}")
+            } else {
+                format!("[{idx}] Title: {title} | Abstract: (Title-only entry; Venue/Field: {ctx})")
+            }
+        } else {
+            let abs_with_ctx = if abs_collapsed.chars().count() < 48 && !ctx.is_empty() {
+                format!("{abs_collapsed} (Venue/Field: {ctx})")
+            } else {
+                abs_collapsed
+            };
+            let abs_trunc: String = abs_with_ctx.chars().take(1600).collect();
+            format!("[{idx}] Title: {title} | Abstract: {abs_trunc}")
+        };
+        user_lines.push(line);
     }
 
     serde_json::json!([
         {
             "role": "system",
-            "content": "You are a precise computer science bibliography curator. Output valid JSON only."
+            "content": BAKE_KEYWORD_SYSTEM_PROMPT
         },
         {
             "role": "user",
-            "content": user_lines.join("\n\n")
+            "content": user_lines.join("\n")
         }
     ])
 }
 
+fn strip_think_blocks_ci(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(open_pos) = rest.to_ascii_lowercase().find("<think>") {
+        out.push_str(&rest[..open_pos]);
+        let after_open = &rest[open_pos + "<think>".len()..];
+        if let Some(close_pos) = after_open.to_ascii_lowercase().find("</think>") {
+            rest = &after_open[close_pos + "</think>".len()..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn extract_string_array_canon(val: &Value) -> Vec<String> {
+    let Some(kws_arr) = val.as_array() else {
+        return Vec::new();
+    };
+    let raw_kws: Vec<String> = kws_arr
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    canonicalize_keywords(&raw_kws)
+}
+
+fn parse_entry_usize(v: &Value) -> Option<usize> {
+    v.as_u64().map(|n| n as usize).or_else(|| {
+        v.as_str().and_then(|s| {
+            s.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+    })
+}
+
+fn parse_items_array(arr: &[Value], expected_len: usize, out: &mut HashMap<usize, Vec<String>>) {
+    let has_zero_id = arr.iter().any(|entry| {
+        entry
+            .get("idx")
+            .or_else(|| entry.get("id"))
+            .or_else(|| entry.get("index"))
+            .and_then(parse_entry_usize)
+            == Some(0)
+    });
+
+    for (pos, entry) in arr.iter().enumerate() {
+        let Some(kws_val) = entry.get("keywords") else {
+            continue;
+        };
+        let target_idx = if let Some(idx0) = entry.get("idx").and_then(parse_entry_usize) {
+            (idx0 < expected_len).then_some(idx0)
+        } else if let Some(raw_n) = entry
+            .get("id")
+            .or_else(|| entry.get("index"))
+            .and_then(parse_entry_usize)
+        {
+            if has_zero_id {
+                (raw_n < expected_len).then_some(raw_n)
+            } else if (1..=expected_len).contains(&raw_n) {
+                Some(raw_n - 1)
+            } else {
+                None
+            }
+        } else {
+            (pos < expected_len).then_some(pos)
+        };
+
+        if let Some(idx) = target_idx {
+            let canon = extract_string_array_canon(kws_val);
+            if !canon.is_empty() {
+                out.insert(idx, canon);
+            }
+        }
+    }
+}
+
 fn parse_llm_keyword_batch_json(content: &str, expected_len: usize) -> HashMap<usize, Vec<String>> {
-    let trimmed = content.trim();
-    let json_slice = extract_json_payload(trimmed);
+    if expected_len == 0 {
+        return HashMap::new();
+    }
+    let cleaned = strip_think_blocks_ci(content);
+    let json_slice = extract_json_payload(cleaned.trim());
     let Ok(val) = serde_json::from_str::<Value>(json_slice) else {
         return HashMap::new();
     };
 
-    let arr_opt = val
-        .get("items")
-        .or_else(|| val.get("results"))
-        .or_else(|| val.get("papers"))
-        .and_then(Value::as_array)
-        .or_else(|| val.as_array());
-
     let mut out = HashMap::new();
-    if let Some(arr) = arr_opt {
-        for (pos, entry) in arr.iter().enumerate() {
-            let idx_1based = entry
-                .get("id")
-                .or_else(|| entry.get("index"))
-                .and_then(|v| {
-                    v.as_u64()
-                        .map(|n| n as usize)
-                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
-                })
-                .unwrap_or(pos + 1);
-            if idx_1based == 0 || idx_1based > expected_len {
-                continue;
+    match &val {
+        Value::Object(map) => {
+            if let Some(arr) = map
+                .get("items")
+                .or_else(|| map.get("results"))
+                .or_else(|| map.get("papers"))
+                .and_then(Value::as_array)
+            {
+                parse_items_array(arr, expected_len, &mut out);
             }
-            if let Some(kws_arr) = entry.get("keywords").and_then(Value::as_array) {
-                let raw_kws: Vec<String> = kws_arr
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect();
-                let canon = canonicalize_keywords(&raw_kws);
-                if !canon.is_empty() {
-                    out.insert(idx_1based - 1, canon);
+
+            // Primary `KEYWORD_SYSTEM_PROMPT` format: `{"0": ["..."], "1": ["..."]}`
+            let numeric_entries: Vec<(usize, &Value)> = map
+                .iter()
+                .filter(|(k, v)| *k != "items" && *k != "results" && *k != "papers" && v.is_array())
+                .filter_map(|(k, v)| {
+                    let parsed = k
+                        .trim()
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .trim()
+                        .parse::<usize>()
+                        .ok()?;
+                    Some((parsed, v))
+                })
+                .collect();
+
+            if !numeric_entries.is_empty() {
+                let has_zero = numeric_entries.iter().any(|(n, _)| *n == 0);
+                let is_strict_1based = !has_zero
+                    && numeric_entries.iter().any(|(n, _)| *n == expected_len)
+                    && numeric_entries
+                        .iter()
+                        .all(|(n, _)| (1..=expected_len).contains(n));
+
+                for (n, arr_val) in numeric_entries {
+                    let mapped_idx = if is_strict_1based {
+                        Some(n - 1)
+                    } else {
+                        (n < expected_len).then_some(n)
+                    };
+                    if let Some(idx) = mapped_idx {
+                        let canon = extract_string_array_canon(arr_val);
+                        if !canon.is_empty() {
+                            out.insert(idx, canon);
+                        }
+                    }
+                }
+            }
+
+            if out.is_empty() && expected_len == 1 {
+                if let Some(kws_val) = map.get("keywords") {
+                    let canon = extract_string_array_canon(kws_val);
+                    if !canon.is_empty() {
+                        out.insert(0, canon);
+                    }
                 }
             }
         }
-    } else if expected_len == 1 {
-        if let Some(kws_arr) = val.get("keywords").and_then(Value::as_array) {
-            let raw_kws: Vec<String> = kws_arr
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
-            let canon = canonicalize_keywords(&raw_kws);
-            if !canon.is_empty() {
-                out.insert(0, canon);
+        Value::Array(arr) => {
+            if arr.iter().any(Value::is_object) {
+                parse_items_array(arr, expected_len, &mut out);
+            } else if expected_len == 1 {
+                let canon = extract_string_array_canon(&val);
+                if !canon.is_empty() {
+                    out.insert(0, canon);
+                }
             }
         }
+        _ => {}
     }
 
     out
@@ -1215,6 +1396,192 @@ fn extract_json_payload(raw: &str) -> &str {
     raw
 }
 
+fn extract_assistant_content(body_val: &Value) -> String {
+    let Some(content_val) = body_val.pointer("/choices/0/message/content") else {
+        return String::new();
+    };
+    if let Some(s) = content_val.as_str() {
+        return s.trim().to_string();
+    }
+    if let Some(parts) = content_val.as_array() {
+        let joined: String = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect();
+        return joined.trim().to_string();
+    }
+    String::new()
+}
+
+/// Guard against an LLM echoing a paper's bespoke coined tool/model prefix before `:`
+/// (e.g., `"DuFP: ..."`, `"VulnGPT: ..."`, `"AutoFuzz: ..."`), while preserving standard
+/// technical names such as `eBPF`, `WebAssembly`, `GraphQL`, `JavaScript`, `TypeScript`,
+/// `PyTorch`, `OpenMP`, `CodeQL`, or `LoRA`.
+fn strip_bespoke_title_prefix(title: &str, kws: Vec<String>) -> Vec<String> {
+    let Some((raw_prefix, _)) = title.split_once(':') else {
+        return kws;
+    };
+    let prefix = raw_prefix
+        .trim()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+    if prefix.len() < 3 || prefix.len() > 28 || prefix.contains(char::is_whitespace) {
+        return kws;
+    }
+    const ALLOWED_STANDARD_CAMEL: &[&str] = &[
+        "ebpf",
+        "webassembly",
+        "graphql",
+        "javascript",
+        "typescript",
+        "pytorch",
+        "openmp",
+        "codeql",
+        "lora",
+        "qlora",
+        "deepseek",
+        "riscv",
+        "risc-v",
+        "llvm",
+        "mlir",
+        "wasm",
+    ];
+    let lower_prefix = prefix.to_ascii_lowercase();
+    if ALLOWED_STANDARD_CAMEL.contains(&lower_prefix.as_str()) {
+        return kws;
+    }
+    let chars: Vec<char> = prefix.chars().collect();
+    let has_internal_camel = chars
+        .windows(2)
+        .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase())
+        || chars.windows(3).any(|w| {
+            w[0].is_ascii_uppercase() && w[1].is_ascii_uppercase() && w[2].is_ascii_lowercase()
+        });
+    let has_hyphen_coinage = prefix.contains('-')
+        && SYNONYM_GROUPS.iter().all(|g| {
+            !g.canonical.eq_ignore_ascii_case(prefix)
+                && !g.aliases.iter().any(|a| a.eq_ignore_ascii_case(prefix))
+        });
+
+    if !has_internal_camel && !has_hyphen_coinage {
+        return kws;
+    }
+
+    kws.into_iter()
+        .filter(|kw| !kw.trim().eq_ignore_ascii_case(prefix))
+        .collect()
+}
+
+fn contains_ascii_phrase_boundary(haystack_lower: &str, phrase_lower: &str) -> bool {
+    if phrase_lower.len() < 3 {
+        return false;
+    }
+    let bytes = haystack_lower.as_bytes();
+    let p_len = phrase_lower.len();
+    let mut start = 0usize;
+    while let Some(rel) = haystack_lower[start..].find(phrase_lower) {
+        let pos = start + rel;
+        let end = pos + p_len;
+        let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+/// Deterministic zero-empty safety net when a paper has a non-empty `title` (even with an
+/// empty or conference-roster placeholder abstract) and the LLM returned only filtered noise.
+fn fallback_keywords_from_title_and_context(paper: &LlmPaperTarget) -> Vec<String> {
+    let title = collapse_whitespace(&paper.title);
+    if title.is_empty() {
+        return Vec::new();
+    }
+    let abs = collapse_whitespace(&paper.abstract_text);
+    let searchable = if is_roster_placeholder_abstract(&abs, &paper.source_label) {
+        title.to_ascii_lowercase()
+    } else {
+        format!("{} {}", title, abs).to_ascii_lowercase()
+    };
+
+    let mut matched_raw: Vec<String> = Vec::new();
+    for group in SYNONYM_GROUPS {
+        let hit = std::iter::once(group.canonical)
+            .chain(group.aliases.iter().copied())
+            .any(|term| {
+                let tl = term.to_ascii_lowercase();
+                tl.len() >= 4 && contains_ascii_phrase_boundary(&searchable, &tl)
+            });
+        if hit {
+            matched_raw.push(group.canonical.to_string());
+            if matched_raw.len() >= 5 {
+                break;
+            }
+        }
+    }
+
+    // Domain context supplement from arXiv categories / venue label so even abstract-less
+    // papers with novel terminology receive valid canonical subfield keywords.
+    let ctx_lower =
+        format!("{} {}", paper.categories.join(" "), paper.source_label).to_ascii_lowercase();
+    if matched_raw.len() < 2 {
+        if ctx_lower.contains("cs.cr")
+            || ctx_lower.contains("security")
+            || ctx_lower.contains("usenix")
+            || ctx_lower.contains("ccs")
+            || ctx_lower.contains("ndss")
+            || ctx_lower.contains("crypt")
+        {
+            matched_raw.push("System Security".to_string());
+        }
+        if ctx_lower.contains("cs.se")
+            || ctx_lower.contains("icse")
+            || ctx_lower.contains("fse")
+            || ctx_lower.contains("ase")
+            || ctx_lower.contains("issta")
+            || ctx_lower.contains("tosem")
+            || ctx_lower.contains("tse")
+        {
+            matched_raw.push("Program Analysis".to_string());
+        }
+        if ctx_lower.contains("cs.pl")
+            || ctx_lower.contains("popl")
+            || ctx_lower.contains("pldi")
+            || ctx_lower.contains("oopsla")
+            || ctx_lower.contains("icfp")
+        {
+            matched_raw.push("Programming Language".to_string());
+        }
+        if ctx_lower.contains("cs.ai")
+            || ctx_lower.contains("cs.lg")
+            || ctx_lower.contains("neurips")
+            || ctx_lower.contains("icml")
+            || ctx_lower.contains("iclr")
+            || ctx_lower.contains("aaai")
+        {
+            matched_raw.push("Machine Learning".to_string());
+        }
+        if ctx_lower.contains("cs.cl") || ctx_lower.contains("acl") || ctx_lower.contains("emnlp") {
+            matched_raw.push("Natural Language Processing".to_string());
+        }
+        if ctx_lower.contains("cs.cv") || ctx_lower.contains("cvpr") || ctx_lower.contains("iccv") {
+            matched_raw.push("Computer Vision".to_string());
+        }
+    }
+
+    if matched_raw.is_empty() {
+        matched_raw.push("Program Analysis".to_string());
+    }
+
+    let canon = strip_bespoke_title_prefix(&title, canonicalize_keywords(&matched_raw));
+    if canon.is_empty() {
+        vec!["Program Analysis".to_string()]
+    } else {
+        canon.into_iter().take(6).collect()
+    }
+}
+
 async fn request_llm_keywords_with_patient_backoff(
     client: &reqwest::Client,
     endpoint: &str,
@@ -1225,6 +1592,7 @@ async fn request_llm_keywords_with_patient_backoff(
     let payload = serde_json::json!({
         "model": model,
         "temperature": 0.1,
+        "max_tokens": 2400,
         "messages": build_bake_llm_messages(chunk),
     });
 
@@ -1247,17 +1615,13 @@ async fn request_llm_keywords_with_patient_backoff(
                             continue;
                         }
                     };
-                    let content = body_val
-                        .pointer("/choices/0/message/content")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim();
+                    let content = extract_assistant_content(&body_val);
                     if content.is_empty() {
                         last_err = "empty assistant content".to_string();
                         tokio::time::sleep(Duration::from_secs(base_secs)).await;
                         continue;
                     }
-                    let parsed = parse_llm_keyword_batch_json(content, chunk.len());
+                    let parsed = parse_llm_keyword_batch_json(&content, chunk.len());
                     if !parsed.is_empty() {
                         return Ok(parsed);
                     }
@@ -1313,23 +1677,48 @@ async fn extract_batch_with_single_fallback(
         request_llm_keywords_with_patient_backoff(client, endpoint, model, api_key, &chunk).await?;
     let mut out = Vec::with_capacity(chunk.len());
     for (idx, paper) in chunk.into_iter().enumerate() {
-        if let Some(kws) = batch_map.get(&idx).filter(|k| !k.is_empty()) {
-            out.push((paper, kws.clone()));
-        } else {
-            // Single-paper patient retry so partial batch omissions are never silently dropped!
-            let single_slice = std::slice::from_ref(&paper);
-            let single_map = request_llm_keywords_with_patient_backoff(
-                client,
-                endpoint,
-                model,
-                api_key,
-                single_slice,
-            )
-            .await?;
-            let kws = single_map.get(&0).cloned().unwrap_or_default();
-            if !kws.is_empty() {
-                out.push((paper, kws));
+        let cleaned_batch = batch_map
+            .get(&idx)
+            .cloned()
+            .map(|kws| strip_bespoke_title_prefix(&paper.title, kws))
+            .unwrap_or_default();
+        if !cleaned_batch.is_empty() {
+            out.push((paper, cleaned_batch));
+            continue;
+        }
+
+        // Single-paper patient retry so partial batch omissions or title-only entries are never dropped.
+        let single_slice = std::slice::from_ref(&paper);
+        let single_kws = match request_llm_keywords_with_patient_backoff(
+            client,
+            endpoint,
+            model,
+            api_key,
+            single_slice,
+        )
+        .await
+        {
+            Ok(single_map) => single_map
+                .get(&0)
+                .cloned()
+                .map(|kws| strip_bespoke_title_prefix(&paper.title, kws))
+                .unwrap_or_default(),
+            Err(err) => {
+                log::warn!(
+                    "seed_bake single-paper LLM fallback failed for {}: {err}; using title/context fallback",
+                    paper.id
+                );
+                Vec::new()
             }
+        };
+
+        let final_kws = if single_kws.is_empty() {
+            fallback_keywords_from_title_and_context(&paper)
+        } else {
+            single_kws
+        };
+        if !final_kws.is_empty() {
+            out.push((paper, final_kws));
         }
     }
     Ok(out)
@@ -1809,4 +2198,138 @@ pub async fn seed_bake_at(
         llm_enriched_papers: llm_enriched,
         shards,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bake_prompt_matches_keyword_llm_rules_and_formats_zero_based_lines() {
+        let long_abs = format!("We study smart contract fuzzing. {}", "x".repeat(2000));
+        let chunk = vec![
+            LlmPaperTarget {
+                id: "arxiv:2603.00001".into(),
+                title: "DuFP: Dual-Path Fuzzing for Smart Contracts".into(),
+                abstract_text: long_abs,
+                categories: vec!["cs.CR".into(), "cs.SE".into()],
+                source_label: "arXiv cs.CR".into(),
+            },
+            LlmPaperTarget {
+                id: "venue:icse-2026:p2".into(),
+                title: "VulnGPT: Automated Program Repair via Symbolic Execution".into(),
+                abstract_text: "ICSE 2026 accepted paper".into(),
+                categories: Vec::new(),
+                source_label: "ICSE 2026".into(),
+            },
+        ];
+
+        let msgs = build_bake_llm_messages(&chunk);
+        let sys = msgs[0]["content"].as_str().unwrap();
+        assert!(sys.contains("4 to 6 canonical English academic keywords"));
+        assert!(sys.contains("VulnGPT"));
+        assert!(sys.contains("AutoFuzz"));
+        assert!(sys.contains("DuFP"));
+
+        let user = msgs[1]["content"].as_str().unwrap();
+        let lines: Vec<&str> = user.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0]
+            .starts_with("[0] Title: DuFP: Dual-Path Fuzzing for Smart Contracts | Abstract: "));
+        let (_, abs_part) = lines[0].split_once(" | Abstract: ").unwrap();
+        assert_eq!(abs_part.chars().count(), 1600);
+        assert!(lines[1].starts_with(
+            "[1] Title: VulnGPT: Automated Program Repair via Symbolic Execution | Abstract: (Title-only entry; Venue/Field: ICSE 2026)"
+        ));
+    }
+
+    #[test]
+    fn parse_llm_keyword_batch_supports_zero_based_object_and_items_array() {
+        // 1) Default KEYWORD_SYSTEM_PROMPT 0-based object with <think> and markdown code fences
+        let raw_kv = r#"<think>Reasoning about subfield and technique...</think>
+```json
+{
+  "0": ["Smart Contract Security", "Fuzzing", "Symbolic Execution", "Benchmark"],
+  "1": ["Program Repair", "Static Analysis", "Computer Science"]
+}
+```"#;
+        let parsed_kv = parse_llm_keyword_batch_json(raw_kv, 2);
+        assert_eq!(
+            parsed_kv.get(&0).unwrap(),
+            &vec![
+                "Smart Contract Security".to_string(),
+                "Fuzzing".to_string(),
+                "Symbolic Execution".to_string()
+            ]
+        );
+        assert_eq!(
+            parsed_kv.get(&1).unwrap(),
+            &vec!["Program Repair".to_string(), "Static Analysis".to_string()]
+        );
+
+        // 2) `{"items": [{"idx": 0, ...}, {"idx": 1, ...}]}` array format
+        let raw_items_idx = r#"{"items":[{"idx":0,"keywords":["Vulnerability Detection","Taint Analysis"]},{"idx":1,"keywords":["Code Generation","Type System"]}]}"#;
+        let parsed_items = parse_llm_keyword_batch_json(raw_items_idx, 2);
+        assert_eq!(
+            parsed_items.get(&0).unwrap(),
+            &vec![
+                "Vulnerability Detection".to_string(),
+                "Taint Analysis".to_string()
+            ]
+        );
+        assert_eq!(
+            parsed_items.get(&1).unwrap(),
+            &vec!["Code Generation".to_string(), "Type System".to_string()]
+        );
+
+        // 3) Legacy 1-based `{"items": [{"id": "1", ...}, {"id": "2", ...}]}` format
+        let raw_items_1based = r#"{"items":[{"id":"1","keywords":["Formal Verification"]},{"id":"2","keywords":["Greybox Fuzzing"]}]}"#;
+        let parsed_1based = parse_llm_keyword_batch_json(raw_items_1based, 2);
+        assert_eq!(
+            parsed_1based.get(&0).unwrap(),
+            &vec!["Formal Verification".to_string()]
+        );
+        assert_eq!(
+            parsed_1based.get(&1).unwrap(),
+            &vec!["Greybox Fuzzing".to_string()]
+        );
+    }
+
+    #[test]
+    fn bespoke_prefix_guard_and_placeholder_abstract_fallback_never_leave_empty() {
+        let stripped = strip_bespoke_title_prefix(
+            "DuFP: Dual-Path Fuzzing for Smart Contracts",
+            vec![
+                "DuFP".into(),
+                "Fuzzing".into(),
+                "Smart Contract Security".into(),
+            ],
+        );
+        assert_eq!(
+            stripped,
+            vec!["Fuzzing".to_string(), "Smart Contract Security".to_string()]
+        );
+
+        // Standard camelCase tech names like eBPF are preserved
+        let kept = strip_bespoke_title_prefix(
+            "eBPF: Safe In-Kernel Sandboxing",
+            vec!["eBPF".into(), "Kernel Security".into()],
+        );
+        assert_eq!(
+            kept,
+            vec!["eBPF".to_string(), "Kernel Security".to_string()]
+        );
+
+        // Roster placeholder abstract still produces non-empty canonical keywords from title + venue
+        let roster_paper = LlmPaperTarget {
+            id: "venue:usenix-2026:p99".into(),
+            title: "AutoFuzz: Coverage-Guided Fuzzing for Smart Contracts".into(),
+            abstract_text: "USENIX Security 2026 accepted paper".into(),
+            categories: Vec::new(),
+            source_label: "USENIX Security 2026".into(),
+        };
+        let fb = fallback_keywords_from_title_and_context(&roster_paper);
+        assert!(!fb.is_empty());
+        assert!(!fb.iter().any(|k| k.eq_ignore_ascii_case("AutoFuzz")));
+    }
 }
