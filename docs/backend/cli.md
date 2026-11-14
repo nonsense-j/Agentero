@@ -23,6 +23,7 @@ Headless Vault / Catalog / Wiki 接口；**不含** BYOA / paper-reader。
 | `paper` | list/get、tag list/set/add/rm、move、open、download/parse、notes fetch… |
 | `import` | 标识符入库 |
 | `discover` | 查询式发现：按关键词/分类/提交日期窗口抓 arXiv 候选，确定性词法排序（headless、无 embedding key） |
+| `collection` | 广场论文池与预置包维护：`upsert-file` / `seed-bake` / `seed-import`（与桌面端共用 XDG `collection.sqlite` Schema V2） |
 | `feed` | 广场订阅源（RSS / Atom / JSON Feed）：`list` / `add` / `remove` / `refresh` / `items` / `read`；与桌面端共用 `$XDG_DATA_HOME/agentero/feeds.sqlite`，无 Vault 概念 |
 | `export` | 导出 |
 | `doctor` | Vault 结构与 Catalog 诊断；含 wikilink 检查与 aliases / 视觉批注 / catalog 去重修复 |
@@ -246,6 +247,30 @@ agentero feed remove <sub-id> -y --json
 - `items` 默认剥掉 `contentHtml` / `bodyMarkdown`（重 HTML 省 token），`--full` 恢复；条目默认每源缓存最近 200 条。`--filter` 仅接受 `all` / `unread` / `paper` / `other`，`--limit` 限 `1..=200`，越界由参数解析直接拒绝。
 - 错误码：`feed_duplicate`（URL 已订阅）、`feed_not_found`、`feed_empty`、`feed_parse_error`（feed 不是合法 RSS/Atom/JSON）、`feed_not_found_in_page`、`feed_http_error`（带状态码）、`feed_fetch_failed`、`feed_too_large`；`feed remove` 在非 TTY 且未传 `-y` 时返回 `needs_confirmation`。底层 IO / JSON / SQLite 错误分别以 `io` / `json` / `sqlite` 透传。
 - 桌面端仍负责完整交互面（重命名、置顶、正文解析 `resolve body`、导入论文）；CLI 面只覆盖订阅与消费生命周期（见 [#962](https://github.com/poco-ai/Agentero/issues/962)）。
+
+## 广场论文池与预置包（`collection`）
+
+`collection *` 是广场 `Paper Collection`（`$XDG_DATA_HOME/agentero/collection.sqlite` Schema V2）的无头写入、图谱烘焙与分片预置包导入/导出接口，供维护者发布 `collection-seed-2026` 预置包以及离线导入使用（不依赖 Vault）。CLI 与发布脚本均会自动读取桌面端 `settings.json` 中的 `networkProxyEnabled` + `networkProxyUrl`（自动附带 `127.0.0.1,localhost` 直连绕过）及 `openAlexKey`。
+
+```bash
+# 1. 一键抓取 28 个 2026 Venue + arXiv 分区、烘焙引用出边与 LLM 关键词并生成 dist/seed/ 预置包
+pnpm collection:seed-publish --dry-run
+pnpm collection:seed-publish --categories cs.SE,cs.CR,cs.PL,cs.AI
+pnpm collection:seed-publish --skip-fetch --out-dir dist/seed --upload
+
+# 2. 直接调用 CLI 子命令（支持自定义 --db 路径与 --json 输出）
+agentero collection upsert-file --input batch.json --json
+agentero collection seed-bake --out-dir dist/seed \
+  --llm-base-url http://127.0.0.1:8011/v1 --llm-model mercury-3-instant --llm-concurrency 16 --json
+agentero collection seed-import --manifest dist/seed/manifest.json --json
+agentero collection seed-import --url https://github.com/poco-ai/Agentero/releases/download/collection-seed-2026/manifest.json --force --json
+```
+
+| 子命令 | 说明 |
+|---|---|
+| `collection upsert-file` | 从 JSON 文件读取 `CollectionUpsertPapersArgs`（含 `items`、可选 `replaceVenueId`、`venueUpdate`、`arxivWatermarks`）批量写入 `collection.sqlite` 并同步解析池内引用图谱 |
+| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点并发烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
+| `collection seed-import` | 从本地 `--manifest <path>` 或远端 `--url <manifest-url>` 校验 SHA-256 并流式导入未应用的分片，自动合并 `arxiv_watermarks` 与 Venue `lastFetchedAt` 水位线（传 `--force` 可重置 `seed_cleared` 标记强制重导） |
 
 ## 论文导入
 
