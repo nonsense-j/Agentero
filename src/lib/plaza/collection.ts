@@ -9,10 +9,16 @@
  * stateless pipelines writing batches directly to `collection.sqlite`.
  */
 
+import i18n from "@/i18n";
 import { listenAgentCompleted, listenAgentFailed, runOnce } from "@/lib/agent";
 import {
 	BackgroundTaskCancelledError,
+	backgroundTasksStore,
+	completeBackgroundTask,
 	isBackgroundTaskCancelledError,
+	registerBackgroundTaskCancelHandler,
+	releaseBackgroundTaskCancelHandler,
+	startBackgroundTask,
 } from "@/lib/core/background-tasks";
 import { commands } from "@/lib/core/bindings";
 import { getKeywordLlmConfigSignature } from "@/lib/keyword-llm";
@@ -30,6 +36,7 @@ import {
 	enrichArxivItemsBatch,
 	enrichSinglePaperOnDemand,
 	enrichVenueItemsBatch,
+	extractArxivDoiFromAtomEntry,
 	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	type FetchJsonFn,
@@ -44,6 +51,7 @@ import {
 	isPlaceholderAbstract,
 	isPositionPaperTitle,
 	isWorkshopOrCompanionVenue,
+	type KeywordSource,
 	normalizePaperKeywords,
 	reconstructOpenAlexAbstract,
 	sleepWithAbort,
@@ -67,30 +75,37 @@ import {
 	type CollectionListPapersQuery,
 	type CollectionOverviewOut,
 	type CollectionPaperDetailResult,
+	type CollectionPaperLineageResult,
 	type CollectionPaperPatchInput,
 	type CollectionPapersPageResult,
+	type CollectionSeedSyncInput,
+	type CollectionSeedSyncResult,
+	type CollectionSharedRefPeerResult,
 	type CollectionStateSummary,
 	type CollectionSummarySnapshot,
 	type CollectionUpsertPapersInput,
+	type CollectionVaultPaperMatch,
 	type CollectionVenueWatermarkUpdate,
 	clearCollection,
 	collectionStore,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
-	ensureCollectionSummaryHydrated,
 	fetchCollectionOverview,
 	fetchCollectionStateSummary,
 	getCollectionPaperDetail,
+	getCollectionPaperLineage,
 	getCollectionPapersByIds,
 	getCollectionSummarySnapshot,
 	isPreloadingCollection,
 	listCollectionPapers,
 	patchCollectionPapers,
-	resetCollectionStoreForTests,
 	setPreloadingCollectionFlag,
+	ensureCollectionSummaryHydrated as storeEnsureCollectionSummaryHydrated,
+	resetCollectionStoreForTests as storeResetCollectionStoreForTests,
+	updateCollectionConfig as storeUpdateCollectionConfig,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
-	updateCollectionConfig,
+	syncCollectionSeed,
 	upsertCollectionPapers,
 } from "@/lib/plaza/collection-store";
 import {
@@ -122,15 +137,21 @@ export type {
 	CollectionOverviewOut,
 	CollectionPaperDetailResult,
 	CollectionPaperItem,
+	CollectionPaperLineageResult,
 	CollectionPaperPatchInput,
 	CollectionPapersPageResult,
+	CollectionSeedSyncInput,
+	CollectionSeedSyncResult,
+	CollectionSharedRefPeerResult,
 	CollectionSourceType,
 	CollectionStateSummary,
 	CollectionSummarySnapshot,
 	CollectionUpsertPapersInput,
+	CollectionVaultPaperMatch,
 	CollectionVenueWatermarkUpdate,
 	FetchJsonFn,
 	FetchTextFn,
+	KeywordSource,
 	VenueCcfRank,
 	VenueConfig,
 	VenueDomain,
@@ -149,7 +170,7 @@ export {
 	enrichArxivItemsBatch,
 	enrichSinglePaperOnDemand,
 	enrichVenueItemsBatch,
-	ensureCollectionSummaryHydrated,
+	extractArxivDoiFromAtomEntry,
 	extractArxivHtmlKeywords,
 	extractSpringerHtmlAbstract,
 	fetchCollectionOverview,
@@ -164,6 +185,7 @@ export {
 	formatPaperBibtex,
 	formatPaperCitationText,
 	getCollectionPaperDetail,
+	getCollectionPaperLineage,
 	getCollectionPapersByIds,
 	getCollectionSummarySnapshot,
 	inferVenueKind,
@@ -185,7 +207,7 @@ export {
 	reconstructOpenAlexAbstract,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
-	updateCollectionConfig,
+	syncCollectionSeed,
 	upsertCollectionPapers,
 	VENUE_SPEC_BY_ID,
 	VENUE_SPECS,
@@ -197,6 +219,131 @@ const attemptedDetailEnrichIds = new Set<string>();
 const completedArxivEnrichIds = new Set<string>();
 const sessionAttemptedArxivEnrichIds = new Set<string>();
 let lastObservedKeywordLlmConfigSig = "";
+let attemptedColdSeedWarmup = false;
+let inFlightSeedSync: Promise<CollectionSeedSyncResult | null> | null = null;
+let activePreloadDepth = 0;
+let activeSeedSyncDepth = 0;
+
+function syncPreloadingFlag(): void {
+	setPreloadingCollectionFlag(
+		activePreloadDepth > 0 || activeSeedSyncDepth > 0,
+	);
+}
+
+function dismissSilentSeedTask(taskId: string): void {
+	const snap = backgroundTasksStore.getState();
+	const nextTasks = snap.tasks.filter((t) => t.id !== taskId);
+	if (nextTasks.length === snap.tasks.length) return;
+	const hasActive = nextTasks.some(
+		(t) => t.status === "queued" || t.status === "running",
+	);
+	backgroundTasksStore.setState({
+		tasks: nextTasks,
+		expanded: hasActive ? snap.expanded : false,
+	});
+}
+
+function runDedupedSeedSync(
+	args?: CollectionSeedSyncInput,
+): Promise<CollectionSeedSyncResult | null> {
+	if (inFlightSeedSync) return inFlightSeedSync;
+	const p = syncCollectionSeed(args)
+		.catch(() => null)
+		.finally(() => {
+			inFlightSeedSync = null;
+		});
+	inFlightSeedSync = p;
+	return p;
+}
+
+/**
+ * Run `syncCollectionSeed` in the background with a bottom-left task status row.
+ * Silently degrades without error toasts or failure banners when the remote seed
+ * bundle is not yet published (`skipped: true`) or the client is offline.
+ */
+export async function syncCollectionSeedInBackground(
+	args?: CollectionSeedSyncInput,
+): Promise<CollectionSeedSyncResult | null> {
+	let cancelled = false;
+	const taskId = startBackgroundTask({
+		kind: "downloadAssets",
+		icon: "download",
+		title: i18n.t("app:tasks.plazaSeedSync"),
+	});
+	registerBackgroundTaskCancelHandler(taskId, () => {
+		cancelled = true;
+	});
+	activeSeedSyncDepth += 1;
+	syncPreloadingFlag();
+	try {
+		const res = await runDedupedSeedSync(args);
+		if (cancelled) return null;
+		if (!res || res.skipped) {
+			dismissSilentSeedTask(taskId);
+			return res;
+		}
+		completeBackgroundTask(
+			taskId,
+			res.importedPapers > 0
+				? i18n.t("sidebar:plaza.collection.papersCount", {
+						count: res.importedPapers,
+					})
+				: undefined,
+		);
+		return res;
+	} finally {
+		releaseBackgroundTaskCancelHandler(taskId);
+		activeSeedSyncDepth = Math.max(0, activeSeedSyncDepth - 1);
+		syncPreloadingFlag();
+	}
+}
+
+export function resetCollectionStoreForTests(): void {
+	attemptedColdSeedWarmup = false;
+	inFlightSeedSync = null;
+	activeSeedSyncDepth = 0;
+	activePreloadDepth = 0;
+	storeResetCollectionStoreForTests();
+}
+
+export async function ensureCollectionSummaryHydrated(): Promise<CollectionStateSummary> {
+	if (!collectionStore.getState().hydrated) {
+		attemptedColdSeedWarmup = false;
+	}
+	const summary = await storeEnsureCollectionSummaryHydrated();
+	if (
+		summary.totalCount === 0 &&
+		!summary.seedCleared &&
+		!attemptedColdSeedWarmup
+	) {
+		attemptedColdSeedWarmup = true;
+		void syncCollectionSeedInBackground();
+	}
+	return summary;
+}
+
+export async function updateCollectionConfig(
+	args: CollectionConfigUpdateInput,
+): Promise<CollectionStateSummary> {
+	const prevCategories = getCollectionSummarySnapshot().categories;
+	const addedCsAi =
+		Array.isArray(args.categories) &&
+		args.categories.includes("cs.AI") &&
+		!prevCategories.includes("cs.AI");
+	const nextSummary = await storeUpdateCollectionConfig(args);
+	if (addedCsAi && !nextSummary.seedCleared) {
+		void syncCollectionSeedInBackground();
+	}
+	return nextSummary;
+}
+
+async function trySyncSeedBeforeManualRefresh(
+	signal?: AbortSignal,
+): Promise<void> {
+	throwIfAborted(signal);
+	await runDedupedSeedSync();
+	throwIfAborted(signal);
+}
 
 function syncEnrichmentSessionWithKeywordLlmConfig(): void {
 	const sig = getKeywordLlmConfigSignature();
@@ -252,6 +399,10 @@ export function resetCollectionMemoryForTests(): void {
 	completedArxivEnrichIds.clear();
 	sessionAttemptedArxivEnrichIds.clear();
 	lastObservedKeywordLlmConfigSig = "";
+	attemptedColdSeedWarmup = false;
+	inFlightSeedSync = null;
+	activePreloadDepth = 0;
+	activeSeedSyncDepth = 0;
 	resetCollectionStoreForTests();
 }
 
@@ -639,7 +790,7 @@ export function parseArxivAtomXml(
 		items.push({
 			id: `arxiv:${arxivId}`,
 			arxivId,
-			doi: `10.48550/arxiv.${arxivId}`,
+			doi: extractArxivDoiFromAtomEntry(block, arxivId),
 			title,
 			authors,
 			abstract,
@@ -772,7 +923,7 @@ export function parseArxivRssXml(
 		items.push({
 			id: `arxiv:${arxivId}`,
 			arxivId,
-			doi: `10.48550/arxiv.${arxivId}`,
+			doi: extractArxivDoiFromAtomEntry(block, arxivId),
 			title,
 			authors,
 			abstract,
@@ -1450,7 +1601,8 @@ export async function preloadAll2026ArxivInBackground(
 	if (pendingCats.length === 0) return;
 
 	const runId = ++activePreloadRunId;
-	setPreloadingCollectionFlag(true);
+	activePreloadDepth += 1;
+	syncPreloadingFlag();
 	const { fetchTextFn, fetchJsonFn } = resolveTransportFetchers(transport);
 
 	type CatCursor = {
@@ -1775,9 +1927,8 @@ export async function preloadAll2026ArxivInBackground(
 			}
 		}
 	} finally {
-		if (runId === activePreloadRunId) {
-			setPreloadingCollectionFlag(false);
-		}
+		activePreloadDepth = Math.max(0, activePreloadDepth - 1);
+		syncPreloadingFlag();
 	}
 }
 
@@ -2553,12 +2704,11 @@ export async function ensureVenueLoaded(
 
 /**
  * True when opening a paper card's detail dialog should run on-demand enrichment:
- * missing/placeholder abstract, missing citation count, or missing canonical keywords.
+ * missing/placeholder abstract or missing canonical keywords.
  */
 export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
 	syncEnrichmentSessionWithKeywordLlmConfig();
 	if (isPlaceholderAbstract(paper.abstract, paper.sourceLabel)) return true;
-	if (paper.citationCount === undefined) return true;
 	if (
 		normalizePaperKeywords(paper.keywords).length === 0 &&
 		!attemptedDetailEnrichIds.has(paper.id)
@@ -2569,9 +2719,9 @@ export function shouldEnrichPaperOnDemand(paper: CollectionPaperItem): boolean {
 }
 
 /**
- * Guarantee complete abstract, citation count, canonical keywords, BibTeX, and
- * bibliographic info when clicking a paper card, persisting enriched fields
- * back to `collection.sqlite` via `plazaCollectionPatchPapers`.
+ * Guarantee complete abstract, canonical keywords, BibTeX, and bibliographic
+ * info when clicking a paper card, persisting enriched fields (including
+ * `keywordSource`, `openalexId`, and `rawRefs`) back to `collection.sqlite`.
  */
 export async function ensurePaperFullDetails(
 	paper: CollectionPaperItem,
@@ -2625,6 +2775,9 @@ export async function ensurePaperFullDetails(
 				venueFull: finalized.venueFull ?? null,
 				citationCount: finalized.citationCount ?? 0,
 				keywords: finalized.keywords ?? [],
+				keywordSource: finalized.keywordSource ?? null,
+				openalexId: finalized.openalexId ?? null,
+				rawRefs: finalized.rawRefs ?? null,
 				bibtex: finalized.bibtex ?? null,
 			},
 		]);
@@ -2683,12 +2836,39 @@ export function mergeCollectionItems(
 									? prev.abstract
 									: item.abstract;
 
+					const mergedKeywords = normalizePaperKeywords([
+						...(prev.keywords ?? []),
+						...(item.keywords ?? []),
+					]);
+					const kwPriority = (src?: KeywordSource): number =>
+						src === "author"
+							? 3
+							: src === "maintainer_llm"
+								? 2
+								: src === "client_llm"
+									? 1
+									: 0;
+					const mergedKeywordSource =
+						mergedKeywords.length > 0
+							? kwPriority(item.keywordSource) > kwPriority(prev.keywordSource)
+								? item.keywordSource
+								: (prev.keywordSource ?? item.keywordSource)
+							: undefined;
+					const mergedRefs =
+						prev.rawRefs?.length || item.rawRefs?.length
+							? Array.from(
+									new Set([...(prev.rawRefs ?? []), ...(item.rawRefs ?? [])]),
+								)
+							: undefined;
+
 					map.set(existingKey, {
 						...prev,
 						abstract: bestAbstract,
 						pdfUrl: prev.pdfUrl || item.pdfUrl,
 						doi: prev.doi || item.doi,
 						arxivId: prev.arxivId || item.arxivId,
+						openalexId: prev.openalexId || item.openalexId,
+						...(mergedRefs ? { rawRefs: mergedRefs } : {}),
 						coolPapersId: prev.coolPapersId || item.coolPapersId,
 						venueId: prev.venueId || item.venueId,
 						venueKind: prev.venueKind || item.venueKind,
@@ -2713,10 +2893,10 @@ export function mergeCollectionItems(
 							prev.citationCount ?? 0,
 							item.citationCount ?? 0,
 						),
-						keywords: normalizePaperKeywords([
-							...(prev.keywords ?? []),
-							...(item.keywords ?? []),
-						]),
+						keywords: mergedKeywords,
+						...(mergedKeywordSource
+							? { keywordSource: mergedKeywordSource }
+							: {}),
 						categories: Array.from(
 							new Set([...prev.categories, ...item.categories]),
 						),
@@ -2952,11 +3132,17 @@ export async function backfillMissingArxivKeywords(
 							const gainedCitations =
 								(item.citationCount ?? 0) > (orig?.citationCount ?? 0);
 							const gainedDoi = !orig?.doi && Boolean(item.doi);
+							const gainedOpenAlexId =
+								!orig?.openalexId && Boolean(item.openalexId);
+							const gainedRefs =
+								(item.rawRefs?.length ?? 0) > (orig?.rawRefs?.length ?? 0);
 							if (
 								!gainedAbstract &&
 								!gainedKeywords &&
 								!gainedCitations &&
-								!gainedDoi
+								!gainedDoi &&
+								!gainedOpenAlexId &&
+								!gainedRefs
 							) {
 								continue;
 							}
@@ -2966,6 +3152,9 @@ export async function backfillMissingArxivKeywords(
 								doi: item.doi ?? null,
 								citationCount: item.citationCount ?? 0,
 								keywords: item.keywords ?? [],
+								keywordSource: item.keywordSource ?? null,
+								openalexId: item.openalexId ?? null,
+								rawRefs: item.rawRefs ?? null,
 							});
 						}
 						if (patches.length > 0) {
@@ -3040,21 +3229,18 @@ export async function refreshArxivCollection(options?: {
 }): Promise<CollectionStateSummary> {
 	throwIfAborted(options?.signal);
 	startNewArxivRefreshSession();
+	if (options?.replaceCategories && options.categories) {
+		await storeUpdateCollectionConfig({ categories: options.categories });
+		throwIfAborted(options?.signal);
+	}
+	await trySyncSeedBeforeManualRefresh(options?.signal);
 	const existingSummary = await fetchCollectionStateSummary();
 	throwIfAborted(options?.signal);
 	const targetCategories = options?.categories ?? existingSummary.categories;
 	const cleanTargetCats = Array.from(
 		new Set(targetCategories.map((c) => c.trim()).filter(Boolean)),
 	);
-	const savedCategories = options?.replaceCategories
-		? targetCategories
-		: existingSummary.categories;
 	const incremental = options?.incremental !== false;
-
-	if (options?.replaceCategories) {
-		await updateCollectionConfig({ categories: savedCategories });
-		throwIfAborted(options?.signal);
-	}
 
 	const totalCats = cleanTargetCats.length;
 	const perCatFraction = new Map<string, number>();
@@ -3272,6 +3458,7 @@ export async function refreshVenueCollection(options?: {
 	) => void;
 }): Promise<CollectionStateSummary> {
 	throwIfAborted(options?.signal);
+	await trySyncSeedBeforeManualRefresh(options?.signal);
 	let current = await fetchCollectionStateSummary();
 	throwIfAborted(options?.signal);
 	if (options?.venues !== undefined) {

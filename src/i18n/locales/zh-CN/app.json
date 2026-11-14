@@ -252,6 +252,7 @@
 		"connectorFailed": "Connector 附件失败",
 		"plazaArxivRefresh": "刷新 arXiv",
 		"plazaVenueRefresh": "刷新 Venue",
+		"plazaSeedSync": "同步预置论文包",
 		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
 		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
 	},

@@ -1,4 +1,15 @@
 export {
+	type CollectionPaperLineageResult,
+	type CollectionSeedSyncInput,
+	type CollectionSeedSyncResult,
+	type CollectionSharedRefPeerResult,
+	type CollectionVaultPaperMatch,
+	getCollectionPaperLineage,
+	type KeywordSource,
+	syncCollectionSeed,
+	syncCollectionSeedInBackground,
+} from "@/lib/plaza/collection";
+export {
 	SKILL_THEMES,
 	type SkillRepo,
 	type SkillTheme,

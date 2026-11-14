@@ -29,6 +29,7 @@ import {
 	cleanKeywordSurface,
 	normalizeKeywordKey,
 } from "@/lib/plaza/keyword-synonyms";
+import { getVaultPath } from "@/lib/vault/store";
 
 export const DEFAULT_RECOMMEND_BATCH_SIZE = 15;
 export const DEFAULT_WORD_CLOUD_TOP_N = 50;
@@ -51,6 +52,7 @@ export type WordCloudKeyword = {
 export type RecommendedPaperItem = CollectionPaperItem & {
 	matchedKeywords: string[];
 	score: number;
+	citedVaultCount?: number;
 };
 
 export type RecommendPoolState = {
@@ -267,11 +269,15 @@ export async function fetchCollectionWordCloud(
 
 export async function recommendNextFromCollection(
 	maxBatchSize: number = DEFAULT_RECOMMEND_BATCH_SIZE,
+	vaultPath?: string | null,
 ): Promise<RecommendNextResult> {
+	const resolvedVaultPath =
+		vaultPath !== undefined ? vaultPath : (getVaultPath() ?? null);
 	const dto = await callApi(
 		() =>
 			commands.plazaCollectionRecommendNext({
 				maxBatchSize,
+				vaultPath: resolvedVaultPath,
 			}),
 		{ fallback: "Failed to recommend papers from collection" },
 	);
@@ -280,6 +286,7 @@ export async function recommendNextFromCollection(
 		...fromPaperSummaryDto(entry.paper),
 		matchedKeywords: entry.matchedKeywords,
 		score: entry.score ?? 0,
+		citedVaultCount: entry.citedVaultCount ?? 0,
 	}));
 	if (items.length > 0) {
 		bumpCollectionRevision();

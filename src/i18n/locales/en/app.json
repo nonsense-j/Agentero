@@ -252,6 +252,7 @@
 		"connectorFailed": "Connector attachment failed",
 		"plazaArxivRefresh": "Refresh arXiv",
 		"plazaVenueRefresh": "Refresh Venue",
+		"plazaSeedSync": "Sync collection seed",
 		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
 		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
 	},

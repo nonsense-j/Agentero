@@ -7,13 +7,19 @@
  */
 
 import { createStore } from "zustand/vanilla";
-import { type CollectionOverviewOut, commands } from "@/lib/core/bindings";
+import {
+	type CollectionOverviewOut,
+	type CollectionSeedSyncOut,
+	type CollectionVaultPaperMatch,
+	commands,
+} from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
 import {
 	type CollectionPaperItem,
 	type CollectionSourceType,
 	formatPaperCitationText,
 	inferVenueKind,
+	type KeywordSource,
 	VENUE_SPEC_BY_ID,
 	VENUE_SPECS,
 	type VenueCcfRank,
@@ -68,6 +74,8 @@ export type CollectionStateSummary = {
 	conferenceCount: number;
 	journalCount: number;
 	categoryCounts: Record<string, number>;
+	seedCleared: boolean;
+	appliedSeedIds: string[];
 };
 
 export type CollectionSummarySnapshot = CollectionStateSummary & {
@@ -134,12 +142,41 @@ export type CollectionPaperPatchInput = {
 	venueFull?: string | null;
 	citationCount?: number | null;
 	keywords?: string[] | null;
+	keywordSource?: KeywordSource | null;
+	openalexId?: string | null;
+	rawRefs?: string[] | null;
 	volume?: string | null;
 	issue?: string | null;
 	pages?: string | null;
 	bibtex?: string | null;
 	coolPapersId?: string | null;
 	recommendedAt?: string | null;
+};
+
+export type CollectionSeedSyncInput = {
+	manifestUrl?: string | null;
+	force?: boolean | null;
+};
+
+export type CollectionSeedSyncResult = {
+	state: CollectionStateSummary;
+	appliedShards: string[];
+	importedPapers: number;
+	skipped: boolean;
+};
+
+export type { CollectionVaultPaperMatch };
+
+export type CollectionSharedRefPeerResult = {
+	paper: CollectionPaperItem;
+	sharedCount: number;
+};
+
+export type CollectionPaperLineageResult = {
+	citedByInPool: CollectionPaperItem[];
+	referencesInPool: CollectionPaperItem[];
+	sharedRefPeers: CollectionSharedRefPeerResult[];
+	vaultMatches: CollectionVaultPaperMatch[];
 };
 
 export type CollectionConfigUpdateInput = {
@@ -173,6 +210,7 @@ export type WirePaperSummaryLike = {
 	venueFull?: string | null;
 	citationCount?: number | null;
 	keywords?: string[] | null;
+	keywordSource?: string | null;
 	volume?: string | null;
 	issue?: string | null;
 	pages?: string | null;
@@ -222,6 +260,8 @@ type WireStateSummaryLike = {
 	conferenceCount: number;
 	journalCount: number;
 	categoryCounts: Record<string, number | undefined>;
+	seedCleared?: boolean | null;
+	appliedSeedIds?: string[] | null;
 };
 
 function coerceVenueKind(raw?: string | null): VenueKind | undefined {
@@ -239,6 +279,13 @@ function coerceCcfRank(raw?: string | null): VenueCcfRank | undefined {
 	return undefined;
 }
 
+function coerceKeywordSource(raw?: string | null): KeywordSource | undefined {
+	if (raw === "author" || raw === "maintainer_llm" || raw === "client_llm") {
+		return raw;
+	}
+	return undefined;
+}
+
 export function fromPaperSummaryDto(
 	dto: WirePaperSummaryLike,
 ): CollectionPaperItem {
@@ -248,6 +295,7 @@ export function fromPaperSummaryDto(
 	const venueKind = coerceVenueKind(dto.venueKind) ?? spec?.kind;
 	const venueDomain = coerceVenueDomain(dto.venueDomain) ?? spec?.domain;
 	const ccfRank = coerceCcfRank(dto.ccfRank) ?? spec?.ccfRank;
+	const keywordSource = coerceKeywordSource(dto.keywordSource);
 
 	return {
 		id: dto.id,
@@ -270,6 +318,7 @@ export function fromPaperSummaryDto(
 		...(dto.venueFull ? { venueFull: dto.venueFull } : {}),
 		citationCount: dto.citationCount ?? 0,
 		keywords: dto.keywords ?? [],
+		...(keywordSource ? { keywordSource } : {}),
 		...(dto.volume ? { volume: dto.volume } : {}),
 		...(dto.issue ? { issue: dto.issue } : {}),
 		...(dto.pages ? { pages: dto.pages } : {}),
@@ -380,6 +429,10 @@ export function fromStateSummaryDto(
 		conferenceCount: dto.conferenceCount ?? 0,
 		journalCount: dto.journalCount ?? 0,
 		categoryCounts,
+		seedCleared: Boolean(dto.seedCleared),
+		appliedSeedIds: Array.isArray(dto.appliedSeedIds)
+			? [...dto.appliedSeedIds]
+			: [],
 	};
 }
 
@@ -455,6 +508,9 @@ function toPaperUpsertDto(item: CollectionPaperItem) {
 		venueFull: item.venueFull ?? null,
 		citationCount: item.citationCount ?? 0,
 		keywords: item.keywords ?? [],
+		keywordSource: item.keywordSource ?? null,
+		openalexId: item.openalexId ?? null,
+		rawRefs: item.rawRefs ?? [],
 		volume: item.volume ?? null,
 		issue: item.issue ?? null,
 		pages: item.pages ?? null,
@@ -479,6 +535,8 @@ function createDefaultSummarySnapshot(): CollectionSummarySnapshot {
 		conferenceCount: 0,
 		journalCount: 0,
 		categoryCounts: {},
+		seedCleared: false,
+		appliedSeedIds: [],
 		revision: 0,
 		hydrated: false,
 		preloading: false,
@@ -678,6 +736,55 @@ export async function upsertCollectionPapers(
 	return applySummaryToStore(fromStateSummaryDto(dto), true);
 }
 
+export async function getCollectionPaperLineage(
+	id: string,
+	vaultPath?: string | null,
+): Promise<CollectionPaperLineageResult> {
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionPaperLineage({
+				id,
+				vaultPath: vaultPath ?? null,
+			}),
+		{ fallback: "Failed to load paper citation lineage" },
+	);
+	return {
+		citedByInPool: dto.citedByInPool.map(fromPaperSummaryDto),
+		referencesInPool: dto.referencesInPool.map(fromPaperSummaryDto),
+		sharedRefPeers: dto.sharedRefPeers.map((entry) => ({
+			paper: fromPaperSummaryDto(entry.paper),
+			sharedCount: entry.sharedCount,
+		})),
+		vaultMatches: dto.vaultMatches.map((m) => ({
+			relPath: m.relPath,
+			title: m.title,
+			doi: m.doi ?? null,
+			arxivId: m.arxivId ?? null,
+			relation: m.relation,
+		})),
+	};
+}
+
+export async function syncCollectionSeed(
+	args?: CollectionSeedSyncInput,
+): Promise<CollectionSeedSyncResult> {
+	const dto: CollectionSeedSyncOut = await callApi(
+		() =>
+			commands.plazaCollectionSeedSync({
+				manifestUrl: args?.manifestUrl ?? null,
+				force: args?.force ?? null,
+			}),
+		{ fallback: "Failed to sync paper collection seed bundle" },
+	);
+	const state = applySummaryToStore(fromStateSummaryDto(dto.state), true);
+	return {
+		state,
+		appliedShards: [...dto.appliedShards],
+		importedPapers: dto.importedPapers,
+		skipped: dto.skipped,
+	};
+}
+
 export async function patchCollectionPapers(
 	patches: readonly CollectionPaperPatchInput[],
 ): Promise<CollectionStateSummary> {
@@ -696,6 +803,9 @@ export async function patchCollectionPapers(
 					venueFull: p.venueFull ?? null,
 					citationCount: p.citationCount ?? null,
 					keywords: p.keywords ?? null,
+					keywordSource: p.keywordSource ?? null,
+					openalexId: p.openalexId ?? null,
+					rawRefs: p.rawRefs ?? null,
 					volume: p.volume ?? null,
 					issue: p.issue ?? null,
 					pages: p.pages ?? null,
