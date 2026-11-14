@@ -29,7 +29,10 @@ import {
 	isPositionPaperTitle,
 	isWorkshopOrCompanionVenue,
 	matchesConfiguredDoiPrefix,
+	mergeKeywordMetadata,
+	normalizeOpenAlexId,
 	normalizePaperKeywords,
+	normalizeRawRefs,
 	scoreCameraReadyCandidateMatch,
 	throwIfAborted,
 	VENUE_SPEC_BY_ID,
@@ -476,7 +479,6 @@ type S2BulkPaper = {
 	abstract?: string | null;
 	year?: number | null;
 	publicationDate?: string | null;
-	citationCount?: number | null;
 	venue?: string | null;
 	url?: string | null;
 	openAccessPdf?: { url?: string | null } | null;
@@ -530,7 +532,7 @@ export async function fetchSemanticScholarVenuePapers(
 			? `&token=${encodeURIComponent(token)}`
 			: "";
 		const fields =
-			"title,abstract,authors,year,publicationDate,citationCount,externalIds,venue,url,openAccessPdf";
+			"title,abstract,authors,year,publicationDate,externalIds,venue,url,openAccessPdf";
 		const s2Url: string = `https://api.semanticscholar.org/graph/v1/paper/search/bulk?venue=${encodeURIComponent(primaryVenueParam)}${dateQuery}&fields=${fields}${tokenQuery}`;
 
 		try {
@@ -630,7 +632,7 @@ export async function fetchSemanticScholarVenuePapers(
 					venueDomain,
 					ccfRank,
 					venueFull: rowVenue || venue.name,
-					citationCount: Math.max(0, row.citationCount ?? 0),
+					citationCount: 0,
 					keywords: [],
 				});
 			}
@@ -1588,6 +1590,7 @@ export async function fetchDataCiteLipicsPapers(
 				.filter((s) => !s.subjectScheme && !s.schemeUri)
 				.map((s) => decodeHtmlEntities(s.subject ?? "").trim())
 				.filter(Boolean);
+			const normalizedKeywords = normalizePaperKeywords(authorSubjects);
 
 			items.push({
 				id: buildVenuePaperId(venue.id, doi, undefined, rawTitle),
@@ -1608,7 +1611,8 @@ export async function fetchDataCiteLipicsPapers(
 				ccfRank,
 				venueFull: venue.name,
 				citationCount: 0,
-				keywords: normalizePaperKeywords(authorSubjects),
+				keywords: normalizedKeywords,
+				...(normalizedKeywords.length > 0 ? { keywordSource: "author" } : {}),
 			});
 		}
 		return { items, remoteTotalCount: items.length };
@@ -1783,6 +1787,7 @@ export async function fetchCsdlVenuePapers(
 		const pubDate = /^\d{4}-\d{2}-\d{2}/.test(row.pubDate ?? "")
 			? `${row.pubDate?.slice(0, 10)}T00:00:00Z`
 			: `${year}-01-01T00:00:00Z`;
+		const normalizedKeywords = normalizePaperKeywords(row.keywords);
 
 		items.push({
 			id,
@@ -1802,7 +1807,8 @@ export async function fetchCsdlVenuePapers(
 			ccfRank,
 			venueFull: venue.name,
 			citationCount: 0,
-			keywords: normalizePaperKeywords(row.keywords),
+			keywords: normalizedKeywords,
+			...(normalizedKeywords.length > 0 ? { keywordSource: "author" } : {}),
 			volume: row.volume || undefined,
 			issue: row.issueNum || undefined,
 			pages: row.pages || undefined,
@@ -1853,6 +1859,19 @@ function dedupeVenueChannelItems(
 			const prev = byId.get(existingId);
 			if (!prev) continue;
 			const mergedDoi = pickPreferredDoi(prev.doi, item.doi);
+			const mergedKw = mergeKeywordMetadata(
+				prev.keywords,
+				prev.keywordSource,
+				item.keywords,
+				item.keywordSource,
+			);
+			const mergedOaId =
+				normalizeOpenAlexId(prev.openalexId) ||
+				normalizeOpenAlexId(item.openalexId);
+			const mergedRefs = normalizeRawRefs([
+				...(prev.rawRefs ?? []),
+				...(item.rawRefs ?? []),
+			]);
 			byId.set(existingId, {
 				...prev,
 				abstract:
@@ -1875,10 +1894,12 @@ function dedupeVenueChannelItems(
 					prev.citationCount ?? 0,
 					item.citationCount ?? 0,
 				),
-				keywords: normalizePaperKeywords([
-					...(prev.keywords ?? []),
-					...(item.keywords ?? []),
-				]),
+				keywords: mergedKw.keywords,
+				...(mergedKw.keywordSource
+					? { keywordSource: mergedKw.keywordSource }
+					: {}),
+				...(mergedOaId ? { openalexId: mergedOaId } : {}),
+				...(mergedRefs ? { rawRefs: mergedRefs } : {}),
 				categories: Array.from(
 					new Set([...prev.categories, ...item.categories]),
 				),
@@ -1933,6 +1954,19 @@ function backfillMissingMetadataFromChannel(
 				: match.abstract;
 		const bestArxivId = item.arxivId || match.arxivId;
 		const bestDoi = pickPreferredDoi(item.doi, match.doi);
+		const mergedKw = mergeKeywordMetadata(
+			item.keywords,
+			item.keywordSource,
+			match.keywords,
+			match.keywordSource,
+		);
+		const mergedOaId =
+			normalizeOpenAlexId(item.openalexId) ||
+			normalizeOpenAlexId(match.openalexId);
+		const mergedRefs = normalizeRawRefs([
+			...(item.rawRefs ?? []),
+			...(match.rawRefs ?? []),
+		]);
 		return {
 			...item,
 			abstract: bestAbstract,
@@ -1947,10 +1981,12 @@ function backfillMissingMetadataFromChannel(
 				item.citationCount ?? 0,
 				match.citationCount ?? 0,
 			),
-			keywords: normalizePaperKeywords([
-				...(item.keywords ?? []),
-				...(match.keywords ?? []),
-			]),
+			keywords: mergedKw.keywords,
+			...(mergedKw.keywordSource
+				? { keywordSource: mergedKw.keywordSource }
+				: {}),
+			...(mergedOaId ? { openalexId: mergedOaId } : {}),
+			...(mergedRefs ? { rawRefs: mergedRefs } : {}),
 		};
 	});
 }
@@ -2074,6 +2110,19 @@ function mergeExistingIntoFreshVenueItem(
 		(!fresh.doi || isArxivDoi(fresh.doi))
 			? existing.title
 			: fresh.title;
+	const mergedKw = mergeKeywordMetadata(
+		fresh.keywords,
+		fresh.keywordSource,
+		existing.keywords,
+		existing.keywordSource,
+	);
+	const mergedOaId =
+		normalizeOpenAlexId(fresh.openalexId) ||
+		normalizeOpenAlexId(existing.openalexId);
+	const mergedRefs = normalizeRawRefs([
+		...(fresh.rawRefs ?? []),
+		...(existing.rawRefs ?? []),
+	]);
 
 	return {
 		...fresh,
@@ -2105,10 +2154,12 @@ function mergeExistingIntoFreshVenueItem(
 			fresh.citationCount ?? 0,
 			existing.citationCount ?? 0,
 		),
-		keywords: normalizePaperKeywords([
-			...(fresh.keywords ?? []),
-			...(existing.keywords ?? []),
-		]),
+		keywords: mergedKw.keywords,
+		...(mergedKw.keywordSource
+			? { keywordSource: mergedKw.keywordSource }
+			: {}),
+		...(mergedOaId ? { openalexId: mergedOaId } : {}),
+		...(mergedRefs ? { rawRefs: mergedRefs } : {}),
 	};
 }
 
@@ -2131,7 +2182,7 @@ function reconcileFreshWithExisting(
 			? mergeExistingIntoFreshVenueItem(fresh, matched, venue)
 			: fresh;
 		items.push(merged);
-		if (!isComplete) {
+		if (!isComplete && !isPaperMetadataComplete(merged, venue.name)) {
 			incompleteOrNewIndices.push(items.length - 1);
 		}
 	}
@@ -2208,6 +2259,7 @@ async function backfillMissingVenueKeywordsWithKeywordLlm(
 			next[idx] = {
 				...item,
 				keywords: llmKws,
+				keywordSource: "client_llm",
 			};
 		}
 	}
@@ -2216,7 +2268,7 @@ async function backfillMissingVenueKeywordsWithKeywordLlm(
 
 /**
  * Reconcile freshly extracted custom / Agent venue items against cached SQLite rows,
- * enriching only new or incomplete items via OpenAlex + author union and Keyword LLM fallback.
+ * enriching only items missing core metadata via OpenAlex and running Keyword LLM fallback.
  */
 export async function finalizeVenuePapersWithSmartDiff(
 	freshItems: readonly CollectionPaperItem[],
@@ -2237,9 +2289,19 @@ export async function finalizeVenuePapersWithSmartDiff(
 		existingLookup,
 		venue,
 	);
+	const openAlexTargetIndices = reconciled.incompleteOrNewIndices.filter(
+		(idx) => {
+			const p = reconciled.items[idx];
+			return Boolean(
+				p &&
+					(isPlaceholderAbstract(p.abstract, venue.name) ||
+						(!p.doi && !p.arxivId)),
+			);
+		},
+	);
 	const enriched = await enrichSubsetInPlace(
 		reconciled.items,
-		reconciled.incompleteOrNewIndices,
+		openAlexTargetIndices,
 		venue,
 		fetchJson,
 		existingLookup.completeItems,
@@ -2359,6 +2421,19 @@ async function mergePublisherIntoTrackRoster(
 				const bestTitle = pub.title || r.title;
 				const bestAbstract =
 					pub.abstract.length >= r.abstract.length ? pub.abstract : r.abstract;
+				const mergedKw = mergeKeywordMetadata(
+					pub.keywords,
+					pub.keywordSource,
+					r.keywords,
+					r.keywordSource,
+				);
+				const mergedOaId =
+					normalizeOpenAlexId(pub.openalexId) ||
+					normalizeOpenAlexId(r.openalexId);
+				const mergedRefs = normalizeRawRefs([
+					...(pub.rawRefs ?? []),
+					...(r.rawRefs ?? []),
+				]);
 				let candidate: CollectionPaperItem = {
 					...r,
 					id: buildVenuePaperId(venue.id, bestDoi, bestArxivId, bestTitle),
@@ -2383,10 +2458,12 @@ async function mergePublisherIntoTrackRoster(
 					pages: pub.pages || r.pages,
 					venueFull: pub.venueFull || r.venueFull,
 					citationCount: Math.max(pub.citationCount ?? 0, r.citationCount ?? 0),
-					keywords: normalizePaperKeywords([
-						...(pub.keywords ?? []),
-						...(r.keywords ?? []),
-					]),
+					keywords: mergedKw.keywords,
+					...(mergedKw.keywordSource
+						? { keywordSource: mergedKw.keywordSource }
+						: {}),
+					...(mergedOaId ? { openalexId: mergedOaId } : {}),
+					...(mergedRefs ? { rawRefs: mergedRefs } : {}),
 				};
 				const exHit = options?.existingLookup?.findMatch(candidate);
 				if (exHit?.matched) {
@@ -2399,10 +2476,9 @@ async function mergePublisherIntoTrackRoster(
 				merged.push(candidate);
 				if (
 					!exHit?.isComplete &&
-					(!candidate.abstract ||
-						!candidate.doi ||
-						!options?.openAlexHydrated ||
-						normalizePaperKeywords(candidate.keywords).length === 0)
+					!isPaperMetadataComplete(candidate, venue.name) &&
+					(isPlaceholderAbstract(candidate.abstract, venue.name) ||
+						!candidate.doi)
 				) {
 					unmatchedIndices.push(merged.length - 1);
 				}
@@ -2415,7 +2491,12 @@ async function mergePublisherIntoTrackRoster(
 			? mergeExistingIntoFreshVenueItem(r, exRosterHit.matched, venue)
 			: r;
 		merged.push(fallbackItem);
-		if (!exRosterHit?.isComplete) {
+		if (
+			!exRosterHit?.isComplete &&
+			!isPaperMetadataComplete(fallbackItem, venue.name) &&
+			(isPlaceholderAbstract(fallbackItem.abstract, venue.name) ||
+				!fallbackItem.doi)
+		) {
 			unmatchedIndices.push(merged.length - 1);
 		}
 	}
@@ -2540,47 +2621,6 @@ export async function fetchMultiChannelVenuePapers(
 			venue,
 		);
 		primaryItems = reconciled.items;
-
-		if (reconciled.incompleteOrNewIndices.length > 0) {
-			const structuredBudget = Math.min(
-				maxPages,
-				Math.max(4, Math.ceil(coolRes.items.length / 200) + 2),
-			);
-			const structured =
-				reconciled.incompleteOrNewIndices.length >= 80
-					? await fetchVenueStructuredPapers(venue, year, fetchJson, {
-							maxPages: structuredBudget,
-							preloadedItems: existingLookup.completeItems,
-							signal: options?.signal,
-							onProgress: options?.onProgress,
-						})
-					: { items: [], remoteTotalCount: 0 };
-			structuredRemoteTotal = structured.remoteTotalCount ?? 0;
-			if (structured.items.length > 0) {
-				primaryItems = backfillMissingMetadataFromChannel(
-					primaryItems,
-					structured.items,
-				);
-			}
-
-			const stillIncompleteIndices = reconciled.incompleteOrNewIndices.filter(
-				(idx) => {
-					const p = primaryItems[idx];
-					return Boolean(p && !isPaperMetadataComplete(p, venue.name));
-				},
-			);
-			if (stillIncompleteIndices.length > 0) {
-				primaryItems = await enrichSubsetInPlace(
-					primaryItems,
-					stillIncompleteIndices,
-					venue,
-					fetchJson,
-					existingLookup.completeItems.length > 0
-						? [...structured.items, ...existingLookup.completeItems]
-						: structured.items,
-				);
-			}
-		}
 		authoritativeMainTrack = true;
 	} else if (spec?.trackRosterMode === "required") {
 		// Strict Main / Research / Technical Track roster required (`ASE`, `ICPC`, `RE`, `SANER`, `ICSME`, `ESEM`)
@@ -2673,11 +2713,20 @@ export async function fetchMultiChannelVenuePapers(
 		primaryItems = reconciled.items;
 
 		// When direct publisher feeds (`CSDL` / `DataCite`) skipped OpenAlex list pages,
-		// enrich only brand-new or incomplete items so they obtain `Author ∪ OpenAlex` keywords.
-		if (!structuredRan && reconciled.incompleteOrNewIndices.length > 0) {
+		// enrich ONLY items still missing an abstract or publisher DOI — never re-query
+		// OpenAlex for papers that already have publisher metadata + author keywords.
+		const missingCoreMetadataIndices = reconciled.incompleteOrNewIndices.filter(
+			(idx) => {
+				const p = primaryItems[idx];
+				return Boolean(
+					p && (isPlaceholderAbstract(p.abstract, venue.name) || !p.doi),
+				);
+			},
+		);
+		if (!structuredRan && missingCoreMetadataIndices.length > 0) {
 			primaryItems = await enrichSubsetInPlace(
 				primaryItems,
-				reconciled.incompleteOrNewIndices,
+				missingCoreMetadataIndices,
 				venue,
 				fetchJson,
 				existingLookup.completeItems,

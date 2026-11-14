@@ -335,4 +335,81 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 			"Side-Channel Analysis",
 		]);
 	});
+
+	it("preserves up to 1600 abstract characters in user prompts and retries HTTP 429 Retry-After + 503 transient errors", async () => {
+		setCachedKeywordLlmConfigForTests({
+			provider: "openaiCompatible",
+			baseUrl: "http://127.0.0.1:8011/v1",
+			apiKey: "",
+			model: "mercury-3-instant",
+		});
+
+		const filler = "Background motivation on distributed verification. ".repeat(
+			22,
+		); // ~1122 chars (> 900)
+		const tailMethod =
+			"We introduce Relational E-Graph Saturation with Counterexample-Guided Inductive Generalization.";
+		const longAbstract = `${filler}${tailMethod}`;
+		expect(longAbstract.length).toBeGreaterThan(1150);
+		expect(longAbstract.length).toBeLessThan(1600);
+
+		let capturedUserPrompt = "";
+		let attempts = 0;
+
+		const out = await extractKeywordsWithKeywordLlmBatch(
+			[
+				{
+					id: "arxiv:2612.00001",
+					title: "Scalable Relational Verification via Equality Saturation",
+					abstract: longAbstract,
+				},
+			],
+			{
+				fetchFn: async (_input, init) => {
+					attempts += 1;
+					const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+						messages?: Array<{ role: string; content: string }>;
+					};
+					capturedUserPrompt = parsed.messages?.[1]?.content ?? "";
+
+					if (attempts === 1) {
+						return new Response('{"error":"rate limited"}', {
+							status: 429,
+							headers: { "Retry-After": "1" },
+						});
+					}
+					if (attempts === 2) {
+						return new Response("upstream overloaded", {
+							status: 503,
+							headers: { "Retry-After": "1" },
+						});
+					}
+					return new Response(
+						JSON.stringify({
+							choices: [
+								{
+									message: {
+										content:
+											'{"0":["Equality Saturation","Relational Verification","Inductive Generalization"]}',
+									},
+								},
+							],
+						}),
+						{ status: 200 },
+					);
+				},
+			},
+		);
+
+		expect(attempts).toBe(3);
+		expect(capturedUserPrompt).toContain("Relational E-Graph Saturation");
+		expect(capturedUserPrompt).toContain(
+			"Counterexample-Guided Inductive Generalization",
+		);
+		expect(out.get("arxiv:2612.00001")).toEqual([
+			"Equality Saturation",
+			"Relational Verification",
+			"Inductive Generalization",
+		]);
+	});
 });

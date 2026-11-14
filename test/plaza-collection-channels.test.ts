@@ -57,6 +57,13 @@ import {
 	VENUE_SPEC_BY_ID,
 	VENUE_SPECS,
 } from "@/lib/plaza/collection";
+import {
+	extractArxivDoiFromAtomEntry,
+	mergeKeywordMetadata,
+	normalizeOpenAlexId,
+	normalizeRawRefs,
+	OPENALEX_SELECT,
+} from "@/lib/plaza/collection-enrichment";
 import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
 
 vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
@@ -1342,14 +1349,18 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(replaced[0]?.doi).toBe("10.1145/3832783.3832801");
 	});
 
-	it("hydrates Crossref abstract-less ASE 2026 papers (Doc2Test) via 0-credit OpenAlex DOI singletons during preload and enforces Option-B authentic keywords", async () => {
+	it("hydrates Crossref abstract-less ASE 2026 papers (Doc2Test) via 0-credit OpenAlex DOI singletons, captures outgoing rawRefs + openalexId, and never reads OpenAlex predicted keywords or external cited_by_count", async () => {
 		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
 		const esem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "esem-2026");
 		const iclr = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "iclr-2026");
 		if (!ase || !esem || !iclr) throw new Error("Missing venue configs");
 
-		// 1. OpenAlex list endpoint (`works?filter=`) returns HTTP 429, Crossref returns Doc2Test without abstract,
-		//    and 0-credit singleton `works/doi:10.1145/3832783.3834507` populates full abstract + authentic keywords during preload.
+		expect(OPENALEX_SELECT).toContain("referenced_works");
+		expect(OPENALEX_SELECT).not.toContain("keywords");
+		expect(OPENALEX_SELECT).not.toContain("cited_by_count");
+
+		// 1. OpenAlex list endpoint (`works?filter=`) returns HTTP 429, Crossref returns Doc2Test without abstract + Crossref `reference`,
+		//    and 0-credit singleton `works/doi:10.1145/3832783.3834507` populates full abstract + `openalexId` + `referenced_works` without OpenAlex keywords/citations.
 		const singletonCalls: string[] = [];
 		const structured = await fetchVenueStructuredPapers(
 			ase,
@@ -1366,6 +1377,10 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 						title:
 							"Doc2Test: An Industrial Multi-agent Framework for Document-Driven End-to-End Selenium Test Generation",
 						cited_by_count: 3,
+						referenced_works: [
+							"https://openalex.org/W1111111111",
+							"https://openalex.org/W2222222222",
+						],
 						abstract_inverted_index: {
 							Industrial: [0],
 							"end-to-end": [1],
@@ -1384,8 +1399,6 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 						keywords: [
 							{ display_name: "Multi-agent Systems", score: 0.78 },
 							{ display_name: "Selenium Test Generation", score: 0.71 },
-							{ display_name: "Computer Science", score: 0.9 },
-							{ display_name: "Low Confidence Noise", score: 0.12 },
 						],
 					} as T;
 				}
@@ -1400,6 +1413,11 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 										"Doc2Test: An Industrial Multi-agent Framework for Document-Driven End-to-End Selenium Test Generation",
 									],
 									subject: ["Software", "Computer Science Applications"],
+									"is-referenced-by-count": 42,
+									reference: [
+										{ DOI: "10.1145/3597926.3598050" },
+										{ DOI: "10.48550/arXiv.2601.12345v2" },
+									],
 									"container-title": [
 										"Proceedings of the 41st IEEE/ACM International Conference on Automated Software Engineering",
 									],
@@ -1419,13 +1437,18 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(structured.items[0]?.abstract).toBe(
 			"Industrial end-to-end Selenium test generation from requirements documents remains challenging in enterprise practice",
 		);
-		expect(structured.items[0]?.citationCount).toBe(3);
-		expect(structured.items[0]?.keywords).toEqual([
-			"Multi-Agent System",
-			"Selenium Test Generation",
+		// External citation counts and OpenAlex predicted keywords are never imported
+		expect(structured.items[0]?.citationCount).toBe(0);
+		expect(structured.items[0]?.keywords).toEqual([]);
+		expect(structured.items[0]?.openalexId).toBe("W_doc2test");
+		expect(structured.items[0]?.rawRefs).toEqual([
+			"doi:10.1145/3597926.3598050",
+			"arxiv:2601.12345",
+			"oa:W1111111111",
+			"oa:W2222222222",
 		]);
 
-		// 2. DataCite LIPIcs retains un-schemed author subjects while dropping ACM CCS classification subjects
+		// 2. DataCite LIPIcs retains un-schemed author subjects with `keywordSource: "author"` while dropping ACM CCS classification subjects
 		const lipics = await fetchDataCiteLipicsPapers(
 			esem,
 			2026,
@@ -1464,6 +1487,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				}) as T,
 		);
 		expect(lipics.items[0]?.keywords).toEqual(["Flaky Test", "Microservices"]);
+		expect(lipics.items[0]?.keywordSource).toBe("author");
 
 		// 3. `papers.cool` `<div keywords="...">` TF-IDF tokens are never surfaced as author keywords
 		const coolParsed = parseCoolPapersVenueHtml(
@@ -1578,15 +1602,15 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"arxiv:2607.00001",
 			]);
 
-			// `ensurePaperFullDetails` enriches placeholder abstract via OpenAlex and patches SQLite
+			// `ensurePaperFullDetails` enriches placeholder abstract via OpenAlex (ignoring external cited_by_count & OpenAlex keywords) and patches SQLite
 			const pldiSummary = ordered[0];
 			if (!pldiSummary) throw new Error("Missing PLDI summary");
 			const detailed = await ensurePaperFullDetails(pldiSummary);
 			expect(detailed.abstract).toBe(
 				"Sound type inference for effect handlers at scale",
 			);
-			expect(detailed.citationCount).toBe(9);
-			expect(detailed.keywords).toEqual(["Effect Handler"]);
+			expect(detailed.citationCount).toBe(0);
+			expect(detailed.keywords).toEqual([]);
 			expect(detailed.bibtex).toContain("@inproceedings{");
 			expect(commands.plazaCollectionPatchPapers).toHaveBeenCalledTimes(1);
 
@@ -1874,7 +1898,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("enriches full arXiv batches beyond 180 items, matches merged publisher locations, falls back to 0-credit singletons + OpenRouter :free LLM keywords, and backfills existing SQLite rows on refresh", async () => {
+	it("enriches arXiv batches solely via Keyword LLM with zero OpenAlex calls, supports on-demand arXiv HTML author keywords, and backfills existing SQLite rows on refresh", async () => {
 		// 1. `extractArxivHtmlKeywords` parses LaTeX `\keywords{...}` / `Index Terms` and strips broad buckets
 		const sampleHtml = `
 			<div class="ltx_keywords">
@@ -1887,8 +1911,8 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"Formal Verification",
 		]);
 
-		// 2. `enrichArxivItemsBatch` enriches all 210 items across 80-DOI chunks (no 180 truncation),
-		//    including works merged into publisher DOIs (`locations` retains `arxiv.org/abs/...`).
+		// 2. When Keyword LLM is unconfigured, `enrichArxivItemsBatch` returns immediately with ZERO OpenAlex or LLM calls.
+		setCachedKeywordLlmConfigForTests(null);
 		const largeBatch: CollectionPaperItem[] = Array.from(
 			{ length: 210 },
 			(_, idx) => {
@@ -1911,69 +1935,36 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		);
 
 		const openAlexBatchUrls: string[] = [];
-		const enriched210 = await enrichArxivItemsBatch(
+		const unconfiguredRes = await enrichArxivItemsBatch(
 			largeBatch,
 			async <T>(url: string) => {
 				openAlexBatchUrls.push(url);
-				const decoded = decodeURIComponent(url);
-				const m = /doi:([^&]+)/.exec(decoded);
-				const dois = (m?.[1] ?? "").split("|").filter(Boolean);
-				const results = dois.map((d, idx) => {
-					const aid = d.replace(/^10\.48550\/arxiv\./i, "");
-					// Simulate merged publisher DOI (no `ids.arxiv`, publisher `doi`, arXiv only in `locations`) on every 5th paper
-					if (idx % 5 === 0) {
-						return {
-							doi: `https://doi.org/10.1145/3888888.${aid.replace(".", "")}`,
-							title: `Scalable Program Analysis Study`,
-							cited_by_count: 9,
-							keywords: [
-								{ display_name: "Symbolic Execution", score: 0.88 },
-								{ display_name: "Program Repair", score: 0.76 },
-							],
-							locations: [
-								{ landing_page_url: `https://arxiv.org/abs/${aid}v2` },
-							],
-						};
-					}
-					return {
-						doi: `https://doi.org/10.48550/arXiv.${aid}`,
-						ids: { arxiv: `https://arxiv.org/abs/${aid}` },
-						cited_by_count: 4,
-						keywords: [
-							{ display_name: "Fuzz Testing", score: 0.91 },
-							{ display_name: "LLM Agents", score: 0.72 },
-						],
-					};
-				});
-				return { results } as T;
+				return { results: [] } as T;
 			},
 		);
+		expect(openAlexBatchUrls).toHaveLength(0);
+		expect(unconfiguredRes).toHaveLength(210);
+		expect(unconfiguredRes[0]?.keywords).toEqual([]);
 
-		expect(openAlexBatchUrls).toHaveLength(3); // ceil(210 / 80) = 3
-		expect(enriched210.every((p) => (p.keywords?.length ?? 0) >= 2)).toBe(true);
-		expect(enriched210[209]?.keywords).toEqual(["Fuzzing", "AI Agent"]);
-		expect(enriched210[0]?.keywords).toEqual([
-			"Symbolic Execution",
-			"Program Repair",
-		]);
-		expect(enriched210[0]?.citationCount).toBe(9);
-
-		// 3. Rate-limited OpenAlex `works?filter=` (`429`) falls back to 0-credit `/works/doi:...` singletons,
-		//    and any OpenAlex miss (recent or old) falls back directly to OpenRouter `:free` LLM keywords.
+		// 3. When Keyword LLM IS configured, `enrichArxivItemsBatch` sends only items lacking keywords to LLM,
+		//    preserves pre-baked `maintainer_llm` / `author` keywords, tags LLM keywords with `keywordSource: "client_llm"`,
+		//    and still makes ZERO OpenAlex requests.
 		const recentIso = new Date(Date.now() - 2 * 86_400_000).toISOString();
 		const mixedBatch: CollectionPaperItem[] = [
 			{
 				id: "arxiv:2610.50001",
 				arxivId: "2610.50001",
 				doi: "10.48550/arxiv.2610.50001",
-				title: "Indexed Singleton Preprint",
+				title: "Seed-Baked Preprint With Maintainer Keywords",
 				authors: ["Alice"],
-				abstract: "Indexed preprint abstract with singleton OpenAlex match.",
+				abstract: "Preprint already enriched by maintainer seed bundle.",
 				publishedAt: "2026-10-01T10:00:00Z",
 				year: 2026,
 				sourceType: "arxiv",
 				sourceLabel: "cs.CR",
 				categories: ["cs.CR"],
+				keywords: ["Zero-Knowledge Proof"],
+				keywordSource: "maintainer_llm",
 				url: "https://arxiv.org/abs/2610.50001",
 			},
 			{
@@ -2001,21 +1992,10 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			const openRouterPayloads: string[] = [];
 			const fallbackRes = await enrichArxivItemsBatch(
 				mixedBatch,
-				async <T>(url: string) => {
-					if (url.includes("/works?filter=")) {
-						throw new Error("HTTP 429 Too Many Requests");
-					}
-					if (url.includes("2610.50001")) {
-						return {
-							id: "https://openalex.org/W_singleton_1",
-							doi: "https://doi.org/10.48550/arxiv.2610.50001",
-							cited_by_count: 6,
-							keywords: [
-								{ display_name: "Zero-Knowledge Proofs", score: 0.94 },
-							],
-						} as T;
-					}
-					throw new Error("HTTP 404 Not Found");
+				async () => {
+					throw new Error(
+						"OpenAlex must not be called in enrichArxivItemsBatch",
+					);
 				},
 				mixedBatch.length,
 				{
@@ -2046,20 +2026,24 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			expect(openRouterPayloads[0]).toContain(
 				"Unindexed Preprint Falling Back To OpenRouter LLM",
 			);
-			expect(openRouterPayloads[0]).not.toContain("Indexed Singleton Preprint");
+			expect(openRouterPayloads[0]).not.toContain(
+				"Seed-Baked Preprint With Maintainer Keywords",
+			);
 			expect(fallbackRes[0]?.keywords).toEqual(["Zero-Knowledge Proof"]);
-			expect(fallbackRes[0]?.citationCount).toBe(6);
+			expect(fallbackRes[0]?.keywordSource).toBe("maintainer_llm");
 			expect(fallbackRes[1]?.keywords).toEqual([
 				"Homomorphic Encryption",
 				"Side-Channel Analysis",
 			]);
+			expect(fallbackRes[1]?.keywordSource).toBe("client_llm");
 
-			// 4. On-demand detail check for `arXiv` never scrapes `arxiv.org/html/<id>`, recovers missing
-			//    abstracts via arXiv Atom `id_list`, and falls back to OpenRouter `:free` LLM for keywords!
+			// 4. On-demand detail check for `arXiv` DOES check `arxiv.org/html/<id>` once for author `\keywords`
+			//    (tagging `keywordSource: "author"`), recovers missing abstracts via arXiv Atom `id_list`,
+			//    and skips Keyword LLM when author HTML keywords succeed!
 			const bareArxivCard: CollectionPaperItem = {
 				id: "arxiv:2611.90003",
 				arxivId: "2611.90003",
-				title: "Card Clicked Before OpenAlex Indexing",
+				title: "Card Clicked In Detail Dialog",
 				authors: ["Carol"],
 				abstract: "",
 				publishedAt: recentIso,
@@ -2073,13 +2057,14 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			};
 			expect(shouldEnrichPaperOnDemand(bareArxivCard)).toBe(true);
 			let htmlFetchedForArxiv = false;
+			let llmCalledForHtmlHit = false;
 			const onDemandArxiv = await enrichSinglePaperOnDemand(
 				bareArxivCard,
 				async () => {
 					throw new Error("HTTP 404");
 				},
 				async (url) => {
-					if (url.includes("arxiv.org/html/")) {
+					if (url.includes("arxiv.org/html/2611.90003")) {
 						htmlFetchedForArxiv = true;
 						return `<div class="ltx_keywords">Keywords: Gradual Typing, Dependent Types</div>`;
 					}
@@ -2094,24 +2079,14 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					return "";
 				},
 				{
-					keywordLlmFetch: async () =>
-						new Response(
-							JSON.stringify({
-								choices: [
-									{
-										message: {
-											content: JSON.stringify({
-												"0": ["Gradual Typing", "Dependent Types"],
-											}),
-										},
-									},
-								],
-							}),
-							{ status: 200 },
-						),
+					keywordLlmFetch: async () => {
+						llmCalledForHtmlHit = true;
+						return new Response("{}", { status: 200 });
+					},
 				},
 			);
-			expect(htmlFetchedForArxiv).toBe(false);
+			expect(htmlFetchedForArxiv).toBe(true);
+			expect(llmCalledForHtmlHit).toBe(false);
 			expect(onDemandArxiv.abstract).toBe(
 				"We formalize gradual dependent types with sound blame tracking across higher-order modules.",
 			);
@@ -2119,6 +2094,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"Gradual Typing",
 				"Dependent Type",
 			]);
+			expect(onDemandArxiv.keywordSource).toBe("author");
 			expect(isPaperMetadataComplete(onDemandArxiv)).toBe(true);
 		} finally {
 			setCachedKeywordLlmConfigForTests(undefined);
@@ -2144,7 +2120,9 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		const onDemandVenue = await enrichSinglePaperOnDemand(
 			venueCardWithArxiv,
 			async () => {
-				throw new Error("HTTP 404");
+				throw new Error(
+					"OpenAlex must not be called when abstract + arxivId exist",
+				);
 			},
 			async (url) =>
 				url.includes("arxiv.org/html/2611.90003")
@@ -2155,9 +2133,14 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"Gradual Typing",
 			"Dependent Type",
 		]);
+		expect(onDemandVenue.keywordSource).toBe("author");
 
-		// 5. `refreshArxivCollection` heals already-cached `historyComplete: true` SQLite arXiv rows lacking keywords
+		// 5. `refreshArxivCollection` heals already-cached `historyComplete: true` SQLite arXiv rows lacking keywords via Keyword LLM
 		resetCollectionMemoryForTests();
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "test-openrouter-key",
+		});
 		const ipc = installMockCollectionIpc({
 			categories: ["cs.SE"],
 			venues: [...DEFAULT_COLLECTION_VENUES],
@@ -2209,24 +2192,24 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 								<author><name>Edsger Dijkstra</name></author>
 							</entry>
 						</feed>`,
-					fetchJson: async <T>(url: string) => {
-						if (decodeURIComponent(url).includes("10.48550/arxiv.2607.12345")) {
-							return {
-								results: [
+					fetchJson: async () => {
+						throw new Error("OpenAlex must not be called during arXiv refresh");
+					},
+					keywordLlmFetch: async () =>
+						new Response(
+							JSON.stringify({
+								choices: [
 									{
-										doi: "https://doi.org/10.48550/arxiv.2607.12345",
-										ids: { arxiv: "https://arxiv.org/abs/2607.12345" },
-										cited_by_count: 11,
-										keywords: [
-											{ display_name: "Deductive Verification", score: 0.93 },
-											{ display_name: "Hoare Logic", score: 0.87 },
-										],
+										message: {
+											content: JSON.stringify({
+												"0": ["Deductive Verification", "Hoare Logic"],
+											}),
+										},
 									},
 								],
-							} as T;
-						}
-						return { results: [] } as T;
-					},
+							}),
+							{ status: 200 },
+						),
 				},
 			});
 
@@ -2239,10 +2222,11 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"Deductive Verification",
 				"Hoare Logic",
 			]);
-			expect(healedPage.items[0]?.citationCount).toBe(11);
+			expect(healedPage.items[0]?.citationCount).toBe(0);
 			expect(statusSeq[0]).toBe("cs.SE:refreshing");
 			expect(statusSeq[statusSeq.length - 1]).toBe("cs.SE:done");
 		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
 			ipc.restore();
 			resetCollectionMemoryForTests();
 		}
@@ -2291,7 +2275,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		expect(extractArxivHtmlKeywords(malformedLncsHtml)).toEqual([]);
 	});
 
-	it("recovers OAI-PMH landing_page_url arXiv keywords and appends optional OpenAlex api_key when configured", async () => {
+	it("normalizes OpenAlex IDs, rawRefs, keyword provenance priority, and appends optional OpenAlex api_key on venue discovery", async () => {
 		setCachedOpenAlexApiKeyForTests("test_dummy_oa_key");
 		try {
 			expect(
@@ -2302,72 +2286,101 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				"https://api.openalex.org/works/W2741809807?select=id&api_key=test_dummy_oa_key",
 			);
 
+			expect(normalizeOpenAlexId("https://openalex.org/W9999999999")).toBe(
+				"W9999999999",
+			);
+			expect(normalizeOpenAlexId("oa:w12345")).toBe("W12345");
+			expect(
+				normalizeRawRefs([
+					"https://openalex.org/W100",
+					"https://doi.org/10.1145/3800001.3800002",
+					"10.48550/arXiv.2601.12345v3",
+					"https://arxiv.org/abs/2601.12345v1",
+					"oa:W100",
+				]),
+			).toEqual(["oa:W100", "doi:10.1145/3800001.3800002", "arxiv:2601.12345"]);
+
+			// Strict provenance rank: `author` > `maintainer_llm` > `client_llm`
+			expect(
+				mergeKeywordMetadata(
+					["Client Keyword"],
+					"client_llm",
+					["Maintainer Keyword"],
+					"maintainer_llm",
+				),
+			).toEqual({
+				keywords: ["Maintainer Keyword"],
+				keywordSource: "maintainer_llm",
+			});
+			expect(
+				mergeKeywordMetadata(
+					["Maintainer Keyword"],
+					"maintainer_llm",
+					["Author Keyword"],
+					"author",
+				),
+			).toEqual({
+				keywords: ["Author Keyword"],
+				keywordSource: "author",
+			});
+
+			// `<arxiv:doi>` preserves genuine publisher DOIs while falling back to synthetic DataCite arXiv DOI
+			expect(
+				extractArxivDoiFromAtomEntry(
+					"<arxiv:doi>10.1145/3744916.3780123</arxiv:doi>",
+					"2604.01234v2",
+				),
+			).toBe("10.1145/3744916.3780123");
+			expect(
+				extractArxivDoiFromAtomEntry("<title>No DOI</title>", "2604.01234v2"),
+			).toBe("10.48550/arxiv.2604.01234");
+
+			const ccs = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ccs-2026");
+			if (!ccs) throw new Error("Missing ccs-2026");
 			const seenUrls: string[] = [];
-			const enriched = await enrichArxivItemsBatch(
-				[
-					{
-						id: "arxiv:2610.36015",
-						arxivId: "2610.36015",
-						doi: "10.48550/arxiv.2610.36015",
-						title:
-							"Operational limits of reference renewal for retained quantum-service results",
-						authors: ["Ada Lovelace"],
-						abstract: "Rigorous study of reference renewal.",
-						publishedAt: "2026-10-18T12:00:00Z",
-						year: 2026,
-						sourceType: "arxiv",
-						sourceLabel: "cs.SE",
-						categories: ["cs.SE"],
-						url: "https://arxiv.org/abs/2610.36015",
-					},
-				],
+			const structured = await fetchVenueStructuredPapers(
+				ccs,
+				2026,
 				async <T>(url: string) => {
 					seenUrls.push(url);
-					const decoded = decodeURIComponent(url);
-					if (
-						decoded.includes(
-							"locations.landing_page_url:https://arxiv.org/abs/2610.36015",
-						)
-					) {
+					if (url.includes("api.openalex.org/works")) {
 						return {
+							meta: { count: 1, next_cursor: null },
 							results: [
 								{
 									id: "https://openalex.org/W9999999999",
-									cited_by_count: 3,
-									locations: [
-										{
-											landing_page_url: "https://arxiv.org/abs/2610.36015",
-										},
+									title: "Post-Quantum Authenticated Key Exchange at Scale",
+									publication_year: 2026,
+									publication_date: "2026-10-18",
+									doi: "https://doi.org/10.1145/3658644.3690211",
+									referenced_works: [
+										"https://openalex.org/W2001",
+										"https://openalex.org/W2002",
 									],
-									keywords: [
-										{
-											display_name: "Quantum Software Engineering",
-											score: 0.91,
-										},
-										{ display_name: "Runtime Assurance", score: 0.85 },
-									],
+									authorships: [{ author: { display_name: "Ada Lovelace" } }],
 								},
 							],
 						} as T;
 					}
-					return { results: [] } as T;
+					return { message: { items: [] } } as T;
 				},
 			);
 
 			expect(
-				seenUrls.every((u) => u.includes("api_key=test_dummy_oa_key")),
+				seenUrls
+					.filter((u) => u.includes("api.openalex.org"))
+					.every((u) => u.includes("api_key=test_dummy_oa_key")),
 			).toBe(true);
-			expect(enriched[0]?.keywords).toEqual([
-				"Quantum Software Engineering",
-				"Runtime Assurance",
-			]);
-			expect(enriched[0]?.citationCount).toBe(3);
+			expect(structured.items[0]?.openalexId).toBe("W9999999999");
+			expect(structured.items[0]?.rawRefs).toEqual(["oa:W2001", "oa:W2002"]);
+			expect(structured.items[0]?.keywords).toEqual([]);
+			expect(structured.items[0]?.citationCount).toBe(0);
 		} finally {
 			setCachedOpenAlexApiKeyForTests(null);
 		}
 	});
 
-	it("enriches DOI-less USENIX Security 2026 papers beyond the former 24-paper cap when OpenAlex proceedings source is still empty", async () => {
+	it("skips secondary OpenAlex/Crossref queries for papers.cool Group A venues (USENIX Security 2026) and extracts keywords directly via Keyword LLM", async () => {
 		const usenix = DEFAULT_COLLECTION_VENUES.find(
 			(v) => v.id === "usenix-sec-2026",
 		);
@@ -2395,59 +2408,72 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				</div>`;
 		}).join("\n");
 
-		const titleSearchUrls: string[] = [];
-		const bundle = await fetchMultiChannelVenuePapers(
-			usenix,
-			2026,
-			async <T>(url: string) => {
-				const decoded = decodeURIComponent(url);
-				if (decoded.includes("primary_location.source.id:S4306421123")) {
-					return { meta: { count: 0, next_cursor: null }, results: [] } as T;
-				}
-				if (decoded.includes("title.search:")) {
-					titleSearchUrls.push(decoded);
-					if (decoded.includes("HasteBoots")) {
-						return {
-							results: [
-								{
-									id: "https://openalex.org/W4411223344",
-									title: targetTitle,
-									publication_year: 2025,
-									publication_date: "2025-11-18",
-									doi: "https://doi.org/10.48550/arxiv.2511.12345",
-									cited_by_count: 7,
-									keywords: [
-										{ display_name: "Homomorphic Encryption", score: 0.94 },
-										{ display_name: "Zero-Knowledge Proofs", score: 0.89 },
-									],
-								},
-							],
-						} as T;
-					}
+		setCachedKeywordLlmConfigForTests({
+			provider: "openrouter",
+			apiKey: "test-openrouter-key",
+		});
+		try {
+			const jsonUrls: string[] = [];
+			const bundle = await fetchMultiChannelVenuePapers(
+				usenix,
+				2026,
+				async <T>(url: string) => {
+					jsonUrls.push(url);
 					return { results: [] } as T;
-				}
-				return { results: [] } as T;
-			},
-			async (url) => {
-				if (url.includes("papers.cool/venue/USENIX-Sec.2026")) {
-					return coolPanels;
-				}
-				return "";
-			},
-		);
+				},
+				async (url) => {
+					if (url.includes("papers.cool/venue/USENIX-Sec.2026")) {
+						return coolPanels;
+					}
+					return "";
+				},
+				{
+					keywordLlmFetch: async (_input, init) => {
+						const body = JSON.parse(String(init?.body ?? "{}")) as {
+							messages?: Array<{ content: string }>;
+						};
+						const prompt = body.messages?.[1]?.content ?? "";
+						const matchLine = /\[(\d+)\]\s+Title:\s+HasteBoots!/.exec(prompt);
+						const contentObj = matchLine?.[1]
+							? {
+									[matchLine[1]]: [
+										"Homomorphic Encryption",
+										"Zero-Knowledge Proofs",
+									],
+								}
+							: { "0": ["Protocol Verification"] };
+						return new Response(
+							JSON.stringify({
+								choices: [
+									{
+										message: {
+											content: JSON.stringify(contentObj),
+										},
+									},
+								],
+							}),
+							{ status: 200 },
+						);
+					},
+				},
+			);
 
-		expect(bundle.items).toHaveLength(totalPapers);
-		expect(titleSearchUrls.length).toBeGreaterThanOrEqual(7);
-		const hit = bundle.items.find((p) => p.title === targetTitle);
-		expect(hit?.keywords).toEqual([
-			"Homomorphic Encryption",
-			"Zero-Knowledge Proof",
-		]);
-		expect(hit?.citationCount).toBe(7);
-		expect(hit?.arxivId).toBe("2511.12345");
+			expect(bundle.items).toHaveLength(totalPapers);
+			// Zero OpenAlex or Crossref requests once papers.cool yields >= 100 main-track papers!
+			expect(jsonUrls).toEqual([]);
+			const hit = bundle.items.find((p) => p.title === targetTitle);
+			expect(hit?.keywords).toEqual([
+				"Homomorphic Encryption",
+				"Zero-Knowledge Proof",
+			]);
+			expect(hit?.keywordSource).toBe("client_llm");
+			expect(hit?.citationCount).toBe(0);
+		} finally {
+			setCachedKeywordLlmConfigForTests(undefined);
+		}
 	});
 
-	it("enriches incomplete arXiv papers of any age (no 10-day cutoff) via OpenAlex -> OpenRouter LLM without in-session retry loops, then permanently skips complete rows", async () => {
+	it("enriches incomplete arXiv papers of any age (no 10-day cutoff) via Keyword LLM with zero OpenAlex calls and skips complete rows on subsequent refreshes", async () => {
 		resetCollectionMemoryForTests();
 		setCachedKeywordLlmConfigForTests(null);
 		const nowMs = Date.now();
@@ -2462,7 +2488,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					id: "arxiv:2611.70001",
 					arxivId: "2611.70001",
 					doi: "10.48550/arxiv.2611.70001",
-					title: "Recent Preprint Pending OpenAlex Indexing",
+					title: "Recent Preprint Missing Keywords",
 					authors: ["Alice"],
 					abstract:
 						"We study post-quantum lattice key encapsulation mechanisms under side-channel leakage.",
@@ -2479,7 +2505,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 					id: "arxiv:2605.10001",
 					arxivId: "2605.10001",
 					doi: "10.48550/arxiv.2605.10001",
-					title: "Older 120-Day Preprint Without OpenAlex Keywords Or Abstract",
+					title: "Older 120-Day Preprint Without Keywords Or Abstract",
 					authors: ["Bob"],
 					abstract: "",
 					publishedAt: olderPub,
@@ -2509,7 +2535,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			<entry>
 				<id>http://arxiv.org/abs/2611.70001v1</id>
 				<published>${recentPub}</published>
-				<title>Recent Preprint Pending OpenAlex Indexing</title>
+				<title>Recent Preprint Missing Keywords</title>
 				<summary>We study post-quantum lattice key encapsulation mechanisms under side-channel leakage.</summary>
 				<author><name>Alice</name></author>
 			</entry>
@@ -2519,7 +2545,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			<entry>
 				<id>http://arxiv.org/abs/2605.10001v1</id>
 				<published>${olderPub}</published>
-				<title>Older 120-Day Preprint Without OpenAlex Keywords Or Abstract</title>
+				<title>Older 120-Day Preprint Without Keywords Or Abstract</title>
 				<summary>We construct threshold ring signatures secure against adaptive chosen-message attacks in lattice groups.</summary>
 				<author><name>Bob</name></author>
 			</entry>
@@ -2529,8 +2555,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			const htmlUrls: string[] = [];
 			const firstRefreshOpenAlexUrls: string[] = [];
 
-			// Refresh 1: OpenAlex has not indexed either preprint yet and OpenRouter has no API key.
-			// Both recent AND >10d rows are attempted once (no infinite loop), and missing abstract is healed!
+			// Refresh 1: Keyword LLM unconfigured -> zero OpenAlex requests, zero HTML scrapes, missing abstract healed via id_list!
 			await refreshArxivCollection({
 				categories: ["cs.CR"],
 				transport: {
@@ -2547,20 +2572,9 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			});
 
 			expect(htmlUrls).toEqual([]);
-			expect(
-				firstRefreshOpenAlexUrls.filter((u) =>
-					u.includes("doi:10.48550/arxiv."),
-				),
-			).toHaveLength(1);
-			expect(
-				firstRefreshOpenAlexUrls.some((u) => u.includes("2611.70001")),
-			).toBe(true);
-			expect(
-				firstRefreshOpenAlexUrls.some((u) => u.includes("2605.10001")),
-			).toBe(true);
+			expect(firstRefreshOpenAlexUrls).toEqual([]);
 
-			// Refresh 2: OpenAlex now indexes `2611.70001`, while 120-day-old `2605.10001` STILL misses OpenAlex
-			// and falls back directly to OpenRouter `:free` LLM (no 10-day cutoff!).
+			// Refresh 2: User configures Keyword LLM -> both recent AND 120-day-old preprints get LLM keywords (`client_llm`) with 0 OpenAlex calls!
 			setCachedKeywordLlmConfigForTests({
 				provider: "openrouter",
 				apiKey: "test-openrouter-key",
@@ -2577,26 +2591,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 						return probeAtomXml;
 					},
 					fetchJson: async <T>(url: string) => {
-						const decoded = decodeURIComponent(url);
-						secondRefreshOpenAlexUrls.push(decoded);
-						if (decoded.includes("10.48550/arxiv.2611.70001")) {
-							return {
-								results: [
-									{
-										doi: "https://doi.org/10.48550/arxiv.2611.70001",
-										ids: { arxiv: "https://arxiv.org/abs/2611.70001" },
-										cited_by_count: 4,
-										keywords: [
-											{
-												display_name: "Post-Quantum Cryptography",
-												score: 0.95,
-											},
-											{ display_name: "Side-Channel Analysis", score: 0.89 },
-										],
-									},
-								],
-							} as T;
-						}
+						secondRefreshOpenAlexUrls.push(decodeURIComponent(url));
 						return { results: [] } as T;
 					},
 					keywordLlmFetch: async () => {
@@ -2607,7 +2602,11 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 									{
 										message: {
 											content: JSON.stringify({
-												"0": ["Ring Signatures", "Lattice Cryptography"],
+												"0": [
+													"Post-Quantum Cryptography",
+													"Side-Channel Analysis",
+												],
+												"1": ["Ring Signatures", "Lattice Cryptography"],
 											}),
 										},
 									},
@@ -2620,12 +2619,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			});
 
 			expect(htmlUrls).toEqual([]);
-			expect(
-				secondRefreshOpenAlexUrls.some((u) => u.includes("2611.70001")),
-			).toBe(true);
-			expect(
-				secondRefreshOpenAlexUrls.some((u) => u.includes("2605.10001")),
-			).toBe(true);
+			expect(secondRefreshOpenAlexUrls).toEqual([]);
 			expect(secondRefreshOpenRouterCalls).toBe(1);
 
 			const page = await listCollectionPapers({
@@ -2674,7 +2668,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("unions Venue author + OpenAlex keywords and falls back to OpenRouter :free LLM only when keywords remain empty", async () => {
+	it("marks CSDL Venue author keywords with keywordSource='author', skips cold-start OpenAlex requests, and falls back to Keyword LLM only when keywords remain empty", async () => {
 		const sp = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sp-2026");
 		if (!sp) throw new Error("Missing sp-2026");
 
@@ -2739,6 +2733,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				authors: [{ fullName: "Grace Hopper" }],
 			}));
 
+			const openAlexCalls: string[] = [];
 			const openRouterPrompts: string[] = [];
 			let callAttempt = 0;
 
@@ -2766,20 +2761,8 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 							},
 						} as T;
 					}
-					if (decoded.includes("api.openalex.org/works")) {
-						return {
-							results: [
-								{
-									id: "https://openalex.org/W_sp_1",
-									doi: "https://doi.org/10.1109/sp60000.2026.00002",
-									cited_by_count: 9,
-									keywords: [
-										{ display_name: "Symbolic Execution", score: 0.94 },
-										{ display_name: "Taint Tracking", score: 0.88 },
-									],
-								},
-							],
-						} as T;
+					if (decoded.includes("api.openalex.org")) {
+						openAlexCalls.push(decoded);
 					}
 					return { results: [] } as T;
 				},
@@ -2821,6 +2804,9 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			);
 
 			expect(bundle.items).toHaveLength(26);
+			// Cold-start IEEE CSDL venue with complete abstracts + DOIs makes ZERO OpenAlex calls!
+			expect(openAlexCalls).toEqual([]);
+
 			const p1 = bundle.items.find((p) =>
 				p.title.includes("Hybrid Fuzzing with Directed Symbolic Execution"),
 			);
@@ -2828,22 +2814,20 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				p.title.includes("Memory-Safe Microkernel Isolation"),
 			);
 
-			// Paper 1 gets deduplicated & canonicalized Author ∪ OpenAlex keywords
-			expect(p1?.keywords).toEqual([
-				"Hybrid Fuzzing",
-				"Symbolic Execution",
-				"Taint Analysis",
-			]);
-			expect(p1?.citationCount).toBe(9);
+			// Paper 1 retains pure IEEE CSDL author keywords with `keywordSource: "author"`
+			expect(p1?.keywords).toEqual(["Hybrid Fuzzing", "Symbolic Execution"]);
+			expect(p1?.keywordSource).toBe("author");
+			expect(p1?.citationCount).toBe(0);
 
-			// Paper 2 had neither author nor OpenAlex keywords -> extracted via OpenRouter :free
+			// Paper 2 lacked author keywords -> extracted via Keyword LLM with `keywordSource: "client_llm"`
 			expect(p2?.keywords).toEqual([
 				"Microkernel Isolation",
 				"Capability Security",
 				"Rust Verification",
 				"Device Driver Isolation",
 			]);
-			// OpenRouter only received the 1 paper missing keywords (not the 25 papers with keywords!)
+			expect(p2?.keywordSource).toBe("client_llm");
+			// OpenRouter only received the 1 paper missing keywords (not the 25 papers with author keywords!)
 			expect(openRouterPrompts).toHaveLength(1);
 			expect(openRouterPrompts[0]).toContain(
 				"Memory-Safe Microkernel Isolation",
@@ -2854,7 +2838,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}
 	});
 
-	it("applies Smart Diff on Venue refresh: deletes extra SQLite rows, skips complete rows with 0 OpenAlex/OpenRouter calls, and enriches only new or incomplete rows", async () => {
+	it("applies Smart Diff on Venue refresh: deletes extra SQLite rows, makes 0 OpenAlex calls on Group A, and sends only incomplete/new rows to Keyword LLM", async () => {
 		resetCollectionMemoryForTests();
 		setCachedKeywordLlmConfigForTests({
 			provider: "openrouter",
@@ -2982,27 +2966,14 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			const openAlexUrls: string[] = [];
 			const openRouterPayloads: string[] = [];
 
-			// Pass 1: Enrich ONLY the 1 incomplete existing row (via OpenAlex) and 1 brand-new row (via OpenRouter fallback)
+			// Pass 1: Zero OpenAlex requests; Keyword LLM receives ONLY the 1 incomplete existing row + 1 brand-new row!
 			await ensureVenueLoaded(usenix.id, {
 				fetchText: async (url) =>
 					url.includes("papers.cool/venue/USENIX-Sec.2026")
 						? freshUpstreamHtml
 						: "",
 				fetchJson: async <T>(url: string) => {
-					const decoded = decodeURIComponent(url);
-					openAlexUrls.push(decoded);
-					if (decoded.includes("Incomplete Existing Paper Missing Keywords")) {
-						return {
-							results: [
-								{
-									id: "https://openalex.org/W_inc_healed",
-									title: incompleteExistingRow.title,
-									cited_by_count: 8,
-									keywords: [{ display_name: "Memory Safety", score: 0.91 }],
-								},
-							],
-						} as T;
-					}
+					openAlexUrls.push(decodeURIComponent(url));
 					return { results: [] } as T;
 				},
 				keywordLlmFetch: async (_input, init) => {
@@ -3019,6 +2990,10 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 											items: [
 												{
 													idx: 0,
+													keywords: ["Memory Safety"],
+												},
+												{
+													idx: 1,
 													keywords: [
 														"Kernel Exploit Mitigation",
 														"Control-Flow Integrity",
@@ -3035,10 +3010,14 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				},
 			});
 
-			// Only 1 batched OpenAlex title.search request for the 2 incomplete/new items (NOT the 102 complete rows!)
-			expect(openAlexUrls).toHaveLength(1);
-			expect(openAlexUrls[0]).not.toContain("Complete Security Paper Number 1");
+			expect(openAlexUrls).toEqual([]);
 			expect(openRouterPayloads).toHaveLength(1);
+			expect(openRouterPayloads[0]).not.toContain(
+				"Complete Security Paper Number 1",
+			);
+			expect(openRouterPayloads[0]).toContain(
+				"Incomplete Existing Paper Missing Keywords",
+			);
 			expect(openRouterPayloads[0]).toContain(
 				"Brand New Zero-Day Kernel Exploit Mitigation Paper",
 			);

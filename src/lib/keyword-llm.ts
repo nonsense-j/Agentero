@@ -402,7 +402,7 @@ function buildChunkUserPrompt(chunk: readonly KeywordLlmInput[]): string {
 			const abs = (item.abstract ?? "")
 				.replace(/\s+/g, " ")
 				.trim()
-				.slice(0, 900);
+				.slice(0, 1600);
 			return abs
 				? `[${idx}] Title: ${title} | Abstract: ${abs}`
 				: `[${idx}] Title: ${title}`;
@@ -432,8 +432,27 @@ const DEFAULT_KEYWORD_LLM_MAX_TOKENS = 2400;
 const KEYWORD_LLM_REQUEST_TIMEOUT_MS = 60_000;
 const PROD_RATE_LIMIT_BACKOFF_MS = [3_000, 6_000, 12_000, 20_000] as const;
 const TEST_RATE_LIMIT_BACKOFF_MS = [15, 25, 35, 45] as const;
-const PROD_TRANSIENT_BACKOFF_MS = [2_000, 5_000] as const;
-const TEST_TRANSIENT_BACKOFF_MS = [15, 25] as const;
+const PROD_TRANSIENT_BACKOFF_MS = [2_000, 5_000, 10_000] as const;
+const TEST_TRANSIENT_BACKOFF_MS = [15, 25, 35] as const;
+const MAX_PROD_RETRY_AFTER_MS = 60_000;
+const MAX_TEST_RETRY_AFTER_MS = 60;
+
+function parseRetryAfterHeaderMs(
+	rawHeader: string | null | undefined,
+): number | undefined {
+	if (!rawHeader) return undefined;
+	const trimmed = rawHeader.trim();
+	if (!trimmed) return undefined;
+	const asSeconds = Number(trimmed);
+	if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+		return Math.ceil(asSeconds * 1000);
+	}
+	const asDateMs = Date.parse(trimmed);
+	if (!Number.isNaN(asDateMs)) {
+		return Math.max(0, asDateMs - Date.now());
+	}
+	return undefined;
+}
 
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) {
@@ -458,8 +477,27 @@ function isOpenRouterFreeTierConfig(cfg: KeywordLlmSettings): boolean {
 	return model.endsWith(":free");
 }
 
+function resolveBackoffWaitMs(
+	baseWaitMs: number,
+	retryAfterMs: number | undefined,
+	isFastTest: boolean,
+): number {
+	if (retryAfterMs === undefined || retryAfterMs <= 0) {
+		return baseWaitMs;
+	}
+	const capped = Math.min(
+		retryAfterMs,
+		isFastTest ? MAX_TEST_RETRY_AFTER_MS : MAX_PROD_RETRY_AFTER_MS,
+	);
+	return Math.max(baseWaitMs, capped);
+}
+
 async function runChunkWithPatientRetries(
-	attemptOnce: () => Promise<{ status: number; content: string } | null>,
+	attemptOnce: () => Promise<{
+		status: number;
+		content: string;
+		retryAfterMs?: number;
+	} | null>,
 	signal?: AbortSignal,
 ): Promise<{
 	byIndex: Record<string, string[]>;
@@ -480,7 +518,11 @@ async function runChunkWithPatientRetries(
 		if (signal?.aborted) {
 			throw new BackgroundTaskCancelledError();
 		}
-		let outcome: { status: number; content: string } | null = null;
+		let outcome: {
+			status: number;
+			content: string;
+			retryAfterMs?: number;
+		} | null = null;
 		try {
 			outcome = await attemptOnce();
 		} catch (err) {
@@ -498,22 +540,28 @@ async function runChunkWithPatientRetries(
 		if (!outcome) {
 			return { byIndex: {}, abortRemaining: true };
 		}
-		const { status, content } = outcome;
+		const { status, content, retryAfterMs } = outcome;
 		if (status === 401 || status === 402) {
 			return { byIndex: {}, abortRemaining: true };
 		}
 		if (status === 429) {
-			const waitMs = rateBackoffs[rateRetryIdx++];
-			if (waitMs !== undefined) {
-				await sleepAbortable(waitMs, signal);
+			const baseWaitMs = rateBackoffs[rateRetryIdx++];
+			if (baseWaitMs !== undefined) {
+				await sleepAbortable(
+					resolveBackoffWaitMs(baseWaitMs, retryAfterMs, isFastTest),
+					signal,
+				);
 				continue;
 			}
 			return { byIndex: {}, abortRemaining: true };
 		}
 		if (status === 408 || status >= 500) {
-			const waitMs = transientBackoffs[transientRetryIdx++];
-			if (waitMs !== undefined) {
-				await sleepAbortable(waitMs, signal);
+			const baseWaitMs = transientBackoffs[transientRetryIdx++];
+			if (baseWaitMs !== undefined) {
+				await sleepAbortable(
+					resolveBackoffWaitMs(baseWaitMs, retryAfterMs, isFastTest),
+					signal,
+				);
 				continue;
 			}
 			return { byIndex: {}, abortRemaining: false };
@@ -613,7 +661,13 @@ async function callKeywordLlmChunkViaFetch(
 			}
 		}
 		if (!resp.ok) {
-			return { status: resp.status, content: "" };
+			return {
+				status: resp.status,
+				content: "",
+				retryAfterMs: parseRetryAfterHeaderMs(
+					resp.headers?.get?.("retry-after"),
+				),
+			};
 		}
 		const json = (await resp.json()) as unknown;
 		return {
