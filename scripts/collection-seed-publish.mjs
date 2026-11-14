@@ -16,7 +16,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -890,10 +890,138 @@ async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
 	);
 }
 
+function resolveAgenteroSettingsCandidates() {
+	const candidates = [];
+	const xdg = process.env.XDG_CONFIG_HOME?.trim();
+	if (xdg) {
+		candidates.push(path.join(xdg, "agentero", "settings.json"));
+	}
+	if (process.platform === "win32") {
+		const appData =
+			process.env.APPDATA?.trim() ||
+			path.join(os.homedir(), "AppData", "Roaming");
+		candidates.push(path.join(appData, "agentero", "settings.json"));
+	} else if (process.platform === "darwin") {
+		candidates.push(
+			path.join(os.homedir(), ".config", "agentero", "settings.json"),
+			path.join(
+				os.homedir(),
+				"Library",
+				"Application Support",
+				"agentero",
+				"settings.json",
+			),
+		);
+	} else {
+		candidates.push(
+			path.join(os.homedir(), ".config", "agentero", "settings.json"),
+		);
+	}
+	return Array.from(new Set(candidates));
+}
+
+function mergeLoopbackNoProxy(existing) {
+	const parts = String(existing || "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	for (const host of ["127.0.0.1", "localhost"]) {
+		if (!parts.some((p) => p.toLowerCase() === host)) {
+			parts.push(host);
+		}
+	}
+	return parts.join(",");
+}
+
+async function bootstrapNetworkProxy() {
+	const hadEnvProxy = Boolean(
+		process.env.HTTP_PROXY?.trim() ||
+			process.env.HTTPS_PROXY?.trim() ||
+			process.env.http_proxy?.trim() ||
+			process.env.https_proxy?.trim(),
+	);
+	const hadStartupNodeEnvProxy =
+		process.execArgv.includes("--use-env-proxy") ||
+		(hadEnvProxy && process.env.NODE_USE_ENV_PROXY === "1");
+
+	if (!hadEnvProxy) {
+		for (const settingsPath of resolveAgenteroSettingsCandidates()) {
+			if (!existsSync(settingsPath)) continue;
+			try {
+				const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+				const proxyUrl =
+					raw?.networkProxyEnabled === true &&
+					typeof raw?.networkProxyUrl === "string"
+						? raw.networkProxyUrl.trim()
+						: "";
+				if (proxyUrl) {
+					process.env.HTTP_PROXY = proxyUrl;
+					process.env.HTTPS_PROXY = proxyUrl;
+					process.env.NO_PROXY = mergeLoopbackNoProxy(process.env.NO_PROXY);
+					process.env.NODE_USE_ENV_PROXY = "1";
+					console.error(
+						`[proxy] Auto-loaded network proxy from ${settingsPath}: ${proxyUrl}`,
+					);
+					break;
+				}
+			} catch {
+				// Ignore unreadable or malformed settings.json
+			}
+		}
+	} else {
+		process.env.NO_PROXY = mergeLoopbackNoProxy(process.env.NO_PROXY);
+	}
+
+	const activeProxy =
+		process.env.HTTPS_PROXY?.trim() ||
+		process.env.HTTP_PROXY?.trim() ||
+		process.env.https_proxy?.trim() ||
+		process.env.http_proxy?.trim() ||
+		"";
+	if (!activeProxy) return false;
+
+	const undiciMod = await import("undici").catch(() => null);
+	if (undiciMod?.EnvHttpProxyAgent && undiciMod?.setGlobalDispatcher) {
+		undiciMod.setGlobalDispatcher(new undiciMod.EnvHttpProxyAgent());
+		return false;
+	}
+
+	if (
+		!hadStartupNodeEnvProxy &&
+		process.env.AGENTERO_SEED_PROXY_BOOTSTRAPPED !== "1"
+	) {
+		const probe = spawnSync(process.execPath, ["--use-env-proxy", "-e", "0"], {
+			stdio: "ignore",
+		});
+		if (probe.status === 0) {
+			const child = spawnSync(
+				process.execPath,
+				["--use-env-proxy", ...process.argv.slice(1)],
+				{
+					stdio: "inherit",
+					env: {
+						...process.env,
+						NODE_USE_ENV_PROXY: "1",
+						AGENTERO_SEED_PROXY_BOOTSTRAPPED: "1",
+					},
+				},
+			);
+			process.exitCode = child.status ?? 1;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 async function main() {
 	const opts = parseCliOptions(process.argv.slice(2));
 	if (opts.help) {
 		process.stdout.write(HELP_TEXT);
+		return;
+	}
+
+	if (await bootstrapNetworkProxy()) {
 		return;
 	}
 
@@ -916,6 +1044,12 @@ async function main() {
 						llmBaseUrl: opts.llmBaseUrl,
 						llmModel: opts.llmModel,
 						llmConcurrency: opts.llmConcurrency,
+						proxyUrl:
+							process.env.HTTPS_PROXY ||
+							process.env.HTTP_PROXY ||
+							process.env.https_proxy ||
+							process.env.http_proxy ||
+							null,
 						upload: opts.upload,
 						releaseTag: opts.releaseTag,
 					},
