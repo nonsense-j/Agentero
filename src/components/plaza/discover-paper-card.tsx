@@ -8,7 +8,6 @@ import {
 	FileCode2,
 	GitFork,
 	Loader2,
-	Quote,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -267,8 +266,13 @@ export function DiscoverPaperCard({
 						</span>
 					) : null}
 
-					<span className="inline-flex items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-medium text-[0.6875rem] text-foreground tabular-nums leading-none">
-						<Quote className="size-2.5 text-muted-foreground" />
+					<span
+						title={t("plaza.collection.citations", {
+							count: paper.citationCount ?? 0,
+						})}
+						className="inline-flex items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-medium text-[0.6875rem] text-foreground tabular-nums leading-none"
+					>
+						<GitFork className="size-2.5 text-muted-foreground" />
 						{paper.citationCount ?? 0}
 					</span>
 				</div>

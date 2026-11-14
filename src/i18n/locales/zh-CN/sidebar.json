@@ -243,9 +243,21 @@
 			"papersCount": "{{count}} 篇",
 			"loadMoreStep": "加载更多 {{step}} 篇（已展示 {{shown}} / 共预载 {{total}} 篇）",
 			"showingAll": "已展示全部 {{total}} 篇论文",
-			"citations": "被引 {{count}}",
+			"citations": "池内被引 {{count}}",
 			"keywords": "关键词",
 			"abstract": "完整摘要",
+			"lineage": {
+				"title": "引文脉络",
+				"citedInPool": "池内跟进",
+				"referencesInPool": "池内参考",
+				"sharedRefs": "同题共引",
+				"current": "当前论文",
+				"inVault": "已在库中",
+				"citesVault": "引用库内论文",
+				"listView": "列表视图",
+				"graphView": "脉络图视图",
+				"back": "返回：{{title}}"
+			},
 			"citationInfo": "引用信息",
 			"copyCitation": "复制引用",
 			"copyBibtex": "复制 BibTeX",
@@ -421,7 +433,8 @@
 			"translateFailed": "翻译失败",
 			"translatePartialFailed": "{{total}} 篇中有 {{failed}} 篇翻译失败",
 			"computing": "正在从论文池匹配推荐…",
-			"searchCategory": "搜索分类…"
+			"searchCategory": "搜索分类…",
+			"citesVault": "引用了库中 {{count}} 篇论文"
 		},
 		"feeds": {
 			"label": "订阅",

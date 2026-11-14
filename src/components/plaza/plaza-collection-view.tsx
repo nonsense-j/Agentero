@@ -18,10 +18,10 @@ import {
 	CheckSquare,
 	ChevronDown,
 	Download,
+	GitFork,
 	Loader2,
 	Pencil,
 	Plus,
-	Quote,
 	RefreshCw,
 	Settings2,
 	Sparkles,
@@ -134,6 +134,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		useState<DomainFilter>("all");
 	const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
 	const [timeRange, setTimeRange] = useState<TimeRangeFilter>("all");
+	const [sortOrder, setSortOrder] = useState<"newest" | "citations">("newest");
 
 	// Paginated slice state (never holds full 20,000-paper pool in React memory)
 	const [pageItems, setPageItems] = useState<CollectionPaperItem[]>([]);
@@ -216,6 +217,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				sourceType: "arxiv",
 				category: selectedCategory,
 				timePreset: timeRange,
+				sort: sortOrder,
 			};
 		}
 		return {
@@ -223,11 +225,13 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			venueKind: venueKindFilter === "all" ? null : venueKindFilter,
 			venueDomain: venueDomainFilter === "all" ? null : venueDomainFilter,
 			venueId: selectedVenueId,
+			sort: sortOrder,
 		};
 	}, [
 		activeSource,
 		selectedCategory,
 		selectedVenueId,
+		sortOrder,
 		timeRange,
 		venueDomainFilter,
 		venueKindFilter,
@@ -819,6 +823,31 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								</>
 							)}
 
+							{/* Sort Switcher: Newest | In-Pool Citations */}
+							<div className="magpie-seg">
+								{(["newest", "citations"] as const).map((mode) => (
+									<button
+										key={mode}
+										type="button"
+										data-active={sortOrder === mode}
+										onClick={() => {
+											setSortOrder(mode);
+											resetPagination();
+										}}
+										className="magpie-seg-btn gap-1"
+									>
+										{mode === "citations" ? (
+											<GitFork className="size-3" />
+										) : null}
+										<span>
+											{mode === "newest"
+												? t("plaza.discover.sortNewest")
+												: t("plaza.discover.sortCitations")}
+										</span>
+									</button>
+								))}
+							</div>
+
 							{/* Right actions */}
 							<div className="ml-auto flex items-center gap-1.5">
 								{isCurrentViewRefreshing && listRefreshTarget ? (
@@ -1253,8 +1282,13 @@ function CollectionPaperCard({
 					<span className="font-mono text-[11px] text-muted-foreground tabular-nums">
 						{paper.publishedAt.slice(0, 10)}
 					</span>
-					<span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tabular-nums">
-						<Quote className="size-2.5" />
+					<span
+						title={t("plaza.collection.citations", {
+							count: paper.citationCount ?? 0,
+						})}
+						className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tabular-nums"
+					>
+						<GitFork className="size-2.5" />
 						{paper.citationCount ?? 0}
 					</span>
 					{paper.authors.length > 0 ? (

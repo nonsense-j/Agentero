@@ -20,11 +20,12 @@ import {
 	CheckSquare,
 	Database,
 	Download,
+	GitFork,
 	Languages,
+	Library,
 	Loader2,
 	Minus,
 	Plus,
-	Quote,
 	RefreshCw,
 	RotateCcw,
 	Sparkles,
@@ -99,6 +100,7 @@ import {
 	type WordCloudKeyword,
 } from "@/lib/plaza/recommend-pool";
 import { runTranslate } from "@/lib/translate";
+import { getVaultPath, vaultStore } from "@/lib/vault/store";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
 
 type RecommendStage = "select" | "results";
@@ -125,6 +127,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		subscribePreloadingCollection,
 		isPreloadingCollection,
 	);
+	const vaultPath = useSyncExternalStore(vaultStore.subscribe, getVaultPath);
 
 	const [poolState, setPoolState] = useState<RecommendPoolState>(
 		createDefaultRecommendPoolState,
@@ -409,6 +412,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 			await flushPoolSave();
 			const res = await recommendNextFromCollection(
 				DEFAULT_RECOMMEND_BATCH_SIZE,
+				vaultPath,
 			);
 			latestPoolStateRef.current = res.state;
 			setPoolState(res.state);
@@ -422,7 +426,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		} finally {
 			setBusy(false);
 		}
-	}, [activeTerms.length, busy, flushPoolSave]);
+	}, [activeTerms.length, busy, flushPoolSave, vaultPath]);
 
 	const handleResetHistory = useCallback(
 		async (recommendAfterReset: boolean) => {
@@ -441,6 +445,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 				if (recommendAfterReset && activeTerms.length > 0) {
 					const res = await recommendNextFromCollection(
 						DEFAULT_RECOMMEND_BATCH_SIZE,
+						vaultPath,
 					);
 					latestPoolStateRef.current = res.state;
 					setPoolState(res.state);
@@ -456,7 +461,7 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 				setResettingHistory(false);
 			}
 		},
-		[activeTerms.length, busy, flushPoolSave, resettingHistory],
+		[activeTerms.length, busy, flushPoolSave, resettingHistory, vaultPath],
 	);
 
 	const translateAll = useCallback(async () => {
@@ -1226,10 +1231,33 @@ function RecommendPaperCard({
 						</span>
 					) : null}
 					{typeof item.citationCount === "number" ? (
-						<span className="inline-flex items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-medium text-[0.6875rem] text-foreground tabular-nums leading-none">
-							<Quote className="size-2.5 text-muted-foreground" />
+						<span
+							title={t("plaza.collection.citations", {
+								count: item.citationCount,
+							})}
+							className="inline-flex items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-medium text-[0.6875rem] text-foreground tabular-nums leading-none"
+						>
+							<GitFork className="size-2.5 text-muted-foreground" />
 							{item.citationCount}
 						</span>
+					) : null}
+					{(item.citedVaultCount ?? 0) > 0 ? (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span
+									data-vault-cited-badge
+									className="inline-flex items-center gap-1 rounded-md bg-emerald-500/12 px-1.5 py-0.5 font-medium text-[0.6875rem] text-emerald-700 tabular-nums leading-none dark:bg-emerald-500/20 dark:text-emerald-200"
+								>
+									<Library className="size-2.5" />
+									{item.citedVaultCount}
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="top">
+								{t("plaza.arxivRec.citesVault", {
+									count: item.citedVaultCount,
+								})}
+							</TooltipContent>
+						</Tooltip>
 					) : null}
 				</div>
 

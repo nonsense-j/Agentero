@@ -1,16 +1,25 @@
 import {
+	ArrowLeft,
 	ArrowUpRight,
 	BookOpen,
 	Check,
 	Copy,
 	Download,
+	GitFork,
 	Loader2,
-	Quote,
 	Tag,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
+import { CollectionPaperLineageSection } from "@/components/plaza/collection-paper-lineage-section";
 import { SelectionSurface } from "@/components/selection/selection-surface";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +30,11 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import {
@@ -31,7 +45,14 @@ import {
 	getCollectionPaperDetail,
 	shouldEnrichPaperOnDemand,
 } from "@/lib/plaza/collection";
+import {
+	type CollectionPaperLineageResult,
+	getCollectionPaperLineage,
+} from "@/lib/plaza/collection-store";
+import { joinVaultPath } from "@/lib/vault/path";
+import { getVaultPath, vaultStore } from "@/lib/vault/store";
 import { openRemoteArxivPaper } from "@/lib/workspace/actions";
+import { openPaper } from "@/lib/workspace/navigation";
 
 export const COLLECTION_PRIMARY_BTN_CLASS =
 	"border-blue-600/30 bg-blue-600 text-white shadow-xs hover:bg-blue-500 hover:text-white active:bg-blue-700 dark:border-blue-400/50 dark:bg-blue-600 dark:text-white dark:shadow-[0_1px_3px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.22)] dark:hover:bg-blue-500 dark:active:bg-blue-700";
@@ -55,38 +76,85 @@ export function CollectionPaperDetailDialog({
 	onPaperUpdated?: (updated: CollectionPaperItem) => void;
 }) {
 	const { t } = useTranslation("sidebar");
+	const vaultPath = useSyncExternalStore(vaultStore.subscribe, getVaultPath);
+	const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+
+	const [history, setHistory] = useState<CollectionPaperItem[]>([]);
+	const [navTarget, setNavTarget] = useState<CollectionPaperItem | null>(paper);
 	const [resolvedPaper, setResolvedPaper] =
 		useState<CollectionPaperItem | null>(paper);
+	const [lineage, setLineage] = useState<CollectionPaperLineageResult | null>(
+		null,
+	);
 	const [serverCitationText, setServerCitationText] = useState<string | null>(
 		null,
 	);
 	const [enriching, setEnriching] = useState(false);
 	const [importing, setImporting] = useState(false);
+	const [locallyImportedIds, setLocallyImportedIds] = useState<Set<string>>(
+		new Set(),
+	);
 	const [copiedKind, setCopiedKind] = useState<"citation" | "bibtex" | null>(
 		null,
 	);
 
+	const prevExternalIdRef = useRef<string | null>(paper?.id ?? null);
+	const prevOpenRef = useRef<boolean>(open);
+
+	// Reset navigation stack when dialog closes or caller switches to a different root paper
 	useEffect(() => {
-		setResolvedPaper(paper);
+		const externalId = paper?.id ?? null;
+		const reopened = open && !prevOpenRef.current;
+		const rootChanged = externalId !== prevExternalIdRef.current;
+		prevOpenRef.current = open;
+		prevExternalIdRef.current = externalId;
+
+		if (!open) {
+			setHistory([]);
+			setNavTarget(paper);
+			setLineage(null);
+			return;
+		}
+
+		if (reopened || rootChanged) {
+			setHistory([]);
+			setNavTarget(paper);
+		} else if (paper && navTarget && paper.id === navTarget.id) {
+			setNavTarget(paper);
+		}
+	}, [open, paper, navTarget]);
+
+	const targetPaper = navTarget ?? paper;
+
+	useEffect(() => {
+		setResolvedPaper(targetPaper);
 		setServerCitationText(null);
 		setCopiedKind(null);
-		if (!open || !paper) {
+		setLineage(null);
+		if (!open || !targetPaper) {
 			setEnriching(false);
 			return;
 		}
 
 		let cancelled = false;
-		const needsInitialEnrich = shouldEnrichPaperOnDemand(paper);
+		const needsInitialEnrich = shouldEnrichPaperOnDemand(targetPaper);
 		setEnriching(needsInitialEnrich);
 
 		void (async () => {
 			try {
-				const dbDetail = await getCollectionPaperDetail(paper.id).catch(
-					() => null,
-				);
+				const [dbDetail, dbLineage] = await Promise.all([
+					getCollectionPaperDetail(targetPaper.id).catch(() => null),
+					getCollectionPaperLineage(targetPaper.id, vaultPath).catch(
+						() => null,
+					),
+				]);
 				if (cancelled) return;
 
-				let candidate: CollectionPaperItem = paper;
+				if (dbLineage) {
+					setLineage(dbLineage);
+				}
+
+				let candidate: CollectionPaperItem = targetPaper;
 				if (dbDetail) {
 					const { citationText: cite, ...detailPaper } = dbDetail;
 					candidate = detailPaper;
@@ -102,7 +170,16 @@ export function CollectionPaperDetailDialog({
 				if (cancelled) return;
 				setResolvedPaper(updated);
 				setServerCitationText(formatPaperCitationText(updated));
-				onPaperUpdated?.(updated);
+				if (updated.id === paper?.id) {
+					onPaperUpdated?.(updated);
+				}
+				const refreshedLineage = await getCollectionPaperLineage(
+					updated.id,
+					vaultPath,
+				).catch(() => null);
+				if (!cancelled && refreshedLineage) {
+					setLineage(refreshedLineage);
+				}
 			} catch {
 				// Ignore transient network / offline failures; fall back to local formatting
 			} finally {
@@ -113,10 +190,40 @@ export function CollectionPaperDetailDialog({
 		return () => {
 			cancelled = true;
 		};
-	}, [open, paper, onPaperUpdated]);
+	}, [open, targetPaper, vaultPath, paper?.id, onPaperUpdated]);
 
-	const active = resolvedPaper ?? paper;
+	const active = resolvedPaper ?? targetPaper;
 	const keywords = active?.keywords ?? [];
+
+	const handleSelectLineagePaper = useCallback(
+		(next: CollectionPaperItem) => {
+			if (!active || next.id === active.id) return;
+			setHistory((prev) => [...prev, active]);
+			setNavTarget(next);
+			bodyScrollRef.current?.scrollTo({ top: 0 });
+		},
+		[active],
+	);
+
+	const handleNavigateBack = useCallback(() => {
+		setHistory((prev) => {
+			if (prev.length === 0) return prev;
+			const nextStack = prev.slice(0, -1);
+			const previous = prev[prev.length - 1] ?? null;
+			setNavTarget(previous);
+			bodyScrollRef.current?.scrollTo({ top: 0 });
+			return nextStack;
+		});
+	}, []);
+
+	const handleOpenVaultPaper = useCallback(
+		(relPath: string) => {
+			if (!vaultPath || !relPath) return;
+			openPaper(joinVaultPath(vaultPath, relPath));
+			onOpenChange(false);
+		},
+		[onOpenChange, vaultPath],
+	);
 
 	const citationText = useMemo(
 		() =>
@@ -130,6 +237,15 @@ export function CollectionPaperDetailDialog({
 	);
 
 	if (!active) return null;
+
+	const isSelfInVault = Boolean(
+		lineage?.vaultMatches.some((m) => m.relation === "self"),
+	);
+	const isActiveImported =
+		(active.id === paper?.id && imported) ||
+		locallyImportedIds.has(active.id) ||
+		isSelfInVault;
+	const previousPaper = history.length > 0 ? history[history.length - 1] : null;
 
 	const copyText = async (kind: "citation" | "bibtex") => {
 		try {
@@ -159,10 +275,15 @@ export function CollectionPaperDetailDialog({
 	};
 
 	const handleImportClick = async () => {
-		if (importing || imported) return;
+		if (importing || isActiveImported) return;
 		setImporting(true);
 		try {
 			await onImport(active);
+			setLocallyImportedIds((prev) => {
+				const next = new Set(prev);
+				next.add(active.id);
+				return next;
+			});
 		} finally {
 			setImporting(false);
 		}
@@ -173,6 +294,30 @@ export function CollectionPaperDetailDialog({
 			<DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
 				<DialogHeader className="shrink-0 border-b px-5 pt-5 pr-11 pb-3.5">
 					<div className="flex flex-wrap items-center gap-1.5">
+						{previousPaper ? (
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon-xs"
+										onClick={handleNavigateBack}
+										aria-label={t("plaza.collection.lineage.back", {
+											title: previousPaper.title,
+										})}
+										className="-ml-1 mr-0.5 text-muted-foreground hover:text-foreground"
+									>
+										<ArrowLeft className="size-3.5" />
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent side="bottom" className="max-w-xs truncate">
+									{t("plaza.collection.lineage.back", {
+										title: previousPaper.title,
+									})}
+								</TooltipContent>
+							</Tooltip>
+						) : null}
+
 						<PlazaSourceBadge
 							source={active.sourceType}
 							label={active.sourceLabel}
@@ -191,7 +336,7 @@ export function CollectionPaperDetailDialog({
 							{active.publishedAt.slice(0, 10)}
 						</span>
 						<span className="inline-flex items-center gap-1 rounded-md bg-muted/70 px-1.5 py-0.5 font-medium text-[11px] text-foreground tabular-nums">
-							<Quote className="size-2.5 text-muted-foreground" />
+							<GitFork className="size-2.5 text-muted-foreground" />
 							{t("plaza.collection.citations", {
 								count: active.citationCount ?? 0,
 							})}
@@ -218,7 +363,10 @@ export function CollectionPaperDetailDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="agentero-scroll min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+				<div
+					ref={bodyScrollRef}
+					className="agentero-scroll min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4"
+				>
 					{enriching ? (
 						<div className="flex items-center gap-2 rounded-lg bg-muted/40 px-3 py-2 text-muted-foreground text-xs">
 							<Loader2 className="size-3.5 animate-spin" />
@@ -266,6 +414,15 @@ export function CollectionPaperDetailDialog({
 							</SelectionSurface>
 						</section>
 					) : null}
+
+					{/* In-Pool Paper Graph Lineage & Personal Vault Association */}
+					<CollectionPaperLineageSection
+						currentPaper={active}
+						lineage={lineage}
+						vaultPath={vaultPath}
+						onSelectPaper={handleSelectLineagePaper}
+						onOpenVaultPaper={handleOpenVaultPaper}
+					/>
 
 					{/* Citation Info & BibTeX */}
 					<section className="space-y-2">
@@ -365,16 +522,16 @@ export function CollectionPaperDetailDialog({
 						<Button
 							type="button"
 							size="sm"
-							disabled={importing || imported}
+							disabled={importing || isActiveImported}
 							onClick={() => void handleImportClick()}
 							className={cn(
 								"gap-1.5",
-								imported
+								isActiveImported
 									? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 disabled:opacity-100 dark:border-emerald-400/35 dark:bg-emerald-500/20 dark:text-emerald-200"
 									: COLLECTION_PRIMARY_BTN_CLASS,
 							)}
 						>
-							{imported ? (
+							{isActiveImported ? (
 								<>
 									<Check className="size-3.5" />
 									{t("plaza.feeds.imported")}

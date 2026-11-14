@@ -243,9 +243,21 @@
 			"papersCount": "{{count}} papers",
 			"loadMoreStep": "Load {{step}} more ({{shown}} / {{total}})",
 			"showingAll": "Showing all {{total}} papers",
-			"citations": "Cited by {{count}}",
+			"citations": "Cited {{count}} in pool",
 			"keywords": "Keywords",
 			"abstract": "Abstract",
+			"lineage": {
+				"title": "Lineage",
+				"citedInPool": "Cited in Pool",
+				"referencesInPool": "References",
+				"sharedRefs": "Shared Refs",
+				"current": "Current",
+				"inVault": "In Vault",
+				"citesVault": "Cites Vault",
+				"listView": "List view",
+				"graphView": "Graph view",
+				"back": "Back: {{title}}"
+			},
 			"citationInfo": "Citation",
 			"copyCitation": "Copy Citation",
 			"copyBibtex": "Copy BibTeX",
@@ -422,7 +434,8 @@
 			"translateFailed": "Translation failed",
 			"translatePartialFailed": "Translation failed for {{failed}} of {{total}} papers",
 			"computing": "Matching papers from Collection…",
-			"searchCategory": "Search category…"
+			"searchCategory": "Search category…",
+			"citesVault": "Cites {{count}} paper(s) in Vault"
 		},
 		"feeds": {
 			"label": "Feeds",
