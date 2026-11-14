@@ -9,13 +9,18 @@ import {
 	type CollectionPaperDetail,
 	type CollectionPaperIdArgs,
 	type CollectionPaperIdsArgs,
+	type CollectionPaperLineageArgs,
+	type CollectionPaperLineageOut,
 	type CollectionPaperSummary,
 	type CollectionPapersPage,
 	type CollectionPatchPapersArgs,
 	type CollectionSearchArgs,
 	type CollectionSearchResult,
+	type CollectionSeedSyncArgs,
+	type CollectionSeedSyncOut,
 	type CollectionStateSummary,
 	type CollectionUpsertPapersArgs,
+	type CollectionVaultPaperMatch,
 	type CollectionVenueRecord,
 	type CollectionWordCloudArgs,
 	commands,
@@ -33,6 +38,7 @@ import {
 	formatPaperBibtex,
 	formatPaperCitationText,
 	isPlaceholderAbstract,
+	type KeywordSource,
 	matchesAnyArxivCategory,
 	mergeCollectionItems,
 	normalizePaperKeywords,
@@ -81,6 +87,7 @@ function toPaperSummaryDto(item: CollectionPaperItem): CollectionPaperSummary {
 		venueFull: item.venueFull ?? null,
 		citationCount: item.citationCount ?? 0,
 		keywords: [...(item.keywords ?? [])],
+		keywordSource: item.keywordSource ?? null,
 		volume: item.volume ?? null,
 		issue: item.issue ?? null,
 		pages: item.pages ?? null,
@@ -97,6 +104,74 @@ function toPaperDetailDto(item: CollectionPaperItem): CollectionPaperDetail {
 		bibtex,
 		citationText: formatPaperCitationText(item),
 	};
+}
+
+function parseKeywordSource(raw?: string | null): KeywordSource | undefined {
+	if (raw === "author" || raw === "maintainer_llm" || raw === "client_llm") {
+		return raw;
+	}
+	return undefined;
+}
+
+function keywordSourceRank(src?: KeywordSource): number {
+	if (src === "author") return 3;
+	if (src === "maintainer_llm") return 2;
+	if (src === "client_llm") return 1;
+	return 0;
+}
+
+function normalizeRefTokensForItem(item: {
+	doi?: string | null;
+	arxivId?: string | null;
+	openalexId?: string | null;
+}): string[] {
+	const tokens: string[] = [];
+	const doi = item.doi?.trim().toLowerCase();
+	if (doi) {
+		tokens.push(`doi:${doi}`);
+		const axMatch = doi.match(/^10\.48550\/arxiv\.(.+)$/i);
+		if (axMatch?.[1]) {
+			tokens.push(`arxiv:${axMatch[1].replace(/v\d+$/i, "")}`);
+		}
+	}
+	const ax = item.arxivId?.trim().toLowerCase().replace(/v\d+$/i, "");
+	if (ax) {
+		tokens.push(`arxiv:${ax}`);
+	}
+	const oa = item.openalexId
+		?.trim()
+		.replace(/^https?:\/\/openalex\.org\//i, "")
+		.toUpperCase();
+	if (oa) {
+		tokens.push(`openalex:${oa}`);
+	}
+	return Array.from(new Set(tokens));
+}
+
+function normalizeRawRefToken(raw: string): string | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	const lower = trimmed.toLowerCase();
+	if (lower.startsWith("doi:")) {
+		const val = lower.slice(4).trim();
+		return val ? `doi:${val}` : null;
+	}
+	if (lower.startsWith("arxiv:")) {
+		const val = lower.slice(6).trim().replace(/v\d+$/i, "");
+		return val ? `arxiv:${val}` : null;
+	}
+	if (lower.startsWith("openalex:")) {
+		const val = trimmed
+			.slice(9)
+			.trim()
+			.replace(/^https?:\/\/openalex\.org\//i, "")
+			.toUpperCase();
+		return val ? `openalex:${val}` : null;
+	}
+	if (/^w\d+$/i.test(trimmed)) {
+		return `openalex:${trimmed.toUpperCase()}`;
+	}
+	return lower;
 }
 
 function defaultVenueRecords(): CollectionVenueRecord[] {
@@ -117,6 +192,20 @@ function defaultVenueRecords(): CollectionVenueRecord[] {
 	}));
 }
 
+export type MockVaultCatalogPaper = {
+	relPath: string;
+	title: string;
+	doi?: string | null;
+	arxivId?: string | null;
+};
+
+export type MockSeedShard = {
+	id: string;
+	kind: "core" | "addon" | "delta";
+	category?: string;
+	items: CollectionPaperItem[];
+};
+
 export type MockCollectionDbSeed = {
 	categories?: string[];
 	venues?: VenueConfig[];
@@ -135,14 +224,18 @@ export type MockCollectionDbSeed = {
 	lastRefreshedAt?: string | null;
 	latestArxiv?: CollectionArxivLatest | null;
 	recommendState?: Partial<RecommendPoolState>;
+	seedCleared?: boolean;
+	appliedSeedIds?: string[];
+	vaultPapers?: MockVaultCatalogPaper[];
+	seedShards?: MockSeedShard[];
 };
 
 /**
  * Install an in-memory `collection.sqlite` mock wired onto `commands.plazaCollection*` spies.
  * Mirrors SQLite invariants: portal-scoped PKs, enabled-category scoping for `arxiv`,
  * metadata-preserving upserts/patches (never overwriting `recommendedAt` with null),
- * atomic venue replacement carrying forward `recommendedAt`, word-cloud casing, and
- * non-repeating recommendation batches.
+ * atomic venue replacement carrying forward `recommendedAt`, word-cloud casing,
+ * non-repeating recommendation batches, pure in-pool lineage graph, and seed sync.
  */
 export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 	let categories: string[] = [...DEFAULT_ARXIV_CATEGORIES];
@@ -152,7 +245,128 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 	let latestArxiv: CollectionArxivLatest | null = null;
 	let itemsById = new Map<string, CollectionPaperItem>();
 	let recommendState: RecommendPoolState = createDefaultRecommendPoolState();
+	let seedCleared = false;
+	let appliedSeedIds: string[] = [];
+	let vaultPapers: MockVaultCatalogPaper[] = [];
+	let seedShards: MockSeedShard[] = [];
 	let recClockSeq = 0;
+
+	const recomputeInPoolCitations = () => {
+		const all = Array.from(itemsById.values());
+		const hasAnyRawRefs = all.some((p) => (p.rawRefs?.length ?? 0) > 0);
+		if (!hasAnyRawRefs) return;
+
+		// Build canonical work groups across portals
+		const workIdxByPaperId = new Map<string, number>();
+		const tokenToWorkIdx = new Map<string, number>();
+		const workMembers: CollectionPaperItem[][] = [];
+
+		for (const item of all) {
+			let foundIdx: number | undefined;
+			for (const tok of normalizeRefTokensForItem(item)) {
+				const existing = tokenToWorkIdx.get(tok);
+				if (existing !== undefined) {
+					foundIdx = existing;
+					break;
+				}
+			}
+			if (foundIdx === undefined) {
+				const bySameWork = workMembers.findIndex((members) =>
+					members.some((m) => sameCollectionPaperWork(m, item)),
+				);
+				if (bySameWork >= 0) foundIdx = bySameWork;
+			}
+			if (foundIdx === undefined) {
+				foundIdx = workMembers.length;
+				workMembers.push([item]);
+			} else {
+				workMembers[foundIdx]?.push(item);
+			}
+			workIdxByPaperId.set(item.id, foundIdx);
+			for (const tok of normalizeRefTokensForItem(item)) {
+				tokenToWorkIdx.set(tok, foundIdx);
+			}
+		}
+
+		const citingWorksByTarget = new Map<number, Set<number>>();
+		for (const item of all) {
+			const srcWork = workIdxByPaperId.get(item.id);
+			if (srcWork === undefined) continue;
+			for (const raw of item.rawRefs ?? []) {
+				const norm = normalizeRawRefToken(raw);
+				if (!norm) continue;
+				const dstWork = tokenToWorkIdx.get(norm);
+				if (dstWork === undefined || dstWork === srcWork) continue;
+				let set = citingWorksByTarget.get(dstWork);
+				if (!set) {
+					set = new Set();
+					citingWorksByTarget.set(dstWork, set);
+				}
+				set.add(srcWork);
+			}
+		}
+
+		for (const [id, item] of itemsById.entries()) {
+			const wIdx = workIdxByPaperId.get(id);
+			const computed =
+				wIdx !== undefined ? (citingWorksByTarget.get(wIdx)?.size ?? 0) : 0;
+			if (computed > 0 || (item.citationCount ?? 0) === 0) {
+				itemsById.set(id, { ...item, citationCount: computed });
+			}
+		}
+	};
+
+	const pickPreferredRepresentative = (
+		members: CollectionPaperItem[],
+	): CollectionPaperItem | null => {
+		if (members.length === 0) return null;
+		const sorted = [...members].sort((a, b) => {
+			if (a.sourceType !== b.sourceType) {
+				return a.sourceType === "venue" ? -1 : 1;
+			}
+			if (a.sourceType === "venue" && b.sourceType === "venue") {
+				return comparePreferredVenueItem(a, b);
+			}
+			return b.publishedAt.localeCompare(a.publishedAt);
+		});
+		return sorted[0] ?? null;
+	};
+
+	const computeVaultMatchesForPaper = (
+		paper: CollectionPaperItem,
+		hasVault: boolean,
+	): CollectionVaultPaperMatch[] => {
+		if (!hasVault || vaultPapers.length === 0) return [];
+		const matches: CollectionVaultPaperMatch[] = [];
+		const selfTokens = new Set(normalizeRefTokensForItem(paper));
+		const refTokens = new Set(
+			(paper.rawRefs ?? [])
+				.map(normalizeRawRefToken)
+				.filter((t): t is string => Boolean(t)),
+		);
+
+		for (const vp of vaultPapers) {
+			const vpTokens = normalizeRefTokensForItem(vp);
+			if (vpTokens.some((t) => selfTokens.has(t))) {
+				matches.push({
+					relPath: vp.relPath,
+					title: vp.title,
+					doi: vp.doi ?? null,
+					arxivId: vp.arxivId ?? null,
+					relation: "self",
+				});
+			} else if (vpTokens.some((t) => refTokens.has(t))) {
+				matches.push({
+					relPath: vp.relPath,
+					title: vp.title,
+					doi: vp.doi ?? null,
+					arxivId: vp.arxivId ?? null,
+					relation: "referenced",
+				});
+			}
+		}
+		return matches;
+	};
 
 	const getVisibleItems = (): CollectionPaperItem[] => {
 		const all = Array.from(itemsById.values());
@@ -214,6 +428,8 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 			conferenceCount,
 			journalCount,
 			categoryCounts,
+			seedCleared,
+			appliedSeedIds: [...appliedSeedIds],
 		};
 	};
 
@@ -253,10 +469,15 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 		}
 		lastRefreshedAt = next?.lastRefreshedAt ?? null;
 		latestArxiv = next?.latestArxiv ?? null;
+		seedCleared = Boolean(next?.seedCleared);
+		appliedSeedIds = next?.appliedSeedIds ? [...next.appliedSeedIds] : [];
+		vaultPapers = next?.vaultPapers ? [...next.vaultPapers] : [];
+		seedShards = next?.seedShards ? [...next.seedShards] : [];
 		itemsById = new Map();
 		for (const item of next?.items ?? []) {
 			itemsById.set(item.id, { ...item });
 		}
+		recomputeInPoolCitations();
 		recommendState = {
 			...createDefaultRecommendPoolState(),
 			...next?.recommendState,
@@ -423,6 +644,13 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 						...(dto.venueFull ? { venueFull: dto.venueFull } : {}),
 						citationCount: dto.citationCount ?? 0,
 						keywords: dto.keywords ?? [],
+						...(parseKeywordSource(dto.keywordSource)
+							? { keywordSource: parseKeywordSource(dto.keywordSource) }
+							: {}),
+						...(dto.openalexId ? { openalexId: dto.openalexId } : {}),
+						...(dto.rawRefs && dto.rawRefs.length > 0
+							? { rawRefs: [...dto.rawRefs] }
+							: {}),
 						...(dto.volume ? { volume: dto.volume } : {}),
 						...(dto.issue ? { issue: dto.issue } : {}),
 						...(dto.pages ? { pages: dto.pages } : {}),
@@ -447,6 +675,7 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					]);
 					itemsById = new Map(merged.map((p) => [p.id, p]));
 				}
+				recomputeInPoolCitations();
 
 				if (args.venueUpdate) {
 					const u = args.venueUpdate;
@@ -496,21 +725,47 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 							patch.abstract.length >= prev.abstract.length)
 							? patch.abstract
 							: prev.abstract;
+					const patchSource = parseKeywordSource(patch.keywordSource);
+					const prevRank = keywordSourceRank(prev.keywordSource);
+					const nextRank = keywordSourceRank(patchSource);
+					const shouldAcceptKeywords =
+						(prev.keywords?.length ?? 0) === 0 || nextRank >= prevRank;
+					const mergedKeywords = shouldAcceptKeywords
+						? normalizePaperKeywords([
+								...(nextRank > prevRank ? [] : (prev.keywords ?? [])),
+								...(patch.keywords ?? []),
+							])
+						: (prev.keywords ?? []);
+					const mergedKeywordSource =
+						nextRank >= prevRank && patchSource
+							? patchSource
+							: prev.keywordSource;
+					const mergedRawRefs =
+						patch.rawRefs && patch.rawRefs.length > 0
+							? Array.from(new Set([...(prev.rawRefs ?? []), ...patch.rawRefs]))
+							: prev.rawRefs;
+
 					itemsById.set(patch.id, {
 						...prev,
 						abstract: nextAbstract,
 						pdfUrl: prev.pdfUrl || patch.pdfUrl || undefined,
 						arxivId: prev.arxivId || patch.arxivId || undefined,
-						doi: prev.doi || patch.doi || undefined,
+						doi: patch.doi || prev.doi || undefined,
 						venueFull: prev.venueFull || patch.venueFull || undefined,
 						citationCount: Math.max(
 							prev.citationCount ?? 0,
 							patch.citationCount ?? 0,
 						),
-						keywords: normalizePaperKeywords([
-							...(prev.keywords ?? []),
-							...(patch.keywords ?? []),
-						]),
+						keywords: mergedKeywords,
+						...(mergedKeywordSource
+							? { keywordSource: mergedKeywordSource }
+							: {}),
+						...(patch.openalexId || prev.openalexId
+							? { openalexId: patch.openalexId || prev.openalexId || undefined }
+							: {}),
+						...(mergedRawRefs && mergedRawRefs.length > 0
+							? { rawRefs: mergedRawRefs }
+							: {}),
 						volume: prev.volume || patch.volume || undefined,
 						issue: prev.issue || patch.issue || undefined,
 						pages: prev.pages || patch.pages || undefined,
@@ -520,6 +775,7 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 							prev.recommendedAt || patch.recommendedAt || undefined,
 					});
 				}
+				recomputeInPoolCitations();
 				return { ok: true, data: buildSummary(), error: null };
 			}),
 
@@ -586,6 +842,179 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					const found = itemsById.get(id);
 					if (found) out.push(toPaperSummaryDto(found));
 				}
+				return { ok: true, data: out, error: null };
+			}),
+
+		vi
+			.spyOn(commands, "plazaCollectionPaperLineage")
+			.mockImplementation(async (args: CollectionPaperLineageArgs) => {
+				const target = itemsById.get(args.id);
+				if (!target) {
+					return {
+						ok: true,
+						data: {
+							citedByInPool: [],
+							referencesInPool: [],
+							sharedRefPeers: [],
+							vaultMatches: [],
+						} satisfies CollectionPaperLineageOut,
+						error: null,
+					};
+				}
+
+				const visible = getVisibleItems();
+				const targetTokens = new Set(normalizeRefTokensForItem(target));
+				const targetRefs = new Set(
+					(target.rawRefs ?? [])
+						.map(normalizeRawRefToken)
+						.filter((t): t is string => Boolean(t)),
+				);
+
+				// Group visible items into canonical works
+				const groups: CollectionPaperItem[][] = [];
+				for (const item of visible) {
+					if (sameCollectionPaperWork(item, target)) continue;
+					const existing = groups.find((g) =>
+						g.some((m) => sameCollectionPaperWork(m, item)),
+					);
+					if (existing) existing.push(item);
+					else groups.push([item]);
+				}
+
+				const citedByInPool: CollectionPaperItem[] = [];
+				const referencesInPool: CollectionPaperItem[] = [];
+				const sharedRefPeers: {
+					paper: CollectionPaperItem;
+					sharedCount: number;
+				}[] = [];
+
+				for (const members of groups) {
+					const rep = pickPreferredRepresentative(members);
+					if (!rep) continue;
+					const memberTokens = new Set(
+						members.flatMap((m) => normalizeRefTokensForItem(m)),
+					);
+					const memberRefs = new Set(
+						members
+							.flatMap((m) => m.rawRefs ?? [])
+							.map(normalizeRawRefToken)
+							.filter((t): t is string => Boolean(t)),
+					);
+
+					const citesTarget = Array.from(targetTokens).some((t) =>
+						memberRefs.has(t),
+					);
+					const referencedByTarget = Array.from(memberTokens).some((t) =>
+						targetRefs.has(t),
+					);
+					if (citesTarget) citedByInPool.push(rep);
+					if (referencedByTarget) referencesInPool.push(rep);
+
+					if (!citesTarget && !referencedByTarget && targetRefs.size > 0) {
+						let shared = 0;
+						for (const r of targetRefs) {
+							if (memberRefs.has(r)) shared += 1;
+						}
+						if (shared > 0) {
+							sharedRefPeers.push({ paper: rep, sharedCount: shared });
+						}
+					}
+				}
+
+				citedByInPool.sort(
+					(a, b) =>
+						(b.citationCount ?? 0) - (a.citationCount ?? 0) ||
+						b.publishedAt.localeCompare(a.publishedAt),
+				);
+				referencesInPool.sort(
+					(a, b) =>
+						(b.citationCount ?? 0) - (a.citationCount ?? 0) ||
+						b.publishedAt.localeCompare(a.publishedAt),
+				);
+				sharedRefPeers.sort(
+					(a, b) =>
+						b.sharedCount - a.sharedCount ||
+						(b.paper.citationCount ?? 0) - (a.paper.citationCount ?? 0),
+				);
+
+				const vaultMatches = computeVaultMatchesForPaper(
+					target,
+					Boolean(args.vaultPath),
+				);
+
+				const out: CollectionPaperLineageOut = {
+					citedByInPool: citedByInPool.slice(0, 20).map(toPaperSummaryDto),
+					referencesInPool: referencesInPool
+						.slice(0, 20)
+						.map(toPaperSummaryDto),
+					sharedRefPeers: sharedRefPeers.slice(0, 10).map((p) => ({
+						paper: toPaperSummaryDto(p.paper),
+						sharedCount: p.sharedCount,
+					})),
+					vaultMatches,
+				};
+				return { ok: true, data: out, error: null };
+			}),
+
+		vi
+			.spyOn(commands, "plazaCollectionSeedSync")
+			.mockImplementation(async (args: CollectionSeedSyncArgs) => {
+				if (seedCleared && !args.force) {
+					const out: CollectionSeedSyncOut = {
+						state: buildSummary(),
+						appliedShards: [],
+						importedPapers: 0,
+						skipped: true,
+					};
+					return { ok: true, data: out, error: null };
+				}
+				if (args.force) {
+					seedCleared = false;
+				}
+				if (seedShards.length === 0) {
+					const out: CollectionSeedSyncOut = {
+						state: buildSummary(),
+						appliedShards: [],
+						importedPapers: 0,
+						skipped: true,
+					};
+					return { ok: true, data: out, error: null };
+				}
+
+				const appliedSet = new Set(appliedSeedIds);
+				const newlyApplied: string[] = [];
+				let importedPapers = 0;
+
+				for (const shard of seedShards) {
+					if (!args.force && appliedSet.has(shard.id)) continue;
+					if (
+						shard.kind === "addon" &&
+						shard.category &&
+						!categories.includes(shard.category)
+					) {
+						continue;
+					}
+					if (shard.items.length > 0) {
+						const merged = mergeCollectionItems([
+							Array.from(itemsById.values()),
+							shard.items,
+						]);
+						itemsById = new Map(merged.map((p) => [p.id, p]));
+						importedPapers += shard.items.length;
+					}
+					appliedSet.add(shard.id);
+					newlyApplied.push(shard.id);
+				}
+
+				appliedSeedIds = Array.from(appliedSet);
+				recomputeInPoolCitations();
+
+				const out: CollectionSeedSyncOut = {
+					state: buildSummary(),
+					appliedShards: newlyApplied,
+					importedPapers,
+					skipped: newlyApplied.length === 0,
+				};
 				return { ok: true, data: out, error: null };
 			}),
 
@@ -771,11 +1200,16 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					.filter((g) => !g.alreadyRecommended)
 					.map((g) => {
 						const res = scorePaperAgainstKeywords(g.rep, activeTerms);
+						const citedVaultCount = computeVaultMatchesForPaper(
+							g.rep,
+							Boolean(args.vaultPath),
+						).filter((m) => m.relation === "referenced").length;
 						return {
 							paper: g.rep,
 							memberIds: g.memberIds,
-							score: res.score,
+							score: res.score + Math.min(20, citedVaultCount * 10),
 							matchedKeywords: res.matchedKeywords,
+							citedVaultCount,
 						};
 					})
 					.filter((entry) => entry.score > 0)
@@ -810,6 +1244,7 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 						paper: toPaperSummaryDto(w.paper),
 						matchedKeywords: w.matchedKeywords,
 						score: w.score,
+						citedVaultCount: w.citedVaultCount,
 					})),
 					state: {
 						keywords: recommendState.keywords.map((k) => ({ ...k })),
@@ -829,7 +1264,7 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 			.spyOn(commands, "plazaCollectionClear")
 			.mockImplementation(async (args: CollectionClearArgs) => {
 				if (args.scope === "all") {
-					seed();
+					seed({ seedCleared: true, appliedSeedIds: [] });
 				} else if (args.scope === "papers") {
 					itemsById.clear();
 					watermarks = {};
@@ -844,6 +1279,7 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 							? { ...v, lastFetchedAt: null, paperCount: 0 }
 							: v,
 					);
+					recomputeInPoolCitations();
 				} else if (args.scope === "recommended") {
 					for (const [id, item] of itemsById.entries()) {
 						if (item.recommendedAt) {
