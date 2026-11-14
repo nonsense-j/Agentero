@@ -1,3 +1,4 @@
+pub mod collection;
 pub mod describe;
 pub mod discover;
 pub mod doctor;

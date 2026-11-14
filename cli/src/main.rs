@@ -214,6 +214,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::feed::FeedCmd,
     },
+    /// Plaza Paper Collection batch ingest, seed baking, and seed import.
+    Collection {
+        #[command(subcommand)]
+        cmd: commands::collection::CollectionCmd,
+    },
     /// Export catalog data.
     Export {
         #[command(subcommand)]
@@ -407,6 +412,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Import { .. } => "cli.import",
         Commands::Discover { .. } => "cli.discover",
         Commands::Feed { .. } => "cli.feed",
+        Commands::Collection { .. } => "cli.collection",
         Commands::Export { .. } => "cli.export",
         Commands::Doctor { .. } => "cli.doctor",
         Commands::Layout { .. } => "cli.layout",
@@ -445,6 +451,7 @@ async fn run(command: Commands, globals: &GlobalOpts) -> Result<serde_json::Valu
         Commands::Import { cmd } => commands::import::run(cmd, globals).await,
         Commands::Discover { cmd } => commands::discover::run(cmd, globals).await,
         Commands::Feed { cmd } => commands::feed::run(cmd, globals).await,
+        Commands::Collection { cmd } => commands::collection::run(cmd, globals).await,
         Commands::Export { cmd } => commands::export::run(cmd, globals).await,
         Commands::Doctor { cmd } => commands::doctor::run(cmd, globals),
         Commands::Layout { cmd } => commands::layout::run(cmd, globals),
@@ -529,6 +536,17 @@ mod ops_contract {
             assert!(
                 clap_has_path(&root, &["feed", sub]),
                 "agentero feed {sub} is not registered"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_commands_are_registered() {
+        let root = Cli::command();
+        for sub in ["upsert-file", "seed-bake", "seed-import"] {
+            assert!(
+                clap_has_path(&root, &["collection", sub]),
+                "agentero collection {sub} is not registered"
             );
         }
     }
