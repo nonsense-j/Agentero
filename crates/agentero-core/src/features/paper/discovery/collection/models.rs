@@ -105,6 +105,8 @@ pub struct CollectionStateSummary {
     pub conference_count: usize,
     pub journal_count: usize,
     pub category_counts: HashMap<String, usize>,
+    pub seed_cleared: bool,
+    pub applied_seed_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, specta::Type)]
@@ -150,6 +152,7 @@ pub struct CollectionPaperSummary {
     pub venue_full: Option<String>,
     pub citation_count: u32,
     pub keywords: Vec<String>,
+    pub keyword_source: Option<String>,
     pub volume: Option<String>,
     pub issue: Option<String>,
     pub pages: Option<String>,
@@ -182,6 +185,7 @@ pub struct CollectionPaperDetail {
     pub venue_full: Option<String>,
     pub citation_count: u32,
     pub keywords: Vec<String>,
+    pub keyword_source: Option<String>,
     pub volume: Option<String>,
     pub issue: Option<String>,
     pub pages: Option<String>,
@@ -230,6 +234,12 @@ pub struct CollectionPaperUpsertInput {
     pub citation_count: Option<u32>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub keyword_source: Option<String>,
+    #[serde(default)]
+    pub openalex_id: Option<String>,
+    #[serde(default)]
+    pub raw_refs: Vec<String>,
     #[serde(default)]
     pub volume: Option<String>,
     #[serde(default)]
@@ -313,6 +323,12 @@ pub struct CollectionPaperPatch {
     pub citation_count: Option<u32>,
     #[serde(default)]
     pub keywords: Option<Vec<String>>,
+    #[serde(default)]
+    pub keyword_source: Option<String>,
+    #[serde(default)]
+    pub openalex_id: Option<String>,
+    #[serde(default)]
+    pub raw_refs: Option<Vec<String>>,
     #[serde(default)]
     pub volume: Option<String>,
     #[serde(default)]
@@ -510,6 +526,8 @@ pub struct WordCloudOut {
 pub struct RecommendNextArgs {
     #[serde(default)]
     pub max_batch_size: Option<usize>,
+    #[serde(default)]
+    pub vault_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -518,6 +536,7 @@ pub struct RecommendedPaperDto {
     pub paper: CollectionPaperSummary,
     pub matched_keywords: Vec<String>,
     pub score: f64,
+    pub cited_vault_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -527,6 +546,60 @@ pub struct RecommendNextOut {
     pub state: RecommendPoolStateDto,
     pub exhausted: bool,
     pub remaining_unrecommended: usize,
+}
+
+// ─── Lineage & Seed Sync DTOs (IPC) ───
+
+#[derive(Debug, Clone, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPaperLineageArgs {
+    pub id: String,
+    #[serde(default)]
+    pub vault_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSharedRefPeer {
+    pub paper: CollectionPaperSummary,
+    pub shared_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionVaultPaperMatch {
+    pub rel_path: String,
+    pub title: String,
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPaperLineageOut {
+    pub cited_by_in_pool: Vec<CollectionPaperSummary>,
+    pub references_in_pool: Vec<CollectionPaperSummary>,
+    pub shared_ref_peers: Vec<CollectionSharedRefPeer>,
+    pub vault_matches: Vec<CollectionVaultPaperMatch>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSeedSyncArgs {
+    #[serde(default)]
+    pub manifest_url: Option<String>,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSeedSyncOut {
+    pub state: CollectionStateSummary,
+    pub applied_shards: Vec<String>,
+    pub imported_papers: usize,
+    pub skipped: bool,
 }
 
 // ─── Overview DTOs (Shared by IPC + MCP) ───

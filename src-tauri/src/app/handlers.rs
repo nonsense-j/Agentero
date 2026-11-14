@@ -164,6 +164,8 @@ pub fn attach_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::features::paper::discovery::collection_commands::plaza_collection_word_cloud,
         crate::features::paper::discovery::collection_commands::plaza_collection_recommend_next,
         crate::features::paper::discovery::collection_commands::plaza_collection_clear,
+        crate::features::paper::discovery::collection_commands::plaza_collection_paper_lineage,
+        crate::features::paper::discovery::collection_commands::plaza_collection_seed_sync,
         crate::features::paper::discovery::feeds::commands::feeds_set_pinned,
         crate::features::paper::discovery::feeds::commands::feeds_resolve_body,
         crate::features::paper::discovery::recommend::commands::recommend_arxiv,

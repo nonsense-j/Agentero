@@ -9,7 +9,7 @@ use crate::error::AppError;
 use crate::paths;
 use crate::sqlite::{DbMsgs, MigrationStep};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub const DEFAULT_ARXIV_CATEGORIES_JSON: &str = r#"["cs.SE","cs.CR","cs.PL"]"#;
 pub const DEFAULT_WORD_CLOUD_TOP_N: usize = 50;
@@ -436,23 +436,77 @@ CREATE TRIGGER IF NOT EXISTS papers_fts_au AFTER UPDATE OF title, keywords_text,
   INSERT INTO papers_fts(rowid, title, keywords_text, abstract_text)
   VALUES (new.row_id, new.title, new.keywords_text, new.abstract_text);
 END;
-
-CREATE TABLE IF NOT EXISTS citation_edges (
-  seed_paper_id   TEXT PRIMARY KEY NOT NULL,
-  openalex_id     TEXT,
-  references_json TEXT NOT NULL DEFAULT '[]',
-  cited_by_json   TEXT NOT NULL DEFAULT '[]',
-  cocited_json    TEXT NOT NULL DEFAULT '[]',
-  fetched_at      TEXT NOT NULL
-);
 "#;
 
-const MIGRATION_STEPS: [MigrationStep; 1] = [MigrationStep::custom(1, init_v1)];
+const V2_ADD_COLUMNS: &[&str] = &[
+    "ALTER TABLE collection_config ADD COLUMN seed_cleared INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE collection_config ADD COLUMN applied_seed_ids_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE papers ADD COLUMN work_id INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE papers ADD COLUMN openalex_id TEXT",
+    "ALTER TABLE papers ADD COLUMN keyword_source TEXT NOT NULL DEFAULT ''",
+];
+
+pub const DDL_V2_TABLES: &str = r#"
+DROP TABLE IF EXISTS citation_edges;
+
+CREATE INDEX IF NOT EXISTS idx_papers_work_id     ON papers(work_id);
+CREATE INDEX IF NOT EXISTS idx_papers_openalex_id ON papers(openalex_id) WHERE openalex_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS canonical_works (
+  work_id         INTEGER PRIMARY KEY,
+  openalex_id     TEXT,
+  doi_norm        TEXT,
+  arxiv_id_norm   TEXT,
+  title_norm      TEXT,
+  author_norm     TEXT,
+  active_in_scope INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_cw_openalex ON canonical_works(openalex_id) WHERE openalex_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cw_doi      ON canonical_works(doi_norm) WHERE doi_norm IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cw_arxiv    ON canonical_works(arxiv_id_norm) WHERE arxiv_id_norm IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cw_title    ON canonical_works(title_norm) WHERE title_norm IS NOT NULL AND title_norm != '';
+
+CREATE TABLE IF NOT EXISTS paper_raw_refs (
+  src_work_id INTEGER NOT NULL,
+  ref_key     TEXT NOT NULL,
+  PRIMARY KEY (src_work_id, ref_key)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_raw_refs_key ON paper_raw_refs(ref_key);
+
+CREATE TABLE IF NOT EXISTS paper_citations (
+  citing_work_id INTEGER NOT NULL,
+  cited_work_id  INTEGER NOT NULL,
+  PRIMARY KEY (citing_work_id, cited_work_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_paper_citations_cited ON paper_citations(cited_work_id);
+"#;
+
+const MIGRATION_STEPS: [MigrationStep; 2] = [
+    MigrationStep::custom(1, init_v1),
+    MigrationStep::custom(2, migrate_v2),
+];
 
 fn init_v1(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(DDL_V1)
         .map_err(|e| AppError::message(format!("collection migrate v1 ddl: {e}")))?;
     seed_defaults(conn)?;
+    Ok(())
+}
+
+fn migrate_v2(conn: &Connection) -> Result<(), AppError> {
+    for alter_sql in V2_ADD_COLUMNS {
+        if let Err(e) = conn.execute_batch(alter_sql) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(AppError::message(format!(
+                    "collection migrate v2 alter: {e}"
+                )));
+            }
+        }
+    }
+    conn.execute_batch(DDL_V2_TABLES)
+        .map_err(|e| AppError::message(format!("collection migrate v2 ddl: {e}")))?;
+    super::store::migrate_v1_rows_to_v2(conn)?;
     Ok(())
 }
 

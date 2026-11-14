@@ -3,10 +3,11 @@
 use agentero_core::features::paper::discovery::collection::{
     self, CollectionClearArgs, CollectionConfigUpdateArgs, CollectionListPapersArgs,
     CollectionOverviewOut, CollectionPaperDetail, CollectionPaperIdArgs, CollectionPaperIdsArgs,
-    CollectionPaperSummary, CollectionPapersPage, CollectionPatchPapersArgs, CollectionSearchArgs,
-    CollectionSearchResult, CollectionStateSummary, CollectionUpsertPapersArgs,
-    CollectionWordCloudArgs, RecommendNextArgs, RecommendNextOut, RecommendPoolStateDto,
-    RecommendPoolStateInput, WordCloudOut,
+    CollectionPaperLineageArgs, CollectionPaperLineageOut, CollectionPaperSummary,
+    CollectionPapersPage, CollectionPatchPapersArgs, CollectionSearchArgs, CollectionSearchResult,
+    CollectionSeedSyncArgs, CollectionSeedSyncOut, CollectionStateSummary,
+    CollectionUpsertPapersArgs, CollectionWordCloudArgs, RecommendNextArgs, RecommendNextOut,
+    RecommendPoolStateDto, RecommendPoolStateInput, WordCloudOut,
 };
 use serde::Serialize;
 
@@ -179,4 +180,28 @@ pub async fn plaza_collection_clear(
         collection::clear_collection(&args)
     })
     .await
+}
+
+/// Resolve bidirectional in-collection citation lineage, bibliographic coupling peers, and personal Vault matches.
+#[tauri::command]
+#[specta::specta]
+pub async fn plaza_collection_paper_lineage(
+    args: CollectionPaperLineageArgs,
+) -> ApiResult<CollectionPaperLineageOut> {
+    run_collection_blocking("plaza_collection_paper_lineage", move || {
+        collection::paper_lineage(&args)
+    })
+    .await
+}
+
+/// Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path).
+#[tauri::command]
+#[specta::specta]
+pub async fn plaza_collection_seed_sync(
+    args: CollectionSeedSyncArgs,
+) -> ApiResult<CollectionSeedSyncOut> {
+    match collection::seed_sync(args).await {
+        Ok(value) => ApiResult::ok(value),
+        Err(err) => map_err(err),
+    }
 }

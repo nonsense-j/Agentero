@@ -497,6 +497,10 @@ export const commands = {
 	plazaCollectionRecommendNext: (args: RecommendNextArgs) => __TAURI_INVOKE<ApiResult<RecommendNextOut>>("plaza_collection_recommend_next", { args }),
 	/**  Reset or clear Paper Collection data (`all`, `papers`, `venue`, `recommended`, or `citations`). */
 	plazaCollectionClear: (args: CollectionClearArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_clear", { args }),
+	/**  Resolve bidirectional in-collection citation lineage, bibliographic coupling peers, and personal Vault matches. */
+	plazaCollectionPaperLineage: (args: CollectionPaperLineageArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperLineageOut>>("plaza_collection_paper_lineage", { args }),
+	/**  Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path). */
+	plazaCollectionSeedSync: (args: CollectionSeedSyncArgs) => __TAURI_INVOKE<ApiResult<CollectionSeedSyncOut>>("plaza_collection_seed_sync", { args }),
 	feedsSetPinned: (args: FeedsSetPinnedArgs) => __TAURI_INVOKE<ApiResult<FeedSub>>("feeds_set_pinned", { args }),
 	feedsResolveBody: (args: FeedsIdArgs) => __TAURI_INVOKE<ApiResult<FeedItem>>("feeds_resolve_body", { args }),
 	/**
@@ -2529,6 +2533,7 @@ export type CollectionPaperDetail = {
 	venueFull: string | null,
 	citationCount: number,
 	keywords: string[],
+	keywordSource: string | null,
 	volume: string | null,
 	issue: string | null,
 	pages: string | null,
@@ -2544,6 +2549,18 @@ export type CollectionPaperIdArgs = {
 
 export type CollectionPaperIdsArgs = {
 	ids: string[],
+};
+
+export type CollectionPaperLineageArgs = {
+	id: string,
+	vaultPath?: string | null,
+};
+
+export type CollectionPaperLineageOut = {
+	citedByInPool: CollectionPaperSummary[],
+	referencesInPool: CollectionPaperSummary[],
+	sharedRefPeers: CollectionSharedRefPeer[],
+	vaultMatches: CollectionVaultPaperMatch[],
 };
 
 export type CollectionPaperPatch = {
@@ -2565,6 +2582,9 @@ export type CollectionPaperPatch = {
 	venueFull?: string | null,
 	citationCount?: number | null,
 	keywords?: string[] | null,
+	keywordSource?: string | null,
+	openalexId?: string | null,
+	rawRefs?: string[] | null,
 	volume?: string | null,
 	issue?: string | null,
 	pages?: string | null,
@@ -2598,6 +2618,7 @@ export type CollectionPaperSummary = {
 	venueFull: string | null,
 	citationCount: number,
 	keywords: string[],
+	keywordSource: string | null,
 	volume: string | null,
 	issue: string | null,
 	pages: string | null,
@@ -2626,6 +2647,9 @@ export type CollectionPaperUpsertInput = {
 	venueFull?: string | null,
 	citationCount?: number | null,
 	keywords?: string[],
+	keywordSource?: string | null,
+	openalexId?: string | null,
+	rawRefs?: string[],
 	volume?: string | null,
 	issue?: string | null,
 	pages?: string | null,
@@ -2666,6 +2690,23 @@ export type CollectionSearchResult = {
 	totalMatched: number,
 };
 
+export type CollectionSeedSyncArgs = {
+	manifestUrl?: string | null,
+	force?: boolean | null,
+};
+
+export type CollectionSeedSyncOut = {
+	state: CollectionStateSummary,
+	appliedShards: string[],
+	importedPapers: number,
+	skipped: boolean,
+};
+
+export type CollectionSharedRefPeer = {
+	paper: CollectionPaperSummary,
+	sharedCount: number,
+};
+
 export type CollectionStateSummary = {
 	categories: string[],
 	venues: CollectionVenueRecord[],
@@ -2678,6 +2719,8 @@ export type CollectionStateSummary = {
 	conferenceCount: number,
 	journalCount: number,
 	categoryCounts: { [key in string]: number },
+	seedCleared: boolean,
+	appliedSeedIds: string[],
 };
 
 export type CollectionUpsertPapersArgs = {
@@ -2688,6 +2731,14 @@ export type CollectionUpsertPapersArgs = {
 	arxivWatermarks?: { [key in string]: CollectionArxivWatermarkInput } | null,
 	lastRefreshedAt?: string | null,
 	latestArxiv?: CollectionArxivLatest | null,
+};
+
+export type CollectionVaultPaperMatch = {
+	relPath: string,
+	title: string,
+	doi: string | null,
+	arxivId: string | null,
+	relation: string,
 };
 
 export type CollectionVenueInput = {
@@ -4859,6 +4910,7 @@ export type RecommendKeywordChipInput = {
 
 export type RecommendNextArgs = {
 	maxBatchSize?: number | null,
+	vaultPath?: string | null,
 };
 
 export type RecommendNextOut = {
@@ -4896,6 +4948,7 @@ export type RecommendedPaperDto = {
 	paper: CollectionPaperSummary,
 	matchedKeywords: string[],
 	score: number | null,
+	citedVaultCount: number,
 };
 
 export type ResearchTableBacklink = {

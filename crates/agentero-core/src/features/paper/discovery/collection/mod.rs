@@ -3,10 +3,12 @@
 
 pub mod citations;
 pub mod keywords;
+pub mod lineage;
 pub mod models;
 pub mod recommend;
 pub mod schema;
 pub mod search;
+pub mod seed;
 pub mod store;
 
 /// CLI flag used when spawning the session-scoped `agentero-collection` stdio MCP.
@@ -18,6 +20,7 @@ pub use keywords::{
     normalize_keyword_key, singularize_keyword_token, union_canonical_keywords,
     KeywordSynonymGroup, KEYWORD_SYNONYM_MAP, SYNONYM_GROUPS,
 };
+pub use lineage::{paper_lineage, paper_lineage_at};
 pub use models::*;
 pub use recommend::{
     recommend_next, recommend_next_at, recommend_state_get, recommend_state_get_at,
@@ -32,6 +35,11 @@ pub use schema::{
 pub use search::{
     curate_collection_at, overview, overview_at, search_collection_at, search_fast, search_fast_at,
 };
+pub use seed::{
+    seed_bake_at, seed_sync, seed_sync_at, SeedBakeOptions, SeedBakeReport, SeedManifest,
+    SeedPaperRecord, SeedShardEntry, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_MODEL,
+    DEFAULT_SEED_MANIFEST_URL,
+};
 pub use store::{
     clear_collection, clear_collection_at, config_update, config_update_at,
     enrich_paper_record_from_collection, enrich_paper_record_from_collection_at,
@@ -44,7 +52,6 @@ pub use store::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use citations::{save_cached_edges_conn, CachedPaperEdges, ExternalPaperStub};
 
     fn make_arxiv_input(
         id_num: usize,
@@ -164,32 +171,50 @@ mod tests {
         upsert_papers_at(
             &db,
             CollectionUpsertPapersArgs {
-                items: vec![CollectionPaperUpsertInput {
-                    id: "venue:icse-2026:doi:10.1145/1".into(),
-                    title: "TaintAgent: Hybrid Vulnerability Detection".into(),
-                    authors: vec!["Alice Guo".into()],
-                    abstract_text: rich_abs.into(),
-                    published_at: "2026-04-01T00:00:00Z".into(),
-                    year: 2026,
-                    source_type: "venue".into(),
-                    source_label: "ICSE 2026".into(),
-                    venue_id: Some("icse-2026".into()),
-                    venue_kind: Some("conference".into()),
-                    venue_domain: Some("PL/SE".into()),
-                    ccf_rank: Some("CCF-A".into()),
-                    doi: Some("10.1145/1".into()),
-                    pdf_url: Some("https://dl.acm.org/pdf/1".into()),
-                    citation_count: Some(42),
-                    keywords: vec!["LLM Agent".into()],
-                    recommended_at: Some("2026-04-02T12:00:00Z".into()),
-                    ..Default::default()
-                }],
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:doi:10.1145/1".into(),
+                        title: "TaintAgent: Hybrid Vulnerability Detection".into(),
+                        authors: vec!["Alice Guo".into()],
+                        abstract_text: rich_abs.into(),
+                        published_at: "2026-04-01T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        venue_id: Some("icse-2026".into()),
+                        venue_kind: Some("conference".into()),
+                        venue_domain: Some("PL/SE".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        doi: Some("10.1145/1".into()),
+                        pdf_url: Some("https://dl.acm.org/pdf/1".into()),
+                        citation_count: Some(42),
+                        keywords: vec!["LLM Agent".into()],
+                        recommended_at: Some("2026-04-02T12:00:00Z".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2604.09999".into(),
+                        title: "Follow-up Study Citing TaintAgent".into(),
+                        authors: vec!["Bob Li".into()],
+                        abstract_text:
+                            "We build upon TaintAgent for cross-language vulnerability repair."
+                                .into(),
+                        published_at: "2026-04-05T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2604.09999".into()),
+                        raw_refs: vec!["doi:10.1145/1".into()],
+                        ..Default::default()
+                    },
+                ],
                 ..Default::default()
             },
         )
         .unwrap();
 
-        // Re-upsert with placeholder abstract, lower citations, null recommended_at, and new keyword
+        // Re-upsert with placeholder abstract, external citation_count (ignored in V2), null recommended_at, and new keyword
         upsert_papers_at(
             &db,
             CollectionUpsertPapersArgs {
@@ -201,7 +226,7 @@ mod tests {
                     year: 2026,
                     source_type: "venue".into(),
                     source_label: "ICSE 2026".into(),
-                    citation_count: Some(3),
+                    citation_count: Some(999),
                     keywords: vec!["Vulnerability Detection".into()],
                     recommended_at: None,
                     ..Default::default()
@@ -215,7 +240,7 @@ mod tests {
             .unwrap()
             .expect("paper should exist");
         assert_eq!(detail.abstract_text, rich_abs);
-        assert_eq!(detail.citation_count, 42);
+        assert_eq!(detail.citation_count, 1);
         assert_eq!(
             detail.recommended_at.as_deref(),
             Some("2026-04-02T12:00:00Z")
@@ -637,6 +662,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(2),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -656,6 +682,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(2),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -667,6 +694,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(2),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -708,45 +736,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("collection.sqlite");
 
+        let mut p10 = make_arxiv_input(10, "cs.SE", "Seed Fuzzing Paper", vec!["Fuzzing", "Rust"]);
+        p10.raw_refs = vec!["arxiv:2603.00012".into()];
+        let mut p11 = make_arxiv_input(11, "cs.SE", "Citing Fuzzing Followup", vec!["Fuzzing"]);
+        p11.raw_refs = vec!["arxiv:2603.00010".into()];
+        let p12 = make_arxiv_input(12, "cs.SE", "Referenced Foundational Work", vec!["Rust"]);
+
         upsert_papers_at(
             &db,
             CollectionUpsertPapersArgs {
-                items: vec![
-                    make_arxiv_input(10, "cs.SE", "Seed Fuzzing Paper", vec!["Fuzzing", "Rust"]),
-                    make_arxiv_input(11, "cs.SE", "Citing Fuzzing Followup", vec!["Fuzzing"]),
-                    make_arxiv_input(12, "cs.SE", "Referenced Foundational Work", vec!["Rust"]),
-                ],
+                items: vec![p10, p11, p12],
                 ..Default::default()
             },
         )
         .unwrap();
-
-        {
-            let mut conn = ensure_collection_at(&db).unwrap();
-            save_cached_edges_conn(
-                &mut conn,
-                &[(
-                    "arxiv:2603.00010".into(),
-                    CachedPaperEdges {
-                        openalex_id: Some("W10".into()),
-                        cited_by: vec![ExternalPaperStub {
-                            arxiv_id: Some("2603.00011".into()),
-                            title: "Citing Fuzzing Followup".into(),
-                            cited_by_count: 5,
-                            ..Default::default()
-                        }],
-                        references: vec![ExternalPaperStub {
-                            arxiv_id: Some("2603.00012".into()),
-                            title: "Referenced Foundational Work".into(),
-                            cited_by_count: 20,
-                            ..Default::default()
-                        }],
-                        cocited_2026: vec![],
-                    },
-                )],
-            )
-            .unwrap();
-        }
 
         let out = snowball_citations_at(
             &db,
@@ -773,7 +776,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("collection.sqlite");
 
-        assert_eq!(SCHEMA_VERSION, 1);
+        assert_eq!(SCHEMA_VERSION, 2);
         let initial = state_get_at(&db).unwrap();
         assert_eq!(initial.venues.len(), 28);
         assert!(initial
@@ -972,6 +975,7 @@ mod tests {
                         arxiv_id: Some("2603.00101".into()),
                         keywords: vec!["Fuzzing".into(), "Smart Contracts".into()],
                         citation_count: Some(14),
+                        raw_refs: vec!["arxiv:2603.00100".into()],
                         ..Default::default()
                     },
                     CollectionPaperUpsertInput {
@@ -1036,7 +1040,9 @@ mod tests {
             .paper
             .abstract_text
             .contains("multi-agent fuzzing engine"));
-        assert_eq!(fast.items[0].paper.citation_count, 14);
+        assert_eq!(fast.items[0].paper.citation_count, 0);
+        let seed_venue = paper_get_at(&db, "venue:icse-2026:seed").unwrap().unwrap();
+        assert_eq!(seed_venue.citation_count, 1);
 
         // Explicit `source_type = "arxiv"` still surfaces arXiv entries when explicitly requested.
         let arxiv_only = search_fast_at(
@@ -1093,36 +1099,8 @@ mod tests {
             "venue:icse-2026:doi:10.1145/3650000.3650001"
         );
 
-        // 3. Citations (`snowball_citations_at`) resolves an arXiv-only stub to the Venue twin
-        //    (matched via `title + first 2 authors`) and excludes the seed's cross-portal twin.
-        {
-            let mut conn = ensure_collection_at(&db).unwrap();
-            save_cached_edges_conn(
-                &mut conn,
-                &[(
-                    "arxiv:2603.00100".into(),
-                    CachedPaperEdges {
-                        openalex_id: Some("W100".into()),
-                        cited_by: vec![
-                            ExternalPaperStub {
-                                arxiv_id: Some("2603.00101".into()),
-                                cited_by_count: 14,
-                                ..Default::default()
-                            },
-                            ExternalPaperStub {
-                                doi: Some("10.1145/3650000.3650000".into()),
-                                title: "Seed Program Repair Study.".into(),
-                                cited_by_count: 3,
-                                ..Default::default()
-                            },
-                        ],
-                        references: vec![],
-                        cocited_2026: vec![],
-                    },
-                )],
-            )
-            .unwrap();
-        }
+        // 3. Citations (`snowball_citations_at`) resolves an arXiv-only edge to the Venue twin
+        //    (matched via `title + first author`) and excludes the seed's cross-portal twin.
         let citations = snowball_citations_at(
             &db,
             &CollectionCitationsParams {
@@ -1164,6 +1142,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(5),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1186,6 +1165,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(5),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1366,6 +1346,7 @@ mod tests {
             &db,
             &RecommendNextArgs {
                 max_batch_size: Some(5),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1375,5 +1356,768 @@ mod tests {
             vec!["Vulnerability Detection", "AI Agent"]
         );
         assert!(rec_next.items[0].score >= 10.0);
+    }
+
+    #[test]
+    fn v1_to_v2_migration_drops_citation_edges_wipes_untagged_keywords_and_builds_canonical_works()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_meta (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+                CREATE TABLE collection_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    categories_json TEXT NOT NULL DEFAULT '[\"cs.SE\",\"cs.CR\",\"cs.PL\"]',
+                    last_refreshed_at TEXT,
+                    latest_arxiv_json TEXT,
+                    word_cloud_top_n INTEGER NOT NULL DEFAULT 50,
+                    selected_cloud_terms_json TEXT NOT NULL DEFAULT '[]',
+                    last_recommended_at TEXT
+                );
+                INSERT INTO collection_config (id) VALUES (1);
+                CREATE TABLE venues (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    tracks_json TEXT NOT NULL DEFAULT '[]',
+                    notes TEXT,
+                    mode TEXT NOT NULL DEFAULT 'auto',
+                    kind TEXT,
+                    domain TEXT,
+                    ccf_rank TEXT,
+                    last_fetched_at TEXT,
+                    latest_published_at TEXT,
+                    remote_total_count INTEGER
+                );
+                CREATE TABLE arxiv_watermarks (
+                    category TEXT PRIMARY KEY NOT NULL,
+                    latest_published_at TEXT NOT NULL,
+                    latest_arxiv_id TEXT NOT NULL,
+                    last_synced_at TEXT NOT NULL,
+                    oldest_synced_published_at TEXT,
+                    remote_total INTEGER,
+                    history_complete INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE recommend_keywords (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    term TEXT NOT NULL,
+                    normalized TEXT NOT NULL UNIQUE,
+                    enabled INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE papers (
+                    row_id INTEGER PRIMARY KEY,
+                    id TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    authors_json TEXT NOT NULL DEFAULT '[]',
+                    abstract_text TEXT NOT NULL DEFAULT '',
+                    published_at TEXT NOT NULL DEFAULT '',
+                    published_ymd TEXT NOT NULL DEFAULT '',
+                    year INTEGER NOT NULL DEFAULT 2026,
+                    source_type TEXT NOT NULL,
+                    source_label TEXT NOT NULL,
+                    categories_json TEXT NOT NULL DEFAULT '[]',
+                    url TEXT NOT NULL DEFAULT '',
+                    pdf_url TEXT,
+                    arxiv_id TEXT,
+                    arxiv_id_norm TEXT,
+                    doi TEXT,
+                    doi_norm TEXT,
+                    title_norm TEXT NOT NULL DEFAULT '',
+                    venue_id TEXT,
+                    venue_kind TEXT,
+                    venue_domain TEXT,
+                    ccf_rank TEXT,
+                    venue_full TEXT,
+                    citation_count INTEGER NOT NULL DEFAULT 0,
+                    keywords_json TEXT NOT NULL DEFAULT '[]',
+                    keywords_text TEXT NOT NULL DEFAULT '',
+                    volume TEXT,
+                    issue TEXT,
+                    pages TEXT,
+                    bibtex TEXT,
+                    cool_papers_id TEXT,
+                    recommended_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE paper_categories (
+                    paper_id TEXT NOT NULL,
+                    category TEXT NOT NULL COLLATE NOCASE,
+                    PRIMARY KEY (paper_id, category)
+                ) WITHOUT ROWID;
+                CREATE TABLE paper_keywords (
+                    paper_id TEXT NOT NULL,
+                    normalized TEXT NOT NULL,
+                    display TEXT NOT NULL,
+                    PRIMARY KEY (paper_id, normalized)
+                ) WITHOUT ROWID;
+                CREATE VIRTUAL TABLE papers_fts USING fts5(
+                    title, keywords_text, abstract_text,
+                    content='papers', content_rowid='row_id',
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+                CREATE TABLE citation_edges (
+                    paper_id TEXT PRIMARY KEY,
+                    openalex_id TEXT,
+                    cited_by_json TEXT NOT NULL DEFAULT '[]',
+                    references_json TEXT NOT NULL DEFAULT '[]',
+                    cocited_json TEXT NOT NULL DEFAULT '[]',
+                    fetched_at TEXT NOT NULL
+                );
+                INSERT INTO papers (
+                    row_id, id, title, title_norm, authors_json, abstract_text, published_at, published_ymd,
+                    year, source_type, source_label, categories_json, arxiv_id, arxiv_id_norm,
+                    citation_count, keywords_json, keywords_text, updated_at
+                ) VALUES (
+                    1, 'arxiv:2601.00001', 'Twin Compiler Verification', 'twin compiler verification',
+                    '[\"Ada Lovelace\"]', 'Verified compiler passes.', '2026-01-02T00:00:00Z', '2026-01-02',
+                    2026, 'arxiv', 'cs.PL', '[\"cs.PL\"]', '2601.00001', '2601.00001',
+                    88, '[\"Computer Science\",\"Artificial Intelligence\"]', 'Computer Science Artificial Intelligence cs.PL',
+                    '2026-01-02T00:00:00Z'
+                );
+                INSERT INTO paper_keywords VALUES ('arxiv:2601.00001', 'computer science', 'Computer Science');
+                INSERT INTO citation_edges VALUES ('arxiv:2601.00001', 'W1', '[]', '[]', '[]', '2026-01-02T00:00:00Z');",
+            )
+            .unwrap();
+        }
+
+        let conn = ensure_collection_at(&db).unwrap();
+        let has_legacy_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'citation_edges'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_legacy_table, 0);
+
+        let detail = paper_get_at(&db, "arxiv:2601.00001").unwrap().unwrap();
+        assert_eq!(detail.citation_count, 0);
+        assert!(detail.keywords.is_empty());
+        assert_eq!(detail.keyword_source, None);
+
+        let kw_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM paper_keywords", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kw_rows, 0);
+        let cw_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM canonical_works", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cw_rows, 1);
+    }
+
+    #[test]
+    fn in_collection_citations_merge_twin_works_and_recompute_on_category_scope_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        // Insert arxiv:A and venue:A separately at first without shared arxiv_id/doi on venue:A,
+        // then bridge them via patch/upsert and test cs.AI scope toggling on citing papers.
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2602.00001".into(),
+                        title: "Kernel Sanitizer Guided Fuzzing".into(),
+                        authors: vec!["Alice Zhang".into()],
+                        source_type: "arxiv".into(),
+                        source_label: "cs.CR".into(),
+                        categories: vec!["cs.CR".into()],
+                        arxiv_id: Some("2602.00001".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:sp-2026:doi:10.1109/sp.2026.1".into(),
+                        title: "Kernel Sanitizer Guided Fuzzing (Extended)".into(),
+                        authors: vec!["Different Lead".into()],
+                        source_type: "venue".into(),
+                        source_label: "IEEE S&P 2026".into(),
+                        venue_id: Some("sp-2026".into()),
+                        doi: Some("10.1109/sp.2026.1".into()),
+                        raw_refs: vec!["oa:W999999".into()],
+                        ..Default::default()
+                    },
+                    // Active-scope citing paper (cs.SE) citing the arXiv ID
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2602.00002".into(),
+                        title: "SE Citer".into(),
+                        authors: vec!["Bob Lee".into()],
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2602.00002".into()),
+                        raw_refs: vec!["arxiv:2602.00001".into()],
+                        ..Default::default()
+                    },
+                    // Out-of-default-scope citing paper (cs.AI) citing the publisher DOI
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2602.00003".into(),
+                        title: "AI Citer".into(),
+                        authors: vec!["Carol Wu".into()],
+                        source_type: "arxiv".into(),
+                        source_label: "cs.AI".into(),
+                        categories: vec!["cs.AI".into()],
+                        arxiv_id: Some("2602.00003".into()),
+                        raw_refs: vec!["doi:10.1109/sp.2026.1".into()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Bridge the two previously distinct work_ids by patching openalex_id + publisher DOI onto arxiv:2602.00001
+        patch_papers_at(
+            &db,
+            CollectionPatchPapersArgs {
+                patches: vec![
+                    CollectionPaperPatch {
+                        id: "arxiv:2602.00001".into(),
+                        openalex_id: Some("W123456".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperPatch {
+                        id: "venue:sp-2026:doi:10.1109/sp.2026.1".into(),
+                        openalex_id: Some("https://openalex.org/W123456".into()),
+                        ..Default::default()
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        // With default categories (cs.SE, cs.CR, cs.PL), only cs.SE citer is active -> citation_count == 1 on BOTH twins!
+        let v_before = paper_get_at(&db, "venue:sp-2026:doi:10.1109/sp.2026.1")
+            .unwrap()
+            .unwrap();
+        let a_before = paper_get_at(&db, "arxiv:2602.00001").unwrap().unwrap();
+        assert_eq!(v_before.citation_count, 1);
+        assert_eq!(a_before.citation_count, 1);
+
+        // Enable cs.AI -> AI citer becomes active_in_scope -> citation_count immediately becomes 2!
+        config_update_at(
+            &db,
+            CollectionConfigUpdateArgs {
+                categories: Some(vec![
+                    "cs.SE".into(),
+                    "cs.CR".into(),
+                    "cs.PL".into(),
+                    "cs.AI".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v_ai_on = paper_get_at(&db, "venue:sp-2026:doi:10.1109/sp.2026.1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(v_ai_on.citation_count, 2);
+
+        // Turn cs.AI back off -> citation_count drops back to 1!
+        config_update_at(
+            &db,
+            CollectionConfigUpdateArgs {
+                categories: Some(vec!["cs.SE".into(), "cs.CR".into(), "cs.PL".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v_ai_off = paper_get_at(&db, "venue:sp-2026:doi:10.1109/sp.2026.1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(v_ai_off.citation_count, 1);
+    }
+
+    #[test]
+    fn keyword_priority_overwrite_and_diff_replace_venue_id_preserve_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "venue:pldi-2026:p1".into(),
+                        title: "Equality Saturation for Tensor Compilers".into(),
+                        authors: vec!["Max Willsey".into()],
+                        source_type: "venue".into(),
+                        source_label: "PLDI 2026".into(),
+                        venue_id: Some("pldi-2026".into()),
+                        openalex_id: Some("W7777".into()),
+                        keywords: vec!["Client Guess".into()],
+                        keyword_source: Some("client_llm".into()),
+                        recommended_at: Some("2026-06-01T00:00:00Z".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:pldi-2026:stale".into(),
+                        title: "Withdrawn Paper".into(),
+                        source_type: "venue".into(),
+                        source_label: "PLDI 2026".into(),
+                        venue_id: Some("pldi-2026".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let conn = ensure_collection_at(&db).unwrap();
+        let orig_rowid: i64 = conn
+            .query_row(
+                "SELECT row_id FROM papers WHERE id = 'venue:pldi-2026:p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Maintainer LLM (priority 2) overwrites client_llm (priority 1) completely
+        patch_papers_at(
+            &db,
+            CollectionPatchPapersArgs {
+                patches: vec![CollectionPaperPatch {
+                    id: "venue:pldi-2026:p1".into(),
+                    keywords: Some(vec!["Equality Saturation".into()]),
+                    keyword_source: Some("maintainer_llm".into()),
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let d_maint = paper_get_at(&db, "venue:pldi-2026:p1").unwrap().unwrap();
+        assert_eq!(d_maint.keywords, vec!["Equality Saturation"]);
+        assert_eq!(d_maint.keyword_source.as_deref(), Some("maintainer_llm"));
+
+        // Author keywords (priority 3) overwrite maintainer_llm; subsequent client_llm is ignored!
+        // Also run `replace_venue_id = "pldi-2026"` with only `p1`, verifying row_id & openalex_id & recommended_at survive!
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                replace_venue_id: Some("pldi-2026".into()),
+                items: vec![CollectionPaperUpsertInput {
+                    id: "venue:pldi-2026:p1".into(),
+                    title: "Equality Saturation for Tensor Compilers".into(),
+                    authors: vec!["Max Willsey".into()],
+                    source_type: "venue".into(),
+                    source_label: "PLDI 2026".into(),
+                    venue_id: Some("pldi-2026".into()),
+                    keywords: vec!["E-Graphs".into(), "Compiler Optimization".into()],
+                    keyword_source: Some("author".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        patch_papers_at(
+            &db,
+            CollectionPatchPapersArgs {
+                patches: vec![CollectionPaperPatch {
+                    id: "venue:pldi-2026:p1".into(),
+                    keywords: Some(vec!["Noisy Lower Priority".into()]),
+                    keyword_source: Some("client_llm".into()),
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+
+        assert!(paper_get_at(&db, "venue:pldi-2026:stale")
+            .unwrap()
+            .is_none());
+        let d_final = paper_get_at(&db, "venue:pldi-2026:p1").unwrap().unwrap();
+        assert_eq!(d_final.keywords, vec!["E-Graph", "Compiler Optimization"]);
+        assert_eq!(d_final.keyword_source.as_deref(), Some("author"));
+        assert_eq!(
+            d_final.recommended_at.as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
+
+        let after_rowid: i64 = conn
+            .query_row(
+                "SELECT row_id FROM papers WHERE id = 'venue:pldi-2026:p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after_rowid, orig_rowid);
+    }
+
+    #[test]
+    fn paper_lineage_and_recommend_vault_catalog_linkage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+        let vault_dir = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_dir.join(".agentero")).unwrap();
+        {
+            let vconn =
+                rusqlite::Connection::open(vault_dir.join(".agentero").join("catalog.sqlite"))
+                    .unwrap();
+            vconn
+                .execute_batch(
+                    "CREATE TABLE papers (
+                        path TEXT PRIMARY KEY NOT NULL,
+                        title TEXT NOT NULL,
+                        authors_json TEXT NOT NULL DEFAULT '[]',
+                        doi TEXT,
+                        arxiv_id TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO papers VALUES ('papers/base_fuzz.md', 'Foundational Greybox Fuzzing', '[\"Marcel Bohme\"]', '10.1145/base-fuzz', '2501.00001', '2026-01-01T00:00:00.000Z');
+                    INSERT INTO papers VALUES ('papers/self_seed.md', 'Target Lineage Paper', '[\"Alice Security\"]', '10.1145/target-1', NULL, '2026-01-02T00:00:00.000Z');",
+                )
+                .unwrap();
+        }
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "venue:ccs-2026:target".into(),
+                        title: "Target Lineage Paper".into(),
+                        authors: vec!["Alice Security".into()],
+                        source_type: "venue".into(),
+                        source_label: "CCS 2026".into(),
+                        venue_id: Some("ccs-2026".into()),
+                        ccf_rank: Some("CCF-A".into()),
+                        doi: Some("10.1145/target-1".into()),
+                        keywords: vec!["Fuzzing".into()],
+                        keyword_source: Some("author".into()),
+                        raw_refs: vec![
+                            "arxiv:2601.00050".into(),
+                            "doi:10.1145/base-fuzz".into(),
+                            "oa:W9001".into(),
+                            "oa:W9002".into(),
+                        ],
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2601.00050".into(),
+                        title: "In-Pool Referenced Sanitizer".into(),
+                        authors: vec!["Bob Sanitizer".into()],
+                        source_type: "arxiv".into(),
+                        source_label: "cs.CR".into(),
+                        categories: vec!["cs.CR".into()],
+                        arxiv_id: Some("2601.00050".into()),
+                        keywords: vec!["Fuzzing".into()],
+                        keyword_source: Some("maintainer_llm".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2606.00060".into(),
+                        title: "In-Pool Citing Followup".into(),
+                        authors: vec!["Carol Followup".into()],
+                        source_type: "arxiv".into(),
+                        source_label: "cs.CR".into(),
+                        categories: vec!["cs.CR".into()],
+                        arxiv_id: Some("2606.00060".into()),
+                        keywords: vec!["Fuzzing".into()],
+                        keyword_source: Some("maintainer_llm".into()),
+                        raw_refs: vec![
+                            "doi:10.1145/target-1".into(),
+                            "doi:10.1145/base-fuzz".into(),
+                            "oa:W9001".into(),
+                            "oa:W9002".into(),
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let lineage = paper_lineage_at(
+            &db,
+            &CollectionPaperLineageArgs {
+                id: "venue:ccs-2026:target".into(),
+                vault_path: Some(vault_dir.to_string_lossy().to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(lineage.cited_by_in_pool.len(), 1);
+        assert_eq!(lineage.cited_by_in_pool[0].id, "arxiv:2606.00060");
+        assert_eq!(lineage.references_in_pool.len(), 1);
+        assert_eq!(lineage.references_in_pool[0].id, "arxiv:2601.00050");
+        assert_eq!(lineage.shared_ref_peers.len(), 1);
+        assert_eq!(lineage.shared_ref_peers[0].paper.id, "arxiv:2606.00060");
+        assert_eq!(lineage.shared_ref_peers[0].shared_count, 3);
+        assert_eq!(lineage.vault_matches.len(), 2);
+        assert!(lineage
+            .vault_matches
+            .iter()
+            .any(|m| m.rel_path == "papers/self_seed.md" && m.relation == "self"));
+        assert!(lineage
+            .vault_matches
+            .iter()
+            .any(|m| m.rel_path == "papers/base_fuzz.md" && m.relation == "referenced"));
+
+        recommend_state_set_at(
+            &db,
+            RecommendPoolStateInput {
+                keywords: Some(vec![RecommendKeywordChipInput {
+                    id: Some("kw-fuzz".into()),
+                    term: "Fuzzing".into(),
+                    enabled: true,
+                }]),
+                selected_cloud_terms: Some(vec![]),
+                word_cloud_top_n: Some(20),
+                last_recommended_at: None,
+            },
+        )
+        .unwrap();
+
+        let rec = recommend_next_at(
+            &db,
+            &RecommendNextArgs {
+                max_batch_size: Some(5),
+                vault_path: Some(vault_dir.to_string_lossy().to_string()),
+            },
+        )
+        .unwrap();
+        let followup_rec = rec
+            .items
+            .iter()
+            .find(|r| r.paper.id == "arxiv:2606.00060")
+            .unwrap();
+        assert_eq!(followup_rec.cited_vault_count, 2);
+        let non_vault_rec = rec
+            .items
+            .iter()
+            .find(|r| r.paper.id == "arxiv:2601.00050")
+            .unwrap();
+        assert_eq!(non_vault_rec.cited_vault_count, 0);
+        assert!(followup_rec.score > non_vault_rec.score);
+    }
+
+    #[tokio::test]
+    async fn seed_bake_and_seed_sync_roundtrip_with_429_retry_and_404_skip() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src_db = tmp.path().join("src_collection.sqlite");
+        let seed_dir = tmp.path().join("seed_out");
+        let dst_db = tmp.path().join("dst_collection.sqlite");
+
+        upsert_papers_at(
+            &src_db,
+            CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00501".into(),
+                        title: "Symbolic Execution for WebAssembly Smart Contracts".into(),
+                        authors: vec!["Alice Wasm".into()],
+                        abstract_text: "We design a concolic symbolic execution engine to uncover reentrancy bugs in WebAssembly smart contracts.".into(),
+                        published_at: "2026-03-10T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2603.00501".into()),
+                        openalex_id: Some("W501".into()),
+                        raw_refs: vec!["oa:W502".into()],
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00502".into(),
+                        title: "Foundational Wasm Semantics".into(),
+                        authors: vec!["Bob Wasm".into()],
+                        abstract_text: "Mechanized operational semantics for WebAssembly.".into(),
+                        published_at: "2026-03-01T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.PL".into(),
+                        categories: vec!["cs.PL".into()],
+                        arxiv_id: Some("2603.00502".into()),
+                        openalex_id: Some("W502".into()),
+                        keywords: vec!["Formal Verification".into()],
+                        keyword_source: Some("author".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2603.00503".into(),
+                        title: "Diffusion Transformer Scaling Laws".into(),
+                        authors: vec!["Carol Vision".into()],
+                        abstract_text: "Scaling laws for multimodal diffusion transformers.".into(),
+                        published_at: "2026-03-12T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.AI".into(),
+                        categories: vec!["cs.AI".into()],
+                        arxiv_id: Some("2603.00503".into()),
+                        keywords: vec!["Diffusion Models".into()],
+                        keyword_source: Some("author".into()),
+                        ..Default::default()
+                    },
+                ],
+                arxiv_watermarks: Some(std::collections::HashMap::from([(
+                    "cs.SE".to_string(),
+                    CollectionArxivWatermarkInput {
+                        latest_published_at: "2026-03-10T00:00:00Z".into(),
+                        latest_arxiv_id: "2603.00501".into(),
+                        last_synced_at: "2026-03-15T00:00:00Z".into(),
+                        oldest_synced_published_at: None,
+                        remote_total: None,
+                        history_complete: Some(true),
+                    },
+                )])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Spawn a tiny local HTTP server testing 429 + Retry-After: 1 on 1st call, 200 OK on 2nd call, and 404 on /missing.json
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let llm_hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = llm_hits.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let hits = hits_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    if req_str.starts_with("GET /missing.json") {
+                        let resp =
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                    let attempt = hits.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        let resp = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 9\r\nConnection: close\r\n\r\nrate limit";
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    } else {
+                        let body = serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "content": "{\"items\":[{\"idx\":0,\"keywords\":[\"Symbolic Execution\",\"Smart Contracts\",\"WebAssembly\"]}]}"
+                                }
+                            }]
+                        })
+                        .to_string();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let bake_report = seed_bake_at(
+            &src_db,
+            SeedBakeOptions {
+                out_dir: seed_dir.clone(),
+                llm_base_url: format!("http://{addr}/v1"),
+                llm_model: "mercury-3-instant".into(),
+                llm_api_key: None,
+                llm_concurrency: 1,
+                skip_refs: true,
+                skip_llm: false,
+                delta_since: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(llm_hits.load(Ordering::SeqCst) >= 2);
+        assert_eq!(bake_report.llm_enriched_papers, 1);
+        assert_eq!(bake_report.shards.len(), 2); // core + addon-cs-ai
+
+        // 404 remote manifest when `force != Some(true)` returns `skipped: true` cleanly
+        let skipped_404 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(format!("http://{addr}/missing.json")),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(skipped_404.skipped);
+        assert_eq!(skipped_404.imported_papers, 0);
+
+        // Import from baked manifest with default categories (core only, 2 papers; cs.AI addon skipped)
+        let manifest_path = seed_dir.join("manifest.json").to_string_lossy().to_string();
+        let sync1 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path.clone()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sync1.skipped);
+        assert_eq!(sync1.imported_papers, 2);
+        assert_eq!(sync1.applied_shards.len(), 1);
+
+        let baked_p1 = paper_get_at(&dst_db, "arxiv:2603.00501").unwrap().unwrap();
+        assert_eq!(baked_p1.keyword_source.as_deref(), Some("maintainer_llm"));
+        assert!(baked_p1
+            .keywords
+            .contains(&"Symbolic Execution".to_string()));
+        let baked_p2 = paper_get_at(&dst_db, "arxiv:2603.00502").unwrap().unwrap();
+        assert_eq!(baked_p2.citation_count, 1); // Cited by 2603.00501 via `oa:W502`!
+
+        // Clear `papers` sets `seed_cleared = true`; auto sync skips until `force = true`
+        let cleared_state = clear_collection_at(
+            &dst_db,
+            &CollectionClearArgs {
+                scope: "papers".into(),
+                venue_id: None,
+            },
+        )
+        .unwrap();
+        assert!(cleared_state.seed_cleared);
+
+        let sync_after_clear = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path.clone()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(sync_after_clear.skipped);
+
+        let sync_forced = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path),
+                force: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sync_forced.skipped);
+        assert!(!sync_forced.state.seed_cleared);
+        assert_eq!(sync_forced.imported_papers, 2);
+
+        server.abort();
     }
 }

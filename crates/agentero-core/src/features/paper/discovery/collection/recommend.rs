@@ -8,9 +8,8 @@ use rusqlite::{params, params_from_iter, Connection, TransactionBehavior};
 
 use crate::error::AppError;
 
-use super::keywords::{
-    canonicalize_keyword, canonicalize_query_term, normalize_keyword_key, union_canonical_keywords,
-};
+use super::keywords::{canonicalize_keyword, canonicalize_query_term, normalize_keyword_key};
+use super::lineage::compute_cited_vault_counts;
 use super::models::{
     CollectionWordCloudArgs, RecommendKeywordChipDto, RecommendKeywordChipInput, RecommendNextArgs,
     RecommendNextOut, RecommendPoolStateDto, RecommendPoolStateInput, RecommendedPaperDto,
@@ -23,8 +22,8 @@ use super::schema::{
 use super::search::enrich_venue_summaries_from_arxiv_conn;
 use super::store::{
     append_enabled_scope_clause, choose_better_abstract, clean_opt_str, is_publisher_doi,
-    load_enabled_categories, load_summaries_by_row_ids, now_rfc3339, same_collection_work,
-    union_strings_case_insensitive,
+    load_enabled_categories, load_summaries_by_row_ids, merge_keywords_by_priority, now_rfc3339,
+    same_collection_work, union_strings_case_insensitive,
 };
 
 pub const DEFAULT_RECOMMEND_BATCH_SIZE: usize = 15;
@@ -746,7 +745,8 @@ pub(crate) fn recommend_next_conn(
     let mut sql = String::from(
         "SELECT p.row_id, p.id, p.source_type, p.ccf_rank, p.published_at, p.title, \
                 p.authors_json, p.title_norm, p.arxiv_id_norm, p.doi_norm, p.abstract_text, \
-                p.source_label, p.categories_json, p.keywords_json, p.recommended_at \
+                p.source_label, p.categories_json, p.keywords_json, p.recommended_at, \
+                p.work_id, p.keyword_source \
          FROM papers p WHERE 1=1",
     );
     let mut binds: Vec<rusqlite::types::Value> = Vec::new();
@@ -754,6 +754,7 @@ pub(crate) fn recommend_next_conn(
 
     struct RawRecRow {
         row_id: i64,
+        work_id: i64,
         id: String,
         source_type: String,
         ccf_rank: Option<String>,
@@ -767,6 +768,7 @@ pub(crate) fn recommend_next_conn(
         source_label: String,
         categories: Vec<String>,
         keywords: Vec<String>,
+        keyword_source: String,
         recommended: bool,
         sibling_row_ids: Vec<i64>,
     }
@@ -791,6 +793,7 @@ pub(crate) fn recommend_next_conn(
             let rec_at: Option<String> = r.get(14)?;
             Ok(RawRecRow {
                 row_id: r.get(0)?,
+                work_id: r.get(15)?,
                 id: r.get(1)?,
                 source_type: r.get(2)?,
                 ccf_rank: r.get(3)?,
@@ -804,6 +807,7 @@ pub(crate) fn recommend_next_conn(
                 source_label: r.get(11)?,
                 categories: serde_json::from_str(&cats_json).unwrap_or_default(),
                 keywords: serde_json::from_str(&kws_json).unwrap_or_default(),
+                keyword_source: r.get(16)?,
                 recommended: rec_at.is_some_and(|s| !s.trim().is_empty()),
                 sibling_row_ids: Vec::new(),
             })
@@ -867,16 +871,17 @@ pub(crate) fn recommend_next_conn(
 
         if let Some(v_idx) = cand_v.into_iter().find(|&vi| {
             let v = &venue_rows[vi];
-            same_collection_work(
-                &a.title,
-                &a.authors,
-                a.arxiv_id_norm.as_deref(),
-                a.doi_norm.as_deref(),
-                &v.title,
-                &v.authors,
-                v.arxiv_id_norm.as_deref(),
-                v.doi_norm.as_deref(),
-            )
+            (a.work_id > 0 && a.work_id == v.work_id)
+                || same_collection_work(
+                    &a.title,
+                    &a.authors,
+                    a.arxiv_id_norm.as_deref(),
+                    a.doi_norm.as_deref(),
+                    &v.title,
+                    &v.authors,
+                    v.arxiv_id_norm.as_deref(),
+                    v.doi_norm.as_deref(),
+                )
         }) {
             let v = &mut venue_rows[v_idx];
             if a.recommended {
@@ -885,7 +890,14 @@ pub(crate) fn recommend_next_conn(
             v.sibling_row_ids.push(a.row_id);
             v.abstract_text =
                 choose_better_abstract(&v.abstract_text, &a.abstract_text, &v.source_label);
-            v.keywords = union_canonical_keywords(&v.keywords, &a.keywords);
+            let (merged_kws, merged_src) = merge_keywords_by_priority(
+                &v.keywords,
+                &v.keyword_source,
+                &a.keywords,
+                Some(a.keyword_source.as_str()),
+            );
+            v.keywords = merged_kws;
+            v.keyword_source = merged_src;
             v.categories = union_strings_case_insensitive(&v.categories, &a.categories);
         } else {
             standalone_arxiv.push(a);
@@ -894,11 +906,13 @@ pub(crate) fn recommend_next_conn(
 
     struct ScoredRecCandidate {
         row_id: i64,
+        work_id: i64,
         sibling_row_ids: Vec<i64>,
         id: String,
         published_at: String,
         score: f64,
         matched_keywords: Vec<String>,
+        cited_vault_count: u32,
     }
 
     let mut candidates: Vec<ScoredRecCandidate> = Vec::new();
@@ -938,12 +952,28 @@ pub(crate) fn recommend_next_conn(
         if let Some((score, matched_keywords)) = score_paper_against_prepared(&doc, &prepared) {
             candidates.push(ScoredRecCandidate {
                 row_id: doc.row_id,
+                work_id: row.work_id,
                 sibling_row_ids: row.sibling_row_ids,
                 id: doc.id,
                 published_at: doc.published_at,
                 score,
                 matched_keywords,
+                cited_vault_count: 0,
             });
+        }
+    }
+
+    if !candidates.is_empty() && args.vault_path.is_some() {
+        let cand_wids: Vec<i64> = candidates.iter().map(|c| c.work_id).collect();
+        let vault_counts = compute_cited_vault_counts(&tx, &cand_wids, args.vault_path.as_deref())?;
+        if !vault_counts.is_empty() {
+            for cand in &mut candidates {
+                if let Some(&cnt) = vault_counts.get(&cand.work_id) {
+                    cand.cited_vault_count = cnt;
+                    let boost = 0.15 * f64::from(cnt.min(3));
+                    cand.score = ((cand.score + boost) * 100.0).round() / 100.0;
+                }
+            }
         }
     }
 
@@ -999,6 +1029,7 @@ pub(crate) fn recommend_next_conn(
                 paper,
                 matched_keywords: cand.matched_keywords,
                 score: cand.score,
+                cited_vault_count: cand.cited_vault_count,
             });
         }
     }

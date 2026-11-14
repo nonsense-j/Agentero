@@ -69,6 +69,123 @@ pub(crate) fn is_publisher_doi(doi_norm: &str) -> bool {
     !doi_norm.is_empty() && !doi_norm.starts_with("10.48550/arxiv.")
 }
 
+pub(crate) fn clean_publisher_doi(raw: &str) -> Option<String> {
+    clean_doi_key(raw).filter(|d| is_publisher_doi(d))
+}
+
+pub(crate) fn clean_openalex_id(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("https://openalex.org/")
+        .trim_start_matches("http://openalex.org/")
+        .trim_start_matches("oa:")
+        .trim_start_matches("OA:")
+        .trim();
+    let rest = trimmed
+        .strip_prefix('W')
+        .or_else(|| trimmed.strip_prefix('w'))?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("W{rest}"))
+}
+
+pub(crate) fn extract_arxiv_norm(arxiv_id: Option<&str>, doi: Option<&str>) -> Option<String> {
+    arxiv_id.and_then(clean_arxiv_key).or_else(|| {
+        doi.and_then(clean_doi_key)
+            .and_then(|d| d.strip_prefix("10.48550/arxiv.").and_then(clean_arxiv_key))
+    })
+}
+
+pub(crate) fn normalize_ref_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower_head: String = trimmed
+        .chars()
+        .take(24)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if lower_head.starts_with("oa:")
+        || lower_head.starts_with("https://openalex.org/")
+        || lower_head.starts_with("http://openalex.org/")
+        || (trimmed.starts_with(['W', 'w'])
+            && trimmed.len() >= 4
+            && trimmed[1..].bytes().all(|b| b.is_ascii_digit()))
+    {
+        return clean_openalex_id(trimmed).map(|id| format!("oa:{id}"));
+    }
+    if lower_head.starts_with("arxiv:")
+        || lower_head.starts_with("https://arxiv.org/")
+        || lower_head.starts_with("http://arxiv.org/")
+        || lower_head.starts_with("10.48550/arxiv.")
+    {
+        return clean_arxiv_key(trimmed).map(|id| format!("arxiv:{id}"));
+    }
+    if let Some(doi) = clean_doi_key(trimmed) {
+        if doi.starts_with("10.48550/arxiv.") {
+            return clean_arxiv_key(&doi).map(|id| format!("arxiv:{id}"));
+        }
+        if doi.starts_with("10.") {
+            return Some(format!("doi:{doi}"));
+        }
+    }
+    None
+}
+
+pub(crate) fn clean_ref_keys(raw_refs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in raw_refs {
+        if let Some(key) = normalize_ref_key(raw) {
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn keyword_source_priority(src: &str, has_keywords: bool) -> (u8, &'static str) {
+    if !has_keywords {
+        return (0, "");
+    }
+    match src.trim().to_ascii_lowercase().as_str() {
+        "author" => (3, "author"),
+        "maintainer_llm" => (2, "maintainer_llm"),
+        _ => (1, "client_llm"),
+    }
+}
+
+/// Priority-aware keyword merge:
+/// `author(3) > maintainer_llm(2) > client_llm(1) > empty(0)`.
+/// Higher priority overwrites lower priority; equal priority unions; lower priority is ignored.
+pub(crate) fn merge_keywords_by_priority(
+    ex_kws_raw: &[String],
+    ex_src: &str,
+    in_kws_raw: &[String],
+    in_src: Option<&str>,
+) -> (Vec<String>, String) {
+    let ex_kws = canonicalize_keywords(ex_kws_raw);
+    let in_kws = canonicalize_keywords(in_kws_raw);
+    let (ex_prio, ex_norm_src) = keyword_source_priority(ex_src, !ex_kws.is_empty());
+    if in_kws.is_empty() {
+        return (ex_kws, ex_norm_src.to_string());
+    }
+    let (in_prio, in_norm_src) = keyword_source_priority(in_src.unwrap_or(""), true);
+    if in_prio > ex_prio {
+        (in_kws, in_norm_src.to_string())
+    } else if in_prio == ex_prio {
+        (
+            union_canonical_keywords(&ex_kws, &in_kws),
+            in_norm_src.to_string(),
+        )
+    } else {
+        (ex_kws, ex_norm_src.to_string())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn same_collection_work(
     a_title: &str,
@@ -170,7 +287,14 @@ pub(crate) fn merge_arxiv_into_venue_summary(
         &arxiv.abstract_text,
         &venue.source_label,
     );
-    venue.keywords = union_canonical_keywords(&venue.keywords, &arxiv.keywords);
+    let (merged_kws, merged_src) = merge_keywords_by_priority(
+        &venue.keywords,
+        venue.keyword_source.as_deref().unwrap_or(""),
+        &arxiv.keywords,
+        arxiv.keyword_source.as_deref(),
+    );
+    venue.keywords = merged_kws;
+    venue.keyword_source = (!merged_src.is_empty()).then_some(merged_src);
     venue.citation_count = venue.citation_count.max(arxiv.citation_count);
 }
 
@@ -552,7 +676,9 @@ pub(crate) fn resolve_single_date_bound(
 pub(crate) const PAPER_SUMMARY_SELECT_COLS: &str = "p.id, p.title, p.authors_json, p.abstract_text, \
     p.published_at, p.year, p.source_type, p.source_label, p.categories_json, p.url, p.pdf_url, \
     p.arxiv_id, p.doi, p.venue_id, p.venue_kind, p.venue_domain, p.ccf_rank, p.venue_full, \
-    p.citation_count, p.keywords_json, p.volume, p.issue, p.pages, p.cool_papers_id, p.recommended_at";
+    p.citation_count, p.keywords_json, p.volume, p.issue, p.pages, p.cool_papers_id, p.recommended_at, \
+    p.keyword_source";
+pub(crate) const PAPER_SUMMARY_COL_COUNT: usize = 26;
 
 pub(crate) fn map_paper_summary_row(
     row: &rusqlite::Row<'_>,
@@ -561,6 +687,11 @@ pub(crate) fn map_paper_summary_row(
     let categories_json: String = row.get(8)?;
     let citation_count_raw: i64 = row.get(18)?;
     let keywords_json: String = row.get(19)?;
+    let keyword_source_raw: String = row.get(25)?;
+    let keyword_source = {
+        let trimmed = keyword_source_raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
     Ok(CollectionPaperSummary {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -582,6 +713,7 @@ pub(crate) fn map_paper_summary_row(
         venue_full: row.get(17)?,
         citation_count: citation_count_raw.max(0) as u32,
         keywords: serde_json::from_str(&keywords_json).unwrap_or_default(),
+        keyword_source,
         volume: row.get(20)?,
         issue: row.get(21)?,
         pages: row.get(22)?,
@@ -607,7 +739,7 @@ pub(crate) fn load_summaries_by_row_ids(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(binds), |row| {
         let summary = map_paper_summary_row(row)?;
-        let rid: i64 = row.get(25)?;
+        let rid: i64 = row.get(PAPER_SUMMARY_COL_COUNT)?;
         Ok((rid, summary))
     })?;
     let mut map = HashMap::with_capacity(row_ids.len());
@@ -633,18 +765,24 @@ pub fn state_get_at(db_path: &Path) -> Result<CollectionStateSummary, AppError> 
 pub(crate) fn read_state_summary_conn(
     conn: &Connection,
 ) -> Result<CollectionStateSummary, AppError> {
-    let (categories_json, last_refreshed_at, latest_arxiv_json): (
-        String,
-        Option<String>,
-        Option<String>,
-    ) = conn.query_row(
-        "SELECT categories_json, last_refreshed_at, latest_arxiv_json FROM collection_config WHERE id = 1",
+    let (
+        categories_json,
+        last_refreshed_at,
+        latest_arxiv_json,
+        seed_cleared_raw,
+        applied_seed_ids_json,
+    ): (String, Option<String>, Option<String>, i64, String) = conn.query_row(
+        "SELECT categories_json, last_refreshed_at, latest_arxiv_json, seed_cleared, applied_seed_ids_json \
+         FROM collection_config WHERE id = 1",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
 
     let categories = clean_string_vec(
         &serde_json::from_str::<Vec<String>>(&categories_json).unwrap_or_default(),
+    );
+    let applied_seed_ids = clean_string_vec(
+        &serde_json::from_str::<Vec<String>>(&applied_seed_ids_json).unwrap_or_default(),
     );
     let latest_arxiv: Option<CollectionArxivLatest> = latest_arxiv_json
         .as_deref()
@@ -797,10 +935,12 @@ pub(crate) fn read_state_summary_conn(
         conference_count,
         journal_count,
         category_counts,
+        seed_cleared: seed_cleared_raw != 0,
+        applied_seed_ids,
     })
 }
 
-fn upsert_arxiv_watermarks_tx(
+pub(crate) fn upsert_arxiv_watermarks_tx(
     conn: &Connection,
     watermarks: &HashMap<String, CollectionArxivWatermarkInput>,
 ) -> Result<(), AppError> {
@@ -836,7 +976,7 @@ fn upsert_arxiv_watermarks_tx(
     Ok(())
 }
 
-fn apply_venue_watermark_update_tx(
+pub(crate) fn apply_venue_watermark_update_tx(
     conn: &Connection,
     upd: &CollectionVenueWatermarkUpdate,
 ) -> Result<(), AppError> {
@@ -961,6 +1101,8 @@ pub(crate) fn config_update_conn(
     args: CollectionConfigUpdateArgs,
 ) -> Result<CollectionStateSummary, AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut scope_changed = false;
+    let mut venues_changed = false;
     if let Some(cats) = args.categories {
         let cleaned = clean_string_vec(&cats);
         let serialized = serde_json::to_string(&cleaned)?;
@@ -968,22 +1110,36 @@ pub(crate) fn config_update_conn(
             "UPDATE collection_config SET categories_json = ?1 WHERE id = 1",
             [serialized],
         )?;
+        scope_changed = true;
     }
     if let Some(ref venues) = args.venues {
         sync_venues_list_tx(&tx, venues)?;
+        venues_changed = true;
     }
     if let Some(ref wms) = args.arxiv_watermarks {
         upsert_arxiv_watermarks_tx(&tx, wms)?;
     }
     if let Some(ts) = args.last_refreshed_at {
         let val = clean_opt_str(Some(ts));
-        tx.execute(
-            "UPDATE collection_config SET last_refreshed_at = ?1 WHERE id = 1",
-            [val],
-        )?;
+        if val.is_some() {
+            tx.execute(
+                "UPDATE collection_config SET last_refreshed_at = ?1, seed_cleared = 0 WHERE id = 1",
+                [val],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE collection_config SET last_refreshed_at = NULL WHERE id = 1",
+                [],
+            )?;
+        }
     }
     if let Some(ref latest) = args.latest_arxiv {
         apply_latest_arxiv_tx(&tx, latest)?;
+    }
+    if venues_changed {
+        recompute_graph_and_citations_tx(&tx)?;
+    } else if scope_changed {
+        recompute_scope_and_citation_counts_tx(&tx)?;
     }
     tx.commit()?;
     read_state_summary_conn(conn)
@@ -1036,8 +1192,441 @@ fn sync_paper_relations(
     Ok(())
 }
 
+// ─── Canonical Work Graph & In-Collection Citations ───
+
+struct CanonicalWorkRow {
+    openalex_id: Option<String>,
+    doi_norm: Option<String>,
+    arxiv_id_norm: Option<String>,
+    title_norm: String,
+    author_norm: String,
+}
+
+fn load_canonical_work_row(
+    conn: &Connection,
+    work_id: i64,
+) -> Result<Option<CanonicalWorkRow>, AppError> {
+    if work_id <= 0 {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT openalex_id, doi_norm, arxiv_id_norm, COALESCE(title_norm, ''), COALESCE(author_norm, '') \
+         FROM canonical_works WHERE work_id = ?1",
+    )?;
+    stmt.query_row([work_id], |r| {
+        Ok(CanonicalWorkRow {
+            openalex_id: r.get(0)?,
+            doi_norm: r.get(1)?,
+            arxiv_id_norm: r.get(2)?,
+            title_norm: r.get(3)?,
+            author_norm: r.get(4)?,
+        })
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
+fn work_matches_title_and_authors(
+    conn: &Connection,
+    work_id: i64,
+    title: &str,
+    authors: &[String],
+) -> Result<bool, AppError> {
+    if authors.is_empty() {
+        return Ok(false);
+    }
+    let mut stmt =
+        conn.prepare_cached("SELECT title, authors_json FROM papers WHERE work_id = ?1 LIMIT 4")?;
+    let rows = stmt.query_map([work_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for entry in rows {
+        let (p_title, p_authors_json) = entry?;
+        let p_authors: Vec<String> = serde_json::from_str(&p_authors_json).unwrap_or_default();
+        if same_work_by_title_and_authors(title, authors, &p_title, &p_authors) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_or_merge_work_id_tx(
+    conn: &Connection,
+    hint_work_id: i64,
+    openalex_id: Option<&str>,
+    pub_doi_norm: Option<&str>,
+    arxiv_id_norm: Option<&str>,
+    title: &str,
+    title_norm: &str,
+    authors: &[String],
+) -> Result<i64, AppError> {
+    let first_author_norm = authors
+        .first()
+        .map(|a| norm_author_key(a))
+        .unwrap_or_default();
+
+    fn push_unique_wid(list: &mut Vec<i64>, wid: i64) {
+        if wid > 0 && !list.contains(&wid) {
+            list.push(wid);
+        }
+    }
+
+    let mut matched_ids: Vec<i64> = Vec::new();
+
+    if hint_work_id > 0 && load_canonical_work_row(conn, hint_work_id)?.is_some() {
+        push_unique_wid(&mut matched_ids, hint_work_id);
+    }
+
+    if let Some(oa) = openalex_id.filter(|s| !s.is_empty()) {
+        let mut stmt =
+            conn.prepare_cached("SELECT work_id FROM canonical_works WHERE openalex_id = ?1")?;
+        for wid in stmt.query_map([oa], |r| r.get::<_, i64>(0))? {
+            push_unique_wid(&mut matched_ids, wid?);
+        }
+    }
+
+    if let Some(doi) = pub_doi_norm.filter(|s| is_publisher_doi(s)) {
+        let mut stmt =
+            conn.prepare_cached("SELECT work_id FROM canonical_works WHERE doi_norm = ?1")?;
+        for wid in stmt.query_map([doi], |r| r.get::<_, i64>(0))? {
+            push_unique_wid(&mut matched_ids, wid?);
+        }
+    }
+
+    if let Some(aid) = arxiv_id_norm.filter(|s| !s.is_empty()) {
+        let mut stmt =
+            conn.prepare_cached("SELECT work_id FROM canonical_works WHERE arxiv_id_norm = ?1")?;
+        for wid in stmt.query_map([aid], |r| r.get::<_, i64>(0))? {
+            push_unique_wid(&mut matched_ids, wid?);
+        }
+    }
+
+    if title_norm.len() >= 4 && !first_author_norm.is_empty() {
+        let mut stmt = conn.prepare_cached(
+            "SELECT work_id, COALESCE(author_norm, '') FROM canonical_works WHERE title_norm = ?1",
+        )?;
+        let candidates: Vec<(i64, String)> = stmt
+            .query_map([title_norm], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (wid, cw_author_norm) in candidates {
+            if matched_ids.contains(&wid) {
+                continue;
+            }
+            if (!cw_author_norm.is_empty() && cw_author_norm == first_author_norm)
+                || work_matches_title_and_authors(conn, wid, title, authors)?
+            {
+                push_unique_wid(&mut matched_ids, wid);
+            }
+        }
+    }
+
+    if matched_ids.is_empty() {
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO canonical_works (openalex_id, doi_norm, arxiv_id_norm, title_norm, author_norm, active_in_scope) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        )?;
+        stmt.execute(params![
+            openalex_id.filter(|s| !s.is_empty()),
+            pub_doi_norm.filter(|s| is_publisher_doi(s)),
+            arxiv_id_norm.filter(|s| !s.is_empty()),
+            (!title_norm.is_empty()).then_some(title_norm),
+            (!first_author_norm.is_empty()).then_some(first_author_norm.as_str()),
+        ])?;
+        return Ok(conn.last_insert_rowid());
+    }
+
+    matched_ids.sort_unstable();
+    let primary_id = matched_ids[0];
+    let mut merged = load_canonical_work_row(conn, primary_id)?.unwrap_or(CanonicalWorkRow {
+        openalex_id: None,
+        doi_norm: None,
+        arxiv_id_norm: None,
+        title_norm: String::new(),
+        author_norm: String::new(),
+    });
+
+    for &sec_id in &matched_ids[1..] {
+        if let Some(sec) = load_canonical_work_row(conn, sec_id)? {
+            if merged.openalex_id.is_none() {
+                merged.openalex_id = sec.openalex_id;
+            }
+            if merged.doi_norm.is_none() {
+                merged.doi_norm = sec.doi_norm;
+            }
+            if merged.arxiv_id_norm.is_none() {
+                merged.arxiv_id_norm = sec.arxiv_id_norm;
+            }
+            if merged.title_norm.is_empty() {
+                merged.title_norm = sec.title_norm;
+            }
+            if merged.author_norm.is_empty() {
+                merged.author_norm = sec.author_norm;
+            }
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key) \
+             SELECT ?1, ref_key FROM paper_raw_refs WHERE src_work_id = ?2",
+            params![primary_id, sec_id],
+        )?;
+        conn.execute(
+            "DELETE FROM paper_raw_refs WHERE src_work_id = ?1",
+            [sec_id],
+        )?;
+        conn.execute(
+            "DELETE FROM paper_citations WHERE citing_work_id = ?1 OR cited_work_id = ?1",
+            [sec_id],
+        )?;
+        conn.execute(
+            "UPDATE papers SET work_id = ?1 WHERE work_id = ?2",
+            params![primary_id, sec_id],
+        )?;
+        conn.execute("DELETE FROM canonical_works WHERE work_id = ?1", [sec_id])?;
+    }
+
+    if let Some(oa) = openalex_id.filter(|s| !s.is_empty()) {
+        merged.openalex_id = Some(oa.to_string());
+    }
+    if let Some(doi) = pub_doi_norm.filter(|s| is_publisher_doi(s)) {
+        merged.doi_norm = Some(doi.to_string());
+    }
+    if let Some(aid) = arxiv_id_norm.filter(|s| !s.is_empty()) {
+        merged.arxiv_id_norm = Some(aid.to_string());
+    }
+    if merged.title_norm.is_empty() && !title_norm.is_empty() {
+        merged.title_norm = title_norm.to_string();
+    }
+    if merged.author_norm.is_empty() && !first_author_norm.is_empty() {
+        merged.author_norm = first_author_norm;
+    }
+
+    let mut upd = conn.prepare_cached(
+        "UPDATE canonical_works SET \
+            openalex_id = ?1, doi_norm = ?2, arxiv_id_norm = ?3, title_norm = ?4, author_norm = ?5 \
+         WHERE work_id = ?6",
+    )?;
+    upd.execute(params![
+        merged.openalex_id,
+        merged.doi_norm,
+        merged.arxiv_id_norm,
+        (!merged.title_norm.is_empty()).then_some(merged.title_norm),
+        (!merged.author_norm.is_empty()).then_some(merged.author_norm),
+        primary_id,
+    ])?;
+
+    Ok(primary_id)
+}
+
+pub(crate) fn insert_work_raw_refs_tx(
+    conn: &Connection,
+    work_id: i64,
+    raw_refs: &[String],
+) -> Result<usize, AppError> {
+    if work_id <= 0 || raw_refs.is_empty() {
+        return Ok(0);
+    }
+    let cleaned = clean_ref_keys(raw_refs);
+    if cleaned.is_empty() {
+        return Ok(0);
+    }
+    let mut inserted = 0usize;
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key) VALUES (?1, ?2)",
+    )?;
+    for key in cleaned {
+        inserted += stmt.execute(params![work_id, key])?;
+    }
+    Ok(inserted)
+}
+
+pub(crate) fn prune_orphan_works_tx(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "DELETE FROM paper_raw_refs WHERE src_work_id IN (
+            SELECT cw.work_id FROM canonical_works cw
+            WHERE NOT EXISTS (SELECT 1 FROM papers p WHERE p.work_id = cw.work_id)
+         );
+         DELETE FROM paper_citations WHERE citing_work_id IN (
+            SELECT cw.work_id FROM canonical_works cw
+            WHERE NOT EXISTS (SELECT 1 FROM papers p WHERE p.work_id = cw.work_id)
+         ) OR cited_work_id IN (
+            SELECT cw.work_id FROM canonical_works cw
+            WHERE NOT EXISTS (SELECT 1 FROM papers p WHERE p.work_id = cw.work_id)
+         );
+         DELETE FROM canonical_works WHERE NOT EXISTS (
+            SELECT 1 FROM papers p WHERE p.work_id = canonical_works.work_id
+         );",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn rebuild_paper_citations_tx(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "DELETE FROM paper_citations;
+         INSERT OR IGNORE INTO paper_citations (citing_work_id, cited_work_id)
+         SELECT r.src_work_id, cw.work_id
+         FROM canonical_works cw
+         JOIN paper_raw_refs r ON r.ref_key = 'oa:' || cw.openalex_id
+         WHERE cw.openalex_id IS NOT NULL AND r.src_work_id != cw.work_id
+         UNION
+         SELECT r.src_work_id, cw.work_id
+         FROM canonical_works cw
+         JOIN paper_raw_refs r ON r.ref_key = 'doi:' || cw.doi_norm
+         WHERE cw.doi_norm IS NOT NULL AND r.src_work_id != cw.work_id
+         UNION
+         SELECT r.src_work_id, cw.work_id
+         FROM canonical_works cw
+         JOIN paper_raw_refs r ON r.ref_key = 'arxiv:' || cw.arxiv_id_norm
+         WHERE cw.arxiv_id_norm IS NOT NULL AND r.src_work_id != cw.work_id;",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn recompute_scope_and_citation_counts_tx(conn: &Connection) -> Result<(), AppError> {
+    let enabled_cats = load_enabled_categories(conn)?;
+    let mut scope_sql = String::from(
+        "UPDATE canonical_works SET active_in_scope = CASE WHEN EXISTS (\
+           SELECT 1 FROM papers p WHERE p.work_id = canonical_works.work_id",
+    );
+    let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+    append_enabled_scope_clause(&mut scope_sql, &mut binds, "p", &enabled_cats);
+    scope_sql.push_str(") THEN 1 ELSE 0 END");
+    conn.execute(&scope_sql, params_from_iter(binds))?;
+
+    conn.execute_batch(
+        "UPDATE papers
+         SET citation_count = (
+           SELECT COUNT(*)
+           FROM paper_citations pc
+           JOIN canonical_works citing ON citing.work_id = pc.citing_work_id
+           WHERE pc.cited_work_id = papers.work_id
+             AND citing.active_in_scope = 1
+         )
+         WHERE citation_count != (
+           SELECT COUNT(*)
+           FROM paper_citations pc
+           JOIN canonical_works citing ON citing.work_id = pc.citing_work_id
+           WHERE pc.cited_work_id = papers.work_id
+             AND citing.active_in_scope = 1
+         );",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn recompute_graph_and_citations_tx(conn: &Connection) -> Result<(), AppError> {
+    prune_orphan_works_tx(conn)?;
+    rebuild_paper_citations_tx(conn)?;
+    recompute_scope_and_citation_counts_tx(conn)?;
+    Ok(())
+}
+
+/// Upgrade V1 rows to V2: drop untagged OpenAlex concept keywords, reset external
+/// citation counts to 0, populate `canonical_works` + `papers.work_id`, and rebuild FTS.
+pub(crate) fn migrate_v1_rows_to_v2(conn: &Connection) -> Result<(), AppError> {
+    let paper_count: i64 = conn.query_row("SELECT COUNT(*) FROM papers", [], |r| r.get(0))?;
+    if paper_count == 0 {
+        return Ok(());
+    }
+
+    conn.execute_batch("SAVEPOINT migrate_v2_data;")?;
+    let res: Result<(), AppError> = (|| {
+        conn.execute(
+            "DELETE FROM paper_keywords WHERE paper_id IN (SELECT id FROM papers WHERE keyword_source = '')",
+            [],
+        )?;
+
+        struct LegacyRow {
+            row_id: i64,
+            work_id: i64,
+            title: String,
+            authors: Vec<String>,
+            categories: Vec<String>,
+            source_label: String,
+            arxiv_id: Option<String>,
+            doi: Option<String>,
+            openalex_id: Option<String>,
+            keyword_source: String,
+        }
+
+        let legacy_rows: Vec<LegacyRow> = {
+            let mut stmt = conn.prepare(
+                "SELECT row_id, work_id, title, authors_json, categories_json, source_label, \
+                        arxiv_id, doi, openalex_id, keyword_source \
+                 FROM papers ORDER BY CASE WHEN source_type = 'venue' THEN 0 ELSE 1 END, row_id ASC",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                let authors_json: String = r.get(3)?;
+                let cats_json: String = r.get(4)?;
+                Ok(LegacyRow {
+                    row_id: r.get(0)?,
+                    work_id: r.get(1)?,
+                    title: r.get(2)?,
+                    authors: serde_json::from_str(&authors_json).unwrap_or_default(),
+                    categories: serde_json::from_str(&cats_json).unwrap_or_default(),
+                    source_label: r.get(5)?,
+                    arxiv_id: r.get(6)?,
+                    doi: r.get(7)?,
+                    openalex_id: r.get(8)?,
+                    keyword_source: r.get(9)?,
+                })
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for row in legacy_rows {
+            let title_norm = norm_title_key(&row.title);
+            let arxiv_norm = extract_arxiv_norm(row.arxiv_id.as_deref(), row.doi.as_deref());
+            let pub_doi_norm = row.doi.as_deref().and_then(clean_publisher_doi);
+            let oa_id = row.openalex_id.as_deref().and_then(clean_openalex_id);
+            let wid = resolve_or_merge_work_id_tx(
+                conn,
+                row.work_id,
+                oa_id.as_deref(),
+                pub_doi_norm.as_deref(),
+                arxiv_norm.as_deref(),
+                &row.title,
+                &title_norm,
+                &row.authors,
+            )?;
+
+            if row.keyword_source.trim().is_empty() {
+                let kw_text = build_keywords_text(&[], &row.categories, &row.source_label);
+                conn.execute(
+                    "UPDATE papers SET work_id = ?1, openalex_id = ?2, arxiv_id_norm = ?3, \
+                                       citation_count = 0, keywords_json = '[]', keyword_source = '', \
+                                       keywords_text = ?4 \
+                     WHERE row_id = ?5",
+                    params![wid, oa_id, arxiv_norm, kw_text, row.row_id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE papers SET work_id = ?1, openalex_id = ?2, arxiv_id_norm = ?3, \
+                                       citation_count = 0 \
+                     WHERE row_id = ?4",
+                    params![wid, oa_id, arxiv_norm, row.row_id],
+                )?;
+            }
+        }
+
+        conn.execute_batch("INSERT INTO papers_fts(papers_fts) VALUES('rebuild');")?;
+        recompute_graph_and_citations_tx(conn)?;
+        Ok(())
+    })();
+
+    match res {
+        Ok(()) => {
+            conn.execute_batch("RELEASE migrate_v2_data;")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO migrate_v2_data; RELEASE migrate_v2_data;");
+            Err(e)
+        }
+    }
+}
+
 struct ExistingPaperRow {
     row_id: i64,
+    work_id: i64,
     title: String,
     authors_json: String,
     abstract_text: String,
@@ -1050,6 +1639,7 @@ struct ExistingPaperRow {
     pdf_url: Option<String>,
     arxiv_id: Option<String>,
     doi: Option<String>,
+    openalex_id: Option<String>,
     venue_id: Option<String>,
     venue_kind: Option<String>,
     venue_domain: Option<String>,
@@ -1057,6 +1647,7 @@ struct ExistingPaperRow {
     venue_full: Option<String>,
     citation_count: u32,
     keywords_json: String,
+    keyword_source: String,
     volume: Option<String>,
     issue: Option<String>,
     pages: Option<String>,
@@ -1070,49 +1661,52 @@ fn load_existing_paper_by_id(
     id: &str,
 ) -> Result<Option<ExistingPaperRow>, AppError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT row_id, title, authors_json, abstract_text, published_at, year, source_type, \
-                source_label, categories_json, url, pdf_url, arxiv_id, doi, venue_id, venue_kind, \
-                venue_domain, ccf_rank, venue_full, citation_count, keywords_json, volume, issue, \
-                pages, bibtex, cool_papers_id, recommended_at \
+        "SELECT row_id, work_id, title, authors_json, abstract_text, published_at, year, source_type, \
+                source_label, categories_json, url, pdf_url, arxiv_id, doi, openalex_id, venue_id, \
+                venue_kind, venue_domain, ccf_rank, venue_full, citation_count, keywords_json, \
+                keyword_source, volume, issue, pages, bibtex, cool_papers_id, recommended_at \
          FROM papers WHERE id = ?1",
     )?;
     let row = stmt
         .query_row([id], |r| {
-            let cites: i64 = r.get(18)?;
+            let cites: i64 = r.get(20)?;
             Ok(ExistingPaperRow {
                 row_id: r.get(0)?,
-                title: r.get(1)?,
-                authors_json: r.get(2)?,
-                abstract_text: r.get(3)?,
-                published_at: r.get(4)?,
-                year: r.get(5)?,
-                source_type: r.get(6)?,
-                source_label: r.get(7)?,
-                categories_json: r.get(8)?,
-                url: r.get(9)?,
-                pdf_url: r.get(10)?,
-                arxiv_id: r.get(11)?,
-                doi: r.get(12)?,
-                venue_id: r.get(13)?,
-                venue_kind: r.get(14)?,
-                venue_domain: r.get(15)?,
-                ccf_rank: r.get(16)?,
-                venue_full: r.get(17)?,
+                work_id: r.get(1)?,
+                title: r.get(2)?,
+                authors_json: r.get(3)?,
+                abstract_text: r.get(4)?,
+                published_at: r.get(5)?,
+                year: r.get(6)?,
+                source_type: r.get(7)?,
+                source_label: r.get(8)?,
+                categories_json: r.get(9)?,
+                url: r.get(10)?,
+                pdf_url: r.get(11)?,
+                arxiv_id: r.get(12)?,
+                doi: r.get(13)?,
+                openalex_id: r.get(14)?,
+                venue_id: r.get(15)?,
+                venue_kind: r.get(16)?,
+                venue_domain: r.get(17)?,
+                ccf_rank: r.get(18)?,
+                venue_full: r.get(19)?,
                 citation_count: cites.max(0) as u32,
-                keywords_json: r.get(19)?,
-                volume: r.get(20)?,
-                issue: r.get(21)?,
-                pages: r.get(22)?,
-                bibtex: r.get(23)?,
-                cool_papers_id: r.get(24)?,
-                recommended_at: r.get(25)?,
+                keywords_json: r.get(21)?,
+                keyword_source: r.get(22)?,
+                volume: r.get(23)?,
+                issue: r.get(24)?,
+                pages: r.get(25)?,
+                bibtex: r.get(26)?,
+                cool_papers_id: r.get(27)?,
+                recommended_at: r.get(28)?,
             })
         })
         .optional()?;
     Ok(row)
 }
 
-fn upsert_single_paper_tx(
+pub(crate) fn upsert_single_paper_tx(
     conn: &Connection,
     input: &CollectionPaperUpsertInput,
     now: &str,
@@ -1125,13 +1719,12 @@ fn upsert_single_paper_tx(
     let in_title = input.title.trim();
     let in_authors = clean_string_vec(&input.authors);
     let in_cats = clean_string_vec(&input.categories);
-    let in_kws = canonicalize_keywords(&input.keywords);
     let in_pub = input.published_at.trim();
     let in_year = if input.year > 0 { input.year } else { 2026 };
     let in_source_type = input.source_type.trim();
     let in_source_label = input.source_label.trim();
     let in_url = input.url.trim();
-    let in_cites = input.citation_count.unwrap_or(0);
+    let in_oa_id = input.openalex_id.as_deref().and_then(clean_openalex_id);
 
     if let Some(ex) = load_existing_paper_by_id(conn, id)? {
         let ex_authors: Vec<String> = serde_json::from_str(&ex.authors_json).unwrap_or_default();
@@ -1168,7 +1761,12 @@ fn upsert_single_paper_tx(
         let published_ymd: String = published_at.chars().take(10).collect();
         let year = if input.year > 0 { input.year } else { ex.year };
         let categories = union_strings_case_insensitive(&ex_cats, &in_cats);
-        let keywords = union_canonical_keywords(&ex_kws, &in_kws);
+        let (keywords, keyword_source) = merge_keywords_by_priority(
+            &ex_kws,
+            &ex.keyword_source,
+            &input.keywords,
+            input.keyword_source.as_deref(),
+        );
         let url = if !in_url.is_empty() {
             in_url.to_string()
         } else {
@@ -1177,16 +1775,17 @@ fn upsert_single_paper_tx(
 
         let pdf_url = clean_opt_str(input.pdf_url.clone()).or(ex.pdf_url);
         let arxiv_id = clean_opt_str(input.arxiv_id.clone()).or(ex.arxiv_id);
-        let arxiv_id_norm = arxiv_id.as_deref().and_then(clean_arxiv_key);
         let doi = clean_opt_str(input.doi.clone()).or(ex.doi);
+        let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
+        let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
+        let openalex_id = in_oa_id.or(ex.openalex_id);
         let title_norm = norm_title_key(&title);
         let venue_id = clean_opt_str(input.venue_id.clone()).or(ex.venue_id);
         let venue_kind = clean_opt_str(input.venue_kind.clone()).or(ex.venue_kind);
         let venue_domain = clean_opt_str(input.venue_domain.clone()).or(ex.venue_domain);
         let ccf_rank = clean_opt_str(input.ccf_rank.clone()).or(ex.ccf_rank);
         let venue_full = clean_opt_str(input.venue_full.clone()).or(ex.venue_full);
-        let citation_count = ex.citation_count.max(in_cites);
         let volume = clean_opt_str(input.volume.clone()).or(ex.volume);
         let issue = clean_opt_str(input.issue.clone()).or(ex.issue);
         let pages = clean_opt_str(input.pages.clone()).or(ex.pages);
@@ -1195,6 +1794,18 @@ fn upsert_single_paper_tx(
         // Never overwrite non-null recommended_at with null.
         let recommended_at = clean_opt_str(input.recommended_at.clone()).or(ex.recommended_at);
 
+        let work_id = resolve_or_merge_work_id_tx(
+            conn,
+            ex.work_id,
+            openalex_id.as_deref(),
+            pub_doi_norm.as_deref(),
+            arxiv_id_norm.as_deref(),
+            &title,
+            &title_norm,
+            &authors,
+        )?;
+        insert_work_raw_refs_tx(conn, work_id, &input.raw_refs)?;
+
         let authors_json = serde_json::to_string(&authors)?;
         let categories_json = serde_json::to_string(&categories)?;
         let keywords_json = serde_json::to_string(&keywords)?;
@@ -1202,17 +1813,18 @@ fn upsert_single_paper_tx(
 
         let mut stmt = conn.prepare_cached(
             "UPDATE papers SET
-                title = ?1, authors_json = ?2, abstract_text = ?3, published_at = ?4,
-                published_ymd = ?5, year = ?6, source_type = ?7, source_label = ?8,
-                categories_json = ?9, url = ?10, pdf_url = ?11, arxiv_id = ?12,
-                arxiv_id_norm = ?13, doi = ?14, doi_norm = ?15, title_norm = ?16,
-                venue_id = ?17, venue_kind = ?18, venue_domain = ?19, ccf_rank = ?20,
-                venue_full = ?21, citation_count = ?22, keywords_json = ?23, keywords_text = ?24,
-                volume = ?25, issue = ?26, pages = ?27, bibtex = ?28, cool_papers_id = ?29,
-                recommended_at = ?30, updated_at = ?31
-             WHERE row_id = ?32",
+                work_id = ?1, title = ?2, authors_json = ?3, abstract_text = ?4, published_at = ?5,
+                published_ymd = ?6, year = ?7, source_type = ?8, source_label = ?9,
+                categories_json = ?10, url = ?11, pdf_url = ?12, arxiv_id = ?13,
+                arxiv_id_norm = ?14, doi = ?15, doi_norm = ?16, openalex_id = ?17, title_norm = ?18,
+                venue_id = ?19, venue_kind = ?20, venue_domain = ?21, ccf_rank = ?22,
+                venue_full = ?23, citation_count = ?24, keywords_json = ?25, keyword_source = ?26,
+                keywords_text = ?27, volume = ?28, issue = ?29, pages = ?30, bibtex = ?31,
+                cool_papers_id = ?32, recommended_at = ?33, updated_at = ?34
+             WHERE row_id = ?35",
         )?;
         stmt.execute(params![
+            work_id,
             title,
             authors_json,
             abstract_text,
@@ -1228,14 +1840,16 @@ fn upsert_single_paper_tx(
             arxiv_id_norm,
             doi,
             doi_norm,
+            openalex_id,
             title_norm,
             venue_id,
             venue_kind,
             venue_domain,
             ccf_rank,
             venue_full,
-            citation_count as i64,
+            ex.citation_count as i64,
             keywords_json,
+            keyword_source,
             keywords_text,
             volume,
             issue,
@@ -1258,10 +1872,26 @@ fn upsert_single_paper_tx(
     } else {
         let published_ymd: String = in_pub.chars().take(10).collect();
         let arxiv_id = clean_opt_str(input.arxiv_id.clone());
-        let arxiv_id_norm = arxiv_id.as_deref().and_then(clean_arxiv_key);
         let doi = clean_opt_str(input.doi.clone());
+        let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
+        let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
         let title_norm = norm_title_key(in_title);
+        let (in_kws, keyword_source) =
+            merge_keywords_by_priority(&[], "", &input.keywords, input.keyword_source.as_deref());
+
+        let work_id = resolve_or_merge_work_id_tx(
+            conn,
+            0,
+            in_oa_id.as_deref(),
+            pub_doi_norm.as_deref(),
+            arxiv_id_norm.as_deref(),
+            in_title,
+            &title_norm,
+            &in_authors,
+        )?;
+        insert_work_raw_refs_tx(conn, work_id, &input.raw_refs)?;
+
         let authors_json = serde_json::to_string(&in_authors)?;
         let categories_json = serde_json::to_string(&in_cats)?;
         let keywords_json = serde_json::to_string(&in_kws)?;
@@ -1269,20 +1899,21 @@ fn upsert_single_paper_tx(
 
         let mut stmt = conn.prepare_cached(
             "INSERT INTO papers (
-                id, title, authors_json, abstract_text, published_at, published_ymd, year,
+                work_id, id, title, authors_json, abstract_text, published_at, published_ymd, year,
                 source_type, source_label, categories_json, url, pdf_url, arxiv_id, arxiv_id_norm,
-                doi, doi_norm, title_norm, venue_id, venue_kind, venue_domain, ccf_rank,
-                venue_full, citation_count, keywords_json, keywords_text, volume, issue, pages,
-                bibtex, cool_papers_id, recommended_at, updated_at
+                doi, doi_norm, openalex_id, title_norm, venue_id, venue_kind, venue_domain, ccf_rank,
+                venue_full, citation_count, keywords_json, keyword_source, keywords_text, volume,
+                issue, pages, bibtex, cool_papers_id, recommended_at, updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23, ?24, ?25, ?26, ?27, ?28,
-                ?29, ?30, ?31, ?32
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                ?24, 0, ?25, ?26, ?27, ?28,
+                ?29, ?30, ?31, ?32, ?33, ?34
              )",
         )?;
         stmt.execute(params![
+            work_id,
             id,
             in_title,
             authors_json,
@@ -1299,14 +1930,15 @@ fn upsert_single_paper_tx(
             arxiv_id_norm,
             doi,
             doi_norm,
+            in_oa_id,
             title_norm,
             clean_opt_str(input.venue_id.clone()),
             clean_opt_str(input.venue_kind.clone()),
             clean_opt_str(input.venue_domain.clone()),
             clean_opt_str(input.ccf_rank.clone()),
             clean_opt_str(input.venue_full.clone()),
-            in_cites as i64,
             keywords_json,
+            keyword_source,
             keywords_text,
             clean_opt_str(input.volume.clone()),
             clean_opt_str(input.issue.clone()),
@@ -1346,7 +1978,9 @@ pub(crate) fn upsert_papers_conn(
     let replace_vid = clean_opt_str(args.replace_venue_id.take());
     let replace_slabel = clean_opt_str(args.replace_source_label.take());
 
-    // Atomic Venue Replacement: preserve recommended_at across fresh venue sync
+    // Diff-based Venue Replacement: preserve row_id, work_id, openalex_id,
+    // higher-priority keywords, and recommended_at; delete only stale venue IDs.
+    let mut existing_venue_ids: Vec<String> = Vec::new();
     if replace_vid.is_some() || replace_slabel.is_some() {
         let mut rec_by_id: HashMap<String, String> = HashMap::new();
         let mut rec_by_doi: HashMap<String, String> = HashMap::new();
@@ -1358,36 +1992,30 @@ pub(crate) fn upsert_papers_conn(
                  FROM papers
                  WHERE source_type = 'venue'
                    AND ((?1 IS NOT NULL AND venue_id = ?1)
-                        OR (?2 IS NOT NULL AND venue_id IS NULL AND source_label = ?2))
-                   AND recommended_at IS NOT NULL",
+                        OR (?2 IS NOT NULL AND venue_id IS NULL AND source_label = ?2))",
             )?;
             let rows = stmt.query_map(params![replace_vid, replace_slabel], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?,
-                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             })?;
             for entry in rows {
-                let (pid, dnorm, anorm, rec_at) = entry?;
-                rec_by_id.insert(pid, rec_at.clone());
-                if let Some(d) = dnorm {
-                    rec_by_doi.insert(d, rec_at.clone());
+                let (pid, dnorm, anorm, rec_opt) = entry?;
+                if let Some(rec_at) = rec_opt.filter(|s| !s.trim().is_empty()) {
+                    rec_by_id.insert(pid.clone(), rec_at.clone());
+                    if let Some(d) = dnorm {
+                        rec_by_doi.insert(d, rec_at.clone());
+                    }
+                    if let Some(a) = anorm {
+                        rec_by_arxiv.insert(a, rec_at);
+                    }
                 }
-                if let Some(a) = anorm {
-                    rec_by_arxiv.insert(a, rec_at);
-                }
+                existing_venue_ids.push(pid);
             }
         }
-
-        tx.execute(
-            "DELETE FROM papers
-             WHERE source_type = 'venue'
-               AND ((?1 IS NOT NULL AND venue_id = ?1)
-                    OR (?2 IS NOT NULL AND venue_id IS NULL AND source_label = ?2))",
-            params![replace_vid, replace_slabel],
-        )?;
 
         if !rec_by_id.is_empty() || !rec_by_doi.is_empty() || !rec_by_arxiv.is_empty() {
             for item in &mut args.items {
@@ -1420,6 +2048,28 @@ pub(crate) fn upsert_papers_conn(
         upsert_single_paper_tx(&tx, item, &now)?;
     }
 
+    if !existing_venue_ids.is_empty() {
+        let kept_ids: HashSet<&str> = args
+            .items
+            .iter()
+            .map(|item| item.id.trim())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let stale_ids: Vec<String> = existing_venue_ids
+            .into_iter()
+            .filter(|eid| !kept_ids.contains(eid.as_str()))
+            .collect();
+        for chunk in stale_ids.chunks(400) {
+            let ph = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("DELETE FROM papers WHERE id IN ({ph})");
+            let binds: Vec<rusqlite::types::Value> =
+                chunk.iter().cloned().map(Into::into).collect();
+            tx.execute(&sql, params_from_iter(binds))?;
+        }
+    }
+
     if let Some(ref vupd) = args.venue_update {
         apply_venue_watermark_update_tx(&tx, vupd)?;
     }
@@ -1429,7 +2079,7 @@ pub(crate) fn upsert_papers_conn(
     if let Some(ts) = args.last_refreshed_at {
         if let Some(clean_ts) = clean_opt_str(Some(ts)) {
             tx.execute(
-                "UPDATE collection_config SET last_refreshed_at = ?1 WHERE id = 1",
+                "UPDATE collection_config SET last_refreshed_at = ?1, seed_cleared = 0 WHERE id = 1",
                 [clean_ts],
             )?;
         }
@@ -1437,6 +2087,8 @@ pub(crate) fn upsert_papers_conn(
     if let Some(ref latest) = args.latest_arxiv {
         apply_latest_arxiv_tx(&tx, latest)?;
     }
+
+    recompute_graph_and_citations_tx(&tx)?;
 
     tx.commit()?;
     read_state_summary_conn(conn)
@@ -1461,6 +2113,7 @@ pub(crate) fn patch_papers_conn(
 ) -> Result<CollectionStateSummary, AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = now_rfc3339();
+    let mut graph_dirty = false;
 
     for patch in &args.patches {
         let id = patch.id.trim();
@@ -1497,12 +2150,24 @@ pub(crate) fn patch_papers_conn(
         let published_ymd: String = published_at.chars().take(10).collect();
         let year = patch.year.filter(|&y| y > 0).unwrap_or(ex.year);
         let categories = match &patch.categories {
-            Some(c) => union_strings_case_insensitive(&ex_cats, c),
+            Some(c) => {
+                graph_dirty = true;
+                union_strings_case_insensitive(&ex_cats, c)
+            }
             None => ex_cats,
         };
-        let keywords = match &patch.keywords {
-            Some(k) => union_canonical_keywords(&ex_kws, k),
-            None => canonicalize_keywords(&ex_kws),
+        let (keywords, keyword_source) = match &patch.keywords {
+            Some(k) => merge_keywords_by_priority(
+                &ex_kws,
+                &ex.keyword_source,
+                k,
+                patch.keyword_source.as_deref(),
+            ),
+            None => {
+                let kws = canonicalize_keywords(&ex_kws);
+                let (_, norm_src) = keyword_source_priority(&ex.keyword_source, !kws.is_empty());
+                (kws, norm_src.to_string())
+            }
         };
         let url = patch
             .url
@@ -1513,25 +2178,47 @@ pub(crate) fn patch_papers_conn(
             .unwrap_or(ex.url);
         let pdf_url = clean_opt_str(patch.pdf_url.clone()).or(ex.pdf_url);
         let arxiv_id = clean_opt_str(patch.arxiv_id.clone()).or(ex.arxiv_id);
-        let arxiv_id_norm = arxiv_id.as_deref().and_then(clean_arxiv_key);
         let doi = clean_opt_str(patch.doi.clone()).or(ex.doi);
+        let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
+        let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
+        let in_oa_id = patch.openalex_id.as_deref().and_then(clean_openalex_id);
+        let openalex_id = in_oa_id.clone().or(ex.openalex_id.clone());
         let title_norm = norm_title_key(&title);
         let venue_id = clean_opt_str(patch.venue_id.clone()).or(ex.venue_id);
         let venue_kind = clean_opt_str(patch.venue_kind.clone()).or(ex.venue_kind);
         let venue_domain = clean_opt_str(patch.venue_domain.clone()).or(ex.venue_domain);
         let ccf_rank = clean_opt_str(patch.ccf_rank.clone()).or(ex.ccf_rank);
         let venue_full = clean_opt_str(patch.venue_full.clone()).or(ex.venue_full);
-        let citation_count = match patch.citation_count {
-            Some(c) => ex.citation_count.max(c),
-            None => ex.citation_count,
-        };
         let volume = clean_opt_str(patch.volume.clone()).or(ex.volume);
         let issue = clean_opt_str(patch.issue.clone()).or(ex.issue);
         let pages = clean_opt_str(patch.pages.clone()).or(ex.pages);
         let bibtex = clean_opt_str(patch.bibtex.clone()).or(ex.bibtex);
         let cool_papers_id = clean_opt_str(patch.cool_papers_id.clone()).or(ex.cool_papers_id);
         let recommended_at = clean_opt_str(patch.recommended_at.clone()).or(ex.recommended_at);
+
+        let work_id = resolve_or_merge_work_id_tx(
+            &tx,
+            ex.work_id,
+            openalex_id.as_deref(),
+            pub_doi_norm.as_deref(),
+            arxiv_id_norm.as_deref(),
+            &title,
+            &title_norm,
+            &authors,
+        )?;
+        if work_id != ex.work_id
+            || in_oa_id.is_some()
+            || patch.doi.is_some()
+            || patch.arxiv_id.is_some()
+        {
+            graph_dirty = true;
+        }
+        if let Some(ref refs) = patch.raw_refs {
+            if insert_work_raw_refs_tx(&tx, work_id, refs)? > 0 {
+                graph_dirty = true;
+            }
+        }
 
         let authors_json = serde_json::to_string(&authors)?;
         let categories_json = serde_json::to_string(&categories)?;
@@ -1540,15 +2227,17 @@ pub(crate) fn patch_papers_conn(
 
         tx.execute(
             "UPDATE papers SET
-                title = ?1, authors_json = ?2, abstract_text = ?3, published_at = ?4,
-                published_ymd = ?5, year = ?6, categories_json = ?7, url = ?8,
-                pdf_url = ?9, arxiv_id = ?10, arxiv_id_norm = ?11, doi = ?12, doi_norm = ?13,
-                title_norm = ?14, venue_id = ?15, venue_kind = ?16, venue_domain = ?17,
-                ccf_rank = ?18, venue_full = ?19, citation_count = ?20, keywords_json = ?21,
-                keywords_text = ?22, volume = ?23, issue = ?24, pages = ?25, bibtex = ?26,
-                cool_papers_id = ?27, recommended_at = ?28, updated_at = ?29
-             WHERE row_id = ?30",
+                work_id = ?1, title = ?2, authors_json = ?3, abstract_text = ?4, published_at = ?5,
+                published_ymd = ?6, year = ?7, categories_json = ?8, url = ?9,
+                pdf_url = ?10, arxiv_id = ?11, arxiv_id_norm = ?12, doi = ?13, doi_norm = ?14,
+                openalex_id = ?15, title_norm = ?16, venue_id = ?17, venue_kind = ?18,
+                venue_domain = ?19, ccf_rank = ?20, venue_full = ?21, citation_count = ?22,
+                keywords_json = ?23, keyword_source = ?24, keywords_text = ?25, volume = ?26,
+                issue = ?27, pages = ?28, bibtex = ?29, cool_papers_id = ?30,
+                recommended_at = ?31, updated_at = ?32
+             WHERE row_id = ?33",
             params![
+                work_id,
                 title,
                 authors_json,
                 abstract_text,
@@ -1562,14 +2251,16 @@ pub(crate) fn patch_papers_conn(
                 arxiv_id_norm,
                 doi,
                 doi_norm,
+                openalex_id,
                 title_norm,
                 venue_id,
                 venue_kind,
                 venue_domain,
                 ccf_rank,
                 venue_full,
-                citation_count as i64,
+                ex.citation_count as i64,
                 keywords_json,
+                keyword_source,
                 keywords_text,
                 volume,
                 issue,
@@ -1590,6 +2281,10 @@ pub(crate) fn patch_papers_conn(
             &categories,
             &keywords,
         )?;
+    }
+
+    if graph_dirty {
+        recompute_graph_and_citations_tx(&tx)?;
     }
 
     tx.commit()?;
@@ -1616,7 +2311,7 @@ pub(crate) fn paper_get_conn(
     let row = conn
         .query_row(&sql, [id.trim()], |r| {
             let summary = map_paper_summary_row(r)?;
-            let raw_bib: Option<String> = r.get(25)?;
+            let raw_bib: Option<String> = r.get(PAPER_SUMMARY_COL_COUNT)?;
             Ok((summary, raw_bib))
         })
         .optional()?;
@@ -1645,6 +2340,7 @@ pub(crate) fn paper_get_conn(
             venue_full: s.venue_full,
             citation_count: s.citation_count,
             keywords: s.keywords,
+            keyword_source: s.keyword_source,
             volume: s.volume,
             issue: s.issue,
             pages: s.pages,
@@ -1874,21 +2570,17 @@ pub(crate) fn clear_collection_conn(
 ) -> Result<CollectionStateSummary, AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match args.scope.trim().to_ascii_lowercase().as_str() {
-        "all" => {
+        "all" | "papers" => {
             tx.execute_batch(
                 "DELETE FROM papers;
-                 DELETE FROM arxiv_watermarks;
-                 DELETE FROM citation_edges;
-                 UPDATE venues SET last_fetched_at = NULL, latest_published_at = NULL, remote_total_count = NULL;
-                 UPDATE collection_config SET last_refreshed_at = NULL, latest_arxiv_json = NULL, last_recommended_at = NULL WHERE id = 1;",
-            )?;
-        }
-        "papers" => {
-            tx.execute_batch(
-                "DELETE FROM papers;
+                 DELETE FROM canonical_works;
+                 DELETE FROM paper_raw_refs;
+                 DELETE FROM paper_citations;
                  DELETE FROM arxiv_watermarks;
                  UPDATE venues SET last_fetched_at = NULL, latest_published_at = NULL, remote_total_count = NULL;
-                 UPDATE collection_config SET last_refreshed_at = NULL, latest_arxiv_json = NULL, last_recommended_at = NULL WHERE id = 1;",
+                 UPDATE collection_config SET last_refreshed_at = NULL, latest_arxiv_json = NULL, \
+                                              last_recommended_at = NULL, seed_cleared = 1, \
+                                              applied_seed_ids_json = '[]' WHERE id = 1;",
             )?;
         }
         "venue" => {
@@ -1906,6 +2598,7 @@ pub(crate) fn clear_collection_conn(
                     "UPDATE venues SET last_fetched_at = NULL, latest_published_at = NULL, remote_total_count = NULL WHERE id = ?1",
                     [vid],
                 )?;
+                recompute_graph_and_citations_tx(&tx)?;
             }
         }
         "recommended" => {
@@ -1915,7 +2608,11 @@ pub(crate) fn clear_collection_conn(
             )?;
         }
         "citations" => {
-            tx.execute("DELETE FROM citation_edges", [])?;
+            tx.execute_batch(
+                "DELETE FROM paper_raw_refs;
+                 DELETE FROM paper_citations;
+                 UPDATE papers SET citation_count = 0 WHERE citation_count != 0;",
+            )?;
         }
         other => {
             return Err(AppError::message(format!(

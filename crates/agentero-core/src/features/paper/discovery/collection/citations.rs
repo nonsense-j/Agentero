@@ -1,983 +1,423 @@
-//! Citation and co-citation snowballing strictly bounded to `collection.sqlite`,
-//! with persistent edge caching in the `citation_edges` table.
+//! Local-first citation and bibliographic-coupling snowballing over `paper_citations`
+//! and `paper_raw_refs` in `collection.sqlite`.
+//!
+//! Queries execute in `< 1ms` purely against local SQLite tables; only when a seed paper
+//! has zero recorded `paper_raw_refs` does it optionally perform a single lightweight
+//! OpenAlex `referenced_works` lookup and persist the discovered outgoing edges back into
+//! `paper_raw_refs`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
-use serde::{Deserialize, Serialize};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 
 use crate::error::AppError;
 use crate::features::paper::scholar_api::client as scholar_client;
-use crate::features::paper::scholar_api::references::fetch_references;
 
-use super::models::{
-    CollectionCitationsOut, CollectionCitationsParams, CollectionPaperSummary, SnowballPaperHit,
-};
+use super::lineage::load_preferred_summaries_by_work_ids;
+use super::models::{CollectionCitationsOut, CollectionCitationsParams, SnowballPaperHit};
 use super::schema::ensure_collection_at;
-use super::search::{enrich_venue_summaries_from_arxiv_conn, summary_to_hit};
+use super::search::summary_to_hit;
 use super::store::{
-    append_enabled_scope_clause, clean_arxiv_key, clean_doi_key, compare_preferred_venue_summary,
-    load_enabled_categories, map_paper_summary_row, merge_arxiv_into_venue_summary, norm_title_key,
-    now_rfc3339, same_summary_work, PAPER_SUMMARY_SELECT_COLS,
+    clean_arxiv_key, clean_doi_key, clean_openalex_id, insert_work_raw_refs_tx,
+    map_paper_summary_row, recompute_graph_and_citations_tx, PAPER_SUMMARY_COL_COUNT,
+    PAPER_SUMMARY_SELECT_COLS,
 };
 
 const OPENALEX_MAILTO: &str = "agentero@users.noreply.github.com";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ExternalPaperStub {
-    #[serde(default)]
-    pub openalex_id: Option<String>,
-    #[serde(default)]
-    pub doi: Option<String>,
-    #[serde(default)]
-    pub arxiv_id: Option<String>,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub cited_by_count: u32,
+#[derive(Clone)]
+struct ResolvedSeed {
+    id: String,
+    work_id: i64,
+    title: String,
+    openalex_id: Option<String>,
+    doi: Option<String>,
+    arxiv_id: Option<String>,
+    has_raw_refs: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CachedPaperEdges {
-    #[serde(default)]
-    pub openalex_id: Option<String>,
-    #[serde(default)]
-    pub references: Vec<ExternalPaperStub>,
-    #[serde(default)]
-    pub cited_by: Vec<ExternalPaperStub>,
-    #[serde(default)]
-    pub cocited_2026: Vec<(String, ExternalPaperStub)>,
-}
-
-fn stub_from_openalex_work(work: &Value) -> Option<ExternalPaperStub> {
-    let title = work
-        .get("title")
-        .or_else(|| work.get("display_name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let doi = work
-        .get("doi")
-        .and_then(Value::as_str)
-        .and_then(clean_doi_key);
-    let arxiv_from_ids = work
-        .get("ids")
-        .and_then(|ids| ids.get("arxiv"))
-        .and_then(Value::as_str)
-        .and_then(clean_arxiv_key);
-    let arxiv_id = arxiv_from_ids.or_else(|| {
-        doi.as_deref()
-            .and_then(|d| d.strip_prefix("10.48550/arxiv."))
-            .map(str::to_string)
-    });
-    let openalex_id = work
-        .get("id")
-        .and_then(Value::as_str)
-        .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
-        .filter(|s| !s.is_empty());
-    let cited_by_count = work
-        .get("cited_by_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32;
-
-    if title.is_empty() && doi.is_none() && arxiv_id.is_none() {
-        return None;
-    }
-
-    Some(ExternalPaperStub {
-        openalex_id,
-        doi,
-        arxiv_id,
-        title,
-        cited_by_count,
-    })
-}
-
-async fn fetch_edges_for_seed(seed: &CollectionPaperSummary) -> CachedPaperEdges {
-    let mut edges = CachedPaperEdges::default();
-    let lookup_doi = seed.doi.as_deref().and_then(clean_doi_key).or_else(|| {
-        seed.arxiv_id
-            .as_deref()
-            .and_then(clean_arxiv_key)
-            .map(|a| format!("10.48550/arxiv.{a}"))
-    });
-
-    let mut referenced_oa_ids: Vec<String> = Vec::new();
-    let select = "id,title,display_name,doi,ids,cited_by_count,referenced_works";
-
-    let work_val = if let Some(ref d) = lookup_doi {
-        let url = format!(
-            "https://api.openalex.org/works/https://doi.org/{}?select={select}&mailto={OPENALEX_MAILTO}",
-            urlencoding::encode(d)
-        );
-        scholar_client::get_json(&url).await.ok()
-    } else {
-        None
-    };
-
-    let work_val = match work_val {
-        Some(v) => Some(v),
-        None => {
-            let url = format!(
-                "https://api.openalex.org/works?search={}&per-page=3&select={select}&mailto={OPENALEX_MAILTO}",
-                urlencoding::encode(&seed.title)
-            );
-            scholar_client::get_json(&url).await.ok().and_then(|res| {
-                let target_tk = norm_title_key(&seed.title);
-                res.get("results")
-                    .and_then(Value::as_array)?
-                    .iter()
-                    .find(|r| {
-                        let t = r
-                            .get("title")
-                            .or_else(|| r.get("display_name"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        norm_title_key(t) == target_tk
-                    })
-                    .cloned()
-            })
-        }
-    };
-
-    if let Some(ref work) = work_val {
-        edges.openalex_id = work
-            .get("id")
-            .and_then(Value::as_str)
-            .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
-            .filter(|s| !s.is_empty());
-
-        if let Some(arr) = work.get("referenced_works").and_then(Value::as_array) {
-            for item in arr.iter().take(45) {
-                if let Some(wid) = item
-                    .as_str()
-                    .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
-                    .filter(|s| s.starts_with('W'))
-                {
-                    referenced_oa_ids.push(wid);
-                }
-            }
-        }
-    }
-
-    // 1. Outgoing references via OpenAlex batch (or Semantic Scholar / Crossref fallback)
-    if !referenced_oa_ids.is_empty() {
-        let filter = format!("openalex:{}", referenced_oa_ids.join("|"));
-        let url = format!(
-            "https://api.openalex.org/works?filter={}&per-page=50&select=id,title,display_name,doi,ids,cited_by_count&mailto={OPENALEX_MAILTO}",
-            urlencoding::encode(&filter)
-        );
-        if let Ok(val) = scholar_client::get_json(&url).await {
-            if let Some(rows) = val.get("results").and_then(Value::as_array) {
-                for row in rows {
-                    if let Some(stub) = stub_from_openalex_work(row) {
-                        edges.references.push(stub);
-                    }
-                }
-            }
-        }
-    }
-
-    if edges.references.is_empty() {
-        let fallback = fetch_references(seed.doi.as_deref(), seed.arxiv_id.as_deref()).await;
-        for r in fallback.refs {
-            edges.references.push(ExternalPaperStub {
-                openalex_id: None,
-                doi: r.identifiers.doi,
-                arxiv_id: r.identifiers.arxiv_id,
-                title: r.title,
-                cited_by_count: r.citation_count.unwrap_or(0) as u32,
-            });
-        }
-    }
-
-    // 2. Incoming `cited_by` (OpenAlex `cites:W...` + Semantic Scholar `/citations`)
-    if let Some(ref wid) = edges.openalex_id {
-        let filter = format!("cites:{wid},from_publication_date:2025-11-01");
-        let url = format!(
-            "https://api.openalex.org/works?filter={}&per-page=100&select=id,title,display_name,doi,ids,cited_by_count&mailto={OPENALEX_MAILTO}",
-            urlencoding::encode(&filter)
-        );
-        if let Ok(val) = scholar_client::get_json(&url).await {
-            if let Some(rows) = val.get("results").and_then(Value::as_array) {
-                for row in rows {
-                    if let Some(stub) = stub_from_openalex_work(row) {
-                        edges.cited_by.push(stub);
-                    }
-                }
-            }
-        }
-    }
-
-    if edges.cited_by.is_empty() {
-        let ext_id = seed
-            .arxiv_id
-            .as_deref()
-            .and_then(clean_arxiv_key)
-            .map(|a| format!("ARXIV:{a}"))
-            .or_else(|| {
-                seed.doi
-                    .as_deref()
-                    .and_then(clean_doi_key)
-                    .map(|d| format!("DOI:{d}"))
-            });
-        if let Some(ext_id) = ext_id {
-            let s2_url = format!(
-                "https://api.semanticscholar.org/graph/v1/paper/{}/citations?fields=title,externalIds,citationCount&limit=150",
-                urlencoding::encode(&ext_id)
-            );
-            if let Ok(val) = scholar_client::get_json(&s2_url).await {
-                if let Some(rows) = val.get("data").and_then(Value::as_array) {
-                    for row in rows {
-                        if let Some(cp) = row.get("citingPaper") {
-                            let title = cp
-                                .get("title")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .trim()
-                                .to_string();
-                            let doi = cp
-                                .get("externalIds")
-                                .and_then(|e| e.get("DOI"))
-                                .and_then(Value::as_str)
-                                .and_then(clean_doi_key);
-                            let arxiv_id = cp
-                                .get("externalIds")
-                                .and_then(|e| e.get("ArXiv"))
-                                .and_then(Value::as_str)
-                                .and_then(clean_arxiv_key);
-                            let cited_by_count =
-                                cp.get("citationCount").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            if !title.is_empty() || doi.is_some() || arxiv_id.is_some() {
-                                edges.cited_by.push(ExternalPaperStub {
-                                    openalex_id: None,
-                                    doi,
-                                    arxiv_id,
-                                    title,
-                                    cited_by_count,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Co-citation pivot: pick top referenced OpenAlex works and fetch 2026 works citing them
-    let mut pivot_refs: Vec<&ExternalPaperStub> = edges
-        .references
-        .iter()
-        .filter(|r| {
-            r.openalex_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with('W'))
-        })
-        .collect();
-    pivot_refs.sort_by_key(|a| std::cmp::Reverse(a.cited_by_count));
-    let specific_pivots: Vec<&ExternalPaperStub> = pivot_refs
-        .iter()
-        .copied()
-        .filter(|r| r.cited_by_count <= 5_000)
-        .take(5)
-        .collect();
-    let chosen_pivots = if specific_pivots.is_empty() {
-        pivot_refs.into_iter().take(4).collect::<Vec<_>>()
-    } else {
-        specific_pivots
-    };
-
-    for pivot in chosen_pivots {
-        let Some(ref wid) = pivot.openalex_id else {
-            continue;
-        };
-        let filter = format!("cites:{wid},publication_year:2026");
-        let url = format!(
-            "https://api.openalex.org/works?filter={}&sort=publication_date:desc&per-page=80&select=id,title,display_name,doi,ids,cited_by_count&mailto={OPENALEX_MAILTO}",
-            urlencoding::encode(&filter)
-        );
-        if let Ok(val) = scholar_client::get_json(&url).await {
-            if let Some(rows) = val.get("results").and_then(Value::as_array) {
-                let pivot_label = if pivot.title.is_empty() {
-                    wid.clone()
-                } else {
-                    pivot.title.clone()
-                };
-                for row in rows {
-                    if let Some(stub) = stub_from_openalex_work(row) {
-                        edges.cocited_2026.push((pivot_label.clone(), stub));
-                    }
-                }
-            }
-        }
-    }
-
-    edges
-}
-
-fn resolve_seed_in_scope(
-    conn: &Connection,
-    raw_id: &str,
-    enabled_cats: &[String],
-) -> Result<Option<CollectionPaperSummary>, AppError> {
+fn resolve_seed_row(conn: &Connection, raw_id: &str) -> Result<Option<ResolvedSeed>, AppError> {
     let trimmed = raw_id.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    // 1. Exact ID match
-    {
-        let mut sql = format!("SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.id = ?");
-        let mut binds: Vec<rusqlite::types::Value> = vec![trimmed.to_string().into()];
-        append_enabled_scope_clause(&mut sql, &mut binds, "p", enabled_cats);
-        sql.push_str(" LIMIT 1");
-        if let Some(p) = conn
-            .query_row(&sql, params_from_iter(binds), map_paper_summary_row)
-            .optional()?
-        {
-            return Ok(Some(p));
-        }
-    }
-
-    // 2. Normalized arXiv ID match
-    if let Some(a) = clean_arxiv_key(trimmed) {
-        let mut sql =
-            format!("SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.arxiv_id_norm = ?");
-        let mut binds: Vec<rusqlite::types::Value> = vec![a.into()];
-        append_enabled_scope_clause(&mut sql, &mut binds, "p", enabled_cats);
-        sql.push_str(" ORDER BY CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END, p.published_at DESC LIMIT 1");
-        if let Some(p) = conn
-            .query_row(&sql, params_from_iter(binds), map_paper_summary_row)
-            .optional()?
-        {
-            return Ok(Some(p));
-        }
-    }
-
-    // 3. Normalized DOI match
-    if let Some(d) = clean_doi_key(trimmed) {
-        let mut sql =
-            format!("SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.doi_norm = ?");
-        let mut binds: Vec<rusqlite::types::Value> = vec![d.clone().into()];
-        append_enabled_scope_clause(&mut sql, &mut binds, "p", enabled_cats);
-        sql.push_str(" ORDER BY CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END, p.published_at DESC LIMIT 1");
-        if let Some(p) = conn
-            .query_row(&sql, params_from_iter(binds), map_paper_summary_row)
-            .optional()?
-        {
-            return Ok(Some(p));
-        }
-        if let Some(a) = d.strip_prefix("10.48550/arxiv.") {
-            let mut sql2 = format!(
-                "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.arxiv_id_norm = ?"
-            );
-            let mut binds2: Vec<rusqlite::types::Value> = vec![a.to_string().into()];
-            append_enabled_scope_clause(&mut sql2, &mut binds2, "p", enabled_cats);
-            sql2.push_str(" LIMIT 1");
-            if let Some(p) = conn
-                .query_row(&sql2, params_from_iter(binds2), map_paper_summary_row)
-                .optional()?
-            {
-                return Ok(Some(p));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn load_cached_edges_conn(
-    conn: &Connection,
-    seed_ids: &[String],
-) -> Result<HashMap<String, CachedPaperEdges>, AppError> {
-    if seed_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let placeholders: String = std::iter::repeat_n("?", seed_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let arxiv_norm = clean_arxiv_key(trimmed);
+    let doi_norm = clean_doi_key(trimmed);
     let sql = format!(
-        "SELECT seed_paper_id, openalex_id, references_json, cited_by_json, cocited_json \
-         FROM citation_edges WHERE seed_paper_id IN ({placeholders})"
+        "SELECT {PAPER_SUMMARY_SELECT_COLS}, p.work_id, p.openalex_id
+         FROM papers p
+         WHERE p.id = ?1
+            OR p.cool_papers_id = ?1
+            OR (?2 IS NOT NULL AND p.arxiv_id_norm = ?2)
+            OR (?3 IS NOT NULL AND p.doi_norm = ?3)
+         ORDER BY CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END ASC
+         LIMIT 1"
     );
-    let binds: Vec<rusqlite::types::Value> = seed_ids.iter().cloned().map(Into::into).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(binds), |r| {
-        let seed_id: String = r.get(0)?;
-        let openalex_id: Option<String> = r.get(1)?;
-        let refs_json: String = r.get(2)?;
-        let cited_json: String = r.get(3)?;
-        let cocited_json: String = r.get(4)?;
-        Ok((
-            seed_id,
-            CachedPaperEdges {
-                openalex_id,
-                references: serde_json::from_str(&refs_json).unwrap_or_default(),
-                cited_by: serde_json::from_str(&cited_json).unwrap_or_default(),
-                cocited_2026: serde_json::from_str(&cocited_json).unwrap_or_default(),
-            },
-        ))
-    })?;
 
-    let mut out = HashMap::new();
-    for entry in rows {
-        let (sid, edges) = entry?;
-        out.insert(sid, edges);
-    }
-    Ok(out)
-}
-
-pub(crate) fn save_cached_edges_conn(
-    conn: &mut Connection,
-    entries: &[(String, CachedPaperEdges)],
-) -> Result<(), AppError> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let now = now_rfc3339();
-    for (seed_id, edges) in entries {
-        let refs_json = serde_json::to_string(&edges.references)?;
-        let cited_json = serde_json::to_string(&edges.cited_by)?;
-        let cocited_json = serde_json::to_string(&edges.cocited_2026)?;
-        tx.execute(
-            "INSERT INTO citation_edges (
-                seed_paper_id, openalex_id, references_json, cited_by_json, cocited_json, fetched_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(seed_paper_id) DO UPDATE SET
-                openalex_id = excluded.openalex_id,
-                references_json = excluded.references_json,
-                cited_by_json = excluded.cited_by_json,
-                cocited_json = excluded.cocited_json,
-                fetched_at = excluded.fetched_at",
-            params![
-                seed_id,
-                edges.openalex_id,
-                refs_json,
-                cited_json,
-                cocited_json,
-                now
-            ],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-struct StubCandidatePool {
-    items: Vec<CollectionPaperSummary>,
-    by_arxiv: HashMap<String, usize>,
-    by_doi: HashMap<String, usize>,
-    by_title: HashMap<String, usize>,
-}
-
-impl StubCandidatePool {
-    fn load_for_stubs(
-        conn: &Connection,
-        stubs: &[&ExternalPaperStub],
-        enabled_cats: &[String],
-    ) -> Result<Self, AppError> {
-        let mut arxiv_keys: HashSet<String> = HashSet::new();
-        let mut doi_keys: HashSet<String> = HashSet::new();
-        let mut title_keys: HashSet<String> = HashSet::new();
-
-        for stub in stubs {
-            if let Some(a) = stub.arxiv_id.as_deref().and_then(clean_arxiv_key) {
-                doi_keys.insert(format!("10.48550/arxiv.{a}"));
-                arxiv_keys.insert(a);
-            }
-            if let Some(d) = stub.doi.as_deref().and_then(clean_doi_key) {
-                if let Some(a) = d.strip_prefix("10.48550/arxiv.") {
-                    arxiv_keys.insert(a.to_string());
-                }
-                doi_keys.insert(d);
-            }
-            let tk = norm_title_key(&stub.title);
-            if tk.len() >= 10 {
-                title_keys.insert(tk);
-            }
-        }
-
-        let mut by_id: HashMap<String, CollectionPaperSummary> = HashMap::new();
-
-        fn fetch_by_column(
-            conn: &Connection,
-            col: &str,
-            keys: &HashSet<String>,
-            enabled_cats: &[String],
-            out: &mut HashMap<String, CollectionPaperSummary>,
-        ) -> Result<(), AppError> {
-            let vec_keys: Vec<&String> = keys.iter().collect();
-            for chunk in vec_keys.chunks(200) {
-                let placeholders: String = std::iter::repeat_n("?", chunk.len())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut sql = format!(
-                    "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p WHERE p.{col} IN ({placeholders})"
-                );
-                let mut binds: Vec<rusqlite::types::Value> =
-                    chunk.iter().map(|s| (*s).clone().into()).collect();
-                append_enabled_scope_clause(&mut sql, &mut binds, "p", enabled_cats);
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map(params_from_iter(binds), map_paper_summary_row)?;
-                for entry in rows {
-                    let p = entry?;
-                    out.entry(p.id.clone()).or_insert(p);
-                }
-            }
-            Ok(())
-        }
-
-        fetch_by_column(conn, "arxiv_id_norm", &arxiv_keys, enabled_cats, &mut by_id)?;
-        fetch_by_column(conn, "doi_norm", &doi_keys, enabled_cats, &mut by_id)?;
-        fetch_by_column(conn, "title_norm", &title_keys, enabled_cats, &mut by_id)?;
-
-        // Pull cross-portal siblings by `title_norm` (e.g. stub only had `arxiv_id`, while the
-        // `venue` counterpart in `collection.sqlite` only shares `title + first 2 authors`).
-        let sibling_titles: HashSet<String> = by_id
-            .values()
-            .map(|p| norm_title_key(&p.title))
-            .filter(|tk| tk.len() >= 4 && !title_keys.contains(tk))
-            .collect();
-        if !sibling_titles.is_empty() {
-            fetch_by_column(
-                conn,
-                "title_norm",
-                &sibling_titles,
-                enabled_cats,
-                &mut by_id,
-            )?;
-        }
-
-        // Sort deterministically (prefer venue portal over preprint when same work exists)
-        let mut raw_items: Vec<CollectionPaperSummary> = by_id.into_values().collect();
-        raw_items.sort_by(compare_preferred_venue_summary);
-
-        // Collapse cross-portal `arXiv` + `Venue` twins into the preferred `Venue` summary.
-        let mut items: Vec<CollectionPaperSummary> = Vec::with_capacity(raw_items.len());
-        for cand in raw_items {
-            if let Some(existing) = items.iter_mut().find(|prev| same_summary_work(prev, &cand)) {
-                if existing.source_type == "venue" && cand.source_type == "arxiv" {
-                    merge_arxiv_into_venue_summary(existing, &cand);
-                } else if existing.source_type == "arxiv" && cand.source_type == "venue" {
-                    let mut upgraded = cand;
-                    merge_arxiv_into_venue_summary(&mut upgraded, existing);
-                    *existing = upgraded;
-                }
-            } else {
-                items.push(cand);
-            }
-        }
-
-        let mut by_arxiv = HashMap::new();
-        let mut by_doi = HashMap::new();
-        let mut by_title = HashMap::new();
-
-        for (idx, p) in items.iter().enumerate() {
-            if let Some(d) = p.doi.as_deref().and_then(clean_doi_key) {
-                by_doi.entry(d).or_insert(idx);
-            }
-            if let Some(a) = p.arxiv_id.as_deref().and_then(clean_arxiv_key) {
-                by_arxiv.entry(a.clone()).or_insert(idx);
-                by_doi.entry(format!("10.48550/arxiv.{a}")).or_insert(idx);
-            }
-            let tk = norm_title_key(&p.title);
-            if tk.len() >= 10 {
-                by_title.entry(tk).or_insert(idx);
-            }
-        }
-
-        Ok(Self {
-            items,
-            by_arxiv,
-            by_doi,
-            by_title,
+    let row = conn
+        .query_row(&sql, params![trimmed, arxiv_norm, doi_norm], |r| {
+            let s = map_paper_summary_row(r)?;
+            let wid: i64 = r.get(PAPER_SUMMARY_COL_COUNT)?;
+            let oa: Option<String> = r.get(PAPER_SUMMARY_COL_COUNT + 1)?;
+            Ok((s, wid, oa))
         })
-    }
+        .optional()?;
 
-    fn match_stub(&self, stub: &ExternalPaperStub) -> Option<&CollectionPaperSummary> {
-        if let Some(a) = stub.arxiv_id.as_deref().and_then(clean_arxiv_key) {
-            if let Some(&idx) = self.by_arxiv.get(&a) {
-                return Some(&self.items[idx]);
-            }
-        }
-        if let Some(d) = stub.doi.as_deref().and_then(clean_doi_key) {
-            if let Some(&idx) = self.by_doi.get(&d) {
-                return Some(&self.items[idx]);
-            }
-            if let Some(a) = d.strip_prefix("10.48550/arxiv.") {
-                if let Some(&idx) = self.by_arxiv.get(a) {
-                    return Some(&self.items[idx]);
-                }
-            }
-        }
-        let tk = norm_title_key(&stub.title);
-        if tk.len() >= 10 {
-            if let Some(&idx) = self.by_title.get(&tk) {
-                return Some(&self.items[idx]);
-            }
-        }
-        None
-    }
+    let Some((summary, work_id, openalex_id)) = row else {
+        return Ok(None);
+    };
+
+    let has_raw_refs = if work_id > 0 {
+        conn.query_row(
+            "SELECT 1 FROM paper_raw_refs WHERE src_work_id = ?1 LIMIT 1",
+            [work_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false)
+    } else {
+        false
+    };
+
+    Ok(Some(ResolvedSeed {
+        id: summary.id,
+        work_id,
+        title: summary.title,
+        openalex_id,
+        doi: summary.doi,
+        arxiv_id: summary.arxiv_id,
+        has_raw_refs,
+    }))
 }
 
-fn find_local_lineage_candidates(
-    conn: &Connection,
-    seed: &CollectionPaperSummary,
-    seed_id_set: &HashSet<String>,
-    enabled_cats: &[String],
-) -> Result<Vec<(CollectionPaperSummary, Vec<String>)>, AppError> {
-    let seed_kw: Vec<String> = seed
-        .keywords
-        .iter()
-        .map(|k| {
-            k.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase()
+async fn fetch_missing_refs_from_openalex(
+    seed: &ResolvedSeed,
+) -> Option<(Option<String>, Vec<String>)> {
+    let select = "id,doi,ids,referenced_works";
+    let url = if let Some(oa) = seed.openalex_id.as_deref().and_then(clean_openalex_id) {
+        format!("https://api.openalex.org/works/{oa}?select={select}&mailto={OPENALEX_MAILTO}")
+    } else if let Some(d) = seed.doi.as_deref().and_then(clean_doi_key) {
+        format!(
+            "https://api.openalex.org/works/https://doi.org/{}?select={select}&mailto={OPENALEX_MAILTO}",
+            urlencoding::encode(&d)
+        )
+    } else {
+        let a = seed.arxiv_id.as_deref().and_then(clean_arxiv_key)?;
+        let synth_doi = format!("10.48550/arxiv.{a}");
+        format!(
+            "https://api.openalex.org/works/https://doi.org/{}?select={select}&mailto={OPENALEX_MAILTO}",
+            urlencoding::encode(&synth_doi)
+        )
+    };
+
+    let work: Value = scholar_client::get_json(&url).await.ok()?;
+    let oa_id = work
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(clean_openalex_id);
+    let refs: Vec<String> = work
+        .get("referenced_works")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter_map(clean_openalex_id)
+                .map(|w| format!("oa:{w}"))
+                .collect()
         })
-        .filter(|k| k.chars().count() >= 2)
-        .collect();
-    if seed_kw.is_empty() {
-        return Ok(Vec::new());
+        .unwrap_or_default();
+
+    if oa_id.is_none() && refs.is_empty() {
+        return None;
     }
-    let seed_kw_set: HashSet<String> = seed_kw.iter().cloned().collect();
-    let seed_authors: HashSet<String> = seed.authors.iter().map(|a| a.to_lowercase()).collect();
+    Some((oa_id, refs))
+}
 
-    let kw_placeholders: String = std::iter::repeat_n("?", seed_kw.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut sql = format!(
-        "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
-         WHERE EXISTS (SELECT 1 FROM paper_keywords pk WHERE pk.paper_id = p.id AND pk.normalized IN ({kw_placeholders}))"
-    );
-    let mut binds: Vec<rusqlite::types::Value> = seed_kw.into_iter().map(Into::into).collect();
-    append_enabled_scope_clause(&mut sql, &mut binds, "p", enabled_cats);
-    sql.push_str(" ORDER BY p.citation_count DESC, p.published_at DESC LIMIT 250");
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(binds), map_paper_summary_row)?;
-
-    let mut out = Vec::new();
-    for entry in rows {
-        let item = entry?;
-        if seed_id_set.contains(&item.id) {
-            continue;
-        }
-        let shared_kw: Vec<String> = item
-            .keywords
-            .iter()
-            .filter(|k| {
-                let norm = k
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase();
-                seed_kw_set.contains(&norm)
-            })
-            .cloned()
-            .collect();
-        let shared_auth = item
-            .authors
-            .iter()
-            .any(|a| seed_authors.contains(&a.to_lowercase()));
-        if shared_kw.len() >= 2 || (shared_auth && !shared_kw.is_empty()) {
-            out.push((item, shared_kw));
-        }
+fn truncate_title(title: &str) -> String {
+    if title.chars().count() > 72 {
+        let mut s: String = title.chars().take(72).collect();
+        s.push('…');
+        s
+    } else {
+        title.to_string()
     }
-    Ok(out)
 }
 
 pub async fn snowball_citations_at(
     db_path: &Path,
     params: &CollectionCitationsParams,
 ) -> Result<CollectionCitationsOut, AppError> {
-    // Step 1 (sync): resolve seeds & load cached edges; drop `Connection` before `.await`.
-    let (resolved_seeds, unresolved_seeds, seed_id_set, mut edge_map) = {
-        let conn = ensure_collection_at(db_path)?;
-        let enabled_cats = load_enabled_categories(&conn)?;
-        let mut resolved: Vec<CollectionPaperSummary> = Vec::new();
-        let mut unresolved: Vec<String> = Vec::new();
-        let mut id_set: HashSet<String> = HashSet::new();
-
-        for raw in params.paper_ids.iter().take(5) {
-            if let Some(p) = resolve_seed_in_scope(&conn, raw, &enabled_cats)? {
-                if id_set.insert(p.id.clone()) {
-                    resolved.push(p);
-                }
-            } else if !raw.trim().is_empty() {
-                unresolved.push(raw.trim().to_string());
-            }
-        }
-
-        if resolved.is_empty() {
-            return Ok(CollectionCitationsOut {
-                resolved_seeds: Vec::new(),
-                unresolved_seeds: unresolved,
-                returned_count: 0,
-                items: Vec::new(),
-            });
-        }
-
-        let resolved_ids: Vec<String> = resolved.iter().map(|s| s.id.clone()).collect();
-        let cached = load_cached_edges_conn(&conn, &resolved_ids)?;
-        (resolved, unresolved, id_set, cached)
-    };
-
-    // Step 2 (async): fetch missing citation edges from OpenAlex / Semantic Scholar.
-    let mut newly_fetched: Vec<(String, CachedPaperEdges)> = Vec::new();
-    for seed in &resolved_seeds {
-        if !edge_map.contains_key(&seed.id) {
-            let fetched = fetch_edges_for_seed(seed).await;
-            newly_fetched.push((seed.id.clone(), fetched.clone()));
-            edge_map.insert(seed.id.clone(), fetched);
-        }
-    }
-
-    // Step 3 (sync): persist new edges & match strictly against in-scope `collection.sqlite` papers.
-    let mut conn = ensure_collection_at(db_path)?;
-    if !newly_fetched.is_empty() {
-        save_cached_edges_conn(&mut conn, &newly_fetched)?;
-    }
-
-    let enabled_cats = load_enabled_categories(&conn)?;
-    let dir_mode = params
+    let limit = params.limit.unwrap_or(25).clamp(1, 50);
+    let direction = params
         .direction
         .as_deref()
         .unwrap_or("both")
         .trim()
         .to_ascii_lowercase();
-    let want_refs = dir_mode == "both" || dir_mode == "references";
-    let want_cited_by = dir_mode == "both" || dir_mode == "cited_by";
-    let want_cocited = dir_mode == "both" || dir_mode == "cocited";
+    let want_refs = matches!(direction.as_str(), "both" | "references");
+    let want_cited_by = matches!(direction.as_str(), "both" | "cited_by");
+    let want_cocited = matches!(direction.as_str(), "both" | "cocited");
 
-    let mut all_stubs: Vec<&ExternalPaperStub> = Vec::new();
-    for edges in edge_map.values() {
-        if want_cited_by {
-            all_stubs.extend(edges.cited_by.iter());
-        }
-        if want_refs {
-            all_stubs.extend(edges.references.iter());
-        }
-        if want_cocited {
-            all_stubs.extend(edges.cocited_2026.iter().map(|(_, s)| s));
-        }
-    }
-
-    let pool = StubCandidatePool::load_for_stubs(&conn, &all_stubs, &enabled_cats)?;
-
-    struct Acc {
-        paper: CollectionPaperSummary,
-        relation_rank: u8, // 3 = cited_by, 2 = references, 1 = cocited
-        relation_type: &'static str,
-        seeds: HashSet<String>,
-        via: Vec<String>,
-    }
-
-    fn record_hit(
-        hits: &mut Vec<Acc>,
-        resolved_seeds: &[CollectionPaperSummary],
-        seed_id: &str,
-        cand: &CollectionPaperSummary,
-        rank: u8,
-        rel: &'static str,
-        via_msg: String,
-    ) -> bool {
-        if resolved_seeds
-            .iter()
-            .any(|s| s.id == cand.id || same_summary_work(s, cand))
-        {
-            return false;
-        }
-        let idx = if let Some(pos) = hits
-            .iter()
-            .position(|e| e.paper.id == cand.id || same_summary_work(&e.paper, cand))
-        {
-            if hits[pos].paper.source_type == "arxiv" && cand.source_type == "venue" {
-                let mut upgraded = cand.clone();
-                merge_arxiv_into_venue_summary(&mut upgraded, &hits[pos].paper);
-                hits[pos].paper = upgraded;
-            } else if hits[pos].paper.source_type == "venue" && cand.source_type == "arxiv" {
-                merge_arxiv_into_venue_summary(&mut hits[pos].paper, cand);
+    let mut req_ids: Vec<String> = Vec::new();
+    let mut seen_req = HashSet::new();
+    for id in &params.paper_ids {
+        let t = id.trim();
+        if !t.is_empty() && seen_req.insert(t.to_string()) {
+            req_ids.push(t.to_string());
+            if req_ids.len() >= 5 {
+                break;
             }
-            pos
-        } else {
-            hits.push(Acc {
-                paper: cand.clone(),
-                relation_rank: rank,
-                relation_type: rel,
-                seeds: HashSet::new(),
-                via: Vec::new(),
-            });
-            hits.len() - 1
-        };
-        let entry = &mut hits[idx];
-        if rank > entry.relation_rank {
-            entry.relation_rank = rank;
-            entry.relation_type = rel;
         }
-        entry.seeds.insert(seed_id.to_string());
-        if entry.via.len() < 4 && !entry.via.contains(&via_msg) {
-            entry.via.push(via_msg);
-        }
-        true
     }
 
-    let mut hits: Vec<Acc> = Vec::new();
+    if req_ids.is_empty() {
+        return Ok(CollectionCitationsOut {
+            resolved_seeds: Vec::new(),
+            unresolved_seeds: Vec::new(),
+            returned_count: 0,
+            items: Vec::new(),
+        });
+    }
 
-    for seed in &resolved_seeds {
-        let Some(edges) = edge_map.get(&seed.id) else {
-            continue;
-        };
-        let mut seed_matched = false;
+    let db_buf = db_path.to_path_buf();
+    let req_clone = req_ids.clone();
+    let (seeds, unresolved_seeds) = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+        let conn = ensure_collection_at(&db_buf)?;
+        let mut resolved = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut seen_work = HashSet::new();
+        for raw_id in req_clone {
+            if let Some(seed) = resolve_seed_row(&conn, &raw_id)? {
+                if seen_work.insert(seed.work_id) {
+                    resolved.push(seed);
+                }
+            } else {
+                unresolved.push(raw_id);
+            }
+        }
+        Ok((resolved, unresolved))
+    })
+    .await
+    .map_err(|e| AppError::message(format!("snowball resolve join: {e}")))??;
 
-        if want_cited_by {
-            for stub in &edges.cited_by {
-                if let Some(cand) = pool.match_stub(stub) {
-                    seed_matched |= record_hit(
-                        &mut hits,
-                        &resolved_seeds,
-                        &seed.id,
-                        cand,
-                        3,
-                        "cited_by",
-                        format!("Directly cites seed `{}`", seed.id),
-                    );
+    if seeds.is_empty() {
+        return Ok(CollectionCitationsOut {
+            resolved_seeds: Vec::new(),
+            unresolved_seeds,
+            returned_count: 0,
+            items: Vec::new(),
+        });
+    }
+
+    // Optional single-query OpenAlex fallback ONLY for seeds missing local `paper_raw_refs`.
+    if want_refs || want_cocited {
+        let mut backfills: Vec<(i64, String, Option<String>, Vec<String>)> = Vec::new();
+        for seed in &seeds {
+            if !seed.has_raw_refs && seed.work_id > 0 {
+                if let Some((oa_id, refs)) = fetch_missing_refs_from_openalex(seed).await {
+                    backfills.push((seed.work_id, seed.id.clone(), oa_id, refs));
                 }
             }
         }
-
-        if want_refs {
-            for stub in &edges.references {
-                if let Some(cand) = pool.match_stub(stub) {
-                    seed_matched |= record_hit(
-                        &mut hits,
-                        &resolved_seeds,
-                        &seed.id,
-                        cand,
-                        2,
-                        "references",
-                        format!("Directly referenced by seed `{}`", seed.id),
-                    );
-                }
-            }
-        }
-
-        if want_cocited {
-            for (pivot_title, stub) in &edges.cocited_2026 {
-                if let Some(cand) = pool.match_stub(stub) {
-                    seed_matched |= record_hit(
-                        &mut hits,
-                        &resolved_seeds,
-                        &seed.id,
-                        cand,
-                        1,
-                        "cocited",
-                        format!("Co-cites `{pivot_title}` with `{}`", seed.id),
-                    );
-                }
-            }
-        }
-
-        // Local fast fallback when network is offline or yields 0 in-collection links.
-        if !seed_matched && want_cocited && !seed.keywords.is_empty() {
-            let local_matches =
-                find_local_lineage_candidates(&conn, seed, &seed_id_set, &enabled_cats)?;
-            for (cand, shared_kw) in local_matches {
-                let _ = record_hit(
-                    &mut hits,
-                    &resolved_seeds,
-                    &seed.id,
-                    &cand,
-                    1,
-                    "cocited",
-                    format!(
-                        "Shared technical lineage ({}) with `{}`",
-                        shared_kw.join(", "),
-                        seed.id
-                    ),
-                );
-            }
-        }
-    }
-
-    // Upgrade any local-lineage `arXiv` hit that has an enabled `Venue` twin in `collection.sqlite`.
-    for acc in &mut hits {
-        if acc.paper.source_type == "arxiv" {
-            let tk = norm_title_key(&acc.paper.title);
-            if tk.len() >= 4 {
-                let mut sql = format!(
-                    "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
-                     WHERE p.source_type = 'venue' AND p.title_norm = ?"
-                );
-                let mut binds: Vec<rusqlite::types::Value> = vec![tk.into()];
-                append_enabled_scope_clause(&mut sql, &mut binds, "p", &enabled_cats);
-                if let Ok(mut stmt) = conn.prepare(&sql) {
-                    if let Ok(rows) = stmt.query_map(params_from_iter(binds), map_paper_summary_row)
-                    {
-                        let mut venues: Vec<CollectionPaperSummary> = rows
-                            .filter_map(Result::ok)
-                            .filter(|v| same_summary_work(&acc.paper, v))
-                            .collect();
-                        venues.sort_by(compare_preferred_venue_summary);
-                        if let Some(mut best_venue) = venues.into_iter().next() {
-                            merge_arxiv_into_venue_summary(&mut best_venue, &acc.paper);
-                            acc.paper = best_venue;
-                        }
+        if !backfills.is_empty() {
+            let db_save = db_path.to_path_buf();
+            tokio::task::spawn_blocking(move || -> Result<(), AppError> {
+                let mut conn = ensure_collection_at(&db_save)?;
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut any_changed = false;
+                for (wid, pid, oa_id, refs) in backfills {
+                    if let Some(ref oa) = oa_id {
+                        tx.execute(
+                            "UPDATE canonical_works SET openalex_id = COALESCE(openalex_id, ?1) WHERE work_id = ?2",
+                            params![oa, wid],
+                        )?;
+                        tx.execute(
+                            "UPDATE papers SET openalex_id = COALESCE(openalex_id, ?1) WHERE id = ?2",
+                            params![oa, pid],
+                        )?;
+                        any_changed = true;
+                    }
+                    if insert_work_raw_refs_tx(&tx, wid, &refs)? > 0 {
+                        any_changed = true;
                     }
                 }
-            }
+                if any_changed {
+                    recompute_graph_and_citations_tx(&tx)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| AppError::message(format!("snowball backfill join: {e}")))??;
         }
     }
 
-    let limit = params.limit.unwrap_or(25).clamp(1, 50);
-    let mut ranked: Vec<Acc> = hits;
-    ranked.sort_by(|a, b| {
-        b.seeds
-            .len()
-            .cmp(&a.seeds.len())
-            .then_with(|| b.relation_rank.cmp(&a.relation_rank))
-            .then_with(|| b.via.len().cmp(&a.via.len()))
-            .then_with(|| b.paper.citation_count.cmp(&a.paper.citation_count))
-            .then_with(|| b.paper.published_at.cmp(&a.paper.published_at))
-    });
-    ranked.truncate(limit);
+    let db_final = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<CollectionCitationsOut, AppError> {
+        let conn = ensure_collection_at(&db_final)?;
+        let seed_work_ids: HashSet<i64> = seeds.iter().map(|s| s.work_id).collect();
+        let resolved_seeds: Vec<String> = seeds.iter().map(|s| s.id.clone()).collect();
 
-    let mut top_summaries: HashMap<i64, CollectionPaperSummary> = ranked
-        .iter()
-        .enumerate()
-        .map(|(i, acc)| (i as i64, acc.paper.clone()))
-        .collect();
-    enrich_venue_summaries_from_arxiv_conn(&conn, &mut top_summaries)?;
+        struct AccCandidate {
+            has_cited_by: bool,
+            has_references: bool,
+            has_cocited: bool,
+            linked_seed_ids: Vec<String>,
+            via: Vec<String>,
+            score: f32,
+        }
 
-    let items: Vec<SnowballPaperHit> = ranked
-        .into_iter()
-        .enumerate()
-        .map(|(i, acc)| {
-            let enriched_paper = top_summaries.remove(&(i as i64)).unwrap_or(acc.paper);
-            let score = (acc.seeds.len() as f32) * 3.0
-                + (acc.relation_rank as f32) * 2.0
-                + (acc.via.len() as f32);
-            let mut linked_seed_ids: Vec<String> = acc.seeds.into_iter().collect();
-            linked_seed_ids.sort();
-            SnowballPaperHit {
-                paper: summary_to_hit(&enriched_paper, score),
-                relation_type: acc.relation_type.to_string(),
-                linked_seed_ids,
-                via: acc.via,
+        let mut acc_by_wid: HashMap<i64, AccCandidate> = HashMap::new();
+        let mut add_edge =
+            |wid: i64, rel: &str, seed_id: &str, via_text: String, weight: f32| {
+                if wid <= 0 || seed_work_ids.contains(&wid) {
+                    return;
+                }
+                let entry = acc_by_wid.entry(wid).or_insert_with(|| AccCandidate {
+                    has_cited_by: false,
+                    has_references: false,
+                    has_cocited: false,
+                    linked_seed_ids: Vec::new(),
+                    via: Vec::new(),
+                    score: 0.0,
+                });
+                match rel {
+                    "cited_by" => entry.has_cited_by = true,
+                    "references" => entry.has_references = true,
+                    _ => entry.has_cocited = true,
+                }
+                if !entry.linked_seed_ids.iter().any(|s| s == seed_id) {
+                    entry.linked_seed_ids.push(seed_id.to_string());
+                }
+                if entry.via.len() < 4 && !entry.via.iter().any(|v| v == &via_text) {
+                    entry.via.push(via_text);
+                }
+                entry.score += weight;
+            };
+
+        for seed in &seeds {
+            if seed.work_id <= 0 {
+                continue;
             }
-        })
-        .collect();
+            let short_seed_title = truncate_title(&seed.title);
 
-    Ok(CollectionCitationsOut {
-        resolved_seeds: resolved_seeds.into_iter().map(|s| s.id).collect(),
-        unresolved_seeds,
-        returned_count: items.len(),
-        items,
+            if want_cited_by {
+                let mut stmt = conn.prepare(
+                    "SELECT pc.citing_work_id
+                     FROM paper_citations pc
+                     JOIN canonical_works cw ON cw.work_id = pc.citing_work_id
+                     WHERE pc.cited_work_id = ?1 AND cw.active_in_scope = 1",
+                )?;
+                for wid_res in stmt.query_map([seed.work_id], |r| r.get::<_, i64>(0))? {
+                    add_edge(
+                        wid_res?,
+                        "cited_by",
+                        &seed.id,
+                        format!("Cites seed `{short_seed_title}`"),
+                        8.0,
+                    );
+                }
+            }
+
+            if want_refs {
+                let mut stmt = conn.prepare(
+                    "SELECT pc.cited_work_id
+                     FROM paper_citations pc
+                     JOIN canonical_works cw ON cw.work_id = pc.cited_work_id
+                     WHERE pc.citing_work_id = ?1 AND cw.active_in_scope = 1",
+                )?;
+                for wid_res in stmt.query_map([seed.work_id], |r| r.get::<_, i64>(0))? {
+                    add_edge(
+                        wid_res?,
+                        "references",
+                        &seed.id,
+                        format!("Referenced by seed `{short_seed_title}`"),
+                        7.0,
+                    );
+                }
+            }
+
+            if want_cocited {
+                let mut stmt = conn.prepare(
+                    "SELECT r2.src_work_id, COUNT(*) AS shared_cnt
+                     FROM paper_raw_refs r1
+                     JOIN paper_raw_refs r2 ON r2.ref_key = r1.ref_key AND r2.src_work_id != r1.src_work_id
+                     JOIN canonical_works cw ON cw.work_id = r2.src_work_id
+                     WHERE r1.src_work_id = ?1 AND cw.active_in_scope = 1
+                     GROUP BY r2.src_work_id
+                     ORDER BY shared_cnt DESC, r2.src_work_id ASC
+                     LIMIT 40",
+                )?;
+                let rows = stmt.query_map([seed.work_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?.max(1) as u32))
+                })?;
+                for entry in rows {
+                    let (wid, shared_cnt) = entry?;
+                    let w = 4.0 + 1.2 * (shared_cnt.min(5) as f32);
+                    add_edge(
+                        wid,
+                        "cocited",
+                        &seed.id,
+                        format!("Shares {shared_cnt} reference(s) with `{short_seed_title}`"),
+                        w,
+                    );
+                }
+            }
+        }
+
+        let candidate_wids: Vec<i64> = acc_by_wid.keys().copied().collect();
+        let summaries = load_preferred_summaries_by_work_ids(&conn, &candidate_wids)?;
+
+        let mut ranked: Vec<SnowballPaperHit> = acc_by_wid
+            .into_iter()
+            .filter_map(|(wid, acc)| {
+                let summary = summaries.get(&wid)?;
+                let relation_type = if acc.has_cited_by {
+                    "cited_by"
+                } else if acc.has_references {
+                    "references"
+                } else {
+                    "cocited"
+                }
+                .to_string();
+                let seed_bonus = ((acc.linked_seed_ids.len().saturating_sub(1)) as f32) * 5.0;
+                let cite_bonus = ((summary.citation_count as f32) + 1.0).ln() * 0.5;
+                let final_score = ((acc.score + seed_bonus + cite_bonus) * 100.0).round() / 100.0;
+                Some(SnowballPaperHit {
+                    paper: summary_to_hit(summary, final_score),
+                    relation_type,
+                    linked_seed_ids: acc.linked_seed_ids,
+                    via: acc.via,
+                })
+            })
+            .collect();
+
+        ranked.sort_by(|a, b| {
+            b.linked_seed_ids
+                .len()
+                .cmp(&a.linked_seed_ids.len())
+                .then_with(|| {
+                    b.paper
+                        .score
+                        .partial_cmp(&a.paper.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| b.paper.citation_count.cmp(&a.paper.citation_count))
+                .then_with(|| b.paper.published_at.cmp(&a.paper.published_at))
+                .then_with(|| a.paper.id.cmp(&b.paper.id))
+        });
+        ranked.truncate(limit);
+
+        Ok(CollectionCitationsOut {
+            resolved_seeds,
+            unresolved_seeds,
+            returned_count: ranked.len(),
+            items: ranked,
+        })
     })
+    .await
+    .map_err(|e| AppError::message(format!("snowball match join: {e}")))?
 }
