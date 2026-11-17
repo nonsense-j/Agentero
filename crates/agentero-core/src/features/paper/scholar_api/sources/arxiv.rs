@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::features::paper::discovery::coolpapers::decode_entities;
+use crate::features::paper::util::clean_arxiv_abstract;
 use crate::features::scholar_api::client;
 use crate::features::scholar_api::identifiers::strip_arxiv_version;
 use crate::features::scholar_api::traits::AcademicApi;
@@ -122,7 +123,9 @@ fn parse_entries(xml: &str, limit: usize) -> Vec<ApiPaper> {
             issue: None,
             pages: None,
             publisher: None,
-            abstract_text: tag_text(entry, "summary"),
+            abstract_text: tag_text(entry, "summary")
+                .map(|s| clean_arxiv_abstract(&s))
+                .filter(|s| !s.is_empty()),
             urls: PaperUrls {
                 pdf: Some(format!("https://arxiv.org/pdf/{bare}")),
                 html: Some(format!("https://arxiv.org/html/{bare}")),

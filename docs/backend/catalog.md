@@ -17,7 +17,7 @@
 本地 PDF ID 保留中文等 Unicode 字母/数字；空 slug 使用名称 SHA-256 的前 12 位，超过 60 个字符的 slug 也带稳定哈希后缀避免截断碰撞，同名本地 ID 追加后缀（原地自动入库用 Vault 相对路径短哈希，分配新目录的文件导入用编号）。无 DOI/arXiv 的本地 PDF 不仅凭 ID 去重。`list_all` / `paper_rescan` 修复旧 `id=paper` 本地条目并经 `pending_sidecars` 写回 `metadata.json`，保持路径、资源及其它元数据；先合入更新的 sidecar，再投影修复后的记录，避免再次 Rescan 恢复冲突（#937）。
 
 - 主键：论文 `path`（Vault 相对路径）
-- 字段以 `crates/agentero-core/src/features/paper/catalog/schema.rs` 为准（当前 schema v13）
+- 字段以 `crates/agentero-core/src/features/paper/catalog/schema.rs` 为准（当前 schema v14）
 - **单一模型**：`papers.rs::PaperRecord` 同时是 catalog 行、`papers/<id>/metadata.json` sidecar 投影与 IPC 出参（前端 `PaperMetadata` 只是其生成类型的派生别名）。构造走 `PaperRecord::local_pdf(id, title)`（`path` 故意为空），入库管线分配到文件夹后用 `at_path(rel)` 绑定；`upsert_conn` 归一化 `\` → `/` 并**拒绝空 `path`**，避免写出 `path = ''` 主键或把 sidecar 落到 Vault 根（#181）
 - **`date` / `year`**：发表时间以 `date`（TEXT）为准，精度随来源——`YYYY`、`YYYY-MM` 或 `YYYY-MM-DD`（arXiv/alphaXiv/bioRxiv 给全日期；Crossref 取 `issued`→`published-online`→`published-print` 的 date-parts，PubMed 取首个 `PubDate` 的 Year/Month/Day）。`year` 是派生列，由 `date` 的前四位重算，供引用键、树标签与既有消费者使用；`paper_update_meta` 只接受 `date`，清空它同时清空 `year`
 - **字段修改事务**：`update_meta` / `set_is_read` / `set_tags` / `add_tags` / `remove_tags` 共用 `mutate_paper`，在 `BEGIN IMMEDIATE` 事务内读取当前行、应用 patch、写入并回读结果后提交。写预约先于读，既防同进程并发，也覆盖桌面与 CLI 独立连接；标签增删保留集合语义。提交后 sidecar 经持久化 pending 路径重试并保持顺序（见下文）；标题对应的 NOTES 同步仍为 best-effort。

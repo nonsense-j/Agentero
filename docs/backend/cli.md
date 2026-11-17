@@ -23,7 +23,7 @@ Headless Vault / Catalog / Wiki 接口；**不含** BYOA / paper-reader。
 | `paper` | list/get、tag list/set/add/rm、move、open、download/parse、notes fetch… |
 | `import` | 标识符入库 |
 | `discover` | 查询式发现：按关键词/分类/提交日期窗口抓 arXiv 候选，确定性词法排序（headless、无 embedding key） |
-| `collection` | 广场论文池与预置包维护：`upsert-file` / `seed-bake` / `seed-import`（与桌面端共用 XDG `collection.sqlite` Schema V2） |
+| `collection` | 广场论文池与预置包维护：`upsert-file` / `seed-bake` / `seed-import`（与桌面端共用 XDG `collection.sqlite` Schema V3） |
 | `feed` | 广场订阅源（RSS / Atom / JSON Feed）：`list` / `add` / `remove` / `refresh` / `items` / `read`；与桌面端共用 `$XDG_DATA_HOME/agentero/feeds.sqlite`，无 Vault 概念 |
 | `export` | 导出 |
 | `doctor` | Vault 结构与 Catalog 诊断；含 wikilink 检查与 aliases / 视觉批注 / catalog 去重修复 |
@@ -250,7 +250,7 @@ agentero feed remove <sub-id> -y --json
 
 ## 广场论文池与预置包（`collection`）
 
-`collection *` 是广场 `Paper Collection`（`$XDG_DATA_HOME/agentero/collection.sqlite` Schema V2）的无头写入、图谱烘焙与分片预置包导入/导出接口，供维护者发布 `collection-seed-2026` 预置包以及离线导入使用（不依赖 Vault）。CLI 与发布脚本均会自动读取桌面端 `settings.json` 中的 `networkProxyEnabled` + `networkProxyUrl`（自动附带 `127.0.0.1,localhost` 直连绕过）及 `openAlexKey`。
+`collection *` 是广场 `Paper Collection`（`$XDG_DATA_HOME/agentero/collection.sqlite` Schema V3）的无头写入、图谱烘焙与分片预置包导入/导出接口，供维护者发布 `collection-seed-2026` 预置包以及离线导入使用（不依赖 Vault）。CLI 与发布脚本均会自动读取桌面端 `settings.json` 中的 `networkProxyEnabled` + `networkProxyUrl`（自动附带 `127.0.0.1,localhost` 直连绕过）及 `openAlexKey`。
 
 ```bash
 # 1. 一键抓取 28 个 2026 Venue + arXiv 分区、烘焙引用出边与 LLM 关键词并生成 dist/seed/ 预置包

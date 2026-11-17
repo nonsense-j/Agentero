@@ -7,6 +7,7 @@ use std::path::Path;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::AppError;
+use crate::features::paper::util::clean_arxiv_abstract;
 
 use super::keywords::{canonicalize_keywords, normalize_keyword_key, union_canonical_keywords};
 use super::models::{
@@ -343,8 +344,10 @@ pub(crate) fn is_placeholder_abstract(abstract_text: &str, venue_label: Option<&
 }
 
 pub(crate) fn choose_better_abstract(existing: &str, incoming: &str, source_label: &str) -> String {
-    let ex_trim = existing.trim();
-    let in_trim = incoming.trim();
+    let ex_clean = clean_arxiv_abstract(existing);
+    let in_clean = clean_arxiv_abstract(incoming);
+    let ex_trim = ex_clean.trim();
+    let in_trim = in_clean.trim();
     if in_trim.is_empty() {
         return ex_trim.to_string();
     }
@@ -1871,6 +1874,7 @@ pub(crate) fn upsert_single_paper_tx(
         )?;
     } else {
         let published_ymd: String = in_pub.chars().take(10).collect();
+        let abstract_text = clean_arxiv_abstract(&input.abstract_text);
         let arxiv_id = clean_opt_str(input.arxiv_id.clone());
         let doi = clean_opt_str(input.doi.clone());
         let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
@@ -1917,7 +1921,7 @@ pub(crate) fn upsert_single_paper_tx(
             id,
             in_title,
             authors_json,
-            input.abstract_text.trim(),
+            abstract_text,
             in_pub,
             published_ymd,
             in_year,
@@ -2138,7 +2142,7 @@ pub(crate) fn patch_papers_conn(
         };
         let abstract_text = match &patch.abstract_text {
             Some(abs) => choose_better_abstract(&ex.abstract_text, abs, &ex.source_label),
-            None => ex.abstract_text,
+            None => clean_arxiv_abstract(&ex.abstract_text),
         };
         let published_at = patch
             .published_at

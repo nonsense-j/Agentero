@@ -234,6 +234,11 @@ pub async fn paper_commit(
         meta.added_at = now.clone();
         meta.updated_at = now;
     }
+    meta.abstract_text = meta
+        .abstract_text
+        .as_deref()
+        .map(crate::features::paper::util::clean_arxiv_abstract)
+        .filter(|s| !s.is_empty());
     if meta
         .abstract_text
         .as_deref()
@@ -243,7 +248,10 @@ pub async fn paper_commit(
             if let Some(abs) =
                 crate::features::import::download::fetch_publisher_abstract_fallback(doi).await
             {
-                meta.abstract_text = Some(abs);
+                let cleaned = crate::features::paper::util::clean_arxiv_abstract(&abs);
+                if !cleaned.is_empty() {
+                    meta.abstract_text = Some(cleaned);
+                }
             }
         }
     }

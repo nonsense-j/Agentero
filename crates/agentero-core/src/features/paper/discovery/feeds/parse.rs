@@ -1,6 +1,7 @@
 //! Feed parsing, HTML autodiscovery, URL normalization, paper-id extraction.
 
 use crate::error::AppError;
+use crate::features::paper::util::clean_arxiv_abstract;
 use crate::features::scholar_api::identifiers::extract_arxiv_id;
 use feed_rs::model::{Entry, Feed};
 use feed_rs::parser;
@@ -293,7 +294,7 @@ fn find_doi(text: &str) -> Option<String> {
 /// Drop arXiv RSS boilerplate (`arXiv:…`, `Announce Type:`, `Abstract:`) so
 /// the card/detail show the actual abstract.
 pub fn clean_summary_text(input: &str) -> String {
-    let mut rest = strip_html(input);
+    let mut rest = clean_arxiv_abstract(&strip_html(input));
     loop {
         let trimmed = rest.trim();
         if trimmed.is_empty() {
@@ -578,6 +579,12 @@ mod tests {
                 "arXiv:2608.08516 Announce Type: replace Abstract: We study transformers."
             ),
             "We study transformers."
+        );
+        assert_eq!(
+            clean_summary_text(
+                "arXiv:2607.07738v3 [cs.CR]\nAnnounce Type: replace-cross\nComments: 15 pages, 8 figures\nAbstract: We study binary lifting."
+            ),
+            "We study binary lifting."
         );
     }
 

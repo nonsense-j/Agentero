@@ -776,7 +776,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("collection.sqlite");
 
-        assert_eq!(SCHEMA_VERSION, 2);
+        assert_eq!(SCHEMA_VERSION, 3);
         let initial = state_get_at(&db).unwrap();
         assert_eq!(initial.venues.len(), 28);
         assert!(initial
@@ -2119,5 +2119,88 @@ mod tests {
         assert_eq!(sync_forced.imported_papers, 2);
 
         server.abort();
+    }
+
+    #[test]
+    fn v2_to_v3_migration_and_upserts_strip_arxiv_announcement_prefixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        {
+            let conn = ensure_collection_at(&db).unwrap();
+            conn.execute_batch(
+                "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version';
+                 INSERT INTO papers (
+                    work_id, id, title, title_norm, authors_json, abstract_text, published_at,
+                    published_ymd, year, source_type, source_label, categories_json,
+                    arxiv_id, arxiv_id_norm, updated_at
+                 ) VALUES (
+                    1,
+                    'arxiv:2607.07738',
+                    'REFORGE: A Method for Benchmarking LLMs'' Reverse Engineering Capabilities in Decompiled Binary Function Naming',
+                    'reforgeamethodforbenchmarkingllmsreverseengineeringcapabilitiesindecompiledbinaryfunctionnaming',
+                    '[\"Alice Smith\"]',
+                    'arXiv:2607.07738v3 Announce Type: replace Abstract: Reverse engineering stripped binaries requires semantic reasoning.',
+                    '2026-07-15T00:00:00Z',
+                    '2026-07-15',
+                    2026,
+                    'arxiv',
+                    'cs.CR',
+                    '[\"cs.CR\"]',
+                    '2607.07738',
+                    '2607.07738',
+                    '2026-07-15T00:00:00Z'
+                 );",
+            )
+            .unwrap();
+        }
+
+        let conn = ensure_collection_at(&db).unwrap();
+        assert_eq!(
+            crate::sqlite::read_schema_version(&conn, crate::sqlite::DbMsgs::COLLECTION).unwrap(),
+            SCHEMA_VERSION
+        );
+        let detail = paper_get_at(&db, "arxiv:2607.07738").unwrap().unwrap();
+        assert_eq!(
+            detail.abstract_text,
+            "Reverse engineering stripped binaries requires semantic reasoning."
+        );
+
+        // FTS5 was also refreshed by the update trigger so searching for `Announce` no longer matches.
+        let fts_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH 'Announce'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_hits, 0);
+
+        // New upserts strip the prefix as well, even on fresh insert.
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "arxiv:2608.00001".into(),
+                    title: "Clean Upsert Check".into(),
+                    authors: vec!["Bob Jones".into()],
+                    abstract_text:
+                        "arXiv:2608.00001v2 Announce Type: replace-cross Abstract: Clean body."
+                            .into(),
+                    published_at: "2026-08-01T00:00:00Z".into(),
+                    year: 2026,
+                    source_type: "arxiv".into(),
+                    source_label: "cs.SE".into(),
+                    categories: vec!["cs.SE".into()],
+                    url: "https://arxiv.org/abs/2608.00001".into(),
+                    arxiv_id: Some("2608.00001".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let inserted = paper_get_at(&db, "arxiv:2608.00001").unwrap().unwrap();
+        assert_eq!(inserted.abstract_text, "Clean body.");
     }
 }

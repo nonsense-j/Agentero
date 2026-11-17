@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::error::AppError;
 use crate::features::catalog::papers::{hide_arxiv_category_tag, PaperKind, PaperRecord, PaperTag};
-use crate::features::paper::util::str_field;
+use crate::features::paper::util::{clean_arxiv_abstract, str_field};
 use crate::features::scholar_api::identifiers::{doi_slug, strip_arxiv_version};
 use crate::features::scholar_api::sources::translator::map_zotero_item;
 use crate::features::scholar_api::urls::{arxiv_canonical_urls, doi_landing_url};
@@ -46,7 +46,11 @@ pub fn api_paper_to_meta(paper: &ApiPaper) -> PaperRecord {
     meta.issue = paper.issue.clone();
     meta.pages = paper.pages.clone();
     meta.publisher = paper.publisher.clone();
-    meta.abstract_text = paper.abstract_text.clone();
+    meta.abstract_text = paper
+        .abstract_text
+        .as_deref()
+        .map(clean_arxiv_abstract)
+        .filter(|s| !s.is_empty());
     meta.language = paper.language.clone();
     meta.pdf_url = paper.urls.pdf.clone();
     meta.html_url = paper.urls.html.clone();
@@ -132,8 +136,13 @@ pub fn merge_api_papers(base: &ApiPaper, other: &ApiPaper) -> PaperRecord {
     if other.publisher.is_some() {
         merged.publisher = other.publisher.clone();
     }
-    if other.abstract_text.is_some() {
-        merged.abstract_text = other.abstract_text.clone();
+    if let Some(abs) = other
+        .abstract_text
+        .as_deref()
+        .map(clean_arxiv_abstract)
+        .filter(|s| !s.is_empty())
+    {
+        merged.abstract_text = Some(abs);
     }
     if other.urls.html.is_some() || other.urls.landing.is_some() {
         merged.html_url = other.urls.html.clone().or(other.urls.landing.clone());
@@ -303,7 +312,10 @@ pub fn merge_api_paper_candidates(candidates: &[ApiPaper]) -> ApiPaper {
         issue: pick_by_source(candidates, |p| &p.issue, BIBLIO_SOURCE_ORDER),
         pages: pick_by_source(candidates, |p| &p.pages, BIBLIO_SOURCE_ORDER),
         publisher: pick_by_source(candidates, |p| &p.publisher, BIBLIO_SOURCE_ORDER),
-        abstract_text: pick_by_source(candidates, |p| &p.abstract_text, ABSTRACT_SOURCE_ORDER),
+        abstract_text: pick_by_source(candidates, |p| &p.abstract_text, ABSTRACT_SOURCE_ORDER)
+            .as_deref()
+            .map(clean_arxiv_abstract)
+            .filter(|s| !s.is_empty()),
         urls: merge_urls(candidates),
         citation_count: merge_citation_count(candidates),
         language: first_language(candidates).or_else(|| base.language.clone()),

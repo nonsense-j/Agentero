@@ -11,6 +11,7 @@ use crate::error::AppError;
 use crate::features::paper::catalog::papers::{PaperKind, PaperRecord};
 use crate::features::paper::discovery::coolpapers::decode_entities;
 use crate::features::paper::import::api_mapper::{api_paper_to_meta, enrich_remote_urls};
+use crate::features::paper::util::clean_arxiv_abstract;
 use crate::features::scholar_api::client;
 use crate::features::scholar_api::identifiers::{
     clean_doi, doi_slug, extract_arxiv_id, fetch_direct_fallback, strip_arxiv_version,
@@ -376,6 +377,8 @@ pub(crate) fn record_from_html(page_url: &str, html: &str) -> PaperRecord {
             "description",
             "twitter:description",
         ])
+        .map(clean_arxiv_abstract)
+        .filter(|text| !text.is_empty())
         .map(|text| text.chars().take(4000).collect::<String>());
     let publication = meta
         .first(&["citation_journal_title", "citation_conference_title"])

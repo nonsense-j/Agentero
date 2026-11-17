@@ -224,6 +224,132 @@ pub fn same_work_by_title_and_authors(
         .all(|(x, y)| author_pair_compatible(x, y))
 }
 
+fn strip_prefix_ascii_ci<'a>(orig: &'a str, prefix: &str) -> Option<&'a str> {
+    if orig
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    {
+        Some(&orig[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn strip_announce_type_prefix(orig: &str) -> Option<&str> {
+    let rest = strip_prefix_ascii_ci(orig, "announce")?;
+    let ws = rest
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(rest.len());
+    if ws == 0 {
+        return None;
+    }
+    strip_prefix_ascii_ci(&rest[ws..], "type:")
+}
+
+fn find_header_abstract(s: &str) -> Option<&str> {
+    const MAX_HEADER_BYTES: usize = 600;
+    // `to_ascii_lowercase` maps ASCII 1:1 and leaves UTF-8 multibyte sequences
+    // untouched, so byte offsets match `s` directly.
+    let lower = s.to_ascii_lowercase();
+    for (idx, _) in lower.match_indices("abstract:") {
+        if idx > MAX_HEADER_BYTES {
+            break;
+        }
+        if idx == 0
+            || s[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            return Some(s[idx + "abstract:".len()..].trim_start());
+        }
+    }
+    None
+}
+
+/// Strip arXiv RSS / announcement boilerplate prefixes (e.g.
+/// `arXiv:2607.07738v3 Announce Type: replace Abstract: ...`) while leaving
+/// genuine abstract prose untouched.
+pub(crate) fn clean_arxiv_abstract(raw: &str) -> String {
+    const HEADER_LABELS: &[&str] = &[
+        "comments:",
+        "subjects:",
+        "journal-ref:",
+        "report-no:",
+        "license:",
+        "doi:",
+        "acm-class:",
+        "msc-class:",
+        "version:",
+    ];
+
+    let mut rest = raw.trim();
+    loop {
+        if rest.is_empty() {
+            return String::new();
+        }
+        if let Some(after_label) = strip_prefix_ascii_ci(rest, "arxiv:") {
+            let after_label = after_label.trim_start();
+            if let Some(id_end) = after_label.find(char::is_whitespace) {
+                if id_end > 0 {
+                    let mut after_id = after_label[id_end..].trim_start();
+                    if let Some(bracket_rest) = after_id.strip_prefix('[') {
+                        if let Some(close) = bracket_rest.find(']') {
+                            if close < 40 && !bracket_rest[..close].contains('\n') {
+                                after_id = bracket_rest[close + 1..].trim_start();
+                            }
+                        }
+                    }
+                    if let Some(after_type) = strip_announce_type_prefix(after_id) {
+                        if let Some(body) = find_header_abstract(after_id) {
+                            rest = body;
+                            continue;
+                        }
+                        let after_type = after_type.trim_start();
+                        let skip = after_type
+                            .find(char::is_whitespace)
+                            .unwrap_or(after_type.len());
+                        rest = after_type[skip..].trim_start();
+                        continue;
+                    }
+                    if let Some(after_abs) = strip_prefix_ascii_ci(after_id, "abstract:") {
+                        rest = after_abs.trim_start();
+                        continue;
+                    }
+                    if HEADER_LABELS
+                        .iter()
+                        .any(|label| strip_prefix_ascii_ci(after_id, label).is_some())
+                    {
+                        if let Some(body) = find_header_abstract(after_id) {
+                            rest = body;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(after_type) = strip_announce_type_prefix(rest) {
+            if let Some(body) = find_header_abstract(after_type) {
+                rest = body;
+                continue;
+            }
+            let after_type = after_type.trim_start();
+            let skip = after_type
+                .find(char::is_whitespace)
+                .unwrap_or(after_type.len());
+            rest = after_type[skip..].trim_start();
+            continue;
+        }
+        if let Some(after_abs) = strip_prefix_ascii_ci(rest, "abstract:") {
+            rest = after_abs.trim_start();
+            continue;
+        }
+        break;
+    }
+    rest.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +414,57 @@ mod tests {
             "Untitled Stub",
             &[],
         ));
+    }
+
+    #[test]
+    fn cleans_arxiv_announcement_prefixes_without_touching_prose() {
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:2607.07738v3 Announce Type: replace Abstract: Reverse engineering stripped binaries."
+            ),
+            "Reverse engineering stripped binaries."
+        );
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:2607.07738v3\nAnnounce Type: replace-cross \nAbstract: Reverse engineering stripped binaries."
+            ),
+            "Reverse engineering stripped binaries."
+        );
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:2607.07738v3 [cs.CR] Announce Type: replace Comments: 15 pages, 8 figures Abstract: Reverse engineering stripped binaries."
+            ),
+            "Reverse engineering stripped binaries."
+        );
+        assert_eq!(
+            clean_arxiv_abstract("Announce Type: replace Abstract: We study binary lifting."),
+            "We study binary lifting."
+        );
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:2607.07738v3 Announce Type: replace We study binary lifting."
+            ),
+            "We study binary lifting."
+        );
+        assert_eq!(
+            clean_arxiv_abstract("Abstract: We study abstract: interpretation."),
+            "We study abstract: interpretation."
+        );
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:2607.07738v3 Announce Type: replace Abstract: We study abstract: interpretation."
+            ),
+            "We study abstract: interpretation."
+        );
+        assert_eq!(
+            clean_arxiv_abstract("Abstract interpretation is a general theory of approximation."),
+            "Abstract interpretation is a general theory of approximation."
+        );
+        assert_eq!(
+            clean_arxiv_abstract(
+                "arXiv:1706.03762 introduced transformers, which we extend with a novel abstract: mechanism."
+            ),
+            "arXiv:1706.03762 introduced transformers, which we extend with a novel abstract: mechanism."
+        );
     }
 }

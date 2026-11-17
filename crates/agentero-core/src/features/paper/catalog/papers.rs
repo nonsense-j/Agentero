@@ -3,6 +3,7 @@
 use super::schema::with_catalog;
 use crate::error::AppError;
 use crate::features::paper::identity::is_paper_marker_file;
+use crate::features::paper::util::clean_arxiv_abstract;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -1866,6 +1867,11 @@ fn upsert_conn_impl(
     if let Some(fixed) = crate::time::normalize_rfc3339_millis(&r.added_at) {
         r.added_at = fixed;
     }
+    r.abstract_text = r
+        .abstract_text
+        .as_deref()
+        .map(clean_arxiv_abstract)
+        .filter(|s| !s.is_empty());
     let authors_json =
         serde_json::to_string(&r.authors).map_err(|e| AppError::message(e.to_string()))?;
     let tags_json = serde_json::to_string(&r.tags).map_err(|e| AppError::message(e.to_string()))?;

@@ -9,7 +9,7 @@ use crate::error::AppError;
 use crate::paths;
 use crate::sqlite::{DbMsgs, MigrationStep};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 pub const DEFAULT_ARXIV_CATEGORIES_JSON: &str = r#"["cs.SE","cs.CR","cs.PL"]"#;
 pub const DEFAULT_WORD_CLOUD_TOP_N: usize = 50;
@@ -482,9 +482,10 @@ CREATE TABLE IF NOT EXISTS paper_citations (
 CREATE INDEX IF NOT EXISTS idx_paper_citations_cited ON paper_citations(cited_work_id);
 "#;
 
-const MIGRATION_STEPS: [MigrationStep; 2] = [
+const MIGRATION_STEPS: [MigrationStep; 3] = [
     MigrationStep::custom(1, init_v1),
     MigrationStep::custom(2, migrate_v2),
+    MigrationStep::custom(3, migrate_v3),
 ];
 
 fn init_v1(conn: &Connection) -> Result<(), AppError> {
@@ -507,6 +508,36 @@ fn migrate_v2(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(DDL_V2_TABLES)
         .map_err(|e| AppError::message(format!("collection migrate v2 ddl: {e}")))?;
     super::store::migrate_v1_rows_to_v2(conn)?;
+    Ok(())
+}
+
+/// v3: strip persisted arXiv RSS announcement prefixes (`arXiv:... Announce Type: ... Abstract: ...`)
+/// from existing `papers.abstract_text` rows; `papers_fts_au` updates FTS5 automatically.
+fn migrate_v3(conn: &Connection) -> Result<(), AppError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::message(format!("collection migrate v3 tx: {e}")))?;
+    let candidates: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT row_id, abstract_text FROM papers
+             WHERE LTRIM(abstract_text, ' ' || char(9) || char(10) || char(13)) LIKE 'arXiv:%'
+                OR LTRIM(abstract_text, ' ' || char(9) || char(10) || char(13)) LIKE 'Announce%Type:%'
+                OR LTRIM(abstract_text, ' ' || char(9) || char(10) || char(13)) LIKE 'Abstract:%'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !candidates.is_empty() {
+        let mut update = tx.prepare("UPDATE papers SET abstract_text = ?1 WHERE row_id = ?2")?;
+        for (row_id, raw) in candidates {
+            let cleaned = crate::features::paper::util::clean_arxiv_abstract(&raw);
+            if cleaned != raw {
+                update.execute(params![cleaned, row_id])?;
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| AppError::message(format!("collection migrate v3 commit: {e}")))?;
     Ok(())
 }
 

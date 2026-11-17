@@ -17,6 +17,8 @@
 //! - v12: durable pending metadata sidecar paths
 //! - v13: `code_repo_manual` — set when Edit Metadata writes `code_repo`, so a
 //!   cleared value is not filled again from the PDF
+//! - v14: data migration — strip persisted arXiv RSS announcement prefixes from
+//!   `papers.abstract`
 
 use crate::error::AppError;
 use crate::sqlite::MigrationStep;
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Current catalog schema version written to `schema_meta`.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 const DDL_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -311,7 +313,7 @@ pub fn with_catalog<T>(
 
 /// Migration ladder, applied by [`crate::sqlite::run_migrations`] (per-step
 /// version re-read, stamping, `newer than app` guard).
-const MIGRATION_STEPS: [MigrationStep; 13] = [
+const MIGRATION_STEPS: [MigrationStep; 14] = [
     MigrationStep::batch(1, DDL_V1),
     // SQLite ADD COLUMN is not fully batch-safe across existing cols; the
     // v2–v4 entries run one-by-one and ignore duplicate-column errors.
@@ -327,6 +329,7 @@ const MIGRATION_STEPS: [MigrationStep; 13] = [
     MigrationStep::script_tolerant(11, MIGRATE_V10_TO_V11),
     MigrationStep::batch(12, MIGRATE_V11_TO_V12),
     MigrationStep::script_tolerant(13, MIGRATE_V12_TO_V13),
+    MigrationStep::custom(14, migrate_v14),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), AppError> {
@@ -354,6 +357,47 @@ fn migrate_v7(conn: &Connection) -> Result<(), AppError> {
         .map_err(|e| AppError::message(format!("catalog migrate v7 rec state: {e}")))?;
     tx.commit()
         .map_err(|e| AppError::message(format!("catalog migrate v7 commit: {e}")))?;
+    Ok(())
+}
+
+/// v14: strip persisted arXiv RSS announcement prefixes from `papers.abstract`.
+/// Updating `papers` fires `paper_sidecar_update` so `metadata.json` catches up too.
+fn migrate_v14(conn: &Connection) -> Result<(), AppError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::message(format!("catalog migrate v14 tx: {e}")))?;
+    let candidates: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT path, abstract FROM papers
+                 WHERE abstract IS NOT NULL
+                   AND (LTRIM(abstract, ' ' || char(9) || char(10) || char(13)) LIKE 'arXiv:%'
+                        OR LTRIM(abstract, ' ' || char(9) || char(10) || char(13)) LIKE 'Announce%Type:%'
+                        OR LTRIM(abstract, ' ' || char(9) || char(10) || char(13)) LIKE 'Abstract:%')",
+            )
+            .map_err(|e| AppError::message(format!("catalog migrate v14 prepare: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| AppError::message(format!("catalog migrate v14 query: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::message(format!("catalog migrate v14 collect: {e}")))?
+    };
+    if !candidates.is_empty() {
+        let mut update = tx
+            .prepare("UPDATE papers SET abstract = ?1 WHERE path = ?2")
+            .map_err(|e| AppError::message(format!("catalog migrate v14 update: {e}")))?;
+        for (path, raw) in candidates {
+            let cleaned = crate::features::paper::util::clean_arxiv_abstract(&raw);
+            if cleaned != raw {
+                let next = (!cleaned.is_empty()).then_some(cleaned);
+                update
+                    .execute(rusqlite::params![next, path])
+                    .map_err(|e| AppError::message(format!("catalog migrate v14 exec: {e}")))?;
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| AppError::message(format!("catalog migrate v14 commit: {e}")))?;
     Ok(())
 }
 
@@ -740,6 +784,64 @@ mod tests {
             "2026-08-21T10:00:00.000Z"
         );
         assert_eq!(get("papers/garbage", "updated_at"), "also not a date");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_v14_strips_arxiv_announcement_prefixes() {
+        let dir = env::temp_dir().join(format!(
+            "agentero-catalog-v14-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        {
+            let conn = ensure_catalog(&dir).expect("ensure");
+            conn.execute_batch(
+                "INSERT INTO papers (path, id, type, title, abstract, added_at, updated_at) VALUES
+                 ('papers/reforge', '2607.07738', 'arxiv', 'REFORGE',
+                  'arXiv:2607.07738v3 Announce Type: replace Abstract: Reverse engineering stripped binaries.',
+                  '2026-07-15T00:00:00.000Z', '2026-07-15T00:00:00.000Z'),
+                 ('papers/clean', '1706.03762', 'arxiv', 'Attention',
+                  'The dominant sequence transduction models.',
+                  '2026-07-15T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
+                 UPDATE schema_meta SET value = '13' WHERE key = 'schema_version';",
+            )
+            .unwrap();
+        }
+
+        evict_catalog_conn(&dir);
+        let conn = ensure_catalog(&dir).expect("migrate v13 to v14");
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let reforge_abs: Option<String> = conn
+            .query_row(
+                "SELECT abstract FROM papers WHERE path = 'papers/reforge'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            reforge_abs.as_deref(),
+            Some("Reverse engineering stripped binaries.")
+        );
+
+        let clean_abs: Option<String> = conn
+            .query_row(
+                "SELECT abstract FROM papers WHERE path = 'papers/clean'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            clean_abs.as_deref(),
+            Some("The dominant sequence transduction models.")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
