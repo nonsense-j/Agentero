@@ -621,4 +621,64 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 			resetCollectionMemoryForTests();
 		}
 	});
+
+	it("configures updated 2026 official track URLs, MiniConf slugs, and required roster modes", () => {
+		const specMap = new Map(VENUE_SPECS.map((s) => [s.id, s]));
+
+		expect(specMap.get("issta-2026")?.tracks).toEqual([
+			"https://conf.researchr.org/track/issta-2026/issta-2026-research-papers",
+		]);
+		expect(specMap.get("ecoop-2026")?.tracks).toEqual([
+			"https://2026.ecoop.org/track/ecoop-2026-technical-papers",
+		]);
+		expect(specMap.get("sp-2026")?.tracks).toEqual([
+			"https://sp2026.ieee-security.org/accepted-papers.html",
+		]);
+		expect(specMap.get("sp-2026")?.trackRosterMode).toBe("fallback");
+
+		expect(specMap.get("sas-2026")?.tracks).toEqual([
+			"https://2026.splashcon.org/track/sas-2026-papers",
+		]);
+		expect(specMap.get("sas-2026")?.trackRosterMode).toBe("required");
+
+		expect(specMap.get("ccs-2026")?.tracks).toEqual([
+			"https://www.sigsac.org/ccs/CCS2026/program/schedule.html",
+		]);
+		expect(specMap.get("ccs-2026")?.trackRosterMode).toBe("required");
+
+		expect(specMap.get("ndss-2026")?.tracks).toEqual([
+			"https://www.ndss-symposium.org/ndss2026/accepted-papers/",
+		]);
+		expect(specMap.get("ndss-2026")?.trackRosterMode).toBe("required");
+		expect(specMap.get("ndss-2026")?.openAlexSourceIds).toEqual([
+			"S4306420590",
+		]);
+
+		expect(specMap.get("acl-2026")?.tracks).toEqual([
+			"https://2026.aclweb.org/program/accepted_papers/",
+			"https://aclanthology.org/volumes/2026.acl-long/",
+			"https://aclanthology.org/volumes/2026.acl-short/",
+		]);
+
+		const neuripsSpec = specMap.get("neurips-2026");
+		expect(neuripsSpec?.miniConfSlug).toBe("neurips");
+		expect(neuripsSpec?.includeDatasetsBenchmarks).toBe(true);
+		expect(neuripsSpec?.tracks).toEqual([
+			"https://neurips.cc/virtual/2026/papers.html",
+		]);
+
+		const iclrSpec = specMap.get("iclr-2026");
+		expect(iclrSpec?.miniConfSlug).toBe("iclr");
+		expect(iclrSpec?.includeDatasetsBenchmarks).toBeFalsy();
+		expect(iclrSpec?.tracks).toEqual([
+			"https://iclr.cc/virtual/2026/papers.html",
+		]);
+
+		const icmlSpec = specMap.get("icml-2026");
+		expect(icmlSpec?.miniConfSlug).toBe("icml");
+		expect(icmlSpec?.includeDatasetsBenchmarks).toBeFalsy();
+		expect(icmlSpec?.tracks).toEqual([
+			"https://icml.cc/virtual/2026/papers.html",
+		]);
+	});
 });

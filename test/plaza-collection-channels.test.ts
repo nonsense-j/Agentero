@@ -58,12 +58,27 @@ import {
 	VENUE_SPECS,
 } from "@/lib/plaza/collection";
 import {
+	crossrefWorkToVenueItem,
+	enrichVenueItemsBatch,
 	extractArxivDoiFromAtomEntry,
+	isArtifactOrDatasetDoi,
+	isNonMainTrackPrefixedTitle,
+	isWorkshopOrCompanionVenue,
 	mergeKeywordMetadata,
 	normalizeOpenAlexId,
 	normalizeRawRefs,
 	OPENALEX_SELECT,
+	openAlexWorkToVenueItem,
+	semanticScholarWorkToVenueItem,
 } from "@/lib/plaza/collection-enrichment";
+import {
+	backfillMissingMetadataFromChannel,
+	fetchAclAnthologyVenuePapers,
+	fetchMiniConfVenuePapers,
+	parseAclAnthologyVolumeHtml,
+	parseResearchrHtml,
+	parseUsenixPresentationHtml,
+} from "@/lib/plaza/collection-venue-channels";
 import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
 
 vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
@@ -1721,8 +1736,24 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"Optimal Transport for Diffusion Samplers",
 		]);
 
-		// 3. SAS 2026 with 21 LNCS papers must NOT trigger `< 25` arXiv fallback noise
+		// 3. SAS 2026 uses required Researchr #event-overview roster intersected with LNCS (<25 papers must NOT trigger arXiv fallback) and drops frontmatter
 		let arxivFallbackCalled = false;
+		const sasResearchrHtml = `
+			<div id="event-overview">
+				<table>
+					${Array.from(
+						{ length: 21 },
+						(_, idx) => `
+						<tr>
+							<td>10:00</td>
+							<td>
+								<a class="publication-link" href="https://2026.splashcon.org/details/sas-2026-papers/${idx + 1}/paper">Relational Static Analysis Chapter ${idx + 1}</a>
+								<div class="performers"><a href="/profile/author${idx + 1}">Author ${idx + 1}</a></div>
+							</td>
+						</tr>`,
+					).join("\n")}
+				</table>
+			</div>`;
 		const sasBundle = await fetchMultiChannelVenuePapers(
 			sas,
 			2026,
@@ -1730,15 +1761,25 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				if (url.includes("api.crossref.org/works")) {
 					return {
 						message: {
-							items: Array.from({ length: 21 }, (_, idx) => ({
-								DOI: `10.1007/978-3-032-40374-2_${idx + 1}`,
-								type: "book-chapter",
-								title: [`Relational Static Analysis Chapter ${idx + 1}`],
-								abstract: `<jats:p>Sound abstract interpretation technique ${idx + 1}.</jats:p>`,
-								"container-title": ["Static Analysis"],
-								author: [{ given: "Author", family: `${idx + 1}` }],
-								published: { "date-parts": [[2026, 10, 1]] },
-							})),
+							items: [
+								{
+									DOI: "10.1007/978-3-032-40374-2",
+									type: "book-chapter",
+									title: ["Front Matter"],
+									"container-title": ["Static Analysis"],
+									author: [{ given: "Editor", family: "Name" }],
+									published: { "date-parts": [[2026, 10, 1]] },
+								},
+								...Array.from({ length: 21 }, (_, idx) => ({
+									DOI: `10.1007/978-3-032-40374-2_${idx + 1}`,
+									type: "book-chapter",
+									title: [`Relational Static Analysis Chapter ${idx + 1}`],
+									abstract: `<jats:p>Sound abstract interpretation technique ${idx + 1}.</jats:p>`,
+									"container-title": ["Static Analysis"],
+									author: [{ given: "Author", family: `${idx + 1}` }],
+									published: { "date-parts": [[2026, 10, 1]] },
+								})),
+							],
 						},
 					} as T;
 				}
@@ -1748,11 +1789,27 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				if (url.includes("export.arxiv.org")) {
 					arxivFallbackCalled = true;
 				}
+				if (url.includes("sas-2026-papers")) {
+					return sasResearchrHtml;
+				}
 				return "";
 			},
 		);
 		expect(sasBundle.items).toHaveLength(21);
+		expect(
+			sasBundle.items.some((p) =>
+				p.title.toLowerCase().includes("front matter"),
+			),
+		).toBe(false);
 		expect(arxivFallbackCalled).toBe(false);
+		await expect(
+			fetchMultiChannelVenuePapers(
+				sas,
+				2026,
+				async <T>() => ({ results: [] }) as T,
+				async () => "",
+			),
+		).rejects.toThrow(/Authoritative main-track roster returned 0 papers/);
 
 		// 4. NeurIPS 2026 drops 2024/2025 `10.52202/079017|085713` spillover & position papers
 		const neuripsStructured = await fetchVenueStructuredPapers(
@@ -3069,5 +3126,840 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			setCachedKeywordLlmConfigForTests(undefined);
 			ipc.restore();
 		}
+	});
+
+	it("blocks Zenodo/artifact DOIs, non-article OpenAlex types, and POSTER/DEMO titles across all enrichment paths", async () => {
+		const issre = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "issre-2026");
+		if (!issre) throw new Error("Missing issre-2026");
+		const issreSpec = VENUE_SPEC_BY_ID.get("issre-2026");
+
+		// 1. Artifact/dataset DOI prefixes + non-main-track title prefixes
+		for (const badDoi of [
+			"https://doi.org/10.5281/ZENODO.21868420",
+			"10.6084/m9.figshare.12345",
+			"10.6084/figshare.99887",
+			"10.17605/OSF.IO/ABCDE",
+			"10.24433/co.1234567.v1",
+			"10.7910/DVN/XYZ",
+			"10.5061/dryad.abc123",
+			"10.4121/uuid-123",
+			"10.13140/RG.2.2.12345",
+		]) {
+			expect(isArtifactOrDatasetDoi(badDoi)).toBe(true);
+		}
+		expect(isArtifactOrDatasetDoi("10.1109/ISSRE.2026.00012")).toBe(false);
+		expect(isArtifactOrDatasetDoi("10.18653/v1/2026.acl-long.1")).toBe(false);
+
+		expect(isNonMainTrackPrefixedTitle("POSTER: Dynamic Binary Lifting")).toBe(
+			true,
+		);
+		expect(isNonMainTrackPrefixedTitle("DEMO: Live Fuzzing Dashboard")).toBe(
+			true,
+		);
+		expect(
+			isNonMainTrackPrefixedTitle("WORKSHOP: Security of Autonomous Agents"),
+		).toBe(true);
+		expect(
+			isNonMainTrackPrefixedTitle("TUTORIAL: Abstract Interpretation"),
+		).toBe(true);
+		expect(isNonMainTrackPrefixedTitle("DOCTORAL: Verified Compilers")).toBe(
+			true,
+		);
+		expect(
+			isNonMainTrackPrefixedTitle("POSTER: Sound Static Analysis for Rust"),
+		).toBe(true);
+		expect(
+			isNonMainTrackPrefixedTitle(
+				"Bridging the Granularity Gap in Log Anomaly Detection",
+			),
+		).toBe(false);
+
+		// 2. Direct row converters reject Zenodo DOIs & dataset/software/paratext/erratum OpenAlex types
+		expect(
+			openAlexWorkToVenueItem(
+				{
+					id: "https://openalex.org/W_zenodo",
+					type: "dataset",
+					title: "Bridging the Granularity Gap in Log Anomaly Detection",
+					doi: "https://doi.org/10.5281/zenodo.21868420",
+					abstract_inverted_index: {
+						Replication: [0],
+						artifact: [1],
+						zip: [2],
+					},
+					authorships: [{ author: { display_name: "Alice Doe" } }],
+				},
+				issre,
+				issreSpec,
+				2026,
+			),
+		).toBeNull();
+		for (const rejectedType of ["dataset", "software", "paratext", "erratum"]) {
+			expect(
+				openAlexWorkToVenueItem(
+					{
+						id: `https://openalex.org/W_${rejectedType}`,
+						type: rejectedType,
+						title: "Valid Looking Paper Title",
+						doi: "https://doi.org/10.1109/ISSRE.2026.1",
+						authorships: [{ author: { display_name: "Alice Doe" } }],
+					},
+					issre,
+					issreSpec,
+					2026,
+				),
+			).toBeNull();
+		}
+		expect(
+			crossrefWorkToVenueItem(
+				{
+					DOI: "10.5281/zenodo.21868420",
+					type: "dataset",
+					title: ["Bridging the Granularity Gap Replication Package"],
+					author: [{ given: "Alice", family: "Doe" }],
+				},
+				issre,
+				issreSpec,
+				2026,
+			),
+		).toBeNull();
+		expect(
+			semanticScholarWorkToVenueItem(
+				{
+					paperId: "s2zenodo",
+					title: "Bridging the Granularity Gap",
+					externalIds: { DOI: "10.5281/zenodo.21868420" },
+					authors: [{ name: "Alice Doe" }],
+				},
+				issre,
+				issreSpec,
+				2026,
+			),
+		).toBeNull();
+
+		// 3. enrichVenueItemsBatch (preloaded + title.search), backfillMissingMetadataFromChannel, and enrichSinglePaperOnDemand
+		// must NEVER adopt Zenodo DOIs or overwrite ISSRE abstract when only a Zenodo artifact exists
+		const issrePaper: CollectionPaperItem = {
+			id: "venue:issre-2026:bridging",
+			title: "Bridging the Granularity Gap in Log Anomaly Detection",
+			authors: ["Alice Doe", "Bob Roe"],
+			abstract: "",
+			publishedAt: "2026-01-01T00:00:00Z",
+			year: 2026,
+			sourceType: "venue",
+			sourceLabel: issre.name,
+			categories: [issre.name],
+			url: "https://issre.github.io/2026/program/papers/",
+			venueId: issre.id,
+			venueKind: "conference",
+			venueDomain: "PL/SE",
+			ccfRank: "CCF-B",
+			venueFull: issre.name,
+		};
+		const poisonedZenodoItem: CollectionPaperItem = {
+			...issrePaper,
+			id: "venue:issre-2026:doi:10.5281/zenodo.21868420",
+			doi: "10.5281/zenodo.21868420",
+			abstract: "Zenodo artifact README contents that must not leak.",
+			url: "https://zenodo.org/records/21868420",
+		};
+
+		const enrichedIssre = await enrichVenueItemsBatch(
+			[issrePaper],
+			issre,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						results: [
+							{
+								id: "https://openalex.org/W_zenodo_21868420",
+								type: "dataset",
+								title: "Bridging the Granularity Gap in Log Anomaly Detection",
+								doi: "https://doi.org/10.5281/zenodo.21868420",
+								publication_year: 2026,
+								abstract_inverted_index: {
+									Zenodo: [0],
+									artifact: [1],
+									repository: [2],
+								},
+								authorships: [
+									{ author: { display_name: "Alice Doe" } },
+									{ author: { display_name: "Bob Roe" } },
+								],
+							},
+						],
+					} as T;
+				}
+				return { results: [], data: [] } as T;
+			},
+			[poisonedZenodoItem],
+		);
+		expect(enrichedIssre[0]?.doi).toBeUndefined();
+		expect(enrichedIssre[0]?.abstract).toBe("");
+
+		const backfilled = backfillMissingMetadataFromChannel(
+			[issrePaper],
+			[poisonedZenodoItem],
+		);
+		expect(backfilled[0]?.doi).toBeUndefined();
+		expect(backfilled[0]?.abstract).toBe("");
+
+		const onDemand = await enrichSinglePaperOnDemand(
+			issrePaper,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						results: [
+							{
+								id: "https://openalex.org/W_zenodo_single",
+								type: "article",
+								title: "Bridging the Granularity Gap in Log Anomaly Detection",
+								doi: "https://doi.org/10.5281/zenodo.21868420",
+								publication_year: 2026,
+								abstract_inverted_index: { Fake: [0], zenodo: [1], text: [2] },
+								authorships: [{ author: { display_name: "Alice Doe" } }],
+							},
+						],
+					} as T;
+				}
+				if (url.includes("api.semanticscholar.org")) {
+					return {
+						data: [
+							{
+								paperId: "s2zen",
+								title: "Bridging the Granularity Gap in Log Anomaly Detection",
+								abstract: "Zenodo replication package in S2.",
+								externalIds: { DOI: "10.5281/zenodo.21868420" },
+								authors: [{ name: "Alice Doe" }],
+							},
+						],
+					} as T;
+				}
+				return {} as T;
+			},
+		);
+		expect(onDemand.doi).toBeUndefined();
+		expect(onDemand.abstract).toBe("");
+	});
+
+	it("parses MiniConf Virtual JSON for NeurIPS/ICLR/ICML with NeurIPS-only Datasets & Benchmarks and graceful papers.cool fallback", async () => {
+		const neurips = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "neurips-2026",
+		);
+		const iclr = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "iclr-2026");
+		if (!neurips || !iclr) throw new Error("Missing MiniConf test venues");
+
+		// Datasets & Benchmarks allowed ONLY when explicitly permitted by spec
+		expect(isWorkshopOrCompanionVenue("NeurIPS Datasets and Benchmarks")).toBe(
+			true,
+		);
+		expect(
+			isWorkshopOrCompanionVenue(
+				"NeurIPS.cc/2026/Evaluations_and_Datasets_Track",
+			),
+		).toBe(true);
+		expect(
+			isWorkshopOrCompanionVenue(
+				"NeurIPS.cc/2026/Evaluations_and_Datasets_Track",
+				{
+					allowDatasetsBenchmarks: true,
+				},
+			),
+		).toBe(false);
+		expect(
+			isWorkshopOrCompanionVenue("NeurIPS Datasets and Benchmarks", {
+				allowDatasetsBenchmarks: true,
+			}),
+		).toBe(false);
+		for (const rejected of [
+			"NeurIPS.cc/2026/Position_Paper_Track",
+			"NeurIPS.cc/2026/BlogPosts",
+			"journal-track/NeurIPS_2026-Posters_TMLR.xlsx",
+			"JMLR 2026",
+			"AoS",
+			"bridging-the-future",
+			"ICLR 2026 Workshop",
+		]) {
+			expect(
+				isWorkshopOrCompanionVenue(rejected.replace(/[_/.-]+/g, " "), {
+					allowDatasetsBenchmarks: true,
+				}),
+			).toBe(true);
+		}
+
+		const mockMiniConfJson = async <T>(url: string): Promise<T> => {
+			if (url.includes("neurips-2026-orals-posters.json")) {
+				return {
+					count: 8,
+					results: [
+						{
+							id: 101,
+							uid: "or-101",
+							name: "Main Track&#x27;s Oral Paper",
+							authors: [
+								{ fullname: "Ada Lovelace" },
+								{ fullname: "Alan Turing" },
+							],
+							keywords: ["scaling", "transformers"],
+							decision: "Accept (oral)",
+							eventtype: "Oral",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/Conference",
+							paper_url: "",
+							url: "https://openreview.net/forum?id=MainOral123",
+							paper_pdf_url: null,
+						},
+						{
+							id: 102,
+							uid: "or-102",
+							name: "Unified Multimodal Benchmark Suite",
+							authors: [{ fullname: "Grace Hopper" }],
+							decision: "Accept (poster)",
+							eventtype: "Poster",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/Evaluations_and_Datasets_Track",
+							paper_url: "https://openreview.net/forum?id=DbTrack456",
+						},
+						{
+							id: 103,
+							name: "Position: Stop Benchmarking Benchmarks",
+							authors: [{ fullname: "Chris Researcher" }],
+							decision: "Accept (spotlight)",
+							eventtype: "Spotlight",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/Position_Paper_Track",
+						},
+						{
+							id: 104,
+							name: "Blog Post Summary",
+							authors: [{ fullname: "Blog Author" }],
+							decision: "Accept",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/BlogPosts",
+						},
+						{
+							id: 105,
+							name: "TMLR Cross-Posted Paper",
+							authors: [{ fullname: "Journal Author" }],
+							decision: "Accept",
+							sourceurl: "journal-track/NeurIPS_2026-Posters_TMLR.xlsx",
+						},
+						{
+							id: 106,
+							name: "JMLR & AoS Journal Track",
+							authors: [{ fullname: "Stat Author" }],
+							decision: "Accept",
+							sourceurl: "journal-track/NeurIPS_2026_JMLR_AoS.xlsx",
+						},
+						{
+							id: 107,
+							name: "Withdrawn Main Submission",
+							authors: [{ fullname: "Withdrawn Author" }],
+							decision: "Withdrawn",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/Conference",
+						},
+						{
+							id: 108,
+							name: "Workshop Bridging Future",
+							authors: [{ fullname: "Ws Author" }],
+							decision: "Accept",
+							sourceurl:
+								"https://openreview.net/group?id=NeurIPS.cc/2026/Workshop/bridging-the-future",
+						},
+					],
+				} as T;
+			}
+			if (url.includes("neurips-2026-abstracts.json")) {
+				return {
+					"101": "Full official NeurIPS main conference oral abstract.",
+					"or-102": "Full NeurIPS Datasets and Benchmarks abstract.",
+				} as T;
+			}
+			if (url.includes("iclr-2026-orals-posters.json")) {
+				return [
+					{
+						id: "iclr-1",
+						name: "ICLR Main Conference Spotlight",
+						authors: [{ fullname: "Yann LeCun" }],
+						decision: "Accept (spotlight)",
+						eventtype: "Spotlight",
+						sourceurl:
+							"https://openreview.net/group?id=ICLR.cc/2026/Conference",
+						paper_url: "https://openreview.net/forum?id=IclrSpot9",
+					},
+					{
+						id: "iclr-2",
+						name: "Non-NeurIPS Datasets Track Must Drop",
+						authors: [{ fullname: "Other Author" }],
+						decision: "Accept (poster)",
+						eventtype: "Poster",
+						sourceurl:
+							"https://openreview.net/group?id=ICLR.cc/2026/Datasets_and_Benchmarks",
+					},
+				] as T;
+			}
+			if (url.includes("iclr-2026-abstracts.json")) {
+				return {
+					"iclr-1": "ICLR spotlight abstract via MiniConf.",
+				} as T;
+			}
+			return { results: [] } as T;
+		};
+
+		const neuripsMini = await fetchMiniConfVenuePapers(
+			neurips,
+			2026,
+			mockMiniConfJson,
+		);
+		expect(neuripsMini.items.map((p) => p.title)).toEqual([
+			"Main Track's Oral Paper",
+			"Unified Multimodal Benchmark Suite",
+		]);
+		expect(neuripsMini.items[0]?.abstract).toBe(
+			"Full official NeurIPS main conference oral abstract.",
+		);
+		expect(neuripsMini.items[0]?.pdfUrl).toBe(
+			"https://openreview.net/pdf?id=MainOral123",
+		);
+		expect(neuripsMini.items[1]?.abstract).toBe(
+			"Full NeurIPS Datasets and Benchmarks abstract.",
+		);
+		expect(neuripsMini.items[1]?.pdfUrl).toBe(
+			"https://openreview.net/pdf?id=DbTrack456",
+		);
+
+		const iclrMini = await fetchMiniConfVenuePapers(
+			iclr,
+			2026,
+			mockMiniConfJson,
+		);
+		expect(iclrMini.items.map((p) => p.title)).toEqual([
+			"ICLR Main Conference Spotlight",
+		]);
+
+		// Graceful fallback to papers.cool when MiniConf throws / returns empty
+		const coolPanelsHtml = `
+			<p class="info">Total 120 papers</p>
+			${Array.from(
+				{ length: 102 },
+				(_, idx) => `
+				<div id="iclr${idx}@OpenReview" class="panel paper">
+					<h2 class="title"><a href="https://openreview.net/forum?id=iclr${idx}"></a><a id="title-iclr${idx}">Fallback ICLR Cool Paper ${idx}</a></h2>
+					<p class="metainfo authors"><a class="author">Author ${idx}</a></p>
+					<p class="metainfo subjects"><a href="/venue/ICLR.2026?group=Poster">ICLR.2026 - Poster</a></p>
+					<p id="summary-iclr${idx}" class="summary">Fallback abstract ${idx}.</p>
+				</div>`,
+			).join("\n")}`;
+		const iclrFallback = await fetchMultiChannelVenuePapers(
+			iclr,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("iclr.cc/static/virtual/data")) {
+					throw new Error("HTTP 404 Not Found");
+				}
+				return { results: [] } as T;
+			},
+			async (url: string) =>
+				url.includes("papers.cool/venue/ICLR.2026") ? coolPanelsHtml : "",
+		);
+		expect(iclrFallback.items).toHaveLength(102);
+		expect(iclrFallback.authoritativeMainTrack).toBe(true);
+	});
+
+	it("parses ACL Anthology 2026 volumes + 2026.aclweb.org accepted_papers and falls back to papers.cool when empty", async () => {
+		const acl = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "acl-2026");
+		if (!acl) throw new Error("Missing acl-2026");
+		const aclSpec = VENUE_SPEC_BY_ID.get("acl-2026");
+
+		const aclWebHtml = `
+			<div class="page__content">
+				<div class="notice--info">Acceptance announcement</div>
+				<ul>
+					<li><p><strong>OctoTools: Executable Tool Chains for Language Agents</strong><br /><em>Pan Lu, Bowen Chen</em></p></li>
+					<li><p><strong>Compact Discourse Parsing in Low Resource</strong><br /><em>Jane Doe &amp; John Smith</em></p></li>
+				</ul>
+			</div>`;
+		const aclLongHtml = `
+			<div class="d-sm-flex align-items-stretch mb-3">
+				<div class="d-none d-sm-block"><a href=https://aclanthology.org/2026.acl-long.0.pdf>pdf</a></div>
+				<span class=d-block><strong><a class=align-middle href=/2026.acl-long.0/>Proceedings of ACL 2026 Long Papers</a></strong></span>
+			</div>
+			<div class="d-sm-flex align-items-stretch mb-3">
+				<div class="d-none d-sm-block"><a href=https://aclanthology.org/2026.acl-long.1.pdf>pdf</a></div>
+				<span class=d-block>
+					<strong><a class=align-middle href=/2026.acl-long.1/><span class=acl-fixed-case>O</span>cto<span class=acl-fixed-case>T</span>ools: Executable Tool Chains for Language Agents</a></strong><br>
+					<a href=/people/p/pan-lu/>Pan Lu</a> | <a href=/people/b/bowen-chen/>Bowen Chen</a>
+				</span>
+			</div>
+			<div class="card bg-light collapse abstract-collapse" id=abstract-2026--acl-long--1>
+				<div class="card-body p-3 small">OctoTools coordinates heterogeneous domain tools cleanly.</div>
+			</div>
+			<div class="d-sm-flex align-items-stretch mb-3">
+				<span class=d-block><strong><a href=/2026.acl-long.2/>Extra Unlisted Volume Note</a></strong><br><a href=/people/u/unlisted/>Unlisted Author</a></span>
+			</div>`;
+		const aclShortHtml = `
+			<div class="d-sm-flex align-items-stretch mb-3">
+				<div class="d-none d-sm-block"><a href=https://aclanthology.org/2026.acl-short.3.pdf>pdf</a></div>
+				<span class=d-block>
+					<strong><a href=/2026.acl-short.3/>Compact Discourse Parsing in Low Resource</a></strong><br>
+					<a href=/people/j/jane-doe/>Jane Doe</a> | <a href=/people/j/john-smith/>John Smith</a>
+				</span>
+			</div>
+			<div class="card collapse abstract-collapse" id="abstract-2026--acl-short-3">
+				<div class="card-body">Minimal short-paper discourse parser.</div>
+			</div>`;
+
+		const aclWebParsed = parseOfficialVenueProgramHtml(
+			aclWebHtml,
+			"https://2026.aclweb.org/program/accepted_papers/",
+			acl,
+			aclSpec,
+			2026,
+		);
+		expect(aclWebParsed.map((p) => p.title)).toEqual([
+			"OctoTools: Executable Tool Chains for Language Agents",
+			"Compact Discourse Parsing in Low Resource",
+		]);
+		expect(aclWebParsed[1]?.authors).toEqual(["Jane Doe", "John Smith"]);
+
+		const longParsed = parseAclAnthologyVolumeHtml(
+			aclLongHtml,
+			"https://aclanthology.org/volumes/2026.acl-long/",
+			acl,
+			aclSpec,
+			2026,
+		);
+		expect(longParsed.map((p) => p.title)).toEqual([
+			"OctoTools: Executable Tool Chains for Language Agents",
+			"Extra Unlisted Volume Note",
+		]);
+		expect(longParsed[0]?.doi).toBe("10.18653/v1/2026.acl-long.1");
+		expect(longParsed[0]?.pdfUrl).toBe(
+			"https://aclanthology.org/2026.acl-long.1.pdf",
+		);
+		expect(longParsed[0]?.abstract).toBe(
+			"OctoTools coordinates heterogeneous domain tools cleanly.",
+		);
+
+		const reconciled = await fetchAclAnthologyVenuePapers(
+			acl,
+			2026,
+			async (url) => {
+				if (url.includes("accepted_papers")) return aclWebHtml;
+				if (url.includes("2026.acl-long")) return aclLongHtml;
+				if (url.includes("2026.acl-short")) return aclShortHtml;
+				return "";
+			},
+		);
+		expect(reconciled.items.map((p) => p.doi)).toEqual([
+			"10.18653/v1/2026.acl-long.1",
+			"10.18653/v1/2026.acl-short.3",
+		]);
+		expect(reconciled.items[1]?.abstract).toBe(
+			"Minimal short-paper discourse parser.",
+		);
+
+		// Fallback to papers.cool when Anthology volumes are not out yet (HTTP 404)
+		const aclCoolHtml = `
+			<p class="info">Total 105 papers</p>
+			${Array.from(
+				{ length: 105 },
+				(_, idx) => `
+				<div id="acl${idx}@ACL" class="panel paper">
+					<h2 class="title"><a href="https://aclanthology.org/2026.acl-long.${idx + 1}"></a><a id="title-acl${idx}">ACL Cool Fallback ${idx}</a></h2>
+					<p class="metainfo authors"><a class="author">Author ${idx}</a></p>
+					<p class="metainfo subjects"><a href="/venue/ACL.2026?group=Long+Papers">ACL.2026 - Long Papers</a></p>
+					<p id="summary-acl${idx}" class="summary">ACL abstract ${idx}.</p>
+				</div>`,
+			).join("\n")}`;
+		const aclFallbackBundle = await fetchMultiChannelVenuePapers(
+			acl,
+			2026,
+			async <T>() => ({ results: [] }) as T,
+			async (url) => {
+				if (url.includes("aclanthology.org/volumes")) {
+					throw new Error("HTTP 404");
+				}
+				if (url.includes("papers.cool/venue/ACL.2026")) {
+					return aclCoolHtml;
+				}
+				return "";
+			},
+		);
+		expect(aclFallbackBundle.items).toHaveLength(105);
+	});
+
+	it("parses S&P 2026, USENIX technical-sessions + presentation subpages, NDSS required intersection, CCS required schedule, and ISSTA/ECOOP Researchr tracks", async () => {
+		const sp = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sp-2026");
+		const usenix = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "usenix-sec-2026",
+		);
+		const ndss = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ndss-2026");
+		const ccs = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ccs-2026");
+		const issta = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "issta-2026");
+		const ecoop = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ecoop-2026");
+		if (!sp || !usenix || !ndss || !ccs || !issta || !ecoop) {
+			throw new Error("Missing security/SE venues");
+		}
+
+		// 1. IEEE S&P 2026 accepted-papers.html (`<sup>` & `<br />` affiliation stripping) + fallback
+		const spHtml = `
+			<div class="list-group-item">
+				<b><a href="#sp1" data-toggle="collapse">Zero-Knowledge Proofs at Line Rate<span class="glyphicon glyphicon-chevron-down"></span></a></b>
+				<div id="sp1" class="collapse authorlist">
+					Alice Chen<sup>1,2</sup>, Bob Kim<sup>2</sup> and Carol Wu<sup>1</sup>
+					<br /><sup>1</sup>ETH Zurich; <sup>2</sup>EPFL
+				</div>
+			</div>`;
+		const spParsed = parseOfficialVenueProgramHtml(
+			spHtml,
+			"https://sp2026.ieee-security.org/accepted-papers.html",
+			sp,
+			VENUE_SPEC_BY_ID.get("sp-2026"),
+			2026,
+		);
+		expect(spParsed).toHaveLength(1);
+		expect(spParsed[0]?.title).toBe("Zero-Knowledge Proofs at Line Rate");
+		expect(spParsed[0]?.authors).toEqual(["Alice Chen", "Bob Kim", "Carol Wu"]);
+
+		// 2. USENIX Security 2026 technical-sessions + papers.cool backfill + polite presentation subpages
+		const usenixTechSessionsHtml = `
+			<article id="node-1" class="node node-paper view-mode-schedule">
+				<h2><a href="/conference/usenixsecurity26/presentation/kernel-guard">Kernel Guard via Hardware Faults</a></h2>
+				<div class="field field-name-field-paper-people-text">Alice Tan and Bob Ng, <em>MIT; ETH Zurich</em></div>
+				<div class="field field-name-field-paper-description-long"><p>Inline USENIX abstract on hardware isolation.</p></div>
+			</article>
+			<article id="node-2" class="node node-paper view-mode-schedule">
+				<h2><a href="/conference/usenixsecurity26/presentation/tls-verify">TLS Transcript Verification</a></h2>
+				<div class="field field-name-field-paper-people-text">Carol Li (Stanford), Dave Park (CMU)</div>
+			</article>
+			<article id="node-3" class="node node-paper view-mode-schedule">
+				<h2><a href="/conference/usenixsecurity26/presentation/missing-page">Side-Channel Leakage in Enclaves</a></h2>
+				<div class="field field-name-field-paper-people-text">Eve Fox, <em>University of Toronto</em></div>
+			</article>`;
+		const usenixTechParsed = parseOfficialVenueProgramHtml(
+			usenixTechSessionsHtml,
+			"https://www.usenix.org/conference/usenixsecurity26/technical-sessions",
+			usenix,
+			VENUE_SPEC_BY_ID.get("usenix-sec-2026"),
+			2026,
+		);
+		expect(usenixTechParsed).toHaveLength(3);
+		expect(usenixTechParsed[0]?.authors).toEqual(["Alice Tan", "Bob Ng"]);
+		expect(usenixTechParsed[1]?.authors).toEqual(["Carol Li", "Dave Park"]);
+		expect(usenixTechParsed[2]?.authors).toEqual(["Eve Fox"]);
+
+		const usenixPresParsed = parseUsenixPresentationHtml(
+			`<div class="field field-name-field-paper-description"><p>Abstract: Verified TLS state machine with bounded proof.</p></div>
+			 <div class="field field-name-field-final-paper-pdf"><a href="/system/files/usenixsecurity26-carol.pdf">PDF</a></div>`,
+			"https://www.usenix.org/conference/usenixsecurity26/presentation/tls-verify",
+		);
+		expect(usenixPresParsed.abstract).toBe(
+			"Verified TLS state machine with bounded proof.",
+		);
+		expect(usenixPresParsed.pdfUrl).toBe(
+			"https://www.usenix.org/system/files/usenixsecurity26-carol.pdf",
+		);
+
+		let coolHydrateCount = 0;
+		const usenixBundle = await fetchMultiChannelVenuePapers(
+			usenix,
+			2026,
+			async <T>() => ({ results: [] }) as T,
+			async (url) => {
+				if (url.includes("usenixsecurity26/technical-sessions")) {
+					return usenixTechSessionsHtml;
+				}
+				if (url.includes("papers.cool/venue/USENIX-Sec.2026")) {
+					coolHydrateCount += 1;
+					return `<div id="u1@USENIX" class="panel paper">
+						<h2 class="title"><a href="https://www.usenix.org/conference/usenixsecurity26/presentation/kernel-guard"></a><a id="title-u1">Kernel Guard via Hardware Faults</a><a id="pdf-u1" data="https://www.usenix.org/system/files/u1.pdf||">PDF</a></h2>
+						<p class="metainfo authors"><a class="author">Alice Tan</a></p>
+						<p class="metainfo subjects"><a href="/venue/USENIX-Sec.2026">USENIX-Sec.2026</a></p>
+						<p id="summary-u1" class="summary">Inline USENIX abstract on hardware isolation.</p>
+					</div>`;
+				}
+				if (url.includes("presentation/tls-verify")) {
+					return `<div class="field field-name-field-paper-description"><p>Verified TLS state machine with bounded proof.</p></div>
+						<div class="field field-name-field-final-paper-pdf"><a href="/system/files/usenixsecurity26-carol.pdf">PDF</a></div>`;
+				}
+				if (url.includes("presentation/missing-page")) {
+					throw new Error("HTTP 404 Not Found");
+				}
+				return "";
+			},
+		);
+		expect(coolHydrateCount).toBe(1);
+		expect(usenixBundle.items).toHaveLength(3);
+		expect(usenixBundle.items[0]?.pdfUrl).toBe(
+			"https://www.usenix.org/system/files/u1.pdf",
+		);
+		expect(usenixBundle.items[1]?.abstract).toBe(
+			"Verified TLS state machine with bounded proof.",
+		);
+		expect(usenixBundle.items[2]?.title).toBe(
+			"Side-Channel Leakage in Enclaves",
+		);
+
+		// 3. NDSS 2026 accepted-papers/ + required OpenAlex S4306420590 & papers.cool intersection
+		const ndssHtml = `
+			<div class="pt-cv-content-item">
+				<h2 class="pt-cv-title"><a href="https://www.ndss-symposium.org/ndss-paper/bgp-route-attestation/">BGP Route Attestation at Scale</a></h2>
+				<div class="pt-cv-custom-fields pt-cv-ctf-display_authors">
+					<div class="pt-cv-ctf-value"><p>Frank Gao (Tsinghua University), Grace Lin (UC San Diego)</p></div>
+				</div>
+			</div>`;
+		const ndssBundle = await fetchMultiChannelVenuePapers(
+			ndss,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("S4306420590")) {
+					return {
+						meta: { count: 2 },
+						results: [
+							{
+								id: "https://openalex.org/W_ndss_1",
+								type: "article",
+								title: "BGP Route Attestation at Scale",
+								doi: "https://doi.org/10.14722/ndss.2026.23001",
+								publication_year: 2026,
+								cited_by_count: 3,
+								referenced_works: [
+									"https://openalex.org/W11",
+									"https://openalex.org/W22",
+								],
+								authorships: [
+									{ author: { display_name: "Frank Gao" } },
+									{ author: { display_name: "Grace Lin" } },
+								],
+							},
+							{
+								id: "https://openalex.org/W_ndss_workshop",
+								type: "article",
+								title: "Non-Roster NDSS Workshop Paper",
+								doi: "https://doi.org/10.14722/ndss.2026.99999",
+								publication_year: 2026,
+								authorships: [{ author: { display_name: "Other Author" } }],
+							},
+						],
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+			async (url) => {
+				if (url.includes("ndss2026/accepted-papers")) return ndssHtml;
+				if (url.includes("papers.cool/venue/NDSS.2026")) {
+					return `<div id="n1@NDSS" class="panel paper">
+						<h2 class="title"><a href="https://www.ndss-symposium.org/wp-content/uploads/2026-23001.pdf"></a><a id="title-n1">BGP Route Attestation at Scale</a></h2>
+						<p class="metainfo authors"><a class="author">Frank Gao</a></p>
+						<p class="metainfo subjects"><a href="/venue/NDSS.2026">NDSS.2026</a></p>
+						<p id="summary-n1" class="summary">Formal RPKI route validation architecture.</p>
+					</div>`;
+				}
+				return "";
+			},
+		);
+		expect(ndssBundle.items).toHaveLength(1);
+		expect(ndssBundle.items[0]?.doi).toBe("10.14722/ndss.2026.23001");
+		expect(ndssBundle.items[0]?.abstract).toBe(
+			"Formal RPKI route validation architecture.",
+		);
+		expect(ndssBundle.items[0]?.rawRefs).toEqual(["oa:W11", "oa:W22"]);
+
+		// 4. CCS 2026 required mode drops workshop + POSTER:/DEMO: schedule entries
+		const ccsScheduleHtml = `
+			<ul>
+				<li class="schedule-paper">
+					<p class="schedule-paper-title"><a href="https://dl.acm.org/doi/10.1145/3700001">Post-Quantum Lattice Signatures</a></p>
+					<p class="schedule-authors">Hannah Abbott (MIT), Ian Bell (ETH Zurich)</p>
+				</li>
+				<li class="schedule-paper">
+					<p class="schedule-paper-title">POSTER: Unverified Hardware Fuzzing Poster</p>
+					<p class="schedule-authors">Poster Author</p>
+				</li>
+				<li class="schedule-paper">
+					<p class="schedule-paper-title">DEMO: Interactive Cryptanalysis Tool</p>
+					<p class="schedule-authors">Demo Author</p>
+				</li>
+				<li class="schedule-paper">
+					<p class="schedule-paper-title">WORKSHOP: Hardware Troubles Companion</p>
+					<p class="schedule-authors">Workshop Author</p>
+				</li>
+			</ul>`;
+		const ccsBundle = await fetchMultiChannelVenuePapers(
+			ccs,
+			2026,
+			async <T>(url: string) => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						results: [
+							{
+								id: "https://openalex.org/W_ccs_ws",
+								type: "article",
+								title: "Non-Roster CCS Workshop Proceeding",
+								doi: "https://doi.org/10.1145/3700002",
+								publication_year: 2026,
+								authorships: [{ author: { display_name: "Extra Author" } }],
+							},
+						],
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+			async (url) =>
+				url.includes("CCS2026/program/schedule.html") ? ccsScheduleHtml : "",
+		);
+		expect(ccsBundle.items.map((p) => p.title)).toEqual([
+			"Post-Quantum Lattice Signatures",
+		]);
+
+		// 5. ISSTA & ECOOP Researchr #event-overview with nested badge spans
+		const ecoopHtml = `
+			<div id="event-overview">
+				<table>
+					<tr>
+						<td>14:00</td>
+						<td>
+							<a class="publication-link" href="/details/ecoop-2026-technical-papers/7">Gradual Ownership Types in Practice<span class="pull-right"><span class="output-badge"><span class="label-primary label">Distinguished paper award</span></span></span></a>
+							<div class="performers"><a href="/profile/a">Martin Odersky</a></div>
+						</td>
+					</tr>
+				</table>
+			</div>`;
+		const ecoopParsed = parseResearchrHtml(
+			ecoopHtml,
+			ecoop,
+			"https://2026.ecoop.org/track/ecoop-2026-technical-papers",
+		);
+		expect(ecoopParsed.map((p) => p.title)).toEqual([
+			"Gradual Ownership Types in Practice",
+		]);
+		const isstaParsed = parseResearchrHtml(
+			`<div id="event-overview"><table><tr><td>09:00</td><td>
+				<a class="publication-link" href="/details/issta-2026-research-papers/1">Symbolic Concolic Execution for WebAssembly</a>
+				<div class="performers"><a href="/profile/s">Sonia Lee</a></div>
+			</td></tr></table></div>`,
+			issta,
+			"https://conf.researchr.org/track/issta-2026/issta-2026-research-papers",
+		);
+		expect(isstaParsed.map((p) => p.title)).toEqual([
+			"Symbolic Concolic Execution for WebAssembly",
+		]);
+
+		// 6. S&P 2026 uses accepted-papers.html fallback when proceedings DOIs are not indexed yet
+		const spFallbackBundle = await fetchMultiChannelVenuePapers(
+			sp,
+			2026,
+			async <T>() => ({ results: [], data: [] }) as T,
+			async (url) =>
+				url.includes("sp2026.ieee-security.org/accepted-papers.html")
+					? spHtml
+					: "",
+		);
+		expect(spFallbackBundle.items.map((p) => p.title)).toEqual([
+			"Zero-Knowledge Proofs at Line Rate",
+		]);
+		expect(spFallbackBundle.authoritativeMainTrack).toBe(true);
 	});
 });

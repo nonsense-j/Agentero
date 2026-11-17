@@ -197,6 +197,10 @@ export type VenueSpec = {
 	crossrefIsbns?: readonly string[];
 	/** IEEE Computer Society Digital Library (`computer.org/csdl/api/v1/graphql`) `idPrefix` for full official abstracts. */
 	csdlIdPrefix?: string;
+	/** Official MiniConf virtual portal slug (`neurips` | `iclr` | `icml`). */
+	miniConfSlug?: "neurips" | "iclr" | "icml";
+	/** Explicitly permit NeurIPS Datasets & Benchmarks / Evaluations & Datasets tracks into the main pool. */
+	includeDatasetsBenchmarks?: boolean;
 };
 
 /**
@@ -254,7 +258,9 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "issta-2026",
 		name: "ISSTA 2026",
 		url: "https://conf.researchr.org/home/issta-2026",
-		tracks: ["https://conf.researchr.org/track/issta-2026/issta-2026-papers"],
+		tracks: [
+			"https://conf.researchr.org/track/issta-2026/issta-2026-research-papers",
+		],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-A",
@@ -328,7 +334,7 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "ecoop-2026",
 		name: "ECOOP 2026",
 		url: "https://2026.ecoop.org",
-		tracks: ["https://2026.ecoop.org/track/ecoop-2026-papers"],
+		tracks: ["https://2026.ecoop.org/track/ecoop-2026-technical-papers"],
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
@@ -408,6 +414,7 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		name: "SAS 2026",
 		url: "https://2026.splashcon.org/home/sas-2026",
 		tracks: ["https://2026.splashcon.org/track/sas-2026-papers"],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "PL/SE",
 		ccfRank: "CCF-B",
@@ -505,7 +512,7 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		name: "CCS 2026",
 		url: "https://www.sigsac.org/ccs/CCS2026/",
 		tracks: ["https://www.sigsac.org/ccs/CCS2026/program/schedule.html"],
-		trackRosterMode: "fallback",
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
@@ -517,7 +524,8 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "sp-2026",
 		name: "S&P 2026",
 		url: "https://sp2026.ieee-security.org/",
-		tracks: ["https://sp2026.ieee-security.org/program-papers.html"],
+		tracks: ["https://sp2026.ieee-security.org/accepted-papers.html"],
+		trackRosterMode: "fallback",
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
@@ -550,6 +558,7 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		name: "NDSS 2026",
 		url: "https://www.ndss-symposium.org/ndss2026/",
 		tracks: ["https://www.ndss-symposium.org/ndss2026/accepted-papers/"],
+		trackRosterMode: "required",
 		kind: "conference",
 		domain: "CR",
 		ccfRank: "CCF-A",
@@ -582,7 +591,9 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "neurips-2026",
 		name: "NeurIPS 2026",
 		url: "https://neurips.cc/Conferences/2026",
-		tracks: ["https://openreview.net/group?id=NeurIPS.cc/2026/Conference"],
+		tracks: ["https://neurips.cc/virtual/2026/papers.html"],
+		miniConfSlug: "neurips",
+		includeDatasetsBenchmarks: true,
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
@@ -599,6 +610,7 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		name: "ACL 2026",
 		url: "https://2026.aclweb.org/",
 		tracks: [
+			"https://2026.aclweb.org/program/accepted_papers/",
 			"https://aclanthology.org/volumes/2026.acl-long/",
 			"https://aclanthology.org/volumes/2026.acl-short/",
 		],
@@ -623,7 +635,8 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "iclr-2026",
 		name: "ICLR 2026",
 		url: "https://iclr.cc/Conferences/2026",
-		tracks: ["https://openreview.net/group?id=ICLR.cc/2026/Conference"],
+		tracks: ["https://iclr.cc/virtual/2026/papers.html"],
+		miniConfSlug: "iclr",
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
@@ -640,7 +653,8 @@ export const VENUE_SPECS: readonly VenueSpec[] = [
 		id: "icml-2026",
 		name: "ICML 2026",
 		url: "https://icml.cc/Conferences/2026",
-		tracks: ["https://openreview.net/group?id=ICML.cc/2026/Conference"],
+		tracks: ["https://icml.cc/virtual/2026/papers.html"],
+		miniConfSlug: "icml",
 		kind: "conference",
 		domain: "AI",
 		ccfRank: "CCF-A",
@@ -722,9 +736,17 @@ export function isPlaceholderAbstract(
 	return false;
 }
 
+/** Detect non-main-track prefixed titles (`POSTER:`, `DEMO:`, `WORKSHOP:`, `TUTORIAL:`, `DOCTORAL:`). */
+export function isNonMainTrackPrefixedTitle(title: string): boolean {
+	return /^(?:poster|posters|demo|demos|demonstration|workshop|workshops|tutorial|tutorials|doctoral(?:\s+(?:symposium|consortium|forum))?)\s*:/i.test(
+		title.trim(),
+	);
+}
+
 export function isFrontmatterTitle(title: string): boolean {
 	const t = title.trim();
 	if (t.length < 8) return true;
+	if (isNonMainTrackPrefixedTitle(t)) return true;
 	if (
 		/^(front\s*matter|back\s*matter|title page|copyright(?:\s+page)?|table of contents|contents\b|message from|welcome (?:from|message|to\b)|foreword|preface|proceedings of\b|companion proceedings\b|adjunct proceedings\b|extended abstracts of\b|conference organization|program committee|organizing committee|artifact evaluation committee|steering committee|external reviewers|additional reviewers|list of reviewers|reviewers?\b|author index|subject index|index of authors|sponsors?\b|corporate sponsors?\b|session details\s*:|keynote\b|panel:|tutorial:|editorial\b|guest\s+editorial\b|introduction\s+to\s+the\s+special\s+(?:issue|section)\b|corrigendum\b|erratum\b|errata\b|corrections?\s+to\b|retraction\b|in\s+memoriam\b)/i.test(
 			t,
@@ -811,7 +833,10 @@ export function hasPriorConferenceYearSpillover(
 }
 
 /** Reject co-located workshop, companion, or non-main-track sub-venues on main conference portals. */
-export function isWorkshopOrCompanionVenue(venueLabel: string): boolean {
+export function isWorkshopOrCompanionVenue(
+	venueLabel: string,
+	options?: { allowDatasetsBenchmarks?: boolean },
+): boolean {
 	const s = venueLabel.trim();
 	if (!s) return false;
 	if (s.includes("@")) return true;
@@ -822,8 +847,17 @@ export function isWorkshopOrCompanionVenue(venueLabel: string): boolean {
 	) {
 		return true;
 	}
-	return /\b(workshops?|companion|adjunct|doctoral\s+(?:symposium|consortium)|student\s+(?:research\s+competition|abstract)|posters?\s+and\s+(?:tool\s+)?demos?|fast\s+abstracts?|seip|seet|seis|nier|findings\s+of|datasets?\s+(?:and|&)\s+benchmarks?|position\s+paper\s+track|demonstrations?\s+track|industry\s+(?:track|showcase)|industrial\s+innovation|replications?\s+(?:and|&)\s+negative)\b/i.test(
-		s,
+	const normalized = s.replace(/_/g, " ");
+	if (
+		!options?.allowDatasetsBenchmarks &&
+		/\b(?:datasets?\s+(?:and|&)\s+benchmarks?|evaluations?\s+(?:and|&)\s+datasets?(?:\s+track)?)\b/i.test(
+			normalized,
+		)
+	) {
+		return true;
+	}
+	return /\b(workshops?|companion|adjunct|doctoral\s+(?:symposium|consortium)|student\s+(?:research\s+competition|abstract)|posters?\s+and\s+(?:tool\s+)?demos?|fast\s+abstracts?|seip|seet|seis|nier|findings\s+of|position\s+(?:paper\s+)?track|demonstrations?\s+track|industry\s+(?:track|showcase)|industrial\s+innovation|replications?\s+(?:and|&)\s+negative|blog\s*posts?|tmlr|jmlr|annals\s+of\s+statistics|aos\b|bridging[- ]the[- ]future)\b/i.test(
+		normalized,
 	);
 }
 
@@ -1049,6 +1083,67 @@ export function cleanDoi(raw: string | null | undefined): string | undefined {
 		return embedded.replace(/[.,;>)"']+$/, "") || undefined;
 	}
 	return undefined;
+}
+
+const ARTIFACT_OR_DATASET_DOI_PREFIXES = [
+	"10.5281/zenodo.",
+	"10.6084/m9.figshare.",
+	"10.6084/figshare.",
+	"10.17605/osf.io",
+	"10.24433/co.",
+	"10.7910/dvn",
+	"10.5061/dryad.",
+	"10.4121/",
+	"10.13140/",
+] as const;
+
+/**
+ * Reject artifact / dataset / supplementary repository DOIs (Zenodo, Figshare, OSF,
+ * CodeOcean, Harvard Dataverse, Dryad, 4TU.ResearchData, ResearchGate) so they never
+ * pollute paper DOIs or overwrite missing abstracts.
+ */
+export function isArtifactOrDatasetDoi(doi?: string | null): boolean {
+	if (!doi) return false;
+	const normalized =
+		cleanDoi(doi)?.toLowerCase() ??
+		doi
+			.trim()
+			.replace(/^doi:\s*/i, "")
+			.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "")
+			.toLowerCase();
+	if (!normalized) return false;
+	return ARTIFACT_OR_DATASET_DOI_PREFIXES.some((prefix) =>
+		normalized.startsWith(prefix),
+	);
+}
+
+const REJECTED_OPENALEX_WORK_TYPE_RE =
+	/^(dataset|software|paratext|peer-review|erratum|letter|editorial|grant|retraction|book|proceedings|journal-issue)$/i;
+
+/**
+ * Reject OpenAlex rows whose work type is dataset/software/paratext/erratum/etc.
+ * or whose DOI / landing page points to an artifact/dataset repository.
+ */
+export function isRejectedOpenAlexWork(
+	row: OpenAlexWork | null | undefined,
+): boolean {
+	if (!row) return true;
+	if (row.type && REJECTED_OPENALEX_WORK_TYPE_RE.test(row.type.trim())) {
+		return true;
+	}
+	if (isArtifactOrDatasetDoi(row.doi) || isArtifactOrDatasetDoi(row.ids?.doi)) {
+		return true;
+	}
+	const landing = row.primary_location?.landing_page_url?.trim() ?? "";
+	if (
+		landing &&
+		/^https?:\/\/(?:www\.)?(?:zenodo\.org|figshare\.com|osf\.io|datadryad\.org|codeocean\.com|dataverse\.harvard\.edu)\//i.test(
+			landing,
+		)
+	) {
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -1496,12 +1591,7 @@ export function openAlexWorkToVenueItem(
 	spec: VenueSpec | undefined,
 	targetYear: number,
 ): CollectionPaperItem | null {
-	if (
-		row.type &&
-		/^(paratext|peer-review|erratum|letter|editorial|grant|retraction|book|proceedings|journal-issue)$/i.test(
-			row.type.trim(),
-		)
-	) {
+	if (isRejectedOpenAlexWork(row)) {
 		return null;
 	}
 	const rawTitle = (row.title ?? row.display_name ?? "")
@@ -1513,6 +1603,7 @@ export function openAlexWorkToVenueItem(
 	}
 
 	const doi = cleanDoi(row.doi);
+	if (isArtifactOrDatasetDoi(doi)) return null;
 	if (!matchesPacmIssue(row, spec?.pacmIssue, doi)) return null;
 
 	const year = row.publication_year ?? targetYear;
@@ -1545,6 +1636,9 @@ export function openAlexWorkToVenueItem(
 	const sourceDisplayName =
 		row.primary_location?.source?.display_name?.trim() ?? "";
 	const landingPageUrl = row.primary_location?.landing_page_url?.trim() ?? "";
+	const allowDandB = {
+		allowDatasetsBenchmarks: Boolean(spec?.includeDatasetsBenchmarks),
+	};
 	if (venueKind === "conference") {
 		if (
 			hasPriorConferenceYearSpillover(
@@ -1559,7 +1653,7 @@ export function openAlexWorkToVenueItem(
 		if (
 			!sourceExplicitlyCurated &&
 			sourceDisplayName &&
-			isWorkshopOrCompanionVenue(sourceDisplayName)
+			isWorkshopOrCompanionVenue(sourceDisplayName, allowDandB)
 		) {
 			return null;
 		}
@@ -1577,7 +1671,7 @@ export function openAlexWorkToVenueItem(
 	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
 	const venueFull =
 		sourceDisplayName &&
-		!isWorkshopOrCompanionVenue(sourceDisplayName) &&
+		!isWorkshopOrCompanionVenue(sourceDisplayName, allowDandB) &&
 		!isGenericRepositoryVenueName(sourceDisplayName)
 			? sourceDisplayName
 			: venue.name;
@@ -1623,6 +1717,300 @@ export function openAlexWorkToVenueItem(
 		volume: row.biblio?.volume?.trim() || undefined,
 		issue: row.biblio?.issue?.trim() || undefined,
 		pages,
+	};
+}
+
+export type CrossrefWorkRow = {
+	DOI?: string;
+	type?: string;
+	title?: string[];
+	abstract?: string;
+	subject?: string[];
+	volume?: string;
+	issue?: string;
+	page?: string;
+	reference?: Array<{ DOI?: string | null }>;
+	"container-title"?: string[];
+	author?: Array<{ given?: string; family?: string }>;
+	published?: { "date-parts"?: number[][] };
+	"published-online"?: { "date-parts"?: number[][] };
+	"published-print"?: { "date-parts"?: number[][] };
+};
+
+export function crossrefWorkToVenueItem(
+	row: CrossrefWorkRow,
+	venue: VenueConfig,
+	spec: VenueSpec | undefined,
+	targetYear: number,
+	requireDoiPrefix = false,
+): CollectionPaperItem | null {
+	const rowType = (row.type ?? "").toLowerCase();
+	if (
+		rowType === "dataset" ||
+		rowType === "software" ||
+		rowType === "paratext" ||
+		rowType === "peer-review" ||
+		rowType === "erratum" ||
+		rowType === "book" ||
+		rowType === "proceedings" ||
+		rowType === "journal-issue" ||
+		rowType === "journal-volume"
+	) {
+		return null;
+	}
+	const doi = cleanDoi(row.DOI);
+	const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
+	if (
+		!doi ||
+		isArtifactOrDatasetDoi(doi) ||
+		!title ||
+		isFrontmatterTitle(title)
+	) {
+		return null;
+	}
+	if (spec?.excludePositionPapers && isPositionPaperTitle(title)) return null;
+	if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) return null;
+
+	const doiPrefixes = [
+		...(spec?.doiPrefixFilters ?? []),
+		...(spec?.doiPrefixFilter ? [spec.doiPrefixFilter] : []),
+	].map((p) => p.toLowerCase());
+	if (requireDoiPrefix || spec?.requireDoiPrefixMatch) {
+		const lowerDoi = doi.toLowerCase();
+		const matched =
+			doiPrefixes.length === 0 ||
+			doiPrefixes.some(
+				(px) =>
+					lowerDoi.startsWith(px) &&
+					(lowerDoi.length === px.length ||
+						/^[./_-]/.test(lowerDoi.slice(px.length))),
+			);
+		if (!matched) return null;
+	}
+
+	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	if (venueKind === "journal" && isNonResearchJournalItem(title, row.page)) {
+		return null;
+	}
+
+	const containerTitle = (row["container-title"]?.[0] ?? "").trim();
+	if (
+		spec?.crossrefContainerMatch &&
+		!containerTitle
+			.toLowerCase()
+			.includes(spec.crossrefContainerMatch.toLowerCase())
+	) {
+		return null;
+	}
+	if (venueKind === "conference") {
+		if (hasPriorConferenceYearSpillover(targetYear, doi, containerTitle)) {
+			return null;
+		}
+		if (
+			containerTitle &&
+			isWorkshopOrCompanionVenue(containerTitle, {
+				allowDatasetsBenchmarks: Boolean(spec?.includeDatasetsBenchmarks),
+			})
+		) {
+			return null;
+		}
+	}
+
+	if (spec?.pacmIssue) {
+		if (!doi.toLowerCase().startsWith("10.1145/")) return null;
+		const iss = (row.issue ?? "").trim().toUpperCase();
+		if (!iss.startsWith(spec.pacmIssue.toUpperCase())) return null;
+	}
+
+	const onlineParts = row["published-online"]?.["date-parts"]?.[0];
+	const printParts = row["published-print"]?.["date-parts"]?.[0];
+	const pubParts = row.published?.["date-parts"]?.[0];
+	const parts = printParts ?? onlineParts ?? pubParts ?? [];
+	const maxYear = Math.max(
+		typeof onlineParts?.[0] === "number" ? onlineParts[0] : 0,
+		typeof printParts?.[0] === "number" ? printParts[0] : 0,
+		typeof pubParts?.[0] === "number" ? pubParts[0] : 0,
+	);
+	const y = maxYear > 0 ? maxYear : targetYear;
+	if (y < targetYear && !spec?.crossrefIsbns?.length && !requireDoiPrefix) {
+		return null;
+	}
+	const m = String(parts[1] ?? 1).padStart(2, "0");
+	const d = String(parts[2] ?? 1).padStart(2, "0");
+	const authors = (row.author ?? [])
+		.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
+		.filter(Boolean);
+	if (authors.length === 0) return null;
+
+	const rawAbs = (row.abstract ?? "")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/^abstract[:.\s-]*/i, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	const cleanAbs = isPlaceholderAbstract(rawAbs, venue.name) ? "" : rawAbs;
+
+	const categories = [
+		venue.name,
+		...(spec?.domain ? [spec.domain] : []),
+		...(spec?.ccfRank ? [spec.ccfRank] : []),
+	];
+	const rawRefs = normalizeRawRefs(
+		(row.reference ?? []).map((r) => (r?.DOI ? `doi:${r.DOI}` : undefined)),
+	);
+	return {
+		id: buildVenuePaperId(venue.id, doi, undefined, title),
+		title,
+		authors,
+		abstract: cleanAbs,
+		publishedAt: `${Math.max(y, targetYear)}-${m}-${d}T00:00:00Z`,
+		year: Math.max(y, targetYear),
+		sourceType: "venue",
+		sourceLabel: venue.name,
+		categories,
+		url: `https://doi.org/${doi}`,
+		doi,
+		venueId: venue.id,
+		venueKind,
+		venueDomain: spec?.domain,
+		ccfRank: spec?.ccfRank,
+		venueFull:
+			containerTitle && !isGenericRepositoryVenueName(containerTitle)
+				? containerTitle
+				: venue.name,
+		citationCount: 0,
+		keywords: [],
+		...(rawRefs ? { rawRefs } : {}),
+		volume: row.volume,
+		issue: row.issue,
+		pages: row.page,
+	};
+}
+
+export type S2BulkPaper = {
+	paperId?: string;
+	title?: string | null;
+	abstract?: string | null;
+	year?: number | null;
+	publicationDate?: string | null;
+	venue?: string | null;
+	url?: string | null;
+	publicationTypes?: string[] | null;
+	openAccessPdf?: { url?: string | null } | null;
+	externalIds?: {
+		DOI?: string | null;
+		ArXiv?: string | null;
+		DBLP?: string | null;
+	} | null;
+	authors?: Array<{ name?: string | null }> | null;
+};
+
+export function semanticScholarWorkToVenueItem(
+	row: S2BulkPaper,
+	venue: VenueConfig,
+	spec: VenueSpec | undefined,
+	targetYear: number,
+): CollectionPaperItem | null {
+	if (
+		row.publicationTypes?.some((pt) =>
+			/^(dataset|software|editorial|erratum)$/i.test(pt.trim()),
+		)
+	) {
+		return null;
+	}
+	const title = (row.title ?? "").replace(/\s+/g, " ").trim();
+	if (!title || isFrontmatterTitle(title)) return null;
+	if (spec?.excludePositionPapers && isPositionPaperTitle(title)) {
+		return null;
+	}
+	const venueKind = spec?.kind ?? inferVenueKind(venue);
+	if (venueKind === "journal" && isNonResearchJournalItem(title, undefined)) {
+		return null;
+	}
+	const itemYear = row.year ?? targetYear;
+	if (itemYear < targetYear) return null;
+
+	const rowVenue = (row.venue ?? "").trim();
+	if (
+		venueKind === "conference" &&
+		rowVenue &&
+		isWorkshopOrCompanionVenue(rowVenue, {
+			allowDatasetsBenchmarks: Boolean(spec?.includeDatasetsBenchmarks),
+		})
+	) {
+		return null;
+	}
+
+	const doi = cleanDoi(row.externalIds?.DOI);
+	if (
+		isArtifactOrDatasetDoi(doi) ||
+		isArtifactOrDatasetDoi(row.externalIds?.DOI)
+	) {
+		return null;
+	}
+	if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) {
+		return null;
+	}
+	if (hasPriorConferenceYearSpillover(targetYear, doi, rowVenue)) {
+		return null;
+	}
+	if (
+		spec?.requireDoiPrefixMatch &&
+		(spec.doiPrefixFilter || spec.doiPrefixFilters?.length) &&
+		doi &&
+		!/^10\.48550\/arxiv\./i.test(doi) &&
+		!matchesConfiguredDoiPrefix(doi, spec)
+	) {
+		return null;
+	}
+
+	const rawAbstract = (row.abstract ?? "").replace(/\s+/g, " ").trim();
+	const abstract = isPlaceholderAbstract(rawAbstract, venue.name)
+		? ""
+		: rawAbstract;
+
+	const authors = (row.authors ?? [])
+		.map((a) => (a?.name ?? "").trim())
+		.filter(Boolean);
+	if (authors.length === 0) return null;
+
+	const arxivId = row.externalIds?.ArXiv?.trim() || undefined;
+	const venueDomain = spec?.domain ?? venue.domain;
+	const ccfRank = spec?.ccfRank ?? venue.ccfRank;
+	const categories = [
+		venue.name,
+		...(venueDomain ? [venueDomain] : []),
+		...(ccfRank ? [ccfRank] : []),
+	];
+
+	return {
+		id: buildVenuePaperId(venue.id, doi, arxivId, title),
+		title,
+		authors,
+		abstract,
+		publishedAt: row.publicationDate
+			? `${row.publicationDate}T00:00:00Z`
+			: `${itemYear}-01-01T00:00:00Z`,
+		year: itemYear,
+		sourceType: "venue",
+		sourceLabel: venue.name,
+		categories,
+		url:
+			(doi ? `https://doi.org/${doi}` : undefined) ||
+			(arxivId ? `https://arxiv.org/abs/${arxivId}` : undefined) ||
+			row.url ||
+			venue.url,
+		pdfUrl:
+			row.openAccessPdf?.url ||
+			(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : undefined),
+		arxivId,
+		doi: doi || (arxivId ? `10.48550/arxiv.${arxivId}` : undefined),
+		venueId: venue.id,
+		venueKind,
+		venueDomain,
+		ccfRank,
+		venueFull: rowVenue || venue.name,
+		citationCount: 0,
+		keywords: [],
 	};
 }
 
@@ -1769,147 +2157,10 @@ export async function fetchVenueStructuredPapers(
 	}
 
 	const openAlexFailed = attemptedRequests > 0 && succeededRequests === 0;
-
-	type CrossrefWorkRow = {
-		DOI?: string;
-		type?: string;
-		title?: string[];
-		abstract?: string;
-		subject?: string[];
-		volume?: string;
-		issue?: string;
-		page?: string;
-		reference?: Array<{ DOI?: string | null }>;
-		"container-title"?: string[];
-		author?: Array<{ given?: string; family?: string }>;
-		published?: { "date-parts"?: number[][] };
-		"published-online"?: { "date-parts"?: number[][] };
-		"published-print"?: { "date-parts"?: number[][] };
-	};
-
 	const convertCrossrefRow = (
 		row: CrossrefWorkRow,
 		requireDoiPrefix: boolean,
-	): CollectionPaperItem | null => {
-		const rowType = (row.type ?? "").toLowerCase();
-		if (
-			rowType === "book" ||
-			rowType === "proceedings" ||
-			rowType === "journal-issue" ||
-			rowType === "journal-volume"
-		) {
-			return null;
-		}
-		const doi = cleanDoi(row.DOI);
-		const title = (row.title?.[0] ?? "").replace(/\s+/g, " ").trim();
-		if (!doi || !title || isFrontmatterTitle(title)) return null;
-		if (spec?.excludePositionPapers && isPositionPaperTitle(title)) return null;
-		if (isExcludedByDoiPrefix(doi, spec?.excludeDoiPrefixes)) return null;
-		if (requireDoiPrefix || spec?.requireDoiPrefixMatch) {
-			const lowerDoi = doi.toLowerCase();
-			const matched =
-				doiPrefixes.length === 0 ||
-				doiPrefixes.some(
-					(px) =>
-						lowerDoi.startsWith(px) &&
-						(lowerDoi.length === px.length ||
-							/^[./_-]/.test(lowerDoi.slice(px.length))),
-				);
-			if (!matched) return null;
-		}
-
-		const venueKind = spec?.kind ?? inferVenueKind(venue);
-		if (venueKind === "journal" && isNonResearchJournalItem(title, row.page)) {
-			return null;
-		}
-
-		const containerTitle = (row["container-title"]?.[0] ?? "").trim();
-		if (
-			spec?.crossrefContainerMatch &&
-			!containerTitle
-				.toLowerCase()
-				.includes(spec.crossrefContainerMatch.toLowerCase())
-		) {
-			return null;
-		}
-		if (venueKind === "conference") {
-			if (hasPriorConferenceYearSpillover(year, doi, containerTitle)) {
-				return null;
-			}
-			if (containerTitle && isWorkshopOrCompanionVenue(containerTitle)) {
-				return null;
-			}
-		}
-
-		if (spec?.pacmIssue) {
-			if (!doi.toLowerCase().startsWith("10.1145/")) return null;
-			const iss = (row.issue ?? "").trim().toUpperCase();
-			if (!iss.startsWith(spec.pacmIssue.toUpperCase())) return null;
-		}
-
-		const onlineParts = row["published-online"]?.["date-parts"]?.[0];
-		const printParts = row["published-print"]?.["date-parts"]?.[0];
-		const pubParts = row.published?.["date-parts"]?.[0];
-		const parts = printParts ?? onlineParts ?? pubParts ?? [];
-		const maxYear = Math.max(
-			typeof onlineParts?.[0] === "number" ? onlineParts[0] : 0,
-			typeof printParts?.[0] === "number" ? printParts[0] : 0,
-			typeof pubParts?.[0] === "number" ? pubParts[0] : 0,
-		);
-		const y = maxYear > 0 ? maxYear : year;
-		if (y < year && !spec?.crossrefIsbns?.length && !requireDoiPrefix) {
-			return null;
-		}
-		const m = String(parts[1] ?? 1).padStart(2, "0");
-		const d = String(parts[2] ?? 1).padStart(2, "0");
-		const authors = (row.author ?? [])
-			.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
-			.filter(Boolean);
-		if (authors.length === 0) return null;
-
-		const rawAbs = (row.abstract ?? "")
-			.replace(/<[^>]+>/g, " ")
-			.replace(/^abstract[:.\s-]*/i, "")
-			.replace(/\s+/g, " ")
-			.trim();
-		const cleanAbs = isPlaceholderAbstract(rawAbs, venue.name) ? "" : rawAbs;
-
-		const categories = [
-			venue.name,
-			...(spec?.domain ? [spec.domain] : []),
-			...(spec?.ccfRank ? [spec.ccfRank] : []),
-		];
-		const rawRefs = normalizeRawRefs(
-			(row.reference ?? []).map((r) => (r?.DOI ? `doi:${r.DOI}` : undefined)),
-		);
-		return {
-			id: buildVenuePaperId(venue.id, doi, undefined, title),
-			title,
-			authors,
-			abstract: cleanAbs,
-			publishedAt: `${Math.max(y, year)}-${m}-${d}T00:00:00Z`,
-			year: Math.max(y, year),
-			sourceType: "venue",
-			sourceLabel: venue.name,
-			categories,
-			url: `https://doi.org/${doi}`,
-			doi,
-			venueId: venue.id,
-			venueKind,
-			venueDomain: spec?.domain,
-			ccfRank: spec?.ccfRank,
-			venueFull:
-				containerTitle && !isGenericRepositoryVenueName(containerTitle)
-					? containerTitle
-					: venue.name,
-			citationCount: 0,
-			keywords: [],
-			...(rawRefs ? { rawRefs } : {}),
-			volume: row.volume,
-			issue: row.issue,
-			pages: row.page,
-		};
-	};
+	) => crossrefWorkToVenueItem(row, venue, spec, year, requireDoiPrefix);
 
 	const crossrefFilters: string[] = [];
 	const fromDate = sinceDate ?? `${year}-01-01`;
@@ -2134,10 +2385,18 @@ async function fetchOpenAlexSingletonsByDoi(
 					}
 				}
 			}
-			if (fetched && (fetched.id || fetched.doi || fetched.title)) {
+			if (
+				fetched &&
+				(fetched.id || fetched.doi || fetched.title) &&
+				!isRejectedOpenAlexWork(fetched)
+			) {
 				const clean = cleanDoi(fetched.doi)?.toLowerCase() || doi;
-				outMap.set(clean, fetched);
-				outMap.set(doi, fetched);
+				if (!isArtifactOrDatasetDoi(clean)) {
+					outMap.set(clean, fetched);
+				}
+				if (!isArtifactOrDatasetDoi(doi)) {
+					outMap.set(doi, fetched);
+				}
 				succeeded += 1;
 				consecutiveFailures = 0;
 			} else {
@@ -2196,8 +2455,12 @@ export async function enrichVenueItemsBatch(
 
 	const preloadedByDoi = new Map<string, CollectionPaperItem>();
 	const preloadedByTitle = new Map<string, CollectionPaperItem>();
+	const validPreloadedItems: CollectionPaperItem[] = [];
 	if (preloadedItems && preloadedItems.length > 0) {
 		for (const p of preloadedItems) {
+			if (isArtifactOrDatasetDoi(p.doi) || isFrontmatterTitle(p.title))
+				continue;
+			validPreloadedItems.push(p);
 			if (p.doi) preloadedByDoi.set(p.doi.toLowerCase(), p);
 			if (p.arxivId) {
 				const aid = stripArxivVersion(p.arxivId).toLowerCase();
@@ -2218,11 +2481,18 @@ export async function enrichVenueItemsBatch(
 	const isPreloadedComplete = (p: CollectionPaperItem | undefined): boolean =>
 		Boolean(p && isPaperMetadataComplete(p, venue.name));
 
-	const resolveLookupDoi = (item: CollectionPaperItem): string | undefined =>
-		item.doi?.toLowerCase() ||
-		(item.arxivId
-			? `10.48550/arxiv.${stripArxivVersion(item.arxivId).toLowerCase()}`
-			: undefined);
+	const resolveLookupDoi = (item: CollectionPaperItem): string | undefined => {
+		const rawDoi =
+			item.doi && !isArtifactOrDatasetDoi(item.doi)
+				? item.doi.toLowerCase()
+				: undefined;
+		return (
+			rawDoi ||
+			(item.arxivId
+				? `10.48550/arxiv.${stripArxivVersion(item.arxivId).toLowerCase()}`
+				: undefined)
+		);
+	};
 
 	const byDoi = new Map<string, OpenAlexWork>();
 	const unmatchedDois = Array.from(
@@ -2256,8 +2526,13 @@ export async function enrichVenueItemsBatch(
 					break;
 				}
 				for (const row of res.results ?? []) {
+					if (isRejectedOpenAlexWork(row)) continue;
+					const rowTitle = (row.title || row.display_name || "").trim();
+					if (rowTitle && isFrontmatterTitle(rowTitle)) continue;
 					const d = cleanDoi(row.doi)?.toLowerCase();
-					if (d) mergeOpenAlexRowIntoMap(byDoi, d, row);
+					if (d && !isArtifactOrDatasetDoi(d)) {
+						mergeOpenAlexRowIntoMap(byDoi, d, row);
+					}
 					for (const aid of extractAllArxivIdsFromOpenAlex(row)) {
 						mergeOpenAlexRowIntoMap(byDoi, `10.48550/arxiv.${aid}`, row);
 					}
@@ -2337,8 +2612,11 @@ export async function enrichVenueItemsBatch(
 							break;
 						}
 						for (const row of res.results ?? []) {
+							if (isRejectedOpenAlexWork(row)) continue;
+							const rowTitle = (row.title || row.display_name || "").trim();
+							if (rowTitle && isFrontmatterTitle(rowTitle)) continue;
 							titleSearchRows.push(row);
-							const tk = normTitleKey(row.title || row.display_name || "");
+							const tk = normTitleKey(rowTitle);
 							if (tk && targetTitleKeys.has(tk)) {
 								mergeOpenAlexRowIntoMap(byTitle, tk, row);
 							}
@@ -2365,17 +2643,22 @@ export async function enrichVenueItemsBatch(
 		}
 	}
 
+	const spec = VENUE_SPEC_BY_ID.get(venue.id);
+	const allowDandB = {
+		allowDatasetsBenchmarks: Boolean(spec?.includeDatasetsBenchmarks),
+	};
 	const enriched: CollectionPaperItem[] = [];
 	for (const item of items) {
 		if (isFrontmatterTitle(item.title)) continue;
 		const tKey = normTitleKey(item.title);
 		const lookupDoi = resolveLookupDoi(item);
 		let pre =
-			(item.doi ? preloadedByDoi.get(item.doi.toLowerCase()) : undefined) ??
-			(tKey ? preloadedByTitle.get(tKey) : undefined);
-		if (!pre && preloadedItems && preloadedItems.length > 0) {
+			(item.doi && !isArtifactOrDatasetDoi(item.doi)
+				? preloadedByDoi.get(item.doi.toLowerCase())
+				: undefined) ?? (tKey ? preloadedByTitle.get(tKey) : undefined);
+		if (!pre && validPreloadedItems.length > 0) {
 			let bestPreScore = 0;
-			for (const cand of preloadedItems) {
+			for (const cand of validPreloadedItems) {
 				const res = scoreCameraReadyCandidateMatch(
 					item.title,
 					item.authors,
@@ -2394,8 +2677,9 @@ export async function enrichVenueItemsBatch(
 		if (!row && titleSearchRows.length > 0) {
 			let bestRowScore = 0;
 			for (const cand of titleSearchRows) {
+				if (isRejectedOpenAlexWork(cand)) continue;
 				const candTitle = cand.title || cand.display_name || "";
-				if (!candTitle) continue;
+				if (!candTitle || isFrontmatterTitle(candTitle)) continue;
 				const res = scoreCameraReadyCandidateMatch(
 					item.title,
 					item.authors,
@@ -2410,7 +2694,7 @@ export async function enrichVenueItemsBatch(
 		}
 
 		let abstract = item.abstract;
-		let doi = item.doi;
+		let doi = isArtifactOrDatasetDoi(item.doi) ? undefined : item.doi;
 		let citationCount = item.citationCount ?? 0;
 		let mergedKw = mergeKeywordMetadata(
 			item.keywords,
@@ -2432,7 +2716,7 @@ export async function enrichVenueItemsBatch(
 		let coolPapersId = item.coolPapersId;
 		let recommendedAt = item.recommendedAt;
 
-		if (pre) {
+		if (pre && !isArtifactOrDatasetDoi(pre.doi)) {
 			if (
 				isPlaceholderAbstract(abstract, venue.name) &&
 				!isPlaceholderAbstract(pre.abstract, venue.name)
@@ -2469,7 +2753,7 @@ export async function enrichVenueItemsBatch(
 			}
 		}
 
-		if (row) {
+		if (row && !isRejectedOpenAlexWork(row)) {
 			const oaAbs = reconstructOpenAlexAbstract(row.abstract_inverted_index);
 			if (
 				isPlaceholderAbstract(abstract, venue.name) &&
@@ -2477,7 +2761,10 @@ export async function enrichVenueItemsBatch(
 			) {
 				abstract = oaAbs;
 			}
-			doi = doi || cleanDoi(row.doi);
+			const rowDoi = cleanDoi(row.doi);
+			if (rowDoi && !isArtifactOrDatasetDoi(rowDoi)) {
+				doi = doi || rowDoi;
+			}
 			openalexId = openalexId || normalizeOpenAlexId(row.id);
 			if (row.referenced_works?.length) {
 				collectedRefs.push(...row.referenced_works);
@@ -2494,7 +2781,7 @@ export async function enrichVenueItemsBatch(
 				!isGenericRepositoryVenueName(venueFull)
 					? venueFull
 					: undefined) ||
-				(!isWorkshopOrCompanionVenue(rowSourceName) &&
+				(!isWorkshopOrCompanionVenue(rowSourceName, allowDandB) &&
 				!isGenericRepositoryVenueName(rowSourceName)
 					? rowSourceName
 					: undefined) ||
@@ -2680,6 +2967,7 @@ function mergeOpenAlexRowIntoMap(
 	key: string,
 	next: OpenAlexWork,
 ): void {
+	if (isRejectedOpenAlexWork(next)) return;
 	const prev = map.get(key);
 	if (!prev) {
 		map.set(key, next);
@@ -2687,12 +2975,21 @@ function mergeOpenAlexRowIntoMap(
 	}
 	const prevDoi = cleanDoi(prev.doi);
 	const nextDoi = cleanDoi(next.doi);
+	const validPrevDoi =
+		prevDoi && !isArtifactOrDatasetDoi(prevDoi) ? prevDoi : undefined;
+	const validNextDoi =
+		nextDoi && !isArtifactOrDatasetDoi(nextDoi) ? nextDoi : undefined;
 	const preferredDoi =
-		prevDoi && !prevDoi.toLowerCase().startsWith("10.48550/arxiv.")
+		validPrevDoi && !validPrevDoi.toLowerCase().startsWith("10.48550/arxiv.")
 			? prev.doi
-			: nextDoi && !nextDoi.toLowerCase().startsWith("10.48550/arxiv.")
+			: validNextDoi &&
+					!validNextDoi.toLowerCase().startsWith("10.48550/arxiv.")
 				? next.doi
-				: prev.doi || next.doi;
+				: validPrevDoi
+					? prev.doi
+					: validNextDoi
+						? next.doi
+						: undefined;
 	const mergedRefs =
 		prev.referenced_works?.length || next.referenced_works?.length
 			? Array.from(
@@ -2970,7 +3267,7 @@ export async function enrichSinglePaperOnDemand(
 	let upstreamKw: string[] = normalizePaperKeywords(paper.keywords);
 	let keywordSource: KeywordSource | undefined =
 		upstreamKw.length > 0 ? paper.keywordSource : undefined;
-	let doi = paper.doi;
+	let doi = isArtifactOrDatasetDoi(paper.doi) ? undefined : paper.doi;
 	let arxivId = paper.arxivId;
 	let pdfUrl = paper.pdfUrl;
 	let openalexId = normalizeOpenAlexId(paper.openalexId);
@@ -2983,7 +3280,9 @@ export async function enrichSinglePaperOnDemand(
 	let venueFull = paper.venueFull;
 
 	const applyOpenAlex = (row: OpenAlexWork | null | undefined) => {
-		if (!row) return;
+		if (!row || isRejectedOpenAlexWork(row)) return;
+		const rowTitle = (row.title ?? row.display_name ?? "").trim();
+		if (rowTitle && isFrontmatterTitle(rowTitle)) return;
 		const oaAbs = reconstructOpenAlexAbstract(row.abstract_inverted_index);
 		if (
 			isPlaceholderAbstract(abstract, paper.sourceLabel) &&
@@ -2991,7 +3290,10 @@ export async function enrichSinglePaperOnDemand(
 		) {
 			abstract = oaAbs;
 		}
-		doi = doi || cleanDoi(row.doi);
+		const rowDoi = cleanDoi(row.doi);
+		if (rowDoi && !isArtifactOrDatasetDoi(rowDoi)) {
+			doi = doi || rowDoi;
+		}
 		openalexId = openalexId || normalizeOpenAlexId(row.id);
 		if (row.referenced_works?.length) {
 			collectedRefs.push(...row.referenced_works);
@@ -3063,8 +3365,9 @@ export async function enrichSinglePaperOnDemand(
 				let bestFuzzyWork: OpenAlexWork | undefined;
 				let bestFuzzyScore = 0;
 				for (const m of oaSearch.results ?? []) {
+					if (isRejectedOpenAlexWork(m)) continue;
 					const mTitle = m.title ?? m.display_name ?? "";
-					if (!mTitle) continue;
+					if (!mTitle || isFrontmatterTitle(mTitle)) continue;
 					if (normTitleKey(mTitle) === targetKey) {
 						matchedExact = true;
 						applyOpenAlex(m);
@@ -3209,14 +3512,16 @@ export async function enrichSinglePaperOnDemand(
 				}>(
 					`https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(s2Id)}?fields=abstract,externalIds,openAccessPdf`,
 				);
-				if (
-					s2.abstract &&
-					!isPlaceholderAbstract(s2.abstract, paper.sourceLabel)
-				) {
-					abstract = s2.abstract.trim();
+				if (!isArtifactOrDatasetDoi(s2.externalIds?.DOI)) {
+					if (
+						s2.abstract &&
+						!isPlaceholderAbstract(s2.abstract, paper.sourceLabel)
+					) {
+						abstract = s2.abstract.trim();
+					}
+					arxivId = arxivId || s2.externalIds?.ArXiv?.trim() || undefined;
+					pdfUrl = pdfUrl || s2.openAccessPdf?.url?.trim() || undefined;
 				}
-				arxivId = arxivId || s2.externalIds?.ArXiv?.trim() || undefined;
-				pdfUrl = pdfUrl || s2.openAccessPdf?.url?.trim() || undefined;
 			} catch {
 				// Best-effort fallback.
 			}
@@ -3241,8 +3546,9 @@ export async function enrichSinglePaperOnDemand(
 				let bestFuzzy: S2SearchCand | undefined;
 				let bestFuzzyScore = 0;
 				for (const cand of candidates) {
+					if (isArtifactOrDatasetDoi(cand.externalIds?.DOI)) continue;
 					const cTitle = cand.title ?? "";
-					if (!cTitle) continue;
+					if (!cTitle || isFrontmatterTitle(cTitle)) continue;
 					if (normTitleKey(cTitle) === targetKey) {
 						exactMatches.push(cand);
 						continue;
@@ -3271,13 +3577,17 @@ export async function enrichSinglePaperOnDemand(
 				const toApply =
 					exactMatches.length > 0 ? exactMatches : bestFuzzy ? [bestFuzzy] : [];
 				for (const cand of toApply) {
+					if (isArtifactOrDatasetDoi(cand.externalIds?.DOI)) continue;
 					if (
 						cand.abstract &&
 						!isPlaceholderAbstract(cand.abstract, paper.sourceLabel)
 					) {
 						abstract = cand.abstract.trim();
 					}
-					doi = doi || cleanDoi(cand.externalIds?.DOI);
+					const candDoi = cleanDoi(cand.externalIds?.DOI);
+					if (candDoi && !isArtifactOrDatasetDoi(candDoi)) {
+						doi = doi || candDoi;
+					}
 					arxivId = arxivId || cand.externalIds?.ArXiv?.trim() || undefined;
 					pdfUrl = pdfUrl || cand.openAccessPdf?.url?.trim() || undefined;
 				}
