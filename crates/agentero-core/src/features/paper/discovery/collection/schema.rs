@@ -9,7 +9,7 @@ use crate::error::AppError;
 use crate::paths;
 use crate::sqlite::{DbMsgs, MigrationStep};
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub const DEFAULT_ARXIV_CATEGORIES_JSON: &str = r#"["cs.SE","cs.CR","cs.PL"]"#;
 pub const DEFAULT_WORD_CLOUD_TOP_N: usize = 50;
@@ -51,7 +51,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "issta-2026",
         name: "ISSTA 2026",
         url: "https://conf.researchr.org/home/issta-2026",
-        tracks: &["https://conf.researchr.org/track/issta-2026/issta-2026-papers"],
+        tracks: &["https://conf.researchr.org/track/issta-2026/issta-2026-research-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-A",
@@ -97,7 +97,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "ecoop-2026",
         name: "ECOOP 2026",
         url: "https://2026.ecoop.org",
-        tracks: &["https://2026.ecoop.org/track/ecoop-2026-papers"],
+        tracks: &["https://2026.ecoop.org/track/ecoop-2026-technical-papers"],
         kind: "conference",
         domain: "PL/SE",
         ccf_rank: "CCF-B",
@@ -216,7 +216,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "sp-2026",
         name: "S&P 2026",
         url: "https://sp2026.ieee-security.org/",
-        tracks: &["https://sp2026.ieee-security.org/program-papers.html"],
+        tracks: &["https://sp2026.ieee-security.org/accepted-papers.html"],
         kind: "conference",
         domain: "CR",
         ccf_rank: "CCF-A",
@@ -253,7 +253,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "neurips-2026",
         name: "NeurIPS 2026",
         url: "https://neurips.cc/Conferences/2026",
-        tracks: &["https://openreview.net/group?id=NeurIPS.cc/2026/Conference"],
+        tracks: &["https://neurips.cc/virtual/2026/papers.html"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
@@ -263,6 +263,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         name: "ACL 2026",
         url: "https://2026.aclweb.org/",
         tracks: &[
+            "https://2026.aclweb.org/program/accepted_papers/",
             "https://aclanthology.org/volumes/2026.acl-long/",
             "https://aclanthology.org/volumes/2026.acl-short/",
         ],
@@ -274,7 +275,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "iclr-2026",
         name: "ICLR 2026",
         url: "https://iclr.cc/Conferences/2026",
-        tracks: &["https://openreview.net/group?id=ICLR.cc/2026/Conference"],
+        tracks: &["https://iclr.cc/virtual/2026/papers.html"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
@@ -283,7 +284,7 @@ pub const DEFAULT_VENUES: &[DefaultVenueSeed] = &[
         id: "icml-2026",
         name: "ICML 2026",
         url: "https://icml.cc/Conferences/2026",
-        tracks: &["https://openreview.net/group?id=ICML.cc/2026/Conference"],
+        tracks: &["https://icml.cc/virtual/2026/papers.html"],
         kind: "conference",
         domain: "AI",
         ccf_rank: "CCF-A",
@@ -459,7 +460,8 @@ CREATE TABLE IF NOT EXISTS canonical_works (
   arxiv_id_norm   TEXT,
   title_norm      TEXT,
   author_norm     TEXT,
-  active_in_scope INTEGER NOT NULL DEFAULT 1
+  active_in_scope INTEGER NOT NULL DEFAULT 1,
+  refs_checked_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cw_openalex ON canonical_works(openalex_id) WHERE openalex_id IS NOT NULL;
@@ -482,10 +484,11 @@ CREATE TABLE IF NOT EXISTS paper_citations (
 CREATE INDEX IF NOT EXISTS idx_paper_citations_cited ON paper_citations(cited_work_id);
 "#;
 
-const MIGRATION_STEPS: [MigrationStep; 3] = [
+const MIGRATION_STEPS: [MigrationStep; 4] = [
     MigrationStep::custom(1, init_v1),
     MigrationStep::custom(2, migrate_v2),
     MigrationStep::custom(3, migrate_v3),
+    MigrationStep::custom(4, migrate_v4),
 ];
 
 fn init_v1(conn: &Connection) -> Result<(), AppError> {
@@ -538,6 +541,358 @@ fn migrate_v3(conn: &Connection) -> Result<(), AppError> {
     }
     tx.commit()
         .map_err(|e| AppError::message(format!("collection migrate v3 commit: {e}")))?;
+    Ok(())
+}
+
+fn is_artifact_description(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let looks_like_paper = lower.contains("we propose")
+        || lower.contains("we present")
+        || lower.contains("we introduce")
+        || lower.contains("in this paper")
+        || lower.contains("this paper ");
+    if looks_like_paper && lower.len() > 260 {
+        return false;
+    }
+    lower.starts_with("artifact for ")
+        || lower.starts_with("replication package for ")
+        || lower.starts_with("source code for ")
+        || lower.starts_with("source code and ")
+        || lower.starts_with("this zenodo ")
+        || lower.starts_with("zenodo ")
+        || (lower.len() < 260
+            && (lower.contains("10.5281/zenodo.")
+                || lower.contains("zenodo.org/record")
+                || lower.contains("figshare.com/")
+                || lower.contains("source code repository for")))
+}
+
+fn migrate_v4_venue_tracks(tx: &Connection) -> Result<(), AppError> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, tracks_json FROM venues
+             WHERE id IN ('issta-2026', 'ecoop-2026', 'sp-2026', 'neurips-2026', 'acl-2026', 'iclr-2026', 'icml-2026')",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut update = tx.prepare("UPDATE venues SET tracks_json = ?1 WHERE id = ?2")?;
+    for (id, raw_json) in rows {
+        let Ok(tracks) = serde_json::from_str::<Vec<String>>(&raw_json) else {
+            continue;
+        };
+        let next_tracks: Option<Vec<String>> = match id.as_str() {
+            "issta-2026" => {
+                if tracks
+                    .iter()
+                    .any(|t| t.trim().ends_with("/issta-2026-papers"))
+                {
+                    Some(
+                        tracks
+                            .iter()
+                            .map(|t| {
+                                if t.trim().ends_with("/issta-2026-papers") {
+                                    "https://conf.researchr.org/track/issta-2026/issta-2026-research-papers"
+                                        .to_string()
+                                } else {
+                                    t.clone()
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+            "ecoop-2026" => {
+                if tracks
+                    .iter()
+                    .any(|t| t.trim().ends_with("/ecoop-2026-papers"))
+                {
+                    Some(
+                        tracks
+                            .iter()
+                            .map(|t| {
+                                if t.trim().ends_with("/ecoop-2026-papers") {
+                                    "https://2026.ecoop.org/track/ecoop-2026-technical-papers"
+                                        .to_string()
+                                } else {
+                                    t.clone()
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+            "sp-2026" => {
+                if tracks
+                    .iter()
+                    .any(|t| t.trim().ends_with("/program-papers.html"))
+                {
+                    Some(
+                        tracks
+                            .iter()
+                            .map(|t| {
+                                if t.trim().ends_with("/program-papers.html") {
+                                    "https://sp2026.ieee-security.org/accepted-papers.html"
+                                        .to_string()
+                                } else {
+                                    t.clone()
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+            "neurips-2026"
+                if tracks.as_slice()
+                    == ["https://openreview.net/group?id=NeurIPS.cc/2026/Conference"] =>
+            {
+                Some(vec![
+                    "https://neurips.cc/virtual/2026/papers.html".to_string()
+                ])
+            }
+            "iclr-2026"
+                if tracks.as_slice()
+                    == ["https://openreview.net/group?id=ICLR.cc/2026/Conference"] =>
+            {
+                Some(vec!["https://iclr.cc/virtual/2026/papers.html".to_string()])
+            }
+            "icml-2026"
+                if tracks.as_slice()
+                    == ["https://openreview.net/group?id=ICML.cc/2026/Conference"] =>
+            {
+                Some(vec!["https://icml.cc/virtual/2026/papers.html".to_string()])
+            }
+            "acl-2026"
+                if tracks.as_slice()
+                    == [
+                        "https://aclanthology.org/volumes/2026.acl-long/",
+                        "https://aclanthology.org/volumes/2026.acl-short/",
+                    ] =>
+            {
+                Some(vec![
+                    "https://2026.aclweb.org/program/accepted_papers/".to_string(),
+                    "https://aclanthology.org/volumes/2026.acl-long/".to_string(),
+                    "https://aclanthology.org/volumes/2026.acl-short/".to_string(),
+                ])
+            }
+            _ => None,
+        };
+
+        if let Some(updated) = next_tracks {
+            let encoded = serde_json::to_string(&updated)?;
+            if encoded != raw_json {
+                update.execute(params![encoded, id])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn migrate_v4_arxiv_keys(tx: &Connection) -> Result<(), AppError> {
+    let bad_refs: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT src_work_id, ref_key FROM paper_raw_refs WHERE ref_key LIKE 'arxiv:10.48550/%'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !bad_refs.is_empty() {
+        let mut ins = tx.prepare(
+            "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key) VALUES (?1, ?2)",
+        )?;
+        let mut del =
+            tx.prepare("DELETE FROM paper_raw_refs WHERE src_work_id = ?1 AND ref_key = ?2")?;
+        for (wid, old_key) in bad_refs {
+            if let Some(clean_id) = super::store::clean_arxiv_key(&old_key) {
+                ins.execute(params![wid, format!("arxiv:{clean_id}")])?;
+                del.execute(params![wid, old_key])?;
+            }
+        }
+    }
+
+    let bad_cw: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT work_id, arxiv_id_norm FROM canonical_works WHERE arxiv_id_norm LIKE '10.48550/%'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !bad_cw.is_empty() {
+        let mut upd_cw =
+            tx.prepare("UPDATE canonical_works SET arxiv_id_norm = ?1 WHERE work_id = ?2")?;
+        let mut cleaned_aids = std::collections::HashSet::new();
+        for (wid, old_aid) in bad_cw {
+            if let Some(clean_id) = super::store::clean_arxiv_key(&old_aid) {
+                upd_cw.execute(params![clean_id, wid])?;
+                cleaned_aids.insert(clean_id);
+            }
+        }
+
+        // Merge any canonical_works rows that now share the same cleaned arxiv_id_norm.
+        for aid in cleaned_aids {
+            let wids: Vec<i64> = {
+                let mut stmt = tx.prepare(
+                    "SELECT work_id FROM canonical_works WHERE arxiv_id_norm = ?1 ORDER BY work_id ASC",
+                )?;
+                let rows = stmt.query_map([aid.as_str()], |r| r.get(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            if wids.len() > 1 {
+                let primary_id = wids[0];
+                for &sec_id in &wids[1..] {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key)
+                         SELECT ?1, ref_key FROM paper_raw_refs WHERE src_work_id = ?2",
+                        params![primary_id, sec_id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM paper_raw_refs WHERE src_work_id = ?1",
+                        [sec_id],
+                    )?;
+                    tx.execute(
+                        "UPDATE papers SET work_id = ?1 WHERE work_id = ?2",
+                        params![primary_id, sec_id],
+                    )?;
+                    tx.execute("DELETE FROM canonical_works WHERE work_id = ?1", [sec_id])?;
+                }
+            }
+        }
+    }
+
+    let bad_papers: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT row_id, arxiv_id_norm FROM papers WHERE arxiv_id_norm LIKE '10.48550/%'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !bad_papers.is_empty() {
+        let mut upd_p = tx.prepare("UPDATE papers SET arxiv_id_norm = ?1 WHERE row_id = ?2")?;
+        for (row_id, old_aid) in bad_papers {
+            if let Some(clean_id) = super::store::clean_arxiv_key(&old_aid) {
+                upd_p.execute(params![clean_id, row_id])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+struct ArtifactCandidateRow {
+    row_id: i64,
+    source_type: String,
+    doi: Option<String>,
+    doi_norm: Option<String>,
+    abstract_text: String,
+}
+
+fn migrate_v4_strip_artifact_dois(tx: &Connection) -> Result<(), AppError> {
+    let paper_candidates: Vec<ArtifactCandidateRow> = {
+        let mut stmt = tx.prepare(
+            "SELECT row_id, source_type, doi, doi_norm, abstract_text
+             FROM papers
+             WHERE doi IS NOT NULL
+                OR doi_norm IS NOT NULL
+                OR LOWER(abstract_text) LIKE '%zenodo%'
+                OR LOWER(abstract_text) LIKE '%figshare%'
+                OR LOWER(abstract_text) LIKE '%source code%'
+                OR LOWER(abstract_text) LIKE '%replication package%'
+                OR LOWER(abstract_text) LIKE '%artifact%'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ArtifactCandidateRow {
+                row_id: r.get(0)?,
+                source_type: r.get(1)?,
+                doi: r.get(2)?,
+                doi_norm: r.get(3)?,
+                abstract_text: r.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !paper_candidates.is_empty() {
+        let mut clear_both = tx.prepare(
+            "UPDATE papers SET doi = NULL, doi_norm = NULL, abstract_text = '' WHERE row_id = ?1",
+        )?;
+        let mut clear_doi =
+            tx.prepare("UPDATE papers SET doi = NULL, doi_norm = NULL WHERE row_id = ?1")?;
+        let mut clear_abs = tx.prepare("UPDATE papers SET abstract_text = '' WHERE row_id = ?1")?;
+        for cand in paper_candidates {
+            let has_artifact_doi = cand
+                .doi
+                .as_deref()
+                .is_some_and(super::store::is_artifact_or_dataset_doi)
+                || cand
+                    .doi_norm
+                    .as_deref()
+                    .is_some_and(super::store::is_artifact_or_dataset_doi);
+            let bad_abs = is_artifact_description(&cand.abstract_text);
+            if has_artifact_doi {
+                if cand.source_type != "arxiv" || bad_abs {
+                    clear_both.execute([cand.row_id])?;
+                } else {
+                    clear_doi.execute([cand.row_id])?;
+                }
+            } else if cand.source_type != "arxiv" && bad_abs {
+                clear_abs.execute([cand.row_id])?;
+            }
+        }
+    }
+
+    let cw_candidates: Vec<(i64, String)> = {
+        let mut stmt =
+            tx.prepare("SELECT work_id, doi_norm FROM canonical_works WHERE doi_norm IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !cw_candidates.is_empty() {
+        let mut upd_cw =
+            tx.prepare("UPDATE canonical_works SET doi_norm = NULL WHERE work_id = ?1")?;
+        for (wid, dnorm) in cw_candidates {
+            if super::store::is_artifact_or_dataset_doi(&dnorm) {
+                upd_cw.execute([wid])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// v4: add `canonical_works.refs_checked_at`, repair broken default venue tracks,
+/// normalize malformed `arxiv:10.48550/...` keys, strip repository/artifact DOIs,
+/// and recompute citation edges.
+fn migrate_v4(conn: &Connection) -> Result<(), AppError> {
+    if let Err(e) =
+        conn.execute_batch("ALTER TABLE canonical_works ADD COLUMN refs_checked_at TEXT")
+    {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(AppError::message(format!(
+                "collection migrate v4 alter: {e}"
+            )));
+        }
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::message(format!("collection migrate v4 tx: {e}")))?;
+
+    migrate_v4_venue_tracks(&tx)?;
+    migrate_v4_arxiv_keys(&tx)?;
+    migrate_v4_strip_artifact_dois(&tx)?;
+    super::store::recompute_graph_and_citations_tx(&tx)?;
+
+    tx.commit()
+        .map_err(|e| AppError::message(format!("collection migrate v4 commit: {e}")))?;
     Ok(())
 }
 

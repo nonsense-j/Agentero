@@ -28,8 +28,9 @@ use super::schema::{collection_db_path, ensure_collection_at};
 use super::store::{
     apply_venue_watermark_update_tx, build_keywords_text, clean_arxiv_key, clean_doi_key,
     clean_openalex_id, clean_opt_str, clean_publisher_doi, clean_string_vec,
-    insert_work_raw_refs_tx, load_enabled_categories, normalize_ref_key, now_rfc3339,
-    read_state_summary_conn, recompute_graph_and_citations_tx, upsert_arxiv_watermarks_tx,
+    insert_work_raw_refs_tx, is_artifact_or_dataset_doi, is_publisher_doi, load_enabled_categories,
+    norm_title_key, normalize_ref_key, now_rfc3339, read_state_summary_conn,
+    recompute_graph_and_citations_tx, same_work_by_title_and_authors, upsert_arxiv_watermarks_tx,
     upsert_single_paper_tx,
 };
 
@@ -40,8 +41,46 @@ pub const DEFAULT_BAKE_LLM_BASE_URL: &str = "http://127.0.0.1:8011/v1";
 pub const DEFAULT_BAKE_LLM_MODEL: &str = "mercury-3-instant";
 
 const OPENALEX_MAILTO: &str = "agentero@users.noreply.github.com";
+const OPENALEX_SELECT: &str = "id,type,title,publication_year,doi,ids,authorships,referenced_works";
+const MAX_OA_SOURCE_PAGES: usize = 30;
+const MAX_OA_TITLE_SEARCH_CALLS: usize = 850;
+const OA_TITLE_SEARCH_BATCH_SIZE: usize = 12;
 const LLM_RETRY_DELAYS_SECS: [u64; 8] = [3, 6, 12, 25, 45, 45, 45, 45];
 const UPSTREAM_RETRY_DELAYS_SECS: [u64; 6] = [2, 5, 10, 20, 35, 45];
+
+/// Verified OpenAlex Source IDs for `DEFAULT_VENUES` (aligned with `collection-enrichment.ts`
+/// plus LIPIcs `S4393917817` for ECOOP/ESEM). Shared source IDs (e.g. PACMSE/PACMPL/LIPIcs)
+/// are deduplicated during Pass A1.5 so each source is paged at most once.
+const VENUE_OPENALEX_SOURCE_IDS: &[(&str, &[&str])] = &[
+    ("aaai-2026", &["S4210191458"]),
+    ("ndss-2026", &["S4306420590"]),
+    ("acl-2026", &["S4393915740"]),
+    ("ccs-2026", &["S4393917527"]),
+    ("sp-2026", &["S4210233669"]),
+    ("icse-2026", &["S4210203175"]),
+    ("ase-2026", &["S4363608212"]),
+    ("fse-2026", &["S4404663975"]),
+    ("issta-2026", &["S4404663975"]),
+    ("pldi-2026", &["S4210216081"]),
+    ("popl-2026", &["S4210216081"]),
+    ("oopsla-2026", &["S4210216081"]),
+    ("re-2026", &["S7407086818"]),
+    ("saner-2026", &["S4363608226"]),
+    ("icpc-2026", &["S7407088527", "S4306419777"]),
+    ("icsme-2026", &["S4210174939"]),
+    ("issre-2026", &["S4210220341"]),
+    ("sas-2026", &["S4306420942"]),
+    ("ecoop-2026", &["S4393917817"]),
+    ("esem-2026", &["S4210197744", "S4393917817"]),
+    ("tse-2026", &["S8351582"]),
+    ("tosem-2026", &["S142627899"]),
+    ("ese-2026", &["S109852484"]),
+    ("ase-journal-2026", &["S4210177399"]),
+    ("usenix-sec-2026", &["S4306421123"]),
+    ("neurips-2026", &["S4363606243"]),
+    ("iclr-2026", &["S4306419637"]),
+    ("icml-2026", &["S4306419644"]),
+];
 
 // ─── Seed Manifest & JSONL Record Wire Types ───
 
@@ -664,12 +703,39 @@ pub struct SeedBakeReport {
     pub shards: Vec<SeedShardEntry>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WorkRefTarget {
     work_id: i64,
     openalex_id: Option<String>,
     doi_norm: Option<String>,
     arxiv_id_norm: Option<String>,
+    title: String,
+    authors: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkRefUpdate {
+    work_id: i64,
+    openalex_id: Option<String>,
+    pub_doi: Option<String>,
+    arxiv_id: Option<String>,
+    refs: Vec<String>,
+}
+
+struct ParsedOpenAlexWork {
+    openalex_id: Option<String>,
+    title: String,
+    authors: Vec<String>,
+    pub_doi: Option<String>,
+    arxiv_id: Option<String>,
+    refs: Vec<String>,
+}
+
+enum OpenAlexFetchResult {
+    Ok(Value),
+    NotFound,
+    RateLimited,
+    Error,
 }
 
 fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -679,72 +745,374 @@ fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
-async fn get_json_with_backoff(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<Option<Value>, AppError> {
-    for (attempt, &base_secs) in UPSTREAM_RETRY_DELAYS_SECS.iter().enumerate() {
+async fn fetch_openalex_json(client: &reqwest::Client, url: &str) -> OpenAlexFetchResult {
+    const OA_RETRY_DELAYS_SECS: [u64; 3] = [2, 5, 10];
+    for (attempt, &base_secs) in OA_RETRY_DELAYS_SECS.iter().enumerate() {
         match client.get(url).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    return Ok(resp.json::<Value>().await.ok());
+                    return match resp.json::<Value>().await {
+                        Ok(v) => OpenAlexFetchResult::Ok(v),
+                        Err(err) => {
+                            log::warn!("seed_bake OpenAlex invalid JSON: {err}");
+                            OpenAlexFetchResult::Error
+                        }
+                    };
                 }
                 if status == StatusCode::NOT_FOUND {
-                    return Ok(None);
+                    return OpenAlexFetchResult::NotFound;
                 }
-                if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                    let wait = parse_retry_after_secs(resp.headers())
-                        .unwrap_or(base_secs)
-                        .clamp(1, 120);
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    let retry_after = parse_retry_after_secs(resp.headers());
+                    let body_lower = resp.text().await.unwrap_or_default().to_ascii_lowercase();
+                    let is_daily_budget = retry_after.is_some_and(|s| s > 60)
+                        || body_lower.contains("credit")
+                        || body_lower.contains("budget")
+                        || body_lower.contains("daily")
+                        || body_lower.contains("insufficient");
+                    if is_daily_budget || attempt + 1 >= OA_RETRY_DELAYS_SECS.len() {
+                        log::warn!(
+                            "seed_bake OpenAlex HTTP 429 rate-limited (daily_budget={is_daily_budget}), stopping OpenAlex pass gracefully"
+                        );
+                        return OpenAlexFetchResult::RateLimited;
+                    }
+                    let wait = retry_after.unwrap_or(base_secs).clamp(1, 30);
                     log::warn!(
-                        "seed_bake upstream GET HTTP {} (attempt {}/{}), sleeping {}s",
-                        status,
+                        "seed_bake OpenAlex HTTP 429 (attempt {}/{}), sleeping {}s",
                         attempt + 1,
-                        UPSTREAM_RETRY_DELAYS_SECS.len(),
+                        OA_RETRY_DELAYS_SECS.len(),
                         wait
                     );
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     continue;
                 }
-                return Ok(None);
+                if status.is_server_error() && attempt + 1 < OA_RETRY_DELAYS_SECS.len() {
+                    log::warn!(
+                        "seed_bake OpenAlex HTTP {} (attempt {}/{}), sleeping {}s",
+                        status,
+                        attempt + 1,
+                        OA_RETRY_DELAYS_SECS.len(),
+                        base_secs
+                    );
+                    tokio::time::sleep(Duration::from_secs(base_secs)).await;
+                    continue;
+                }
+                log::warn!("seed_bake OpenAlex HTTP {status}");
+                return OpenAlexFetchResult::Error;
             }
             Err(err) => {
-                if attempt + 1 < UPSTREAM_RETRY_DELAYS_SECS.len() {
+                if attempt + 1 < OA_RETRY_DELAYS_SECS.len() {
                     tokio::time::sleep(Duration::from_secs(base_secs)).await;
                 } else {
-                    log::warn!("seed_bake upstream GET failed after retries: {err}");
+                    log::warn!("seed_bake OpenAlex GET failed after retries: {err}");
+                    return OpenAlexFetchResult::Error;
                 }
             }
         }
     }
-    Ok(None)
+    OpenAlexFetchResult::Error
 }
 
-fn persist_ref_batch(
-    db_path: &Path,
-    updates: &[(i64, Option<String>, Vec<String>)],
-) -> Result<usize, AppError> {
+fn is_rejected_openalex_work(work: &Value) -> bool {
+    if let Some(wtype) = work.get("type").and_then(Value::as_str) {
+        let t = wtype.trim().to_ascii_lowercase();
+        if matches!(t.as_str(), "dataset" | "software" | "paratext" | "erratum") {
+            return true;
+        }
+    }
+    if let Some(raw_doi) = work.get("doi").and_then(Value::as_str) {
+        if is_artifact_or_dataset_doi(raw_doi) {
+            return true;
+        }
+    }
+    if let Some(id_doi) = work
+        .get("ids")
+        .and_then(|ids| ids.get("doi"))
+        .and_then(Value::as_str)
+    {
+        if is_artifact_or_dataset_doi(id_doi) {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_openalex_authors(work: &Value) -> Vec<String> {
+    work.get("authorships")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    a.get("author")
+                        .and_then(|au| au.get("display_name"))
+                        .and_then(Value::as_str)
+                        .or_else(|| a.get("raw_author_name").and_then(Value::as_str))
+                })
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_openalex_work(work: &Value) -> Option<ParsedOpenAlexWork> {
+    if is_rejected_openalex_work(work) {
+        return None;
+    }
+    let openalex_id = work
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(clean_openalex_id);
+    let title = work
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let authors = extract_openalex_authors(work);
+    let raw_doi = work
+        .get("doi")
+        .and_then(Value::as_str)
+        .and_then(clean_doi_key);
+    let pub_doi = raw_doi.as_deref().and_then(clean_publisher_doi);
+    let arxiv_id = work
+        .get("ids")
+        .and_then(|ids| ids.get("arxiv"))
+        .and_then(Value::as_str)
+        .and_then(clean_arxiv_key)
+        .or_else(|| {
+            raw_doi
+                .as_deref()
+                .and_then(|d| d.strip_prefix("10.48550/arxiv.").and_then(clean_arxiv_key))
+        });
+    let refs: Vec<String> = work
+        .get("referenced_works")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter_map(clean_openalex_id)
+                .map(|w| format!("oa:{w}"))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ParsedOpenAlexWork {
+        openalex_id,
+        title,
+        authors,
+        pub_doi,
+        arxiv_id,
+        refs,
+    })
+}
+
+fn resolve_work_alias(aliases: &HashMap<i64, i64>, mut wid: i64) -> i64 {
+    while let Some(&next) = aliases.get(&wid) {
+        if next == wid {
+            break;
+        }
+        wid = next;
+    }
+    wid
+}
+
+fn merge_canonical_works_on_ids_tx(
+    tx: &rusqlite::Transaction<'_>,
+    aliases: &mut HashMap<i64, i64>,
+    seed_wid: i64,
+    oa_opt: Option<&str>,
+    pub_doi_opt: Option<&str>,
+    arxiv_opt: Option<&str>,
+) -> Result<i64, AppError> {
+    let cur_wid = resolve_work_alias(aliases, seed_wid);
+    let mut matched: Vec<i64> = Vec::new();
+    let exists_cur: bool = tx
+        .query_row(
+            "SELECT 1 FROM canonical_works WHERE work_id = ?1",
+            [cur_wid],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if exists_cur {
+        matched.push(cur_wid);
+    }
+
+    if let Some(oa) = oa_opt.filter(|s| !s.is_empty()) {
+        let mut stmt =
+            tx.prepare_cached("SELECT work_id FROM canonical_works WHERE openalex_id = ?1")?;
+        for wid in stmt.query_map([oa], |r| r.get::<_, i64>(0))? {
+            let wid = wid?;
+            if !matched.contains(&wid) {
+                matched.push(wid);
+            }
+        }
+    }
+    if let Some(doi) = pub_doi_opt.filter(|s| is_publisher_doi(s)) {
+        let mut stmt =
+            tx.prepare_cached("SELECT work_id FROM canonical_works WHERE doi_norm = ?1")?;
+        for wid in stmt.query_map([doi], |r| r.get::<_, i64>(0))? {
+            let wid = wid?;
+            if !matched.contains(&wid) {
+                matched.push(wid);
+            }
+        }
+    }
+    if let Some(aid) = arxiv_opt.filter(|s| !s.is_empty()) {
+        let mut stmt =
+            tx.prepare_cached("SELECT work_id FROM canonical_works WHERE arxiv_id_norm = ?1")?;
+        for wid in stmt.query_map([aid], |r| r.get::<_, i64>(0))? {
+            let wid = wid?;
+            if !matched.contains(&wid) {
+                matched.push(wid);
+            }
+        }
+    }
+
+    if matched.is_empty() {
+        return Ok(cur_wid);
+    }
+    matched.sort_unstable();
+    let primary_id = matched[0];
+    if matched.len() > 1 {
+        struct CanonicalMergeRow {
+            openalex_id: Option<String>,
+            doi_norm: Option<String>,
+            arxiv_id_norm: Option<String>,
+            title_norm: Option<String>,
+            author_norm: Option<String>,
+            refs_checked_at: Option<String>,
+        }
+        let read_cw = |wid: i64| -> rusqlite::Result<CanonicalMergeRow> {
+            tx.query_row(
+                "SELECT openalex_id, doi_norm, arxiv_id_norm, title_norm, author_norm, refs_checked_at
+                 FROM canonical_works WHERE work_id = ?1",
+                [wid],
+                |r| {
+                    Ok(CanonicalMergeRow {
+                        openalex_id: r.get(0)?,
+                        doi_norm: r.get(1)?,
+                        arxiv_id_norm: r.get(2)?,
+                        title_norm: r.get(3)?,
+                        author_norm: r.get(4)?,
+                        refs_checked_at: r.get(5)?,
+                    })
+                },
+            )
+        };
+        let mut primary = read_cw(primary_id)?;
+        for &sec_id in &matched[1..] {
+            if let Ok(sec) = read_cw(sec_id) {
+                if primary.openalex_id.is_none() {
+                    primary.openalex_id = sec.openalex_id;
+                }
+                if primary.doi_norm.is_none() {
+                    primary.doi_norm = sec.doi_norm.filter(|d| is_publisher_doi(d));
+                }
+                if primary.arxiv_id_norm.is_none() {
+                    primary.arxiv_id_norm = sec.arxiv_id_norm;
+                }
+                if primary.title_norm.as_deref().is_none_or(str::is_empty) {
+                    primary.title_norm = sec.title_norm;
+                }
+                if primary.author_norm.as_deref().is_none_or(str::is_empty) {
+                    primary.author_norm = sec.author_norm;
+                }
+                if primary.refs_checked_at.is_none() {
+                    primary.refs_checked_at = sec.refs_checked_at;
+                }
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key)
+                 SELECT ?1, ref_key FROM paper_raw_refs WHERE src_work_id = ?2",
+                params![primary_id, sec_id],
+            )?;
+            tx.execute(
+                "DELETE FROM paper_raw_refs WHERE src_work_id = ?1",
+                [sec_id],
+            )?;
+            tx.execute(
+                "DELETE FROM paper_citations WHERE citing_work_id = ?1 OR cited_work_id = ?1",
+                [sec_id],
+            )?;
+            tx.execute(
+                "UPDATE papers SET work_id = ?1 WHERE work_id = ?2",
+                params![primary_id, sec_id],
+            )?;
+            tx.execute("DELETE FROM canonical_works WHERE work_id = ?1", [sec_id])?;
+            aliases.insert(sec_id, primary_id);
+        }
+        tx.execute(
+            "UPDATE canonical_works
+             SET openalex_id = ?1, doi_norm = ?2, arxiv_id_norm = ?3,
+                 title_norm = ?4, author_norm = ?5, refs_checked_at = ?6
+             WHERE work_id = ?7",
+            params![
+                primary.openalex_id,
+                primary.doi_norm,
+                primary.arxiv_id_norm,
+                primary.title_norm,
+                primary.author_norm,
+                primary.refs_checked_at,
+                primary_id
+            ],
+        )?;
+    }
+
+    Ok(primary_id)
+}
+
+fn persist_ref_batch(db_path: &Path, updates: &[WorkRefUpdate]) -> Result<usize, AppError> {
     if updates.is_empty() {
         return Ok(0);
     }
     let mut conn = ensure_collection_at(db_path)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut enriched = 0usize;
-    for (wid, oa_opt, refs) in updates {
+    let mut aliases: HashMap<i64, i64> = HashMap::new();
+
+    for u in updates {
+        let pub_doi = u.pub_doi.as_deref().and_then(clean_publisher_doi);
+        let arxiv_id = u.arxiv_id.as_deref().and_then(clean_arxiv_key);
+        let oa_id = u.openalex_id.as_deref().and_then(clean_openalex_id);
+        let primary_id = merge_canonical_works_on_ids_tx(
+            &tx,
+            &mut aliases,
+            u.work_id,
+            oa_id.as_deref(),
+            pub_doi.as_deref(),
+            arxiv_id.as_deref(),
+        )?;
+
         let mut touched = false;
-        if let Some(ref oa) = oa_opt {
+        if oa_id.is_some() || pub_doi.is_some() || arxiv_id.is_some() {
             tx.execute(
-                "UPDATE canonical_works SET openalex_id = COALESCE(openalex_id, ?1) WHERE work_id = ?2",
-                params![oa, wid],
+                "UPDATE canonical_works
+                 SET openalex_id = COALESCE(openalex_id, ?1),
+                     doi_norm = COALESCE(doi_norm, ?2),
+                     arxiv_id_norm = COALESCE(arxiv_id_norm, ?3)
+                 WHERE work_id = ?4",
+                params![oa_id, pub_doi, arxiv_id, primary_id],
             )?;
             tx.execute(
-                "UPDATE papers SET openalex_id = COALESCE(openalex_id, ?1) WHERE work_id = ?2",
-                params![oa, wid],
+                "UPDATE papers
+                 SET openalex_id = COALESCE(openalex_id, ?1),
+                     doi = CASE
+                         WHEN ?2 IS NOT NULL AND (doi IS NULL OR doi = '' OR doi_norm LIKE '10.48550/%')
+                         THEN ?2 ELSE doi END,
+                     doi_norm = CASE
+                         WHEN ?2 IS NOT NULL AND (doi_norm IS NULL OR doi_norm = '' OR doi_norm LIKE '10.48550/%')
+                         THEN ?2 ELSE doi_norm END,
+                     arxiv_id = COALESCE(NULLIF(arxiv_id, ''), ?3),
+                     arxiv_id_norm = COALESCE(NULLIF(arxiv_id_norm, ''), ?3)
+                 WHERE work_id = ?4",
+                params![oa_id, pub_doi, arxiv_id, primary_id],
             )?;
             touched = true;
         }
-        if insert_work_raw_refs_tx(&tx, *wid, refs)? > 0 {
+        if insert_work_raw_refs_tx(&tx, primary_id, &u.refs)? > 0 {
             touched = true;
         }
         if touched {
@@ -755,34 +1123,266 @@ fn persist_ref_batch(
     Ok(enriched)
 }
 
-async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppError> {
-    let db_load = db_path.to_path_buf();
-    let targets: Vec<WorkRefTarget> = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
-        let conn = ensure_collection_at(&db_load)?;
-        let mut stmt = conn.prepare(
-            "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm
-             FROM canonical_works cw
-             WHERE NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
-               AND (cw.openalex_id IS NOT NULL OR cw.doi_norm IS NOT NULL OR cw.arxiv_id_norm IS NOT NULL)
-             ORDER BY cw.work_id ASC",
+fn mark_works_refs_checked(db_path: &Path, work_ids: &[i64]) -> Result<(), AppError> {
+    if work_ids.is_empty() {
+        return Ok(());
+    }
+    let mut conn = ensure_collection_at(db_path)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = now_rfc3339();
+    {
+        let mut stmt = tx.prepare_cached(
+            "UPDATE canonical_works SET refs_checked_at = COALESCE(refs_checked_at, ?1) WHERE work_id = ?2",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorkRefTarget {
+        for &wid in work_ids {
+            stmt.execute(params![now, wid])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn sanitize_title_for_openalex_search(raw: &str) -> Option<String> {
+    if raw.split_whitespace().count() < 3 {
+        return None;
+    }
+    let mut buf = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '"' | '“' | '”' => {}
+            '|' | ',' | ':' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '!' | '?' | '/' | '\\'
+            | '&' | '*' | '+' | '~' | '<' | '>' | '=' | '^' | '$' | '#' | '@' | '%' | '_' | '-'
+            | '\'' | '’' | '‘' => buf.push(' '),
+            _ if ch.is_whitespace() => buf.push(' '),
+            _ => buf.push(ch),
+        }
+    }
+    let collapsed = buf
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if collapsed.split_whitespace().count() < 3 {
+        return None;
+    }
+    let mut trimmed = collapsed;
+    if trimmed.len() > 115 {
+        if let Some(cut) = trimmed
+            .char_indices()
+            .take_while(|(idx, _)| *idx <= 115)
+            .filter(|(_, c)| *c == ' ')
+            .map(|(idx, _)| idx)
+            .last()
+        {
+            if cut >= 24 {
+                trimmed.truncate(cut);
+            }
+        }
+        if trimmed.len() > 115 {
+            trimmed = trimmed
+                .chars()
+                .take(115)
+                .collect::<String>()
+                .trim_end()
+                .to_string();
+        }
+    }
+    if trimmed.split_whitespace().count() < 3 {
+        return None;
+    }
+    Some(format!("\"{trimmed}\""))
+}
+
+fn target_ids_compatible(target: &WorkRefTarget, parsed: &ParsedOpenAlexWork) -> bool {
+    let doi_ok = match (&target.doi_norm, &parsed.pub_doi) {
+        (Some(td), Some(pd)) => td == pd,
+        _ => true,
+    };
+    let arxiv_ok = match (&target.arxiv_id_norm, &parsed.arxiv_id) {
+        (Some(ta), Some(pa)) => ta == pa,
+        _ => true,
+    };
+    doi_ok && arxiv_ok
+}
+
+fn verify_target_title_and_authors(
+    target: &WorkRefTarget,
+    parsed: &ParsedOpenAlexWork,
+    allow_authorless_fallback: bool,
+) -> bool {
+    let t_key = norm_title_key(&target.title);
+    let oa_key = norm_title_key(&parsed.title);
+    if t_key.is_empty() || t_key != oa_key {
+        return false;
+    }
+    if !target.authors.is_empty() && !parsed.authors.is_empty() {
+        return same_work_by_title_and_authors(
+            &target.title,
+            &target.authors,
+            &parsed.title,
+            &parsed.authors,
+        );
+    }
+    if !allow_authorless_fallback {
+        return false;
+    }
+    t_key.len() >= 12 && target.title.split_whitespace().count() >= 3
+}
+
+fn merge_parsed_into_update(existing: &mut WorkRefUpdate, parsed: &ParsedOpenAlexWork) {
+    if existing.openalex_id.is_none() {
+        existing.openalex_id = parsed.openalex_id.clone();
+    }
+    if existing.pub_doi.is_none() {
+        existing.pub_doi = parsed.pub_doi.clone();
+    }
+    if existing.arxiv_id.is_none() {
+        existing.arxiv_id = parsed.arxiv_id.clone();
+    }
+    for r in &parsed.refs {
+        if !existing.refs.contains(r) {
+            existing.refs.push(r.clone());
+        }
+    }
+}
+
+struct WorkTargetRow {
+    work_id: i64,
+    openalex_id: Option<String>,
+    doi_norm: Option<String>,
+    arxiv_id_norm: Option<String>,
+    title: String,
+    authors_json: String,
+}
+
+fn fold_work_targets_from_rows(rows: Vec<WorkTargetRow>) -> Vec<WorkRefTarget> {
+    let mut order: Vec<i64> = Vec::new();
+    let mut map: HashMap<i64, WorkRefTarget> = HashMap::new();
+    for row in rows {
+        let authors: Vec<String> = serde_json::from_str(&row.authors_json).unwrap_or_default();
+        let entry = map.entry(row.work_id).or_insert_with(|| {
+            order.push(row.work_id);
+            WorkRefTarget {
+                work_id: row.work_id,
+                openalex_id: row.openalex_id.clone(),
+                doi_norm: row.doi_norm.filter(|d| is_publisher_doi(d)),
+                arxiv_id_norm: row.arxiv_id_norm,
+                title: String::new(),
+                authors: Vec::new(),
+            }
+        });
+        if entry.title.trim().is_empty() && !row.title.trim().is_empty() {
+            entry.title = row.title;
+        }
+        if entry.authors.is_empty() && !authors.is_empty() {
+            entry.authors = authors;
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|wid| map.remove(&wid))
+        .collect()
+}
+
+fn load_pass_a1_targets(conn: &rusqlite::Connection) -> Result<Vec<WorkRefTarget>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm, p.title, p.authors_json
+         FROM canonical_works cw
+         LEFT JOIN papers p ON p.work_id = cw.work_id
+         WHERE NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
+           AND (cw.openalex_id IS NOT NULL OR cw.doi_norm IS NOT NULL OR cw.arxiv_id_norm IS NOT NULL)
+         ORDER BY cw.work_id ASC, CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END, p.row_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(WorkTargetRow {
                 work_id: r.get(0)?,
                 openalex_id: r.get(1)?,
                 doi_norm: r.get(2)?,
                 arxiv_id_norm: r.get(3)?,
+                title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                authors_json: r
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| "[]".to_string()),
             })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    })
-    .await
-    .map_err(|e| AppError::message(format!("seed_bake load ref targets: {e}")))??;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(fold_work_targets_from_rows(rows))
+}
 
-    if targets.is_empty() {
-        return Ok((0, 0));
+fn load_pass_a1_5_targets_by_venue(
+    conn: &rusqlite::Connection,
+) -> Result<HashMap<String, Vec<WorkRefTarget>>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm, p.venue_id, p.title, p.authors_json
+         FROM canonical_works cw
+         JOIN papers p ON p.work_id = cw.work_id
+         WHERE cw.active_in_scope = 1
+           AND cw.openalex_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
+           AND p.source_type = 'venue'
+           AND p.venue_id IS NOT NULL
+         ORDER BY cw.work_id ASC, p.row_id ASC",
+    )?;
+    let mut by_venue_rows: HashMap<String, Vec<WorkTargetRow>> = HashMap::new();
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(4)?,
+            WorkTargetRow {
+                work_id: r.get(0)?,
+                openalex_id: r.get(1)?,
+                doi_norm: r.get(2)?,
+                arxiv_id_norm: r.get(3)?,
+                title: r.get(5)?,
+                authors_json: r.get(6)?,
+            },
+        ))
+    })?;
+    for entry in rows {
+        let (vid, row) = entry?;
+        by_venue_rows.entry(vid).or_default().push(row);
     }
+    Ok(by_venue_rows
+        .into_iter()
+        .map(|(vid, vrows)| (vid, fold_work_targets_from_rows(vrows)))
+        .collect())
+}
 
+fn load_pass_a2_5_targets(conn: &rusqlite::Connection) -> Result<Vec<WorkRefTarget>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm, p.title, p.authors_json
+         FROM canonical_works cw
+         JOIN papers p ON p.work_id = cw.work_id
+         WHERE cw.active_in_scope = 1
+           AND cw.refs_checked_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
+         ORDER BY CASE WHEN EXISTS (
+             SELECT 1 FROM papers pv WHERE pv.work_id = cw.work_id AND pv.source_type = 'venue'
+         ) THEN 0 ELSE 1 END,
+         cw.work_id ASC,
+         CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END,
+         p.row_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(WorkTargetRow {
+                work_id: r.get(0)?,
+                openalex_id: r.get(1)?,
+                doi_norm: r.get(2)?,
+                arxiv_id_norm: r.get(3)?,
+                title: r.get(4)?,
+                authors_json: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let folded = fold_work_targets_from_rows(rows);
+    Ok(folded
+        .into_iter()
+        .filter(|t| sanitize_title_for_openalex_search(&t.title).is_some())
+        .collect())
+}
+
+async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppError> {
     let client = crate::http::client_with(Duration::from_secs(60), 5, crate::http::USER_AGENT)?;
     let oa_api_key = crate::features::paper::scholar_api::client::openalex_api_key();
     let oa_key_param = oa_api_key
@@ -790,60 +1390,272 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
         .map(|k| format!("&api_key={}", urlencoding::encode(k)))
         .unwrap_or_default();
     let mut oa_enriched = 0usize;
+    let mut oa_rate_limited = false;
 
-    // Pass A1: OpenAlex batch lookup (`select=id,doi,ids,referenced_works`, 50/batch)
-    let mut by_oa_batch: Vec<&WorkRefTarget> = Vec::new();
-    let mut by_doi_batch: Vec<(&WorkRefTarget, String)> = Vec::new();
-    for t in &targets {
-        if t.openalex_id.is_some() {
-            by_oa_batch.push(t);
-        } else if let Some(ref d) = t.doi_norm {
-            by_doi_batch.push((t, format!("https://doi.org/{d}")));
-        } else if let Some(ref a) = t.arxiv_id_norm {
-            by_doi_batch.push((t, format!("https://doi.org/10.48550/arxiv.{a}")));
+    // Pass A1: OpenAlex batch lookup (`?filter=openalex:...` & `?filter=doi:...`, $0.10/1k)
+    let db_load = db_path.to_path_buf();
+    let a1_targets = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+        let conn = ensure_collection_at(&db_load)?;
+        load_pass_a1_targets(&conn)
+    })
+    .await
+    .map_err(|e| AppError::message(format!("seed_bake load a1 targets: {e}")))??;
+
+    if !a1_targets.is_empty() {
+        let mut by_oa_batch: Vec<&WorkRefTarget> = Vec::new();
+        let mut by_doi_batch: Vec<(&WorkRefTarget, String)> = Vec::new();
+        for t in &a1_targets {
+            if t.openalex_id.is_some() {
+                by_oa_batch.push(t);
+            } else if let Some(ref d) = t.doi_norm {
+                by_doi_batch.push((t, format!("https://doi.org/{d}")));
+            } else if let Some(ref a) = t.arxiv_id_norm {
+                by_doi_batch.push((t, format!("https://doi.org/10.48550/arxiv.{a}")));
+            }
+        }
+
+        for chunk in by_oa_batch.chunks(50) {
+            let filter_ids: Vec<&str> = chunk
+                .iter()
+                .filter_map(|t| t.openalex_id.as_deref())
+                .collect();
+            let url = format!(
+                "https://api.openalex.org/works?filter=openalex:{}&per-page=50&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}",
+                filter_ids.join("|")
+            );
+            match fetch_openalex_json(&client, &url).await {
+                OpenAlexFetchResult::Ok(json) => {
+                    let updates = match_openalex_results_to_targets(chunk, &json);
+                    if !updates.is_empty() {
+                        let db_p = db_path.to_path_buf();
+                        oa_enriched +=
+                            tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
+                                .await
+                                .map_err(|e| {
+                                    AppError::message(format!("persist oa batch: {e}"))
+                                })??;
+                    }
+                }
+                OpenAlexFetchResult::RateLimited => {
+                    oa_rate_limited = true;
+                    break;
+                }
+                OpenAlexFetchResult::NotFound | OpenAlexFetchResult::Error => {}
+            }
+        }
+
+        if !oa_rate_limited {
+            for chunk in by_doi_batch.chunks(40) {
+                let filter_dois: Vec<String> = chunk
+                    .iter()
+                    .map(|(_, d)| urlencoding::encode(d).into_owned())
+                    .collect();
+                let target_refs: Vec<&WorkRefTarget> = chunk.iter().map(|(t, _)| *t).collect();
+                let url = format!(
+                    "https://api.openalex.org/works?filter=doi:{}&per-page=50&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}",
+                    filter_dois.join("|")
+                );
+                match fetch_openalex_json(&client, &url).await {
+                    OpenAlexFetchResult::Ok(json) => {
+                        let updates = match_openalex_results_to_targets(&target_refs, &json);
+                        if !updates.is_empty() {
+                            let db_p = db_path.to_path_buf();
+                            oa_enriched += tokio::task::spawn_blocking(move || {
+                                persist_ref_batch(&db_p, &updates)
+                            })
+                            .await
+                            .map_err(|e| {
+                                AppError::message(format!("persist oa doi batch: {e}"))
+                            })??;
+                        }
+                    }
+                    OpenAlexFetchResult::RateLimited => {
+                        oa_rate_limited = true;
+                        break;
+                    }
+                    OpenAlexFetchResult::NotFound | OpenAlexFetchResult::Error => {}
+                }
+            }
         }
     }
 
-    for chunk in by_oa_batch.chunks(50) {
-        let filter_ids: Vec<&str> = chunk
-            .iter()
-            .filter_map(|t| t.openalex_id.as_deref())
-            .collect();
-        let url = format!(
-            "https://api.openalex.org/works?filter=openalex:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}{oa_key_param}",
-            filter_ids.join("|")
-        );
-        if let Some(json) = get_json_with_backoff(&client, &url).await? {
-            let updates = match_openalex_results_to_targets(chunk, &json);
-            let db_p = db_path.to_path_buf();
-            oa_enriched += tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
-                .await
-                .map_err(|e| AppError::message(format!("persist oa batch: {e}")))??;
+    // Pass A1.5: OpenAlex Source Paging ($0.10/1k) for venues with missing-ref `openalex_id IS NULL`
+    if !oa_rate_limited {
+        let db_a15 = db_path.to_path_buf();
+        let targets_by_venue = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            let conn = ensure_collection_at(&db_a15)?;
+            load_pass_a1_5_targets_by_venue(&conn)
+        })
+        .await
+        .map_err(|e| AppError::message(format!("seed_bake load a1.5 targets: {e}")))??;
+
+        if !targets_by_venue.is_empty() {
+            let mut source_to_venues: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+            let mut sid_index: HashMap<&'static str, usize> = HashMap::new();
+            for &(vid, sids) in VENUE_OPENALEX_SOURCE_IDS {
+                if !targets_by_venue
+                    .get(vid)
+                    .is_some_and(|list| !list.is_empty())
+                {
+                    continue;
+                }
+                for &sid in sids {
+                    if let Some(&pos) = sid_index.get(sid) {
+                        source_to_venues[pos].1.push(vid);
+                    } else {
+                        sid_index.insert(sid, source_to_venues.len());
+                        source_to_venues.push((sid, vec![vid]));
+                    }
+                }
+            }
+
+            let mut claimed_wids: HashSet<i64> = HashSet::new();
+            for (sid, vids) in source_to_venues {
+                if oa_rate_limited {
+                    break;
+                }
+                let mut remaining: Vec<WorkRefTarget> = Vec::new();
+                let mut seen_wids: HashSet<i64> = HashSet::new();
+                for vid in vids {
+                    if let Some(list) = targets_by_venue.get(vid) {
+                        for t in list {
+                            if !claimed_wids.contains(&t.work_id) && seen_wids.insert(t.work_id) {
+                                remaining.push(t.clone());
+                            }
+                        }
+                    }
+                }
+                if remaining.is_empty() {
+                    continue;
+                }
+
+                for page in 1..=MAX_OA_SOURCE_PAGES {
+                    if remaining.is_empty() {
+                        break;
+                    }
+                    let url = format!(
+                        "https://api.openalex.org/works?filter=locations.source.id:{sid},publication_year:2026&per-page=200&page={page}&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}"
+                    );
+                    match fetch_openalex_json(&client, &url).await {
+                        OpenAlexFetchResult::Ok(json) => {
+                            let result_len = json
+                                .get("results")
+                                .and_then(Value::as_array)
+                                .map_or(0, Vec::len);
+                            let total_count = json
+                                .pointer("/meta/count")
+                                .and_then(Value::as_u64)
+                                .map(|n| n as usize);
+                            if result_len == 0 {
+                                break;
+                            }
+
+                            let updates = match_source_page_results_to_targets(&remaining, &json);
+                            if !updates.is_empty() {
+                                let matched_set: HashSet<i64> =
+                                    updates.iter().map(|u| u.work_id).collect();
+                                claimed_wids.extend(&matched_set);
+                                remaining.retain(|t| !matched_set.contains(&t.work_id));
+
+                                let db_p = db_path.to_path_buf();
+                                oa_enriched += tokio::task::spawn_blocking(move || {
+                                    persist_ref_batch(&db_p, &updates)
+                                })
+                                .await
+                                .map_err(|e| {
+                                    AppError::message(format!("persist oa source batch: {e}"))
+                                })??;
+                            }
+
+                            if result_len < 200
+                                || total_count.is_some_and(|total| page * 200 >= total)
+                            {
+                                break;
+                            }
+                        }
+                        OpenAlexFetchResult::RateLimited => {
+                            oa_rate_limited = true;
+                            break;
+                        }
+                        OpenAlexFetchResult::NotFound | OpenAlexFetchResult::Error => break,
+                    }
+                }
+            }
         }
     }
 
-    for chunk in by_doi_batch.chunks(40) {
-        let filter_dois: Vec<String> = chunk
-            .iter()
-            .map(|(_, d)| urlencoding::encode(d).into_owned())
-            .collect();
-        let target_refs: Vec<&WorkRefTarget> = chunk.iter().map(|(t, _)| *t).collect();
-        let url = format!(
-            "https://api.openalex.org/works?filter=doi:{}&per-page=50&select=id,doi,ids,referenced_works&mailto={OPENALEX_MAILTO}{oa_key_param}",
-            filter_dois.join("|")
-        );
-        if let Some(json) = get_json_with_backoff(&client, &url).await? {
-            let updates = match_openalex_results_to_targets(&target_refs, &json);
-            let db_p = db_path.to_path_buf();
-            oa_enriched += tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
-                .await
-                .map_err(|e| AppError::message(format!("persist oa doi batch: {e}")))??;
+    // Pass A2.5: 12-title Batched OpenAlex `filter=title.search` ($1.00/1k, capped at 850 calls/run)
+    if !oa_rate_limited {
+        let db_a25 = db_path.to_path_buf();
+        let a25_targets = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            let conn = ensure_collection_at(&db_a25)?;
+            load_pass_a2_5_targets(&conn)
+        })
+        .await
+        .map_err(|e| AppError::message(format!("seed_bake load a2.5 targets: {e}")))??;
+
+        let mut calls_used = 0usize;
+        for chunk in a25_targets.chunks(OA_TITLE_SEARCH_BATCH_SIZE) {
+            if calls_used >= MAX_OA_TITLE_SEARCH_CALLS {
+                log::info!(
+                    "seed_bake Pass A2.5 reached per-run cap ({MAX_OA_TITLE_SEARCH_CALLS} calls); stopping cleanly"
+                );
+                break;
+            }
+            let clauses: Vec<String> = chunk
+                .iter()
+                .filter_map(|t| sanitize_title_for_openalex_search(&t.title))
+                .map(|c| urlencoding::encode(&c).into_owned())
+                .collect();
+            if clauses.is_empty() {
+                continue;
+            }
+            calls_used += 1;
+            let url = format!(
+                "https://api.openalex.org/works?filter=title.search:{},from_publication_date:2024-01-01&per-page=100&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}",
+                clauses.join("|")
+            );
+            match fetch_openalex_json(&client, &url).await {
+                OpenAlexFetchResult::Ok(json) => {
+                    let updates = match_title_search_results_to_targets(chunk, &json);
+                    if !updates.is_empty() {
+                        let db_p = db_path.to_path_buf();
+                        oa_enriched +=
+                            tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
+                                .await
+                                .map_err(|e| {
+                                    AppError::message(format!("persist oa title.search batch: {e}"))
+                                })??;
+                    }
+                    let checked_wids: Vec<i64> = chunk.iter().map(|t| t.work_id).collect();
+                    let db_chk = db_path.to_path_buf();
+                    tokio::task::spawn_blocking(move || {
+                        mark_works_refs_checked(&db_chk, &checked_wids)
+                    })
+                    .await
+                    .map_err(|e| AppError::message(format!("mark refs_checked_at: {e}")))??;
+                }
+                OpenAlexFetchResult::NotFound => {
+                    let checked_wids: Vec<i64> = chunk.iter().map(|t| t.work_id).collect();
+                    let db_chk = db_path.to_path_buf();
+                    tokio::task::spawn_blocking(move || {
+                        mark_works_refs_checked(&db_chk, &checked_wids)
+                    })
+                    .await
+                    .map_err(|e| AppError::message(format!("mark refs_checked_at: {e}")))??;
+                }
+                OpenAlexFetchResult::RateLimited | OpenAlexFetchResult::Error => {
+                    // Do NOT mark failed/rate-limited batch as checked; stop A2.5 gracefully and proceed to A2.
+                    break;
+                }
+            }
         }
     }
 
     // Pass A2: Semantic Scholar batch (`POST /graph/v1/paper/batch`, 100/batch, auto-bisect 50 -> 20)
+    let mut s2_enriched = 0usize;
     let db_rem = db_path.to_path_buf();
-    let s2_targets: Vec<(i64, String)> =
+    let s2_primary_targets: Vec<(i64, String)> =
         tokio::task::spawn_blocking(move || -> Result<_, AppError> {
             let conn = ensure_collection_at(&db_rem)?;
             let mut stmt = conn.prepare(
@@ -854,17 +1666,18 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
                  ORDER BY cw.work_id ASC",
             )?;
             let rows = stmt.query_map([], |r| {
-                let wid: i64 = r.get(0)?;
-                let d: Option<String> = r.get(1)?;
-                let a: Option<String> = r.get(2)?;
-                Ok((wid, d, a))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
             })?;
             let mut list = Vec::new();
             for entry in rows {
                 let (wid, d_opt, a_opt) = entry?;
-                if let Some(d) = d_opt.filter(|s| !s.is_empty()) {
+                if let Some(d) = d_opt.as_deref().and_then(clean_publisher_doi) {
                     list.push((wid, format!("DOI:{d}")));
-                } else if let Some(a) = a_opt.filter(|s| !s.is_empty()) {
+                } else if let Some(a) = a_opt.as_deref().and_then(clean_arxiv_key) {
                     list.push((wid, format!("ARXIV:{a}")));
                 }
             }
@@ -873,14 +1686,49 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
         .await
         .map_err(|e| AppError::message(format!("seed_bake load s2 targets: {e}")))??;
 
-    let mut s2_enriched = 0usize;
-    for batch100 in s2_targets.chunks(100) {
+    for batch100 in s2_primary_targets.chunks(100) {
         let updates = fetch_s2_batch_with_bisect(&client, batch100).await?;
         if !updates.is_empty() {
             let db_p = db_path.to_path_buf();
             s2_enriched += tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
                 .await
                 .map_err(|e| AppError::message(format!("persist s2 batch: {e}")))??;
+        }
+    }
+
+    // Fallback S2 pass by `ARXIV:` for works that had a publisher DOI (maybe too new for S2) AND an arXiv ID.
+    let db_rem2 = db_path.to_path_buf();
+    let s2_arxiv_fallback_targets: Vec<(i64, String)> =
+        tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            let conn = ensure_collection_at(&db_rem2)?;
+            let mut stmt = conn.prepare(
+                "SELECT cw.work_id, cw.arxiv_id_norm
+                 FROM canonical_works cw
+                 WHERE NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
+                   AND cw.doi_norm IS NOT NULL
+                   AND cw.arxiv_id_norm IS NOT NULL
+                 ORDER BY cw.work_id ASC",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut list = Vec::new();
+            for entry in rows {
+                let (wid, a_raw) = entry?;
+                if let Some(a) = clean_arxiv_key(&a_raw) {
+                    list.push((wid, format!("ARXIV:{a}")));
+                }
+            }
+            Ok(list)
+        })
+        .await
+        .map_err(|e| AppError::message(format!("seed_bake load s2 arxiv fallback: {e}")))??;
+
+    for batch100 in s2_arxiv_fallback_targets.chunks(100) {
+        let updates = fetch_s2_batch_with_bisect(&client, batch100).await?;
+        if !updates.is_empty() {
+            let db_p = db_path.to_path_buf();
+            s2_enriched += tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &updates))
+                .await
+                .map_err(|e| AppError::message(format!("persist s2 arxiv batch: {e}")))??;
         }
     }
 
@@ -901,84 +1749,334 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
 fn match_openalex_results_to_targets(
     targets: &[&WorkRefTarget],
     json: &Value,
-) -> Vec<(i64, Option<String>, Vec<String>)> {
+) -> Vec<WorkRefUpdate> {
     let Some(results) = json.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };
-    let mut by_oa: HashMap<&str, i64> = HashMap::new();
-    let mut by_doi: HashMap<&str, i64> = HashMap::new();
-    let mut by_arxiv: HashMap<&str, i64> = HashMap::new();
-    for t in targets {
+    let mut by_oa: HashMap<&str, usize> = HashMap::new();
+    let mut by_doi: HashMap<&str, usize> = HashMap::new();
+    let mut by_arxiv: HashMap<&str, usize> = HashMap::new();
+    for (idx, t) in targets.iter().enumerate() {
         if let Some(ref oa) = t.openalex_id {
-            by_oa.insert(oa.as_str(), t.work_id);
+            by_oa.entry(oa.as_str()).or_insert(idx);
         }
         if let Some(ref d) = t.doi_norm {
-            by_doi.insert(d.as_str(), t.work_id);
+            by_doi.entry(d.as_str()).or_insert(idx);
         }
         if let Some(ref a) = t.arxiv_id_norm {
-            by_arxiv.insert(a.as_str(), t.work_id);
+            by_arxiv.entry(a.as_str()).or_insert(idx);
         }
     }
 
-    let mut out = Vec::new();
-    for work in results {
-        let oa_id = work
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(clean_openalex_id);
-        let raw_doi = work
-            .get("doi")
-            .and_then(Value::as_str)
-            .and_then(clean_doi_key);
-        let pub_doi = raw_doi.as_deref().and_then(clean_publisher_doi);
-        let arxiv_id = work
-            .get("ids")
-            .and_then(|ids| ids.get("arxiv"))
-            .and_then(Value::as_str)
-            .and_then(clean_arxiv_key)
-            .or_else(|| {
-                raw_doi
-                    .as_deref()
-                    .and_then(|d| d.strip_prefix("10.48550/arxiv.").and_then(clean_arxiv_key))
-            });
+    let mut matched_indices: HashSet<usize> = HashSet::new();
+    let mut by_target_idx: HashMap<usize, WorkRefUpdate> = HashMap::new();
+    let mut order: Vec<usize> = Vec::new();
 
-        let matched_wid = oa_id
-            .as_deref()
-            .and_then(|k| by_oa.get(k).copied())
-            .or_else(|| pub_doi.as_deref().and_then(|k| by_doi.get(k).copied()))
-            .or_else(|| arxiv_id.as_deref().and_then(|k| by_arxiv.get(k).copied()));
-        let Some(wid) = matched_wid else {
+    for work in results {
+        let Some(parsed) = parse_openalex_work(work) else {
             continue;
         };
 
-        let refs: Vec<String> = work
-            .get("referenced_works")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .filter_map(clean_openalex_id)
-                    .map(|w| format!("oa:{w}"))
-                    .collect()
+        let exact_idx = parsed
+            .openalex_id
+            .as_deref()
+            .and_then(|k| by_oa.get(k).copied())
+            .or_else(|| {
+                parsed
+                    .pub_doi
+                    .as_deref()
+                    .and_then(|k| by_doi.get(k).copied())
             })
-            .unwrap_or_default();
+            .or_else(|| {
+                parsed
+                    .arxiv_id
+                    .as_deref()
+                    .and_then(|k| by_arxiv.get(k).copied())
+            });
 
-        if oa_id.is_some() || !refs.is_empty() {
-            out.push((wid, oa_id, refs));
+        let matched_idx = if let Some(idx) = exact_idx {
+            Some(idx)
+        } else {
+            // Fallback for `10.48550/arxiv.{aid}` lookups where OpenAlex resolved to the
+            // published conference DOI with `ids.arxiv = null`: match by title + authors
+            // within this chunk, requiring a unique compatible target and no ID conflicts.
+            let candidates: Vec<usize> = targets
+                .iter()
+                .enumerate()
+                .filter(|(idx, t)| {
+                    !matched_indices.contains(idx)
+                        && verify_target_title_and_authors(t, &parsed, false)
+                        && target_ids_compatible(t, &parsed)
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+            match candidates.as_slice() {
+                &[single] => Some(single),
+                _ => None,
+            }
+        };
+
+        let Some(idx) = matched_idx else {
+            continue;
+        };
+        let t = targets[idx];
+        matched_indices.insert(idx);
+
+        if parsed.openalex_id.is_some()
+            || parsed.pub_doi.is_some()
+            || parsed.arxiv_id.is_some()
+            || !parsed.refs.is_empty()
+        {
+            if let Some(existing) = by_target_idx.get_mut(&idx) {
+                merge_parsed_into_update(existing, &parsed);
+            } else {
+                order.push(idx);
+                by_target_idx.insert(
+                    idx,
+                    WorkRefUpdate {
+                        work_id: t.work_id,
+                        openalex_id: parsed.openalex_id,
+                        pub_doi: parsed.pub_doi,
+                        arxiv_id: parsed.arxiv_id,
+                        refs: parsed.refs,
+                    },
+                );
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|idx| by_target_idx.remove(&idx))
+        .collect()
+}
+
+fn match_source_page_results_to_targets(
+    targets: &[WorkRefTarget],
+    json: &Value,
+) -> Vec<WorkRefUpdate> {
+    let Some(results) = json.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut by_doi: HashMap<&str, usize> = HashMap::new();
+    let mut by_arxiv: HashMap<&str, usize> = HashMap::new();
+    let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, t) in targets.iter().enumerate() {
+        if let Some(ref d) = t.doi_norm {
+            by_doi.entry(d.as_str()).or_insert(idx);
+        }
+        if let Some(ref a) = t.arxiv_id_norm {
+            by_arxiv.entry(a.as_str()).or_insert(idx);
+        }
+        let tk = norm_title_key(&t.title);
+        if !tk.is_empty() {
+            by_title.entry(tk).or_default().push(idx);
+        }
+    }
+
+    let mut matched_indices: HashSet<usize> = HashSet::new();
+    let mut out: Vec<WorkRefUpdate> = Vec::new();
+    for work in results {
+        let Some(parsed) = parse_openalex_work(work) else {
+            continue;
+        };
+        let exact_idx = parsed
+            .pub_doi
+            .as_deref()
+            .and_then(|d| by_doi.get(d).copied())
+            .or_else(|| {
+                parsed
+                    .arxiv_id
+                    .as_deref()
+                    .and_then(|a| by_arxiv.get(a).copied())
+            });
+
+        let matched_idx = if let Some(idx) = exact_idx.filter(|i| !matched_indices.contains(i)) {
+            Some(idx)
+        } else {
+            let tk = norm_title_key(&parsed.title);
+            by_title.get(&tk).and_then(|cand_indices| {
+                let valid: Vec<usize> = cand_indices
+                    .iter()
+                    .copied()
+                    .filter(|idx| {
+                        let t = &targets[*idx];
+                        !matched_indices.contains(idx)
+                            && verify_target_title_and_authors(t, &parsed, true)
+                            && target_ids_compatible(t, &parsed)
+                    })
+                    .collect();
+                match valid.as_slice() {
+                    &[single] => Some(single),
+                    _ => None,
+                }
+            })
+        };
+
+        let Some(idx) = matched_idx else {
+            continue;
+        };
+        matched_indices.insert(idx);
+        let t = &targets[idx];
+        if parsed.openalex_id.is_some()
+            || parsed.pub_doi.is_some()
+            || parsed.arxiv_id.is_some()
+            || !parsed.refs.is_empty()
+        {
+            out.push(WorkRefUpdate {
+                work_id: t.work_id,
+                openalex_id: parsed.openalex_id,
+                pub_doi: parsed.pub_doi,
+                arxiv_id: parsed.arxiv_id,
+                refs: parsed.refs,
+            });
         }
     }
     out
 }
 
+fn match_title_search_results_to_targets(
+    targets: &[WorkRefTarget],
+    json: &Value,
+) -> Vec<WorkRefUpdate> {
+    let Some(results) = json.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, t) in targets.iter().enumerate() {
+        let tk = norm_title_key(&t.title);
+        if !tk.is_empty() {
+            by_title.entry(tk).or_default().push(idx);
+        }
+    }
+
+    let mut matched_by_idx: HashMap<usize, Vec<ParsedOpenAlexWork>> = HashMap::new();
+    for work in results {
+        let Some(parsed) = parse_openalex_work(work) else {
+            continue;
+        };
+        let tk = norm_title_key(&parsed.title);
+        let Some(cand_indices) = by_title.get(&tk) else {
+            continue;
+        };
+        let valid: Vec<usize> = cand_indices
+            .iter()
+            .copied()
+            .filter(|idx| {
+                let t = &targets[*idx];
+                verify_target_title_and_authors(t, &parsed, true)
+                    && target_ids_compatible(t, &parsed)
+            })
+            .collect();
+        if valid.len() == 1 {
+            matched_by_idx.entry(valid[0]).or_default().push(parsed);
+        }
+    }
+
+    let mut out = Vec::new();
+    for (idx, t) in targets.iter().enumerate() {
+        let Some(mut hits) = matched_by_idx.remove(&idx) else {
+            continue;
+        };
+        if t.authors.is_empty() && hits.len() > 1 {
+            let distinct_authors = hits.windows(2).any(|w| {
+                !w[0].authors.is_empty()
+                    && !w[1].authors.is_empty()
+                    && !same_work_by_title_and_authors(
+                        &w[0].title,
+                        &w[0].authors,
+                        &w[1].title,
+                        &w[1].authors,
+                    )
+            });
+            if distinct_authors {
+                continue;
+            }
+        }
+        // Prefer richer record (has publisher DOI, then more referenced_works) as primary metadata,
+        // and union refs across matching preprint/conference twins.
+        hits.sort_by(|a, b| {
+            b.pub_doi
+                .is_some()
+                .cmp(&a.pub_doi.is_some())
+                .then_with(|| b.refs.len().cmp(&a.refs.len()))
+        });
+        let mut iter = hits.into_iter();
+        let first = iter.next().unwrap();
+        let mut upd = WorkRefUpdate {
+            work_id: t.work_id,
+            openalex_id: first.openalex_id,
+            pub_doi: first.pub_doi,
+            arxiv_id: first.arxiv_id,
+            refs: first.refs,
+        };
+        for extra in iter {
+            merge_parsed_into_update(&mut upd, &extra);
+        }
+        if upd.openalex_id.is_some()
+            || upd.pub_doi.is_some()
+            || upd.arxiv_id.is_some()
+            || !upd.refs.is_empty()
+        {
+            out.push(upd);
+        }
+    }
+    out
+}
+
+pub(crate) fn extract_s2_ref_keys(ext: &Value) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(raw_doi) = ext.get("DOI").and_then(Value::as_str) {
+        if !is_artifact_or_dataset_doi(raw_doi) {
+            if let Some(d) = normalize_ref_key(raw_doi) {
+                refs.push(d);
+            }
+        }
+    }
+    if let Some(a) = ext
+        .get("ArXiv")
+        .and_then(Value::as_str)
+        .and_then(clean_arxiv_key)
+    {
+        let key = format!("arxiv:{a}");
+        if !refs.contains(&key) {
+            refs.push(key);
+        }
+    }
+    if let Some(raw_acl) = ext.get("ACL").and_then(Value::as_str) {
+        let mut acl_clean = raw_acl.trim().to_ascii_lowercase();
+        for prefix in [
+            "https://doi.org/",
+            "http://doi.org/",
+            "doi:",
+            "10.18653/v1/",
+        ] {
+            if let Some(rest) = acl_clean.strip_prefix(prefix) {
+                acl_clean = rest.trim().to_string();
+            }
+        }
+        if !acl_clean.is_empty() {
+            let acl_doi = format!("10.18653/v1/{acl_clean}");
+            if !is_artifact_or_dataset_doi(&acl_doi) {
+                let key = format!("doi:{acl_doi}");
+                if !refs.contains(&key) {
+                    refs.push(key);
+                }
+            }
+        }
+    }
+    refs
+}
+
 async fn fetch_s2_batch_with_bisect(
     client: &reqwest::Client,
     slice: &[(i64, String)],
-) -> Result<Vec<(i64, Option<String>, Vec<String>)>, AppError> {
+) -> Result<Vec<WorkRefUpdate>, AppError> {
     if slice.is_empty() {
         return Ok(Vec::new());
     }
     let mut pending: Vec<&[(i64, String)]> = vec![slice];
-    let mut collected: Vec<(i64, Option<String>, Vec<String>)> = Vec::new();
+    let mut collected: Vec<WorkRefUpdate> = Vec::new();
     let url =
         "https://api.semanticscholar.org/graph/v1/paper/batch?fields=externalIds,references.externalIds";
 
@@ -1011,23 +2109,21 @@ async fn fetch_s2_batch_with_bisect(
                                         let Some(ext) = r.get("externalIds") else {
                                             continue;
                                         };
-                                        if let Some(d) = ext
-                                            .get("DOI")
-                                            .and_then(Value::as_str)
-                                            .and_then(normalize_ref_key)
-                                        {
-                                            refs.push(d);
-                                        } else if let Some(a) = ext
-                                            .get("ArXiv")
-                                            .and_then(Value::as_str)
-                                            .and_then(clean_arxiv_key)
-                                        {
-                                            refs.push(format!("arxiv:{a}"));
+                                        for key in extract_s2_ref_keys(ext) {
+                                            if !refs.contains(&key) {
+                                                refs.push(key);
+                                            }
                                         }
                                     }
                                 }
                                 if !refs.is_empty() {
-                                    collected.push((wid, None, refs));
+                                    collected.push(WorkRefUpdate {
+                                        work_id: wid,
+                                        openalex_id: None,
+                                        pub_doi: None,
+                                        arxiv_id: None,
+                                        refs,
+                                    });
                                 }
                             }
                         }
@@ -2003,7 +3099,9 @@ fn export_seed_shards_sync(
                 url: r.get(9)?,
                 pdf_url: r.get(10)?,
                 arxiv_id: r.get(11)?,
-                doi: r.get(12)?,
+                doi: r
+                    .get::<_, Option<String>>(12)?
+                    .filter(|d| !is_artifact_or_dataset_doi(d)),
                 venue_id: r.get(13)?,
                 venue_kind: r.get(14)?,
                 venue_domain: r.get(15)?,
@@ -2331,5 +3429,288 @@ mod tests {
         let fb = fallback_keywords_from_title_and_context(&roster_paper);
         assert!(!fb.is_empty());
         assert!(!fb.iter().any(|k| k.eq_ignore_ascii_case("AutoFuzz")));
+    }
+
+    #[test]
+    fn venue_openalex_source_ids_all_exist_in_default_venues() {
+        let valid_ids: HashSet<&str> = super::super::schema::DEFAULT_VENUES
+            .iter()
+            .map(|v| v.id)
+            .collect();
+        for &(vid, sids) in VENUE_OPENALEX_SOURCE_IDS {
+            assert!(
+                valid_ids.contains(vid),
+                "unknown venue_id `{vid}` in VENUE_OPENALEX_SOURCE_IDS"
+            );
+            assert!(
+                !sids.is_empty(),
+                "empty OpenAlex source IDs for venue `{vid}`"
+            );
+        }
+    }
+
+    #[test]
+    fn match_openalex_results_handles_arxiv_to_publisher_doi_and_guards_collisions() {
+        let t_arxiv = WorkRefTarget {
+            work_id: 101,
+            openalex_id: None,
+            doi_norm: None,
+            arxiv_id_norm: Some("2601.10001".into()),
+            title: "Sound Taint Analysis for Rust Kernels".into(),
+            authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+        };
+        let t_existing_doi = WorkRefTarget {
+            work_id: 102,
+            openalex_id: None,
+            doi_norm: Some("10.1109/sp.2026.999".into()),
+            arxiv_id_norm: None,
+            title: "Hardware Enclave Side Channels".into(),
+            authors: vec!["Carol Lee".into()],
+        };
+        let targets = vec![&t_arxiv, &t_existing_doi];
+
+        let json = serde_json::json!({
+            "results": [
+                // 1) Upgraded published conference work with `ids.arxiv = null`, matched via title+authors
+                {
+                    "id": "https://openalex.org/W9001",
+                    "type": "proceedings-article",
+                    "title": "Sound Taint Analysis for Rust Kernels",
+                    "publication_year": 2026,
+                    "doi": "https://doi.org/10.1145/3744916.3773101",
+                    "ids": { "openalex": "https://openalex.org/W9001", "arxiv": null },
+                    "authorships": [
+                        { "author": { "display_name": "Alice Smith" } },
+                        { "author": { "display_name": "Bob Chen" } }
+                    ],
+                    "referenced_works": ["https://openalex.org/W42", "https://openalex.org/W43"]
+                },
+                // 2) Collision: same title, DIFFERENT author -> MUST be rejected
+                {
+                    "id": "https://openalex.org/W9002",
+                    "type": "article",
+                    "title": "Sound Taint Analysis for Rust Kernels",
+                    "publication_year": 2026,
+                    "doi": "https://doi.org/10.1145/9999999.1",
+                    "ids": {},
+                    "authorships": [
+                        { "author": { "display_name": "Eve Mallory" } }
+                    ],
+                    "referenced_works": ["https://openalex.org/W777"]
+                },
+                // 3) Rejected dataset/Zenodo artifact even with identical title and authors
+                {
+                    "id": "https://openalex.org/W9003",
+                    "type": "dataset",
+                    "title": "Sound Taint Analysis for Rust Kernels",
+                    "publication_year": 2026,
+                    "doi": "https://doi.org/10.5281/zenodo.21868420",
+                    "ids": {},
+                    "authorships": [
+                        { "author": { "display_name": "Alice Smith" } },
+                        { "author": { "display_name": "Bob Chen" } }
+                    ],
+                    "referenced_works": ["https://openalex.org/W888"]
+                },
+                // 4) Conflicting publisher DOI on t_existing_doi -> MUST be rejected by ID compatibility guard
+                {
+                    "id": "https://openalex.org/W9004",
+                    "type": "article",
+                    "title": "Hardware Enclave Side Channels",
+                    "publication_year": 2026,
+                    "doi": "https://doi.org/10.1145/conflict.2026.1",
+                    "ids": {},
+                    "authorships": [
+                        { "author": { "display_name": "Carol Lee" } }
+                    ],
+                    "referenced_works": ["https://openalex.org/W555"]
+                }
+            ]
+        });
+
+        let updates = match_openalex_results_to_targets(&targets, &json);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].work_id, 101);
+        assert_eq!(updates[0].openalex_id.as_deref(), Some("W9001"));
+        assert_eq!(
+            updates[0].pub_doi.as_deref(),
+            Some("10.1145/3744916.3773101")
+        );
+        assert_eq!(
+            updates[0].refs,
+            vec!["oa:W42".to_string(), "oa:W43".to_string()]
+        );
+
+        // Verify persist_ref_batch upgrades `doi`/`doi_norm`/`openalex_id` on both tables
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "arxiv:2601.10001".into(),
+                    title: "Sound Taint Analysis for Rust Kernels".into(),
+                    authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+                    source_type: "arxiv".into(),
+                    source_label: "cs.SE".into(),
+                    categories: vec!["cs.SE".into()],
+                    arxiv_id: Some("2601.10001".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let conn = ensure_collection_at(&db).unwrap();
+        let wid: i64 = conn
+            .query_row(
+                "SELECT work_id FROM papers WHERE id = 'arxiv:2601.10001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        let mut persisted = updates;
+        persisted[0].work_id = wid;
+        let cnt = persist_ref_batch(&db, &persisted).unwrap();
+        assert_eq!(cnt, 1);
+
+        let detail = super::super::store::paper_get_at(&db, "arxiv:2601.10001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.doi.as_deref(), Some("10.1145/3744916.3773101"));
+        let conn2 = ensure_collection_at(&db).unwrap();
+        let (cw_oa, cw_doi): (Option<String>, Option<String>) = conn2
+            .query_row(
+                "SELECT openalex_id, doi_norm FROM canonical_works WHERE work_id = ?1",
+                [wid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cw_oa.as_deref(), Some("W9001"));
+        assert_eq!(cw_doi.as_deref(), Some("10.1145/3744916.3773101"));
+    }
+
+    #[test]
+    fn title_search_sanitizer_and_strict_matcher_guard_noise() {
+        assert_eq!(sanitize_title_for_openalex_search("Short Title"), None);
+        assert_eq!(
+            sanitize_title_for_openalex_search(
+                "\"Agentic\" Security & Privacy | A Study: AND/OR (2026)!"
+            ),
+            Some("\"agentic security privacy a study and or 2026\"".to_string())
+        );
+        let sanitized =
+            sanitize_title_for_openalex_search("\"Foo\": Bar | Baz + Quux * Test (v1) [Draft]?")
+                .unwrap();
+        assert!(!sanitized[1..sanitized.len() - 1].contains('"'));
+        assert!(!sanitized.contains('|'));
+        assert!(!sanitized.contains(':'));
+        assert!(!sanitized.contains('+'));
+        assert!(!sanitized.contains('*'));
+
+        // Strict author + non-artifact verification on Pass A2.5 matching
+        let targets = vec![WorkRefTarget {
+            work_id: 201,
+            openalex_id: None,
+            doi_norm: None,
+            arxiv_id_norm: None,
+            title: "Agentic Security and Privacy in Modern Systems".into(),
+            authors: vec!["Dana White".into(), "Evan Green".into()],
+        }];
+        let json = serde_json::json!({
+            "results": [
+                {
+                    "id": "https://openalex.org/W8001",
+                    "type": "software",
+                    "title": "Agentic Security and Privacy in Modern Systems",
+                    "doi": "https://doi.org/10.5281/zenodo.77777",
+                    "ids": {},
+                    "authorships": [{ "author": { "display_name": "Dana White" } }, { "author": { "display_name": "Evan Green" } }],
+                    "referenced_works": ["https://openalex.org/W1"]
+                },
+                {
+                    "id": "https://openalex.org/W8002",
+                    "type": "article",
+                    "title": "Agentic Security and Privacy in Modern Systems",
+                    "doi": "https://doi.org/10.1145/wrong.author",
+                    "ids": {},
+                    "authorships": [{ "author": { "display_name": "Wrong Author" } }, { "author": { "display_name": "Another Person" } }],
+                    "referenced_works": ["https://openalex.org/W2"]
+                },
+                {
+                    "id": "https://openalex.org/W8003",
+                    "type": "preprint",
+                    "title": "Agentic Security and Privacy in Modern Systems",
+                    "doi": "https://doi.org/10.48550/arXiv.2603.55555",
+                    "ids": { "arxiv": "https://arxiv.org/abs/2603.55555" },
+                    "authorships": [{ "author": { "display_name": "Dana White" } }, { "author": { "display_name": "Evan Green" } }],
+                    "referenced_works": ["https://openalex.org/W10", "https://openalex.org/W11"]
+                }
+            ]
+        });
+        let matched = match_title_search_results_to_targets(&targets, &json);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].work_id, 201);
+        assert_eq!(matched[0].openalex_id.as_deref(), Some("W8003"));
+        assert_eq!(matched[0].pub_doi, None);
+        assert_eq!(matched[0].arxiv_id.as_deref(), Some("2603.55555"));
+        assert_eq!(
+            matched[0].refs,
+            vec!["oa:W10".to_string(), "oa:W11".to_string()]
+        );
+    }
+
+    #[test]
+    fn s2_ref_extraction_keeps_doi_arxiv_and_acl_independently() {
+        let ext_all = serde_json::json!({
+            "DOI": "10.1145/3744916.3773100",
+            "ArXiv": "2601.55555v2",
+            "ACL": "2026.acl-long.42"
+        });
+        let keys_all = extract_s2_ref_keys(&ext_all);
+        assert_eq!(
+            keys_all,
+            vec![
+                "doi:10.1145/3744916.3773100".to_string(),
+                "arxiv:2601.55555".to_string(),
+                "doi:10.18653/v1/2026.acl-long.42".to_string(),
+            ]
+        );
+
+        let ext_zenodo_plus_arxiv = serde_json::json!({
+            "DOI": "10.5281/zenodo.21868420",
+            "ArXiv": "10.48550/arXiv.2602.77777"
+        });
+        let keys_filtered = extract_s2_ref_keys(&ext_zenodo_plus_arxiv);
+        assert_eq!(keys_filtered, vec!["arxiv:2602.77777".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn fetch_openalex_json_returns_rate_limited_without_hanging_on_daily_429() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"error":"Insufficient daily budget credits"}"#;
+                let resp = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client =
+            crate::http::client_with(Duration::from_secs(5), 1, crate::http::USER_AGENT).unwrap();
+        let url = format!("http://{addr}/works?filter=title.search:%22test%22");
+        let res = fetch_openalex_json(&client, &url).await;
+        assert!(matches!(res, OpenAlexFetchResult::RateLimited));
+        server.abort();
     }
 }

@@ -29,35 +29,58 @@ pub(crate) fn clean_opt_str(raw: Option<String>) -> Option<String> {
 }
 
 pub(crate) fn clean_doi_key(raw: &str) -> Option<String> {
-    let s = raw
-        .trim()
-        .trim_start_matches("https://doi.org/")
-        .trim_start_matches("http://doi.org/")
-        .trim_start_matches("https://dx.doi.org/")
-        .trim_start_matches("doi:")
-        .trim_start_matches("DOI:")
-        .trim_end_matches(['.', ',', ';', ')'])
-        .trim()
-        .to_lowercase();
-    (!s.is_empty()).then_some(s)
+    let mut s = raw.trim().to_lowercase();
+    loop {
+        let next = s
+            .trim_start_matches("https://doi.org/")
+            .trim_start_matches("http://doi.org/")
+            .trim_start_matches("https://dx.doi.org/")
+            .trim_start_matches("http://dx.doi.org/")
+            .trim_start_matches("doi:")
+            .trim();
+        if next.len() == s.len() {
+            break;
+        }
+        s = next.to_string();
+    }
+    let s = s.trim_end_matches(['.', ',', ';', ')']).trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 pub(crate) fn clean_arxiv_key(raw: &str) -> Option<String> {
-    let s = raw
-        .trim()
-        .trim_start_matches("https://arxiv.org/abs/")
-        .trim_start_matches("http://arxiv.org/abs/")
-        .trim_start_matches("10.48550/arxiv.")
-        .trim_start_matches("arxiv:")
-        .trim_start_matches("ARXIV:")
-        .trim()
-        .to_lowercase();
+    let mut s = raw.trim().to_ascii_lowercase();
+    loop {
+        let next = s
+            .trim_start_matches("https://arxiv.org/abs/")
+            .trim_start_matches("http://arxiv.org/abs/")
+            .trim_start_matches("https://arxiv.org/pdf/")
+            .trim_start_matches("http://arxiv.org/pdf/")
+            .trim_start_matches("https://doi.org/")
+            .trim_start_matches("http://doi.org/")
+            .trim_start_matches("https://dx.doi.org/")
+            .trim_start_matches("http://dx.doi.org/")
+            .trim_start_matches("doi:")
+            .trim_start_matches("10.48550/arxiv.")
+            .trim_start_matches("arxiv:")
+            .trim();
+        if next.len() == s.len() {
+            break;
+        }
+        s = next.to_string();
+    }
+    let s = s.strip_suffix(".pdf").unwrap_or(&s).trim();
     if s.is_empty() {
         return None;
     }
     let stripped = match s.rfind('v') {
-        Some(pos) if pos >= 6 && s[pos + 1..].bytes().all(|b| b.is_ascii_digit()) => &s[..pos],
-        _ => s.as_str(),
+        Some(pos)
+            if pos >= 6
+                && pos + 1 < s.len()
+                && s[pos + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            &s[..pos]
+        }
+        _ => s,
     };
     (!stripped.is_empty()).then(|| stripped.to_string())
 }
@@ -66,8 +89,31 @@ pub use crate::features::paper::util::{
     norm_author_key, norm_title_key, paper_work_key, same_work_by_title_and_authors,
 };
 
+const ARTIFACT_OR_DATASET_DOI_PREFIXES: &[&str] = &[
+    "10.5281/zenodo.",
+    "10.6084/m9.figshare.",
+    "10.6084/figshare.",
+    "10.17605/osf.io",
+    "10.24433/co.",
+    "10.7910/dvn",
+    "10.5061/dryad.",
+    "10.4121/",
+    "10.13140/",
+];
+
+pub(crate) fn is_artifact_or_dataset_doi(raw: &str) -> bool {
+    let Some(norm) = clean_doi_key(raw) else {
+        return false;
+    };
+    ARTIFACT_OR_DATASET_DOI_PREFIXES
+        .iter()
+        .any(|prefix| norm.starts_with(prefix))
+}
+
 pub(crate) fn is_publisher_doi(doi_norm: &str) -> bool {
-    !doi_norm.is_empty() && !doi_norm.starts_with("10.48550/arxiv.")
+    !doi_norm.is_empty()
+        && !doi_norm.starts_with("10.48550/arxiv.")
+        && !is_artifact_or_dataset_doi(doi_norm)
 }
 
 pub(crate) fn clean_publisher_doi(raw: &str) -> Option<String> {
@@ -1390,6 +1436,7 @@ pub(crate) fn resolve_or_merge_work_id_tx(
     if let Some(oa) = openalex_id.filter(|s| !s.is_empty()) {
         merged.openalex_id = Some(oa.to_string());
     }
+    merged.doi_norm = merged.doi_norm.filter(|d| is_publisher_doi(d));
     if let Some(doi) = pub_doi_norm.filter(|s| is_publisher_doi(s)) {
         merged.doi_norm = Some(doi.to_string());
     }
@@ -1754,8 +1801,14 @@ pub(crate) fn upsert_single_paper_tx(
         } else {
             ex.source_label
         };
+        let ex_doi_was_artifact = ex.doi.as_deref().is_some_and(is_artifact_or_dataset_doi);
+        let ex_abs_clean = if ex_doi_was_artifact {
+            ""
+        } else {
+            ex.abstract_text.as_str()
+        };
         let abstract_text =
-            choose_better_abstract(&ex.abstract_text, &input.abstract_text, &source_label);
+            choose_better_abstract(ex_abs_clean, &input.abstract_text, &source_label);
         let published_at = if !in_pub.is_empty() {
             in_pub.to_string()
         } else {
@@ -1778,7 +1831,9 @@ pub(crate) fn upsert_single_paper_tx(
 
         let pdf_url = clean_opt_str(input.pdf_url.clone()).or(ex.pdf_url);
         let arxiv_id = clean_opt_str(input.arxiv_id.clone()).or(ex.arxiv_id);
-        let doi = clean_opt_str(input.doi.clone()).or(ex.doi);
+        let in_doi = clean_opt_str(input.doi.clone()).filter(|d| !is_artifact_or_dataset_doi(d));
+        let ex_doi = ex.doi.filter(|d| !is_artifact_or_dataset_doi(d));
+        let doi = in_doi.or(ex_doi);
         let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
         let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
@@ -1876,7 +1931,7 @@ pub(crate) fn upsert_single_paper_tx(
         let published_ymd: String = in_pub.chars().take(10).collect();
         let abstract_text = clean_arxiv_abstract(&input.abstract_text);
         let arxiv_id = clean_opt_str(input.arxiv_id.clone());
-        let doi = clean_opt_str(input.doi.clone());
+        let doi = clean_opt_str(input.doi.clone()).filter(|d| !is_artifact_or_dataset_doi(d));
         let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
         let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
@@ -2140,9 +2195,15 @@ pub(crate) fn patch_papers_conn(
             Some(a) if !a.is_empty() => clean_string_vec(a),
             _ => ex_authors,
         };
+        let ex_doi_was_artifact = ex.doi.as_deref().is_some_and(is_artifact_or_dataset_doi);
+        let ex_abs_clean = if ex_doi_was_artifact {
+            ""
+        } else {
+            ex.abstract_text.as_str()
+        };
         let abstract_text = match &patch.abstract_text {
-            Some(abs) => choose_better_abstract(&ex.abstract_text, abs, &ex.source_label),
-            None => clean_arxiv_abstract(&ex.abstract_text),
+            Some(abs) => choose_better_abstract(ex_abs_clean, abs, &ex.source_label),
+            None => clean_arxiv_abstract(ex_abs_clean),
         };
         let published_at = patch
             .published_at
@@ -2182,7 +2243,9 @@ pub(crate) fn patch_papers_conn(
             .unwrap_or(ex.url);
         let pdf_url = clean_opt_str(patch.pdf_url.clone()).or(ex.pdf_url);
         let arxiv_id = clean_opt_str(patch.arxiv_id.clone()).or(ex.arxiv_id);
-        let doi = clean_opt_str(patch.doi.clone()).or(ex.doi);
+        let in_doi = clean_opt_str(patch.doi.clone()).filter(|d| !is_artifact_or_dataset_doi(d));
+        let ex_doi = ex.doi.filter(|d| !is_artifact_or_dataset_doi(d));
+        let doi = in_doi.or(ex_doi);
         let arxiv_id_norm = extract_arxiv_norm(arxiv_id.as_deref(), doi.as_deref());
         let doi_norm = doi.as_deref().and_then(clean_doi_key);
         let pub_doi_norm = doi.as_deref().and_then(clean_publisher_doi);
@@ -2215,6 +2278,7 @@ pub(crate) fn patch_papers_conn(
             || in_oa_id.is_some()
             || patch.doi.is_some()
             || patch.arxiv_id.is_some()
+            || ex_doi_was_artifact
         {
             graph_dirty = true;
         }

@@ -776,7 +776,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("collection.sqlite");
 
-        assert_eq!(SCHEMA_VERSION, 3);
+        assert_eq!(SCHEMA_VERSION, 4);
         let initial = state_get_at(&db).unwrap();
         assert_eq!(initial.venues.len(), 28);
         assert!(initial
@@ -2267,5 +2267,292 @@ mod tests {
         assert_eq!(sub.unexpanded_counts.get("arxiv:2603.00001"), Some(&1));
         assert_eq!(sub.unexpanded_counts.get("arxiv:2603.00002"), Some(&1));
         assert!(!sub.unexpanded_counts.contains_key("arxiv:2603.00003"));
+    }
+
+    #[test]
+    fn clean_arxiv_key_and_artifact_doi_guards_prevent_pollution() {
+        use super::store::{clean_arxiv_key, clean_publisher_doi, is_artifact_or_dataset_doi};
+
+        // Case-insensitive prefix stripping on arXiv identifiers & DOIs
+        assert_eq!(
+            clean_arxiv_key("10.48550/arXiv.2601.12345v2"),
+            Some("2601.12345".into())
+        );
+        assert_eq!(
+            clean_arxiv_key("HTTPS://ARXIV.ORG/ABS/2602.00099V3"),
+            Some("2602.00099".into())
+        );
+        assert_eq!(
+            clean_arxiv_key("ARXIV:10.48550/arXiv.2603.11111"),
+            Some("2603.11111".into())
+        );
+        assert_eq!(
+            clean_arxiv_key("https://doi.org/10.48550/arXiv.2604.22222v1"),
+            Some("2604.22222".into())
+        );
+
+        // Repository / artifact / dataset DOIs
+        for bad_doi in [
+            "10.5281/zenodo.21868420",
+            "https://doi.org/10.5281/ZENODO.99999",
+            "doi:10.6084/m9.figshare.123456",
+            "10.6084/figshare.123456",
+            "10.17605/OSF.IO/abcde",
+            "10.24433/co.123456.v1",
+            "10.7910/DVN/XYZ123",
+            "10.5061/dryad.abc123",
+            "10.4121/99999",
+            "10.13140/RG.2.2.12345.67890",
+        ] {
+            assert!(
+                is_artifact_or_dataset_doi(bad_doi),
+                "expected artifact DOI rejection for {bad_doi}"
+            );
+            assert_eq!(
+                clean_publisher_doi(bad_doi),
+                None,
+                "clean_publisher_doi must reject {bad_doi}"
+            );
+        }
+        assert!(!is_artifact_or_dataset_doi("10.1145/3744916.3773123"));
+        assert!(!is_artifact_or_dataset_doi("10.48550/arXiv.2601.12345"));
+        assert_eq!(
+            clean_publisher_doi("https://doi.org/10.1145/3744916.3773123"),
+            Some("10.1145/3744916.3773123".into())
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        // Fresh upsert with artifact DOI strips doi & doi_norm
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "venue:issre-2026:1".into(),
+                    title: "Bridging the Granularity Gap in Software Testing".into(),
+                    authors: vec!["Alice Researcher".into()],
+                    abstract_text: "Valid abstract from venue.".into(),
+                    source_type: "venue".into(),
+                    source_label: "ISSRE 2026".into(),
+                    venue_id: Some("issre-2026".into()),
+                    doi: Some("10.5281/zenodo.21868420".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p = paper_get_at(&db, "venue:issre-2026:1").unwrap().unwrap();
+        assert_eq!(p.doi, None);
+
+        // Simulate legacy polluted row with ex.doi = zenodo + polluted abstract, then re-upsert with empty doi/abs
+        {
+            let conn = ensure_collection_at(&db).unwrap();
+            conn.execute(
+                "UPDATE papers SET doi = '10.5281/zenodo.21868420', doi_norm = '10.5281/zenodo.21868420',
+                                    abstract_text = 'Polluted Zenodo artifact readme'
+                 WHERE id = 'venue:issre-2026:1'",
+                [],
+            )
+            .unwrap();
+        }
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "venue:issre-2026:1".into(),
+                    title: "Bridging the Granularity Gap in Software Testing".into(),
+                    authors: vec!["Alice Researcher".into()],
+                    abstract_text: "".into(),
+                    source_type: "venue".into(),
+                    source_label: "ISSRE 2026".into(),
+                    venue_id: Some("issre-2026".into()),
+                    doi: Some("https://doi.org/10.5281/zenodo.999".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let cleaned = paper_get_at(&db, "venue:issre-2026:1").unwrap().unwrap();
+        assert_eq!(cleaned.doi, None);
+        assert_eq!(cleaned.abstract_text, "");
+    }
+
+    #[test]
+    fn v3_to_v4_migration_fixes_tracks_arxiv_keys_and_strips_artifact_dois() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(schema::DDL_V1).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE collection_config ADD COLUMN seed_cleared INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE collection_config ADD COLUMN applied_seed_ids_json TEXT NOT NULL DEFAULT '[]';
+                 ALTER TABLE papers ADD COLUMN work_id INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE papers ADD COLUMN openalex_id TEXT;
+                 ALTER TABLE papers ADD COLUMN keyword_source TEXT NOT NULL DEFAULT '';
+                 DROP TABLE IF EXISTS citation_edges;
+                 CREATE TABLE canonical_works (
+                    work_id         INTEGER PRIMARY KEY,
+                    openalex_id     TEXT,
+                    doi_norm        TEXT,
+                    arxiv_id_norm   TEXT,
+                    title_norm      TEXT,
+                    author_norm     TEXT,
+                    active_in_scope INTEGER NOT NULL DEFAULT 1
+                 );
+                 CREATE TABLE paper_raw_refs (
+                    src_work_id INTEGER NOT NULL,
+                    ref_key     TEXT NOT NULL,
+                    PRIMARY KEY (src_work_id, ref_key)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE paper_citations (
+                    citing_work_id INTEGER NOT NULL,
+                    cited_work_id  INTEGER NOT NULL,
+                    PRIMARY KEY (citing_work_id, cited_work_id)
+                 ) WITHOUT ROWID;
+                 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');",
+            )
+            .unwrap();
+            schema::seed_defaults(&conn).unwrap();
+            // Simulate old v3 default tracks, plus a user-edited ICLR track and SAS track
+            conn.execute_batch(
+                "UPDATE venues SET tracks_json = '[\"https://conf.researchr.org/track/issta-2026/issta-2026-papers\"]' WHERE id = 'issta-2026';
+                 UPDATE venues SET tracks_json = '[\"https://2026.ecoop.org/track/ecoop-2026-papers\"]' WHERE id = 'ecoop-2026';
+                 UPDATE venues SET tracks_json = '[\"https://2026.splashcon.org/track/sas-2026-papers\"]' WHERE id = 'sas-2026';
+                 UPDATE venues SET tracks_json = '[\"https://sp2026.ieee-security.org/program-papers.html\"]' WHERE id = 'sp-2026';
+                 UPDATE venues SET tracks_json = '[\"https://openreview.net/group?id=NeurIPS.cc/2026/Conference\"]' WHERE id = 'neurips-2026';
+                 UPDATE venues SET tracks_json = '[\"https://aclanthology.org/volumes/2026.acl-long/\",\"https://aclanthology.org/volumes/2026.acl-short/\"]' WHERE id = 'acl-2026';
+                 UPDATE venues SET tracks_json = '[\"https://custom.user.edit/iclr-2026\"]' WHERE id = 'iclr-2026';
+
+                 INSERT INTO canonical_works (work_id, openalex_id, doi_norm, arxiv_id_norm, title_norm, author_norm, active_in_scope)
+                 VALUES
+                    (1, NULL, NULL, '10.48550/arxiv.2601.00010', 'foundationalpaper', 'alicesmith', 1),
+                    (2, NULL, '10.5281/zenodo.21868420', NULL, 'bridgingthegranularitygap', 'bobjones', 1),
+                    (3, NULL, '10.1145/3744916.3773123', NULL, 'genuineicsepaper', 'carollee', 1);
+
+                 INSERT INTO papers (
+                    row_id, work_id, id, title, title_norm, authors_json, abstract_text, published_at, published_ymd,
+                    year, source_type, source_label, categories_json, arxiv_id, arxiv_id_norm, doi, doi_norm, updated_at
+                 ) VALUES
+                    (1, 1, 'arxiv:2601.00010', 'Foundational Paper', 'foundationalpaper', '[\"Alice Smith\"]', 'ArXiv study.', '2026-01-10T00:00:00Z', '2026-01-10',
+                     2026, 'arxiv', 'cs.SE', '[\"cs.SE\"]', '2601.00010', '10.48550/arxiv.2601.00010', NULL, NULL, '2026-01-10T00:00:00Z'),
+                    (2, 2, 'venue:issre-2026:p1', 'Bridging the Granularity Gap', 'bridgingthegranularitygap', '[\"Bob Jones\"]', 'Artifact for Bridging the Granularity Gap on Zenodo', '2026-05-01T00:00:00Z', '2026-05-01',
+                     2026, 'venue', 'ISSRE 2026', '[\"ISSRE 2026\"]', NULL, NULL, '10.5281/zenodo.21868420', '10.5281/zenodo.21868420', '2026-05-01T00:00:00Z'),
+                    (3, 3, 'venue:icse-2026:p1', 'Genuine ICSE Paper', 'genuineicsepaper', '[\"Carol Lee\"]', 'We propose a novel static analysis tool. Our source code is on Zenodo.', '2026-04-01T00:00:00Z', '2026-04-01',
+                     2026, 'venue', 'ICSE 2026', '[\"ICSE 2026\"]', NULL, NULL, '10.1145/3744916.3773123', '10.1145/3744916.3773123', '2026-04-01T00:00:00Z');
+
+                 INSERT INTO paper_raw_refs (src_work_id, ref_key) VALUES
+                    (3, 'arxiv:10.48550/arxiv.2601.00010'),
+                    (3, 'arxiv:2601.00010'),
+                    (2, 'arxiv:10.48550/arxiv.2601.00010'),
+                    (3, 'doi:10.5281/zenodo.21868420');",
+            )
+            .unwrap();
+        }
+
+        let conn = ensure_collection_at(&db).unwrap();
+        assert_eq!(
+            crate::sqlite::read_schema_version(&conn, crate::sqlite::DbMsgs::COLLECTION).unwrap(),
+            4
+        );
+
+        // 1. `refs_checked_at` column added on canonical_works
+        let checked: Option<String> = conn
+            .query_row(
+                "SELECT refs_checked_at FROM canonical_works WHERE work_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(checked, None);
+
+        // 2. Venue tracks updated only for broken old defaults; SAS and user-edited ICLR preserved
+        let state = state_get_at(&db).unwrap();
+        let tracks_of = |vid: &str| -> Vec<String> {
+            state
+                .venues
+                .iter()
+                .find(|v| v.id == vid)
+                .unwrap()
+                .tracks
+                .clone()
+        };
+        assert_eq!(
+            tracks_of("issta-2026"),
+            vec!["https://conf.researchr.org/track/issta-2026/issta-2026-research-papers"]
+        );
+        assert_eq!(
+            tracks_of("ecoop-2026"),
+            vec!["https://2026.ecoop.org/track/ecoop-2026-technical-papers"]
+        );
+        assert_eq!(
+            tracks_of("sas-2026"),
+            vec!["https://2026.splashcon.org/track/sas-2026-papers"]
+        );
+        assert_eq!(
+            tracks_of("sp-2026"),
+            vec!["https://sp2026.ieee-security.org/accepted-papers.html"]
+        );
+        assert_eq!(
+            tracks_of("neurips-2026"),
+            vec!["https://neurips.cc/virtual/2026/papers.html"]
+        );
+        assert_eq!(
+            tracks_of("acl-2026"),
+            vec![
+                "https://2026.aclweb.org/program/accepted_papers/",
+                "https://aclanthology.org/volumes/2026.acl-long/",
+                "https://aclanthology.org/volumes/2026.acl-short/",
+            ]
+        );
+        assert_eq!(
+            tracks_of("iclr-2026"),
+            vec!["https://custom.user.edit/iclr-2026"]
+        );
+
+        // 3. Malformed `arxiv:10.48550/` cleaned in paper_raw_refs and canonical_works (with PK collision handled)
+        let malformed_refs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM paper_raw_refs WHERE ref_key LIKE 'arxiv:10.48550/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(malformed_refs, 0);
+        let cw1_arxiv: Option<String> = conn
+            .query_row(
+                "SELECT arxiv_id_norm FROM canonical_works WHERE work_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cw1_arxiv.as_deref(), Some("2601.00010"));
+
+        // 4. Zenodo DOI & artifact abstract stripped; genuine paper abstract + publisher DOI preserved
+        let p2 = paper_get_at(&db, "venue:issre-2026:p1").unwrap().unwrap();
+        assert_eq!(p2.doi, None);
+        assert_eq!(p2.abstract_text, "");
+        let cw2_doi: Option<String> = conn
+            .query_row(
+                "SELECT doi_norm FROM canonical_works WHERE work_id = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cw2_doi, None);
+
+        let p3 = paper_get_at(&db, "venue:icse-2026:p1").unwrap().unwrap();
+        assert_eq!(p3.doi.as_deref(), Some("10.1145/3744916.3773123"));
+        assert!(p3.abstract_text.contains("novel static analysis tool"));
+
+        // Recomputed citations: work 2 & 3 both cite work 1 via normalized `arxiv:2601.00010`,
+        // while work 2 no longer gets false citation via Zenodo DOI!
+        let p1 = paper_get_at(&db, "arxiv:2601.00010").unwrap().unwrap();
+        assert_eq!(p1.citation_count, 2);
+        assert_eq!(p2.citation_count, 0);
     }
 }
