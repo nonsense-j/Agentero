@@ -79,3 +79,80 @@ export function arxivReaderUrl(url: string): string {
 		: "agentero-arxiv://localhost";
 	return `${origin}${parsed.pathname}${parsed.search}`;
 }
+
+const ARXIV_HEADER_META_RE =
+	/^(?:comments|subjects|journal-ref|report-no|license|doi|acm-class|msc-class|version):/i;
+const HEADER_ABSTRACT_RE = /(?:^|\s)abstract:\s*/i;
+const MAX_ARXIV_HEADER_SCAN = 600;
+
+/**
+ * Strip arXiv RSS / announcement boilerplate prefixes (e.g.
+ * `arXiv:2607.07738v3 Announce Type: replace Abstract: ...`) while leaving
+ * genuine abstract prose untouched.
+ */
+export function stripArxivAbstractPrefix(raw: string): string {
+	let rest = raw.trim();
+	for (;;) {
+		if (!rest) return "";
+		if (/^arxiv:/i.test(rest)) {
+			const afterLabel = rest.slice("arxiv:".length).trimStart();
+			const idEnd = afterLabel.search(/\s/);
+			if (idEnd > 0) {
+				let afterId = afterLabel.slice(idEnd).trimStart();
+				if (afterId.startsWith("[")) {
+					const close = afterId.indexOf("]");
+					if (
+						close > 0 &&
+						close < 40 &&
+						!afterId.slice(0, close).includes("\n")
+					) {
+						afterId = afterId.slice(close + 1).trimStart();
+					}
+				}
+				if (/^announce\s+type:/i.test(afterId)) {
+					const absMatch = HEADER_ABSTRACT_RE.exec(afterId);
+					if (absMatch && absMatch.index <= MAX_ARXIV_HEADER_SCAN) {
+						rest = afterId
+							.slice(absMatch.index + absMatch[0].length)
+							.trimStart();
+						continue;
+					}
+					const afterType = afterId.replace(/^announce\s+type:\s*/i, "");
+					const typeEnd = afterType.search(/\s/);
+					rest = (typeEnd === -1 ? "" : afterType.slice(typeEnd)).trimStart();
+					continue;
+				}
+				if (/^abstract:/i.test(afterId)) {
+					rest = afterId.replace(/^abstract:\s*/i, "");
+					continue;
+				}
+				if (ARXIV_HEADER_META_RE.test(afterId)) {
+					const absMatch = HEADER_ABSTRACT_RE.exec(afterId);
+					if (absMatch && absMatch.index <= MAX_ARXIV_HEADER_SCAN) {
+						rest = afterId
+							.slice(absMatch.index + absMatch[0].length)
+							.trimStart();
+						continue;
+					}
+				}
+			}
+		}
+		if (/^announce\s+type:/i.test(rest)) {
+			const afterAt = rest.replace(/^announce\s+type:\s*/i, "");
+			const absMatch = HEADER_ABSTRACT_RE.exec(afterAt);
+			if (absMatch && absMatch.index <= MAX_ARXIV_HEADER_SCAN) {
+				rest = afterAt.slice(absMatch.index + absMatch[0].length).trimStart();
+				continue;
+			}
+			const typeEnd = afterAt.search(/\s/);
+			rest = (typeEnd === -1 ? "" : afterAt.slice(typeEnd)).trimStart();
+			continue;
+		}
+		if (/^abstract:/i.test(rest)) {
+			rest = rest.replace(/^abstract:\s*/i, "");
+			continue;
+		}
+		break;
+	}
+	return rest.trim();
+}

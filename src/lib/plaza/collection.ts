@@ -26,6 +26,7 @@ import {
 	ensureOpenAlexRuntimeKeyLoaded,
 	withOpenAlexApiKey,
 } from "@/lib/openalex";
+import { stripArxivAbstractPrefix } from "@/lib/paper/arxiv";
 import {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
@@ -688,22 +689,32 @@ function cleanWhitespace(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
+function unwrapCdata(input: string): string {
+	return input.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+}
+
+const RSS_HTML_TAG_RE = /<\/?[a-zA-Z][a-zA-Z0-9:-]*(?:\s+[^<>]*)?\/?>/g;
+
 function decodeHtmlEntities(input: string): string {
+	const unwrapped = unwrapCdata(input).replace(RSS_HTML_TAG_RE, " ");
 	if (typeof DOMParser !== "undefined") {
 		try {
-			const doc = new DOMParser().parseFromString(input, "text/html");
-			return cleanWhitespace(doc.body.textContent ?? input);
+			const doc = new DOMParser().parseFromString(unwrapped, "text/html");
+			const text = doc.body.textContent ?? unwrapped;
+			return cleanWhitespace(text.replace(RSS_HTML_TAG_RE, " "));
 		} catch {
 			// Fall back to regex replacement.
 		}
 	}
 	return cleanWhitespace(
-		input
+		unwrapped
+			.replace(/&nbsp;/gi, " ")
 			.replace(/&amp;/g, "&")
 			.replace(/&lt;/g, "<")
 			.replace(/&gt;/g, ">")
 			.replace(/&quot;/g, '"')
-			.replace(/&#39;/g, "'"),
+			.replace(/&#0*39;|&apos;/gi, "'")
+			.replace(RSS_HTML_TAG_RE, " "),
 	);
 }
 
@@ -784,7 +795,7 @@ export function parseArxivAtomXml(
 		const url = `https://arxiv.org/abs/${arxivId}`;
 		const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
 		const title = decodeHtmlEntities(rawTitle);
-		const abstract = decodeHtmlEntities(rawSummary);
+		const abstract = stripArxivAbstractPrefix(decodeHtmlEntities(rawSummary));
 		const finalCats = categories.length > 0 ? categories : [primaryCat];
 
 		items.push({
@@ -888,13 +899,10 @@ export function parseArxivRssXml(
 		if (!arxivId || !rawTitle) continue;
 
 		const title = decodeHtmlEntities(
-			rawTitle.replace(/\s*\(arXiv:[^)]+\)\s*$/i, ""),
+			unwrapCdata(rawTitle).replace(/\s*\(arXiv:[^)]+\)\s*$/i, ""),
 		);
 		const decodedDesc = decodeHtmlEntities(rawDesc);
-		const abstract = decodedDesc
-			.replace(/^arXiv:[^\s]+\s*Announce Type:[^A]*Abstract:\s*/i, "")
-			.replace(/^Abstract:\s*/i, "")
-			.trim();
+		const abstract = stripArxivAbstractPrefix(decodedDesc);
 		if (isPlaceholderAbstract(abstract)) continue;
 
 		const parsedTs = rawPubDate ? Date.parse(rawPubDate) : Number.NaN;
@@ -2814,27 +2822,35 @@ export function mergeCollectionItems(
 					? titleKeys.get(scopedTitleKey)
 					: undefined;
 			if (!existingKey) {
-				map.set(item.id, item);
+				const cleanedAbs = stripArxivAbstractPrefix(item.abstract);
+				map.set(
+					item.id,
+					cleanedAbs === item.abstract
+						? item
+						: { ...item, abstract: cleanedAbs },
+				);
 				if (scopedTitleKey) titleKeys.set(scopedTitleKey, item.id);
 			} else {
 				const prev = map.get(existingKey);
 				if (prev) {
+					const prevAbs = stripArxivAbstractPrefix(prev.abstract);
+					const nextAbs = stripArxivAbstractPrefix(item.abstract);
 					const prevPlaceholder = isPlaceholderAbstract(
-						prev.abstract,
+						prevAbs,
 						prev.sourceLabel,
 					);
 					const nextPlaceholder = isPlaceholderAbstract(
-						item.abstract,
+						nextAbs,
 						item.sourceLabel,
 					);
 					const bestAbstract =
 						prevPlaceholder && !nextPlaceholder
-							? item.abstract
+							? nextAbs
 							: !prevPlaceholder && nextPlaceholder
-								? prev.abstract
-								: prev.abstract.length >= item.abstract.length
-									? prev.abstract
-									: item.abstract;
+								? prevAbs
+								: prevAbs.length >= nextAbs.length
+									? prevAbs
+									: nextAbs;
 
 					const mergedKeywords = normalizePaperKeywords([
 						...(prev.keywords ?? []),

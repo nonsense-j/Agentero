@@ -13,6 +13,7 @@ import {
 	hasCachedOpenAlexApiKey,
 	withOpenAlexApiKey,
 } from "@/lib/openalex";
+import { stripArxivAbstractPrefix } from "@/lib/paper/arxiv";
 import { canonicalizePaperKeywords } from "@/lib/plaza/keyword-synonyms";
 
 export type CollectionSourceType = "arxiv" | "venue";
@@ -3306,9 +3307,9 @@ export async function enrichSinglePaperOnDemand(
 						atomXml,
 					)?.[1];
 				if (sumRaw) {
-					const atomAbs = decodeBasicHtmlEntities(sumRaw)
-						.replace(/\s+/g, " ")
-						.trim();
+					const atomAbs = stripArxivAbstractPrefix(
+						decodeBasicHtmlEntities(sumRaw).replace(/\s+/g, " ").trim(),
+					);
 					if (!isPlaceholderAbstract(atomAbs, paper.sourceLabel)) {
 						abstract = atomAbs;
 					}

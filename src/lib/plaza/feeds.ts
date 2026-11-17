@@ -8,6 +8,7 @@ import { commands, type FeedItem, type FeedSub } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { callApi } from "@/lib/core/ipc";
 import { notifyError } from "@/lib/core/notify";
+import { stripArxivAbstractPrefix } from "@/lib/paper/arxiv";
 import { lookupSubmit } from "@/lib/paper/import-actions";
 
 /** Wire shapes from the generated bindings (feeds.sqlite rows). */
@@ -217,7 +218,7 @@ export function formatFeedWhen(iso: string | null, locale: string): string {
  * Line breaks are preserved for callers that keep paragraph structure.
  */
 export function stripFeedMeta(raw: string): string {
-	let rest = raw.trim();
+	let rest = stripArxivAbstractPrefix(raw);
 	for (;;) {
 		const lower = rest.toLowerCase();
 		const hit = META_PREFIXES.find((prefix) => lower.startsWith(prefix));

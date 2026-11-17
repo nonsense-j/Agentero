@@ -14,6 +14,7 @@
 
 import { commands } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
+import { stripArxivAbstractPrefix } from "@/lib/paper/arxiv";
 import {
 	type CollectionPaperItem,
 	type CollectionSourceType,
@@ -415,12 +416,12 @@ export function mergeArxivIntoVenueItem(
 	venue: CollectionPaperItem,
 	arxiv: CollectionPaperItem,
 ): CollectionPaperItem {
-	const venueAbsLen = venue.abstract.trim().length;
-	const arxivAbsLen = arxiv.abstract.trim().length;
+	const venueAbs = stripArxivAbstractPrefix(venue.abstract);
+	const arxivAbs = stripArxivAbstractPrefix(arxiv.abstract);
+	const venueAbsLen = venueAbs.length;
+	const arxivAbsLen = arxivAbs.length;
 	const mergedAbstract =
-		venueAbsLen < 40 && arxivAbsLen > venueAbsLen
-			? arxiv.abstract
-			: venue.abstract;
+		venueAbsLen < 40 && arxivAbsLen > venueAbsLen ? arxivAbs : venueAbs;
 	const mergedKeywords = normalizePaperKeywords(
 		[...(venue.keywords ?? []), ...(arxiv.keywords ?? [])],
 		Number.MAX_SAFE_INTEGER,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stripArxivAbstractPrefix } from "@/lib/paper/arxiv";
 import { PLAZA_SOURCES } from "@/lib/plaza";
 import {
 	type CollectionPaperItem,
@@ -9,6 +10,7 @@ import {
 	formatPaperCitationText,
 	isPaperMetadataComplete,
 	isPlaceholderAbstract,
+	mergeCollectionItems,
 	normalizePaperKeywords,
 	parseArxivAtomXml,
 	parseArxivRssXml,
@@ -21,7 +23,7 @@ import {
 	applyCollectionToolOutputToSession,
 	type DeepDiscoverSession,
 } from "@/lib/plaza/deep-discover-store";
-import { ARXIV_FEED_CHIPS } from "@/lib/plaza/feeds";
+import { ARXIV_FEED_CHIPS, cleanFeedSummary } from "@/lib/plaza/feeds";
 import {
 	parseBooleanSearchQuery,
 	searchCollectionFast,
@@ -242,6 +244,77 @@ Abstract: We introduce a symbolic execution engine tailored for verifying multi-
 			"We introduce a symbolic execution engine tailored for verifying multi-agent LLM tool invocations.",
 		);
 		expect(parsed[0]?.keywords).toEqual([]);
+	});
+
+	it("strips arXiv version-change RSS prefixes like Announce Type: replace and replace-cross", () => {
+		const rss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <item>
+      <title>REFORGE: A Method for Benchmarking LLMs' Reverse Engineering Capabilities in Decompiled Binary Function Naming</title>
+      <link>https://arxiv.org/abs/2607.07738</link>
+      <description>arXiv:2607.07738v3 Announce Type: replace Abstract: Reverse engineering decompiled functions requires semantic reasoning over stripped binaries.</description>
+      <dc:creator>Alice Smith</dc:creator>
+      <pubDate>Tue, 14 Jul 2026 00:00:00 -0400</pubDate>
+      <category>cs.CR</category>
+    </item>
+    <item>
+      <title>Cross-Listed Replace Entry</title>
+      <link>https://arxiv.org/abs/2607.09999</link>
+      <description><![CDATA[<p>arXiv:2607.09999v2 [cs.SE]<br/>Announce Type: replace-cross<br/>Comments: 15 pages, 8 figures<br/>Abstract: We study abstract: interpretation and &lt;0.5MB models.</p>]]></description>
+      <dc:creator>Bob Jones</dc:creator>
+      <pubDate>Wed, 15 Jul 2026 00:00:00 -0400</pubDate>
+      <category>cs.SE</category>
+    </item>
+  </channel>
+</rss>`;
+		const parsed = parseArxivRssXml(rss, "cs.CR", ["cs.CR", "cs.SE"]);
+		expect(parsed).toHaveLength(2);
+		expect(parsed[0]?.abstract).toBe(
+			"Reverse engineering decompiled functions requires semantic reasoning over stripped binaries.",
+		);
+		expect(parsed[1]?.abstract).toBe(
+			"We study abstract: interpretation and <0.5MB models.",
+		);
+
+		// Prose without arXiv announcement boilerplate must stay untouched.
+		expect(
+			stripArxivAbstractPrefix(
+				"Abstract interpretation is a general framework for static analysis.",
+			),
+		).toBe(
+			"Abstract interpretation is a general framework for static analysis.",
+		);
+		expect(
+			stripArxivAbstractPrefix(
+				"arXiv:1706.03762 introduced transformers, which we extend with an abstract: view.",
+			),
+		).toBe(
+			"arXiv:1706.03762 introduced transformers, which we extend with an abstract: view.",
+		);
+
+		const first = parsed[0];
+		if (!first) throw new Error("Expected parsed RSS item");
+
+		// Merging a legacy prefixed item with a clean item strips the prefix before length check.
+		const merged = mergeCollectionItems([
+			[
+				{
+					...first,
+					abstract:
+						"arXiv:2607.07738v3 Announce Type: replace Abstract: Short abstract.",
+				},
+			],
+			[{ ...first, abstract: "Short abstract with extra details." }],
+		]);
+		expect(merged[0]?.abstract).toBe("Short abstract with extra details.");
+
+		// Feeds summary cleaner handles multi-word Comments before Abstract:.
+		expect(
+			cleanFeedSummary(
+				"arXiv:2607.07738v3 Announce Type: replace Comments: 15 pages, 8 figures Abstract: Reverse engineering binaries.",
+			),
+		).toBe("Reverse engineering binaries.");
 	});
 
 	it("parses 2026 arXiv Atom XML and drops pre-2026 entries when 2026 items exist", () => {

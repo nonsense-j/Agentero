@@ -80,6 +80,16 @@ describe("feed mention entry", () => {
 		expect(text).not.toContain("<p>");
 	});
 
+	it("strips arXiv RSS version-change prefixes while preserving paragraph breaks", () => {
+		const entry = feedMentionEntry(
+			item({
+				summaryText:
+					"<p>arXiv:2607.07738v3 Announce Type: replace</p><p>Abstract: First paragraph.</p><p>Second paragraph.</p>",
+			}),
+		);
+		expect(entry.abstract).toBe("First paragraph.\n\nSecond paragraph.");
+	});
+
 	it("uses the resolved body and strips feed markup", () => {
 		const entry = feedMentionEntry(
 			item({
