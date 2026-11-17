@@ -19,6 +19,8 @@ import {
 	type CollectionSeedSyncArgs,
 	type CollectionSeedSyncOut,
 	type CollectionStateSummary,
+	type CollectionSubgraphArgs,
+	type CollectionSubgraphOut,
 	type CollectionUpsertPapersArgs,
 	type CollectionVaultPaperMatch,
 	type CollectionVenueRecord,
@@ -952,6 +954,122 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 						sharedCount: p.sharedCount,
 					})),
 					vaultMatches,
+				};
+				return { ok: true, data: out, error: null };
+			}),
+
+		vi
+			.spyOn(commands, "plazaCollectionSubgraph")
+			.mockImplementation(async (args: CollectionSubgraphArgs) => {
+				const minShared = Math.max(1, args.minSharedRefs ?? 3);
+				const visible = getVisibleItems();
+				const workGroups: CollectionPaperItem[][] = [];
+				for (const item of visible) {
+					const existing = workGroups.find((g) =>
+						g.some((m) => sameCollectionPaperWork(m, item)),
+					);
+					if (existing) existing.push(item);
+					else workGroups.push([item]);
+				}
+
+				const groupTokens = workGroups.map(
+					(members) =>
+						new Set(members.flatMap((m) => normalizeRefTokensForItem(m))),
+				);
+				const groupRefs = workGroups.map(
+					(members) =>
+						new Set(
+							members
+								.flatMap((m) => m.rawRefs ?? [])
+								.map(normalizeRawRefToken)
+								.filter((t): t is string => Boolean(t)),
+						),
+				);
+
+				const widToRepId = new Map<number, string>();
+				const subgraphWids: number[] = [];
+				for (const rawId of args.ids) {
+					const item = itemsById.get(rawId);
+					if (!item) continue;
+					const wIdx = workGroups.findIndex((g) =>
+						g.some((m) => sameCollectionPaperWork(m, item)),
+					);
+					if (wIdx >= 0 && !widToRepId.has(wIdx)) {
+						widToRepId.set(wIdx, rawId);
+						subgraphWids.push(wIdx);
+					}
+				}
+				const subSet = new Set(subgraphWids);
+
+				const citationEdges: CollectionSubgraphOut["citationEdges"] = [];
+				const directUndirected = new Set<string>();
+				const unexpandedCounts: Record<string, number> = {};
+
+				for (const wIdx of subgraphWids) {
+					const myTokens = groupTokens[wIdx] ?? new Set<string>();
+					const myRefs = groupRefs[wIdx] ?? new Set<string>();
+					const myId = widToRepId.get(wIdx);
+					if (!myId) continue;
+
+					let outsideCount = 0;
+					for (let other = 0; other < workGroups.length; other += 1) {
+						if (other === wIdx) continue;
+						const otherTokens = groupTokens[other] ?? new Set<string>();
+						const otherRefs = groupRefs[other] ?? new Set<string>();
+						const iCiteOther = Array.from(otherTokens).some((t) =>
+							myRefs.has(t),
+						);
+						const otherCitesMe = Array.from(myTokens).some((t) =>
+							otherRefs.has(t),
+						);
+
+						if (subSet.has(other)) {
+							const otherId = widToRepId.get(other);
+							if (iCiteOther && otherId) {
+								citationEdges.push({ citingId: myId, citedId: otherId });
+								const pairKey =
+									wIdx < other ? `${wIdx}:${other}` : `${other}:${wIdx}`;
+								directUndirected.add(pairKey);
+							}
+						} else if (iCiteOther || otherCitesMe) {
+							outsideCount += 1;
+						}
+					}
+					if (outsideCount > 0) {
+						unexpandedCounts[myId] = outsideCount;
+					}
+				}
+
+				const sharedRefEdges: CollectionSubgraphOut["sharedRefEdges"] = [];
+				for (let i = 0; i < subgraphWids.length; i += 1) {
+					const u = subgraphWids[i];
+					const uRefs = groupRefs[u] ?? new Set<string>();
+					if (uRefs.size === 0) continue;
+					for (let j = i + 1; j < subgraphWids.length; j += 1) {
+						const v = subgraphWids[j];
+						const pairKey = u < v ? `${u}:${v}` : `${v}:${u}`;
+						if (directUndirected.has(pairKey)) continue;
+						const vRefs = groupRefs[v] ?? new Set<string>();
+						let shared = 0;
+						for (const r of uRefs) {
+							if (vRefs.has(r)) shared += 1;
+						}
+						const srcId = widToRepId.get(u);
+						const dstId = widToRepId.get(v);
+						if (shared >= minShared && srcId && dstId) {
+							sharedRefEdges.push({
+								sourceId: srcId,
+								targetId: dstId,
+								sharedCount: shared,
+							});
+						}
+					}
+				}
+
+				const out: CollectionSubgraphOut = {
+					citationEdges,
+					sharedRefEdges,
+					unexpandedCounts,
 				};
 				return { ok: true, data: out, error: null };
 			}),

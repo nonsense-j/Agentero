@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
-import { MAX_LINEAGE_GRAPH_NODES } from "@/components/plaza/collection-paper-lineage-section";
+import { DiscoverFastView } from "@/components/plaza/discover-fast-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { backgroundTasksStore } from "@/lib/core/background-tasks";
 import { commands } from "@/lib/core/bindings";
@@ -19,6 +19,14 @@ import {
 	shouldEnrichPaperOnDemand,
 	updateCollectionConfig,
 } from "@/lib/plaza/collection";
+import {
+	collectLibraryImportedKeys,
+	isCollectionPaperImported,
+} from "@/lib/plaza/imported";
+import {
+	computePaperGraphLayout,
+	formatPaperGraphLabel,
+} from "@/lib/plaza/paper-graph";
 import { recommendNextFromCollection } from "@/lib/plaza/recommend-pool";
 import { setVaultPath } from "@/lib/vault/store";
 import { installMockCollectionIpc } from "./helpers/mock-collection-ipc";
@@ -312,42 +320,31 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		expect(recOut.items[0]?.citedVaultCount).toBe(1);
 	});
 
-	it("renders Paper Graph Lineage (Vault highlight, List <-> 3-column SVG Graph <= 25 nodes, and in-dialog Back navigation)", async () => {
+	it("renders list-only Lineage in single-paper detail dialog (no Graph View toggle, Vault highlight, and Back navigation)", async () => {
 		const rootPaper = makePaper({
 			id: "doi:10.1145/root.paper",
 			title: "Root Paper: Directed Greybox Fuzzing",
 			doi: "10.1145/root.paper",
-			rawRefs: Array.from({ length: 16 }, (_, i) => `doi:10.1145/ref.${i + 1}`),
-		});
-
-		const refPapers = Array.from({ length: 16 }, (_, i) =>
-			makePaper({
-				id: `doi:10.1145/ref.${i + 1}`,
-				title: `Foundational Reference Paper #${i + 1}`,
-				doi: `10.1145/ref.${i + 1}`,
-				publishedAt: `2026-01-${String((i % 20) + 1).padStart(2, "0")}T00:00:00Z`,
-			}),
-		);
-
-		const citingPapers = Array.from({ length: 16 }, (_, i) =>
-			makePaper({
-				id: `doi:10.1145/citing.${i + 1}`,
-				title: `Follow-up Citing Paper #${i + 1}`,
-				doi: `10.1145/citing.${i + 1}`,
-				rawRefs: ["doi:10.1145/root.paper"],
-				publishedAt: `2026-04-${String((i % 20) + 1).padStart(2, "0")}T00:00:00Z`,
-			}),
-		);
-
-		const coCitedPeer = makePaper({
-			id: "doi:10.1145/peer.1",
-			title: "Co-Cited Sibling Paper",
-			doi: "10.1145/peer.1",
 			rawRefs: ["doi:10.1145/ref.1", "doi:10.1145/ref.2"],
 		});
 
+		const refPaper1 = makePaper({
+			id: "doi:10.1145/ref.1",
+			title: "Foundational Reference Paper #1",
+			doi: "10.1145/ref.1",
+			publishedAt: "2026-01-05T00:00:00Z",
+		});
+
+		const citingPaper = makePaper({
+			id: "doi:10.1145/citing.1",
+			title: "Follow-up Citing Paper #1",
+			doi: "10.1145/citing.1",
+			rawRefs: ["doi:10.1145/root.paper"],
+			publishedAt: "2026-04-16T00:00:00Z",
+		});
+
 		mockDb.seed({
-			items: [rootPaper, ...refPapers, ...citingPapers, coCitedPeer],
+			items: [rootPaper, refPaper1, citingPaper],
 			vaultPapers: [
 				{
 					relPath: "papers/ref-1",
@@ -385,34 +382,26 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		const lineageSection = document.querySelector("[data-lineage-section]");
 		expect(lineageSection).not.toBeNull();
 
+		// Single-paper card does NOT expose a Graph View switcher or SVG graph
+		expect(
+			lineageSection?.querySelector("button[aria-label='graphView']"),
+		).toBeNull();
+		expect(document.querySelector("[data-lineage-graph]")).toBeNull();
+
 		// Personal Vault highlight bar renders "citesVault" and opens Vault paper on click
 		const vaultBar = document.querySelector("[data-lineage-vault-matches]");
 		expect(vaultBar?.textContent).toContain("citesVault");
 		expect(vaultBar?.textContent).toContain("Foundational Reference Paper #1");
 
-		// Switch to 3-column SVG Graph view and verify total nodes <= 25
-		const graphBtn = document.querySelector(
-			"button[aria-label='graphView']",
-		) as HTMLButtonElement | null;
-		expect(graphBtn).not.toBeNull();
-		graphBtn?.click();
-		await flush(4);
-
-		const graphContainer = document.querySelector("[data-lineage-graph]");
-		expect(graphContainer).not.toBeNull();
-		const graphNodes = graphContainer?.querySelectorAll("[data-lineage-node]");
-		expect(graphNodes?.length).toBeLessThanOrEqual(MAX_LINEAGE_GRAPH_NODES);
-		expect(graphNodes?.length).toBe(25);
-
-		// Click a node in the graph to navigate inside the dialog (newest 12 are shown: citing.16 .. citing.5)
-		const firstCitingNode = graphContainer?.querySelector(
-			"[data-lineage-node='doi:10.1145/citing.16']",
-		) as HTMLButtonElement | null;
-		expect(firstCitingNode).not.toBeNull();
-		firstCitingNode?.click();
+		// Click a row in the list view to navigate inside the dialog
+		const citingRow = Array.from(
+			lineageSection?.querySelectorAll("button") ?? [],
+		).find((btn) => btn.textContent?.includes("Follow-up Citing Paper #1"));
+		expect(citingRow).toBeDefined();
+		citingRow?.click();
 		await flush(8);
 
-		expect(document.body.textContent).toContain("Follow-up Citing Paper #16");
+		expect(document.body.textContent).toContain("Follow-up Citing Paper #1");
 
 		// Back button appears in header and restores Root Paper
 		const backBtn = document.querySelector(
@@ -439,6 +428,218 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 			"C:/Users/Test/MyVault/papers/ref-1",
 		);
 		expect(dialogOpen).toBe(false);
+
+		root.unmount();
+	});
+
+	it("renders Fast Search Graph View with XXX@YYY pills, Library highlight, citation + shared-ref edges, node expand, and click-to-card", async () => {
+		expect(
+			formatPaperGraphLabel({
+				authors: ["Alice B. Smith"],
+				title: "A Survey of Greybox Fuzzing",
+			}),
+		).toBe("Smith@Survey");
+		expect(
+			formatPaperGraphLabel({
+				authors: ["O'Connor, Liam 0001"],
+				title: "The Multi-Agent Repair Engine",
+			}),
+		).toBe("O'Connor@Multi-Agent");
+
+		const layoutCheck = computePaperGraphLayout(
+			[
+				{ id: "n1", label: "Smith@Fuzzing" },
+				{ id: "n2", label: "Chen@Symbolic" },
+				{ id: "n3", label: "Doe@Isolated" },
+			],
+			[{ citingId: "n1", citedId: "n2" }],
+			[],
+		);
+		expect(layoutCheck.positions.size).toBe(3);
+
+		// Search matches pA, pB, pC, pIso; pOutsideRef and pOutsideCiting are outside the query
+		const pA = makePaper({
+			id: "doi:10.1145/graph.a",
+			title: "A Fuzzing Engine for Rust",
+			authors: ["Alice Smith"],
+			doi: "10.1145/graph.a",
+			rawRefs: [
+				"doi:10.1145/graph.b",
+				"doi:10.1145/outside.ref",
+				"doi:10.1145/common.1",
+				"doi:10.1145/common.2",
+				"doi:10.1145/common.3",
+			],
+		});
+		const pB = makePaper({
+			id: "doi:10.1145/graph.b",
+			title: "The Harness Synthesis Framework",
+			authors: ["Bob Chen"],
+			doi: "10.1145/graph.b",
+		});
+		const pC = makePaper({
+			id: "doi:10.1145/graph.c",
+			title: "Sanitizer Guided Fuzzing",
+			authors: ["Carol Li"],
+			doi: "10.1145/graph.c",
+			rawRefs: [
+				"doi:10.1145/common.1",
+				"doi:10.1145/common.2",
+				"doi:10.1145/common.3",
+			],
+		});
+		const pIso = makePaper({
+			id: "doi:10.1145/graph.iso",
+			title: "Standalone Fuzzing Benchmark",
+			authors: ["Dan Wu"],
+			doi: "10.1145/graph.iso",
+		});
+		const pOutsideRef = makePaper({
+			id: "doi:10.1145/outside.ref",
+			title: "Foundational Symbolic Solver",
+			authors: ["Eve Taylor"],
+			abstract: "Pure SMT solver internals without the target keyword.",
+			keywords: ["Formal Verification"],
+			doi: "10.1145/outside.ref",
+		});
+		const pOutsideCiting = makePaper({
+			id: "doi:10.1145/outside.citing",
+			title: "Downstream Kernel Verifier",
+			authors: ["Frank Miller"],
+			abstract: "Kernel verification built atop earlier engines.",
+			keywords: ["Formal Verification"],
+			doi: "10.1145/outside.citing",
+			rawRefs: ["doi:10.1145/graph.a"],
+		});
+
+		mockDb.seed({
+			items: [pA, pB, pC, pIso, pOutsideRef, pOutsideCiting],
+		});
+		await ensureCollectionSummaryHydrated();
+		await flush(4);
+
+		// pB and pOutsideRef are in the user's Library
+		const libraryKeys = collectLibraryImportedKeys([
+			{
+				id: "lib-b",
+				title: pB.title,
+				authors: pB.authors,
+				doi: pB.doi,
+				path: "papers/lib-b",
+			},
+			{
+				id: "lib-out",
+				title: pOutsideRef.title,
+				authors: pOutsideRef.authors,
+				doi: pOutsideRef.doi,
+				path: "papers/lib-out",
+			},
+		]);
+
+		let openedPaper: CollectionPaperItem | null = null;
+		const host = document.createElement("div");
+		document.body.append(host);
+		const root = createRoot(host);
+
+		const renderFast = () => {
+			root.render(
+				createElement(
+					TooltipProvider,
+					{ delayDuration: 0 },
+					createElement(DiscoverFastView, {
+						summary: getCollectionSummarySnapshot(),
+						importedSet: libraryKeys,
+						isPaperImported: isCollectionPaperImported,
+						onBackToHub: () => {},
+						onOpenDetail: (p) => {
+							openedPaper = p;
+						},
+						onImportPaper: async () => {},
+						onBatchImport: async () => {},
+					}),
+				),
+			);
+		};
+
+		renderFast();
+		await flush(8);
+
+		// Filter to "Fuzzing OR Harness" so pOutsideRef & pOutsideCiting are excluded from initial search
+		const searchInput = host.querySelector(
+			"input[type='text']",
+		) as HTMLInputElement | null;
+		expect(searchInput).not.toBeNull();
+		const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+			window.HTMLInputElement.prototype,
+			"value",
+		)?.set;
+		nativeInputValueSetter?.call(searchInput, "Fuzzing OR Harness");
+		searchInput?.dispatchEvent(new Event("input", { bubbles: true }));
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		await flush(8);
+
+		// Switch Fast Search to Graph View
+		const graphSwitchBtn = host.querySelector(
+			"button[aria-label='graphView']",
+		) as HTMLButtonElement | null;
+		expect(graphSwitchBtn).not.toBeNull();
+		graphSwitchBtn?.click();
+		await flush(8);
+
+		const graphCanvas = host.querySelector("[data-discover-graph-view]");
+		expect(graphCanvas).not.toBeNull();
+
+		// All 4 matched nodes (including isolated pIso) are rendered with XXX@YYY labels
+		const initialNodes = graphCanvas?.querySelectorAll("[data-graph-node]");
+		expect(initialNodes?.length).toBe(4);
+		expect(graphCanvas?.textContent).toContain("Smith@Fuzzing");
+		expect(graphCanvas?.textContent).toContain("Chen@Harness");
+		expect(graphCanvas?.textContent).toContain("Li@Sanitizer");
+		expect(graphCanvas?.textContent).toContain("Wu@Standalone");
+
+		// Direct citation edge (pA -> pB) + dashed shared-ref edge (pA <-> pC)
+		expect(
+			graphCanvas?.querySelectorAll("[data-graph-edge='citation']").length,
+		).toBe(1);
+		expect(
+			graphCanvas?.querySelectorAll("[data-graph-edge='shared']").length,
+		).toBe(1);
+
+		// Library paper pB is highlighted
+		const nodeB = graphCanvas?.querySelector(
+			`[data-graph-node='${pB.id}']`,
+		) as HTMLElement | null;
+		expect(nodeB?.getAttribute("data-in-library")).toBe("true");
+		const nodeA = graphCanvas?.querySelector(
+			`[data-graph-node='${pA.id}']`,
+		) as HTMLElement | null;
+		expect(nodeA?.getAttribute("data-in-library")).toBeNull();
+
+		// Expand pA -> pulls in both pOutsideRef (ref) and pOutsideCiting (cite)
+		const expandABtn = graphCanvas?.querySelector(
+			`[data-graph-expand='${pA.id}']`,
+		) as HTMLButtonElement | null;
+		expect(expandABtn).not.toBeNull();
+		expandABtn?.click();
+		await flush(10);
+
+		const expandedNodes = graphCanvas?.querySelectorAll("[data-graph-node]");
+		expect(expandedNodes?.length).toBe(6);
+		expect(graphCanvas?.textContent).toContain("Taylor@Foundational");
+		expect(graphCanvas?.textContent).toContain("Miller@Downstream");
+
+		// Expanded Library neighbor pOutsideRef is also highlighted
+		const nodeOutRef = graphCanvas?.querySelector(
+			`[data-graph-node='${pOutsideRef.id}']`,
+		) as HTMLElement | null;
+		expect(nodeOutRef?.getAttribute("data-in-library")).toBe("true");
+		expect(nodeOutRef?.getAttribute("data-expanded-neighbor")).toBe("true");
+
+		// Clicking a node pill opens the paper detail card
+		const pillBtnA = nodeA?.querySelector("button") as HTMLButtonElement | null;
+		pillBtnA?.click();
+		await flush(2);
+		expect(openedPaper?.id).toBe(pA.id);
 
 		root.unmount();
 	});
