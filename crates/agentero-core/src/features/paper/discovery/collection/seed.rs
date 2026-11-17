@@ -765,15 +765,26 @@ async fn fetch_openalex_json(client: &reqwest::Client, url: &str) -> OpenAlexFet
                 }
                 if status == StatusCode::TOO_MANY_REQUESTS {
                     let retry_after = parse_retry_after_secs(resp.headers());
+                    let remaining_credits: Option<u64> = resp
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<u64>().ok());
                     let body_lower = resp.text().await.unwrap_or_default().to_ascii_lowercase();
-                    let is_daily_budget = retry_after.is_some_and(|s| s > 60)
-                        || body_lower.contains("credit")
-                        || body_lower.contains("budget")
-                        || body_lower.contains("daily")
-                        || body_lower.contains("insufficient");
+                    let is_daily_budget = match remaining_credits {
+                        Some(0) => true,
+                        Some(_) => false,
+                        None => {
+                            retry_after.is_some_and(|s| s > 120)
+                                || body_lower.contains("daily budget")
+                                || body_lower.contains("insufficient credits")
+                                || body_lower.contains("out of credits")
+                                || body_lower.contains("daily limit exceeded")
+                        }
+                    };
                     if is_daily_budget || attempt + 1 >= OA_RETRY_DELAYS_SECS.len() {
                         log::warn!(
-                            "seed_bake OpenAlex HTTP 429 rate-limited (daily_budget={is_daily_budget}), stopping OpenAlex pass gracefully"
+                            "seed_bake OpenAlex HTTP 429 rate-limited (daily_budget={is_daily_budget}, remaining={remaining_credits:?}), stopping OpenAlex pass gracefully"
                         );
                         return OpenAlexFetchResult::RateLimited;
                     }
@@ -1611,6 +1622,9 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
                 continue;
             }
             calls_used += 1;
+            if calls_used > 1 {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+            }
             let url = format!(
                 "https://api.openalex.org/works?filter=title.search:{},from_publication_date:2024-01-01&per-page=100&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}",
                 clauses.join("|")
@@ -2084,6 +2098,7 @@ async fn fetch_s2_batch_with_bisect(
         if cur.is_empty() {
             continue;
         }
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let ids: Vec<&str> = cur.iter().map(|(_, q)| q.as_str()).collect();
         let body = serde_json::json!({ "ids": ids });
 
@@ -3711,6 +3726,45 @@ mod tests {
         let url = format!("http://{addr}/works?filter=title.search:%22test%22");
         let res = fetch_openalex_json(&client, &url).await;
         assert!(matches!(res, OpenAlexFetchResult::RateLimited));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_openalex_json_retries_transient_429_when_credits_remain() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"error":"Rate limit exceeded. Your daily credit limit is 10000."}"#;
+                let resp = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nX-RateLimit-Remaining: 6374\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"results":[]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client =
+            crate::http::client_with(Duration::from_secs(5), 1, crate::http::USER_AGENT).unwrap();
+        let url = format!("http://{addr}/works?filter=title.search:%22test%22");
+        let res = fetch_openalex_json(&client, &url).await;
+        assert!(matches!(res, OpenAlexFetchResult::Ok(_)));
         server.abort();
     }
 }
