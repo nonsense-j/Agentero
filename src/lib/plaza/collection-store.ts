@@ -179,6 +179,23 @@ export type CollectionPaperLineageResult = {
 	vaultMatches: CollectionVaultPaperMatch[];
 };
 
+export type CollectionCitationEdge = {
+	citingId: string;
+	citedId: string;
+};
+
+export type CollectionSharedRefEdge = {
+	sourceId: string;
+	targetId: string;
+	sharedCount: number;
+};
+
+export type CollectionSubgraphResult = {
+	citationEdges: CollectionCitationEdge[];
+	sharedRefEdges: CollectionSharedRefEdge[];
+	unexpandedCounts: Record<string, number>;
+};
+
 export type CollectionConfigUpdateInput = {
 	categories?: string[];
 	venues?: VenueConfig[];
@@ -762,6 +779,46 @@ export async function getCollectionPaperLineage(
 			arxivId: m.arxivId ?? null,
 			relation: m.relation,
 		})),
+	};
+}
+
+export async function getCollectionSubgraph(
+	ids: readonly string[],
+	options?: { minSharedRefs?: number },
+): Promise<CollectionSubgraphResult> {
+	const cleaned = ids.map((id) => id.trim()).filter(Boolean);
+	if (cleaned.length === 0) {
+		return {
+			citationEdges: [],
+			sharedRefEdges: [],
+			unexpandedCounts: {},
+		};
+	}
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionSubgraph({
+				ids: cleaned,
+				minSharedRefs: options?.minSharedRefs ?? null,
+			}),
+		{ fallback: "Failed to load paper citation subgraph" },
+	);
+	const unexpandedCounts: Record<string, number> = {};
+	for (const [k, v] of Object.entries(dto.unexpandedCounts ?? {})) {
+		if (typeof v === "number" && v > 0) {
+			unexpandedCounts[k] = v;
+		}
+	}
+	return {
+		citationEdges: dto.citationEdges.map((e) => ({
+			citingId: e.citingId,
+			citedId: e.citedId,
+		})),
+		sharedRefEdges: dto.sharedRefEdges.map((e) => ({
+			sourceId: e.sourceId,
+			targetId: e.targetId,
+			sharedCount: e.sharedCount,
+		})),
+		unexpandedCounts,
 	};
 }
 

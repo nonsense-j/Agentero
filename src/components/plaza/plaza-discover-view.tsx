@@ -285,6 +285,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 									<span className="rounded-md bg-muted/80 px-2 py-0.5 font-mono text-[0.6875rem] text-muted-foreground">
 										{t("plaza.discover.fastTagFilters")}
 									</span>
+									<span className="rounded-md bg-brand/10 px-2 py-0.5 font-mono text-[0.6875rem] text-brand">
+										{t("plaza.discover.graphView")}
+									</span>
 								</div>
 							</button>
 

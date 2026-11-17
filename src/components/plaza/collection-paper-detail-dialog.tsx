@@ -415,9 +415,8 @@ export function CollectionPaperDetailDialog({
 						</section>
 					) : null}
 
-					{/* In-Pool Paper Graph Lineage & Personal Vault Association */}
+					{/* In-Pool Paper Lineage & Personal Vault Association */}
 					<CollectionPaperLineageSection
-						currentPaper={active}
 						lineage={lineage}
 						vaultPath={vaultPath}
 						onSelectPaper={handleSelectLineagePaper}

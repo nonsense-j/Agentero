@@ -499,6 +499,8 @@ export const commands = {
 	plazaCollectionClear: (args: CollectionClearArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_clear", { args }),
 	/**  Resolve bidirectional in-collection citation lineage, bibliographic coupling peers, and personal Vault matches. */
 	plazaCollectionPaperLineage: (args: CollectionPaperLineageArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperLineageOut>>("plaza_collection_paper_lineage", { args }),
+	/**  Resolve direct citation edges, shared-reference edges, and unexpanded pool neighbor counts across a set of paper IDs. */
+	plazaCollectionSubgraph: (args: CollectionSubgraphArgs) => __TAURI_INVOKE<ApiResult<CollectionSubgraphOut>>("plaza_collection_subgraph", { args }),
 	/**  Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path). */
 	plazaCollectionSeedSync: (args: CollectionSeedSyncArgs) => __TAURI_INVOKE<ApiResult<CollectionSeedSyncOut>>("plaza_collection_seed_sync", { args }),
 	feedsSetPinned: (args: FeedsSetPinnedArgs) => __TAURI_INVOKE<ApiResult<FeedSub>>("feeds_set_pinned", { args }),
@@ -2471,6 +2473,11 @@ export type CollectionArxivWatermarkInput = {
 	historyComplete?: boolean | null,
 };
 
+export type CollectionCitationEdgeDto = {
+	citingId: string,
+	citedId: string,
+};
+
 export type CollectionClearArgs = {
 	scope: string,
 	venueId?: string | null,
@@ -2702,6 +2709,12 @@ export type CollectionSeedSyncOut = {
 	skipped: boolean,
 };
 
+export type CollectionSharedRefEdgeDto = {
+	sourceId: string,
+	targetId: string,
+	sharedCount: number,
+};
+
 export type CollectionSharedRefPeer = {
 	paper: CollectionPaperSummary,
 	sharedCount: number,
@@ -2721,6 +2734,17 @@ export type CollectionStateSummary = {
 	categoryCounts: { [key in string]: number },
 	seedCleared: boolean,
 	appliedSeedIds: string[],
+};
+
+export type CollectionSubgraphArgs = {
+	ids: string[],
+	minSharedRefs?: number | null,
+};
+
+export type CollectionSubgraphOut = {
+	citationEdges: CollectionCitationEdgeDto[],
+	sharedRefEdges: CollectionSharedRefEdgeDto[],
+	unexpandedCounts: { [key in string]: number },
 };
 
 export type CollectionUpsertPapersArgs = {

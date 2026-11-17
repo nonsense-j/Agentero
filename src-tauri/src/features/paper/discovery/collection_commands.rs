@@ -5,9 +5,9 @@ use agentero_core::features::paper::discovery::collection::{
     CollectionOverviewOut, CollectionPaperDetail, CollectionPaperIdArgs, CollectionPaperIdsArgs,
     CollectionPaperLineageArgs, CollectionPaperLineageOut, CollectionPaperSummary,
     CollectionPapersPage, CollectionPatchPapersArgs, CollectionSearchArgs, CollectionSearchResult,
-    CollectionSeedSyncArgs, CollectionSeedSyncOut, CollectionStateSummary,
-    CollectionUpsertPapersArgs, CollectionWordCloudArgs, RecommendNextArgs, RecommendNextOut,
-    RecommendPoolStateDto, RecommendPoolStateInput, WordCloudOut,
+    CollectionSeedSyncArgs, CollectionSeedSyncOut, CollectionStateSummary, CollectionSubgraphArgs,
+    CollectionSubgraphOut, CollectionUpsertPapersArgs, CollectionWordCloudArgs, RecommendNextArgs,
+    RecommendNextOut, RecommendPoolStateDto, RecommendPoolStateInput, WordCloudOut,
 };
 use serde::Serialize;
 
@@ -190,6 +190,18 @@ pub async fn plaza_collection_paper_lineage(
 ) -> ApiResult<CollectionPaperLineageOut> {
     run_collection_blocking("plaza_collection_paper_lineage", move || {
         collection::paper_lineage(&args)
+    })
+    .await
+}
+
+/// Resolve direct citation edges, shared-reference edges, and unexpanded pool neighbor counts across a set of paper IDs.
+#[tauri::command]
+#[specta::specta]
+pub async fn plaza_collection_subgraph(
+    args: CollectionSubgraphArgs,
+) -> ApiResult<CollectionSubgraphOut> {
+    run_collection_blocking("plaza_collection_subgraph", move || {
+        collection::paper_subgraph(&args)
     })
     .await
 }

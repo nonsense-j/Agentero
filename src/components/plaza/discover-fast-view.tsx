@@ -3,15 +3,18 @@ import {
 	CheckSquare,
 	ChevronDown,
 	Download,
+	List,
 	Loader2,
 	RotateCcw,
 	Search,
 	SlidersHorizontal,
 	Square,
+	Workflow,
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DiscoverGraphView } from "@/components/plaza/discover-graph-view";
 import { DiscoverPaperCard } from "@/components/plaza/discover-paper-card";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,6 +75,7 @@ export function DiscoverFastView({
 		DEFAULT_FAST_SEARCH_FILTERS,
 	);
 	const [advancedOpen, setAdvancedOpen] = useState(false);
+	const [viewMode, setViewMode] = useState<"list" | "graph">("list");
 
 	const [items, setItems] = useState<ScoredCollectionPaper[]>([]);
 	const [totalMatched, setTotalMatched] = useState(0);
@@ -195,6 +199,12 @@ export function DiscoverFastView({
 		[filters],
 	);
 
+	const seedPapers = useMemo(() => items.map((e) => e.paper), [items]);
+	const graphResetKey = useMemo(
+		() => `${debouncedQuery}\u0000${JSON.stringify(filters)}`,
+		[debouncedQuery, filters],
+	);
+
 	const availableVenues = useMemo(() => {
 		return summary.venues.filter((v) => {
 			if (
@@ -307,6 +317,53 @@ export function DiscoverFastView({
 					</div>
 
 					<div className="flex items-center gap-1.5">
+						{/* List / Graph View switcher */}
+						<div className="inline-flex items-center rounded-lg bg-muted/65 p-0.5">
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<button
+										type="button"
+										data-active={viewMode === "list"}
+										aria-label={t("plaza.discover.listView")}
+										onClick={() => setViewMode("list")}
+										className={cn(
+											"flex h-6 w-7 items-center justify-center rounded-md transition-colors motion-reduce:transition-none",
+											viewMode === "list"
+												? "bg-background text-foreground shadow-xs"
+												: "text-muted-foreground hover:text-foreground",
+										)}
+									>
+										<List className="size-3.5" />
+									</button>
+								</TooltipTrigger>
+								<TooltipContent side="bottom">
+									{t("plaza.discover.listView")}
+								</TooltipContent>
+							</Tooltip>
+
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<button
+										type="button"
+										data-active={viewMode === "graph"}
+										aria-label={t("plaza.discover.graphView")}
+										onClick={() => setViewMode("graph")}
+										className={cn(
+											"flex h-6 w-7 items-center justify-center rounded-md transition-colors motion-reduce:transition-none",
+											viewMode === "graph"
+												? "bg-background text-foreground shadow-xs"
+												: "text-muted-foreground hover:text-foreground",
+										)}
+									>
+										<Workflow className="size-3.5" />
+									</button>
+								</TooltipTrigger>
+								<TooltipContent side="bottom">
+									{t("plaza.discover.graphView")}
+								</TooltipContent>
+							</Tooltip>
+						</div>
+
 						{/* Sort segmented pills */}
 						<div className="inline-flex items-center rounded-lg bg-muted/65 p-0.5">
 							{(
@@ -334,7 +391,7 @@ export function DiscoverFastView({
 							))}
 						</div>
 
-						{items.length > 0 ? (
+						{viewMode === "list" && items.length > 0 ? (
 							<Tooltip>
 								<TooltipTrigger asChild>
 									<Button
@@ -723,40 +780,55 @@ export function DiscoverFastView({
 				) : null}
 			</header>
 
-			{/* Results list */}
-			<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-4">
-				{summary.totalCount === 0 ? (
-					<div className="flex h-48 flex-col items-center justify-center gap-2 text-center text-muted-foreground text-xs">
-						{!summary.hydrated || summary.preloading ? (
-							<div className="flex items-center gap-2">
-								<Loader2 className="size-4 animate-spin" />
-								<span>{t("plaza.collection.preloading")}</span>
-							</div>
-						) : (
-							<p>{t("plaza.discover.poolEmptyHint")}</p>
-						)}
-					</div>
-				) : searching && items.length === 0 ? (
-					<div className="flex h-48 items-center justify-center text-muted-foreground text-xs">
-						<Loader2 className="size-4 animate-spin" />
-					</div>
-				) : items.length === 0 ? (
-					<div className="flex h-48 flex-col items-center justify-center gap-2 text-center text-muted-foreground text-xs">
-						<p>{t("plaza.collection.emptyFiltered")}</p>
-						{activeFilterCount > 0 ? (
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								onClick={resetFilters}
-								className="h-7 gap-1.5 text-xs"
-							>
-								<RotateCcw className="size-3" />
-								{t("plaza.discover.resetFilters")}
-							</Button>
-						) : null}
-					</div>
-				) : (
+			{/* Results body: List View vs Graph View */}
+			{summary.totalCount === 0 ? (
+				<div className="flex h-48 flex-col items-center justify-center gap-2 p-4 text-center text-muted-foreground text-xs">
+					{!summary.hydrated || summary.preloading ? (
+						<div className="flex items-center gap-2">
+							<Loader2 className="size-4 animate-spin" />
+							<span>{t("plaza.collection.preloading")}</span>
+						</div>
+					) : (
+						<p>{t("plaza.discover.poolEmptyHint")}</p>
+					)}
+				</div>
+			) : searching && items.length === 0 ? (
+				<div className="flex h-48 items-center justify-center p-4 text-muted-foreground text-xs">
+					<Loader2 className="size-4 animate-spin" />
+				</div>
+			) : items.length === 0 ? (
+				<div className="flex h-48 flex-col items-center justify-center gap-2 p-4 text-center text-muted-foreground text-xs">
+					<p>{t("plaza.collection.emptyFiltered")}</p>
+					{activeFilterCount > 0 ? (
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={resetFilters}
+							className="h-7 gap-1.5 text-xs"
+						>
+							<RotateCcw className="size-3" />
+							{t("plaza.discover.resetFilters")}
+						</Button>
+					) : null}
+				</div>
+			) : viewMode === "graph" ? (
+				<div className="min-h-0 flex-1 overflow-hidden">
+					<DiscoverGraphView
+						seedPapers={seedPapers}
+						resetKey={graphResetKey}
+						summaryRevision={summary.revision}
+						totalMatched={totalMatched}
+						loadingMore={loadingMore}
+						onLoadMore={() => void handleLoadMore()}
+						onObservePapers={onObservePapers}
+						importedSet={importedSet}
+						isPaperImported={isPaperImported}
+						onOpenDetail={onOpenDetail}
+					/>
+				</div>
+			) : (
+				<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-4">
 					<div className="mx-auto flex w-full max-w-4xl flex-col gap-2.5">
 						{items.map((entry) => (
 							<DiscoverPaperCard
@@ -792,8 +864,8 @@ export function DiscoverFastView({
 							</div>
 						) : null}
 					</div>
-				)}
-			</div>
+				</div>
+			)}
 		</div>
 	);
 }

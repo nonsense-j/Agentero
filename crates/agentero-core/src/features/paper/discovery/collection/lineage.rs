@@ -9,8 +9,9 @@ use rusqlite::{params_from_iter, Connection, OpenFlags, OptionalExtension};
 use crate::error::AppError;
 
 use super::models::{
-    CollectionPaperLineageArgs, CollectionPaperLineageOut, CollectionPaperSummary,
-    CollectionSharedRefPeer, CollectionVaultPaperMatch,
+    CollectionCitationEdgeDto, CollectionPaperLineageArgs, CollectionPaperLineageOut,
+    CollectionPaperSummary, CollectionSharedRefEdgeDto, CollectionSharedRefPeer,
+    CollectionSubgraphArgs, CollectionSubgraphOut, CollectionVaultPaperMatch,
 };
 use super::schema::{ensure_collection, ensure_collection_at};
 use super::store::{
@@ -22,6 +23,7 @@ use super::store::{
 const MAX_LINEAGE_NEIGHBORS: usize = 40;
 const MAX_SHARED_REF_PEERS: usize = 20;
 const MIN_SHARED_REF_COUNT: i64 = 3;
+const MAX_SUBGRAPH_SHARED_DEGREE: usize = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct VaultCatalogEntry {
@@ -702,4 +704,248 @@ pub(crate) fn compute_cited_vault_counts(
             (cnt > 0).then_some((wid, cnt))
         })
         .collect())
+}
+
+pub fn paper_subgraph(args: &CollectionSubgraphArgs) -> Result<CollectionSubgraphOut, AppError> {
+    let conn = ensure_collection()?;
+    paper_subgraph_conn(&conn, args)
+}
+
+pub fn paper_subgraph_at(
+    db_path: &Path,
+    args: &CollectionSubgraphArgs,
+) -> Result<CollectionSubgraphOut, AppError> {
+    let conn = ensure_collection_at(db_path)?;
+    paper_subgraph_conn(&conn, args)
+}
+
+pub(crate) fn paper_subgraph_conn(
+    conn: &Connection,
+    args: &CollectionSubgraphArgs,
+) -> Result<CollectionSubgraphOut, AppError> {
+    let mut cleaned_ids: Vec<String> = Vec::new();
+    let mut seen_input_ids: HashSet<String> = HashSet::new();
+    for raw in &args.ids {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && seen_input_ids.insert(trimmed.to_string()) {
+            cleaned_ids.push(trimmed.to_string());
+        }
+    }
+
+    if cleaned_ids.is_empty() {
+        return Ok(CollectionSubgraphOut {
+            citation_edges: Vec::new(),
+            shared_ref_edges: Vec::new(),
+            unexpanded_counts: HashMap::new(),
+        });
+    }
+
+    let mut id_to_wid: HashMap<String, i64> = HashMap::with_capacity(cleaned_ids.len());
+    for chunk in cleaned_ids.chunks(400) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT id, work_id FROM papers WHERE id IN ({ph})");
+        let binds: Vec<rusqlite::types::Value> = chunk.iter().map(|s| s.clone().into()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(binds), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for entry in rows {
+            let (id, wid) = entry?;
+            if wid > 0 {
+                id_to_wid.insert(id, wid);
+            }
+        }
+    }
+
+    let mut wid_to_id: HashMap<i64, String> = HashMap::with_capacity(id_to_wid.len());
+    let mut wids: Vec<i64> = Vec::with_capacity(id_to_wid.len());
+    for id in &cleaned_ids {
+        if let Some(&wid) = id_to_wid.get(id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = wid_to_id.entry(wid) {
+                e.insert(id.clone());
+                wids.push(wid);
+            }
+        }
+    }
+
+    if wids.is_empty() {
+        return Ok(CollectionSubgraphOut {
+            citation_edges: Vec::new(),
+            shared_ref_edges: Vec::new(),
+            unexpanded_counts: HashMap::new(),
+        });
+    }
+
+    let wid_set: HashSet<i64> = wids.iter().copied().collect();
+    let mut direct_directed: HashSet<(i64, i64)> = HashSet::new();
+    let mut direct_undirected: HashSet<(i64, i64)> = HashSet::new();
+    let mut outside_neighbors: HashMap<i64, HashSet<i64>> = HashMap::new();
+
+    for chunk in wids.chunks(400) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let binds: Vec<rusqlite::types::Value> = chunk.iter().copied().map(Into::into).collect();
+
+        // Outgoing references (`citing_work_id` in subgraph)
+        let out_sql = format!(
+            "SELECT pc.citing_work_id, pc.cited_work_id, cw.active_in_scope
+             FROM paper_citations pc
+             JOIN canonical_works cw ON cw.work_id = pc.cited_work_id
+             WHERE pc.citing_work_id IN ({ph})"
+        );
+        let mut out_stmt = conn.prepare(&out_sql)?;
+        let out_rows = out_stmt.query_map(params_from_iter(binds.clone()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for entry in out_rows {
+            let (citing_wid, cited_wid, active) = entry?;
+            if citing_wid == cited_wid {
+                continue;
+            }
+            if wid_set.contains(&cited_wid) {
+                direct_directed.insert((citing_wid, cited_wid));
+                let pair = if citing_wid < cited_wid {
+                    (citing_wid, cited_wid)
+                } else {
+                    (cited_wid, citing_wid)
+                };
+                direct_undirected.insert(pair);
+            } else if active == 1 {
+                outside_neighbors
+                    .entry(citing_wid)
+                    .or_default()
+                    .insert(cited_wid);
+            }
+        }
+
+        // Incoming citations (`cited_work_id` in subgraph)
+        let in_sql = format!(
+            "SELECT pc.citing_work_id, pc.cited_work_id
+             FROM paper_citations pc
+             JOIN canonical_works cw ON cw.work_id = pc.citing_work_id
+             WHERE pc.cited_work_id IN ({ph}) AND cw.active_in_scope = 1"
+        );
+        let mut in_stmt = conn.prepare(&in_sql)?;
+        let in_rows = in_stmt.query_map(params_from_iter(binds), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for entry in in_rows {
+            let (citing_wid, cited_wid) = entry?;
+            if citing_wid != cited_wid && !wid_set.contains(&citing_wid) {
+                outside_neighbors
+                    .entry(cited_wid)
+                    .or_default()
+                    .insert(citing_wid);
+            }
+        }
+    }
+
+    let mut direct_vec: Vec<(i64, i64)> = direct_directed.into_iter().collect();
+    direct_vec.sort_unstable();
+    let citation_edges: Vec<CollectionCitationEdgeDto> = direct_vec
+        .into_iter()
+        .filter_map(|(citing_wid, cited_wid)| {
+            Some(CollectionCitationEdgeDto {
+                citing_id: wid_to_id.get(&citing_wid)?.clone(),
+                cited_id: wid_to_id.get(&cited_wid)?.clone(),
+            })
+        })
+        .collect();
+
+    // Shared reference (bibliographic coupling) edges among subgraph works
+    let min_shared = args
+        .min_shared_refs
+        .unwrap_or(MIN_SHARED_REF_COUNT as u32)
+        .max(1);
+    let mut works_by_ref: HashMap<String, Vec<i64>> = HashMap::new();
+    for chunk in wids.chunks(400) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql =
+            format!("SELECT src_work_id, ref_key FROM paper_raw_refs WHERE src_work_id IN ({ph})");
+        let binds: Vec<rusqlite::types::Value> = chunk.iter().copied().map(Into::into).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(binds), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for entry in rows {
+            let (src_wid, ref_key) = entry?;
+            works_by_ref.entry(ref_key).or_default().push(src_wid);
+        }
+    }
+
+    let mut pair_shared: HashMap<(i64, i64), u32> = HashMap::new();
+    for (_, mut list) in works_by_ref {
+        if list.len() < 2 {
+            continue;
+        }
+        list.sort_unstable();
+        list.dedup();
+        if list.len() < 2 {
+            continue;
+        }
+        for i in 0..list.len() {
+            let u = list[i];
+            for &v in &list[(i + 1)..] {
+                let pair = (u, v);
+                if direct_undirected.contains(&pair) {
+                    continue;
+                }
+                *pair_shared.entry(pair).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut shared_candidates: Vec<(i64, i64, u32)> = pair_shared
+        .into_iter()
+        .filter_map(|((u, v), cnt)| (cnt >= min_shared).then_some((u, v, cnt)))
+        .collect();
+    shared_candidates.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    let mut shared_degree: HashMap<i64, usize> = HashMap::new();
+    let mut shared_ref_edges: Vec<CollectionSharedRefEdgeDto> = Vec::new();
+    for (u, v, cnt) in shared_candidates {
+        let du = shared_degree.get(&u).copied().unwrap_or(0);
+        let dv = shared_degree.get(&v).copied().unwrap_or(0);
+        if du >= MAX_SUBGRAPH_SHARED_DEGREE || dv >= MAX_SUBGRAPH_SHARED_DEGREE {
+            continue;
+        }
+        if let (Some(src_id), Some(dst_id)) = (wid_to_id.get(&u), wid_to_id.get(&v)) {
+            *shared_degree.entry(u).or_insert(0) += 1;
+            *shared_degree.entry(v).or_insert(0) += 1;
+            shared_ref_edges.push(CollectionSharedRefEdgeDto {
+                source_id: src_id.clone(),
+                target_id: dst_id.clone(),
+                shared_count: cnt,
+            });
+        }
+    }
+
+    let mut unexpanded_counts: HashMap<String, u32> = HashMap::new();
+    for (wid, neighbors) in outside_neighbors {
+        if neighbors.is_empty() {
+            continue;
+        }
+        if let Some(id) = wid_to_id.get(&wid) {
+            unexpanded_counts.insert(id.clone(), neighbors.len() as u32);
+        }
+    }
+
+    Ok(CollectionSubgraphOut {
+        citation_edges,
+        shared_ref_edges,
+        unexpanded_counts,
+    })
 }

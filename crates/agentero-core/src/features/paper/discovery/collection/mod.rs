@@ -20,7 +20,7 @@ pub use keywords::{
     normalize_keyword_key, singularize_keyword_token, union_canonical_keywords,
     KeywordSynonymGroup, KEYWORD_SYNONYM_MAP, SYNONYM_GROUPS,
 };
-pub use lineage::{paper_lineage, paper_lineage_at};
+pub use lineage::{paper_lineage, paper_lineage_at, paper_subgraph, paper_subgraph_at};
 pub use models::*;
 pub use recommend::{
     recommend_next, recommend_next_at, recommend_state_get, recommend_state_get_at,
@@ -2202,5 +2202,70 @@ mod tests {
         .unwrap();
         let inserted = paper_get_at(&db, "arxiv:2608.00001").unwrap().unwrap();
         assert_eq!(inserted.abstract_text, "Clean body.");
+    }
+
+    #[test]
+    fn paper_subgraph_resolves_direct_citations_shared_refs_and_unexpanded_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        let mut p1 = make_arxiv_input(1, "cs.SE", "Fuzzing Core", vec!["Fuzzing"]);
+        p1.raw_refs = vec![
+            "arxiv:2603.00002".into(),
+            "arxiv:2603.00004".into(),
+            "doi:10.1145/shared-1".into(),
+            "doi:10.1145/shared-2".into(),
+            "doi:10.1145/shared-3".into(),
+        ];
+
+        let mut p2 = make_arxiv_input(2, "cs.SE", "Symbolic Base", vec!["Symbolic Execution"]);
+        p2.raw_refs = vec!["doi:10.1145/shared-1".into()];
+
+        let mut p3 = make_arxiv_input(3, "cs.SE", "Sibling Fuzzer", vec!["Fuzzing"]);
+        p3.raw_refs = vec![
+            "doi:10.1145/shared-1".into(),
+            "doi:10.1145/shared-2".into(),
+            "doi:10.1145/shared-3".into(),
+        ];
+
+        // Outside the initial queried subgraph: p4 is cited by p1, p5 cites p2
+        let p4 = make_arxiv_input(4, "cs.SE", "Outside Ref", vec!["Program Analysis"]);
+        let mut p5 = make_arxiv_input(5, "cs.SE", "Outside Citing", vec!["Program Analysis"]);
+        p5.raw_refs = vec!["arxiv:2603.00002".into()];
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![p1, p2, p3, p4, p5],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let sub = paper_subgraph_at(
+            &db,
+            &CollectionSubgraphArgs {
+                ids: vec![
+                    "arxiv:2603.00001".into(),
+                    "arxiv:2603.00002".into(),
+                    "arxiv:2603.00003".into(),
+                ],
+                min_shared_refs: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(sub.citation_edges.len(), 1);
+        assert_eq!(sub.citation_edges[0].citing_id, "arxiv:2603.00001");
+        assert_eq!(sub.citation_edges[0].cited_id, "arxiv:2603.00002");
+
+        assert_eq!(sub.shared_ref_edges.len(), 1);
+        assert_eq!(sub.shared_ref_edges[0].source_id, "arxiv:2603.00001");
+        assert_eq!(sub.shared_ref_edges[0].target_id, "arxiv:2603.00003");
+        assert_eq!(sub.shared_ref_edges[0].shared_count, 3);
+
+        assert_eq!(sub.unexpanded_counts.get("arxiv:2603.00001"), Some(&1));
+        assert_eq!(sub.unexpanded_counts.get("arxiv:2603.00002"), Some(&1));
+        assert!(!sub.unexpanded_counts.contains_key("arxiv:2603.00003"));
     }
 }

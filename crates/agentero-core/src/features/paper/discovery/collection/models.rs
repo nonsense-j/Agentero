@@ -586,6 +586,37 @@ pub struct CollectionPaperLineageOut {
 
 #[derive(Debug, Clone, Default, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
+pub struct CollectionSubgraphArgs {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub min_shared_refs: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionCitationEdgeDto {
+    pub citing_id: String,
+    pub cited_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSharedRefEdgeDto {
+    pub source_id: String,
+    pub target_id: String,
+    pub shared_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSubgraphOut {
+    pub citation_edges: Vec<CollectionCitationEdgeDto>,
+    pub shared_ref_edges: Vec<CollectionSharedRefEdgeDto>,
+    pub unexpanded_counts: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct CollectionSeedSyncArgs {
     #[serde(default)]
     pub manifest_url: Option<String>,
