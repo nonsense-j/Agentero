@@ -217,7 +217,7 @@ fn map_work(work: &Value) -> Option<ApiPaper> {
     })
 }
 
-fn reconstruct_abstract(inverted: &Value) -> Option<String> {
+pub(crate) fn reconstruct_abstract(inverted: &Value) -> Option<String> {
     let obj = inverted.as_object()?;
     if obj.is_empty() {
         return None;

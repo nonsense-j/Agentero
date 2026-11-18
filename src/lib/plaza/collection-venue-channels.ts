@@ -106,11 +106,17 @@ function isOpenAlexListUrl(url: string): boolean {
 	}
 }
 
-async function acquireHostSlot(host: string): Promise<void> {
+async function acquireHostSlot(host: string, url: string): Promise<void> {
 	if (IS_TEST_ENV || !host) return;
 	const interval =
-		host === "api.openalex.org" && hasCachedOpenAlexApiKey()
-			? 105
+		host === "api.openalex.org"
+			? !isOpenAlexListUrl(url)
+				? hasCachedOpenAlexApiKey()
+					? 45
+					: 120
+				: hasCachedOpenAlexApiKey()
+					? 105
+					: HOST_MIN_INTERVAL_MS[host]
 			: HOST_MIN_INTERVAL_MS[host];
 	if (!interval) return;
 
@@ -136,7 +142,7 @@ async function withHostGate<T>(
 		throw new Error(`OpenAlex list rate-limit cooldown active for ${url}`);
 	}
 	if (IS_TEST_ENV || !SERIALIZED_HOSTS.has(host)) {
-		await acquireHostSlot(host);
+		await acquireHostSlot(host, url);
 		return await task();
 	}
 
@@ -149,7 +155,7 @@ async function withHostGate<T>(
 
 	await prev;
 	try {
-		await acquireHostSlot(host);
+		await acquireHostSlot(host, url);
 		return await task();
 	} finally {
 		if (hostInFlightChain.get(host) === current) {
@@ -3137,6 +3143,7 @@ async function enrichSubsetInPlace(
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
 	preloadedItems?: readonly CollectionPaperItem[],
+	skipTitleSearch?: boolean,
 ): Promise<CollectionPaperItem[]> {
 	if (targetIndices.length === 0) return items;
 	const subset = targetIndices
@@ -3149,6 +3156,7 @@ async function enrichSubsetInPlace(
 		venue,
 		fetchJson,
 		preloadedItems,
+		skipTitleSearch ? { skipTitleSearch: true } : undefined,
 	);
 	const next = [...items];
 	if (enrichedSubset.length === targetIndices.length) {
@@ -3266,6 +3274,7 @@ async function mergePublisherIntoTrackRoster(
 	fetchJson: FetchJsonFn,
 	options?: {
 		openAlexHydrated?: boolean;
+		skipTitleSearch?: boolean;
 		existingLookup?: ExistingVenueLookup;
 		signal?: AbortSignal;
 	},
@@ -3453,7 +3462,10 @@ async function mergePublisherIntoTrackRoster(
 			options?.existingLookup?.completeItems.length
 				? [...pubList, ...options.existingLookup.completeItems]
 				: pubList,
-			{ signal: options?.signal },
+			{
+				signal: options?.signal,
+				...(options?.skipTitleSearch ? { skipTitleSearch: true } : {}),
+			},
 		);
 		for (let k = 0; k < unmatchedIndices.length; k++) {
 			const targetIdx = unmatchedIndices[k];
@@ -3566,6 +3578,7 @@ export async function fetchMultiChannelVenuePapers(
 	rawFetchText: FetchTextFn,
 	options?: {
 		maxPages?: number;
+		skipTitleSearch?: boolean;
 		existingItems?: readonly CollectionPaperItem[];
 		keywordLlmFetch?: typeof fetch;
 		signal?: AbortSignal;
@@ -3702,6 +3715,7 @@ export async function fetchMultiChannelVenuePapers(
 				fetchJson,
 				{
 					openAlexHydrated: structuredRan,
+					skipTitleSearch: options?.skipTitleSearch,
 					existingLookup,
 					signal: options?.signal,
 				},
@@ -3893,6 +3907,7 @@ export async function fetchMultiChannelVenuePapers(
 				venue,
 				fetchJson,
 				existingLookup.completeItems,
+				options?.skipTitleSearch,
 			);
 		}
 
@@ -3950,6 +3965,7 @@ export async function fetchMultiChannelVenuePapers(
 							...arxivSupp.items,
 							...existingLookup.completeItems,
 						],
+						options?.skipTitleSearch,
 					);
 				}
 				primaryItems = dedupeVenueChannelItems([

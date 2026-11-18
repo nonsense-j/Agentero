@@ -2320,9 +2320,11 @@ let openAlexSingletonNextSlotMs = 0;
 
 async function acquireOpenAlexSingletonSlot(): Promise<void> {
 	if (IS_ENRICH_TEST_ENV) return;
+	// OpenAlex 2026 rate limits: 30 req/s with free API key (45ms ≈ 22 req/s), 10 req/s keyless (120ms ≈ 8.3 req/s).
+	const interval = hasCachedOpenAlexApiKey() ? 45 : 120;
 	const now = Date.now();
 	const scheduled = Math.max(now, openAlexSingletonNextSlotMs);
-	openAlexSingletonNextSlotMs = scheduled + 125;
+	openAlexSingletonNextSlotMs = scheduled + interval;
 	const waitMs = scheduled - now;
 	if (waitMs > 0) {
 		await new Promise((resolve) => setTimeout(resolve, waitMs));
@@ -2343,7 +2345,7 @@ async function fetchOpenAlexSingletonsByDoi(
 	const targets = dois.filter((d) => !outMap.has(d)).slice(0, maxItems);
 	if (targets.length === 0) return;
 
-	const CONCURRENCY = 4;
+	const CONCURRENCY = hasCachedOpenAlexApiKey() ? 12 : 4;
 	let cursor = 0;
 	let processed = 0;
 	let succeeded = 0;
@@ -2443,6 +2445,7 @@ export async function enrichVenueItemsBatch(
 	preloadedItems?: readonly CollectionPaperItem[],
 	options?: {
 		skipOpenAlexFilter?: boolean;
+		skipTitleSearch?: boolean;
 		maxDoiLessLookups?: number;
 		signal?: AbortSignal;
 	},
@@ -2562,10 +2565,10 @@ export async function enrichVenueItemsBatch(
 	}
 
 	// Batched OpenAlex `title.search` lookup for DOI-less proceedings records
-	// (e.g. `USENIX Security 2026`, `CCS 2026`, `ISSRE 2026` before publisher DOIs are minted).
+	// (skipped in Stage 1 maintainer publish so Rust Stage 2 handles unified title.search batches).
 	const byTitle = new Map<string, OpenAlexWork>();
 	const titleSearchRows: OpenAlexWork[] = [];
-	if (!openAlexFilterFailed) {
+	if (!openAlexFilterFailed && !options?.skipTitleSearch) {
 		const maxDoiLess =
 			options?.maxDoiLessLookups ?? (hasCachedOpenAlexApiKey() ? 1800 : 600);
 		const doiLessItems = items

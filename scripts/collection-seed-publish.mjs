@@ -1100,7 +1100,7 @@ async function main() {
 							opts.year,
 							resilientFetchJson,
 							resilientFetchText,
-							{ maxPages: 30 },
+							{ maxPages: 30, skipTitleSearch: true },
 						);
 						const nowIso = new Date().toISOString();
 						await runUpsertFile(
