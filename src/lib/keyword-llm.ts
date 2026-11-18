@@ -428,7 +428,6 @@ function extractChatContentFromJson(json: unknown): string {
 	return "";
 }
 
-const DEFAULT_KEYWORD_LLM_MAX_TOKENS = 2400;
 const KEYWORD_LLM_REQUEST_TIMEOUT_MS = 60_000;
 const PROD_RATE_LIMIT_BACKOFF_MS = [3_000, 6_000, 12_000, 20_000] as const;
 const TEST_RATE_LIMIT_BACKOFF_MS = [15, 25, 35, 45] as const;
@@ -625,7 +624,6 @@ async function callKeywordLlmChunkViaFetch(
 			};
 			if (!minimalFallback) {
 				body.temperature = 0;
-				body.max_tokens = DEFAULT_KEYWORD_LLM_MAX_TOKENS;
 				if (isOpenRouterEndpoint(chatUrl)) {
 					body.reasoning = { effort: "low", exclude: true };
 				}
@@ -693,7 +691,7 @@ async function callKeywordLlmChunkViaHost(
 				commands.keywordLlmChatComplete(
 					KEYWORD_SYSTEM_PROMPT,
 					buildChunkUserPrompt(chunk),
-					DEFAULT_KEYWORD_LLM_MAX_TOKENS,
+					null,
 				),
 			{ fallback: "Keyword LLM completion failed" },
 		);

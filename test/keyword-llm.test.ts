@@ -180,7 +180,7 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 
 		expect(capturedUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
 		expect(capturedBody.model).toBe("openai/gpt-4o-mini");
-		expect(capturedBody.max_tokens).toBe(2400);
+		expect(capturedBody.max_tokens).toBeUndefined();
 		expect(capturedBody.reasoning).toEqual({
 			effort: "low",
 			exclude: true,
@@ -230,7 +230,7 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 				};
 				// Strictly uses the user's configured model on every attempt
 				expect(body.model).toBe(DEFAULT_OPEN_ROUTER_MODEL);
-				expect(body.max_tokens).toBe(2400);
+				expect(body.max_tokens).toBeUndefined();
 				expect(body.reasoning).toEqual({ effort: "low", exclude: true });
 
 				// Simulate 3 consecutive 429s on chunk 1, then an empty reasoning truncation on chunk 2 before succeeding
@@ -328,6 +328,7 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		expect(capturedUrl).toBe("http://127.0.0.1:11434/v1/chat/completions");
 		expect(capturedHeaders.Authorization).toBeUndefined();
 		expect(capturedBody.model).toBe("qwen2.5:14b");
+		expect(capturedBody.max_tokens).toBeUndefined();
 		expect(capturedBody.reasoning).toBeUndefined();
 		expect(batchMap.get("venue:sp-2026:1")).toEqual([
 			"Trusted Execution Environment",

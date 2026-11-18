@@ -1140,6 +1140,28 @@ fn summarize_keyword_llm_error_body(raw: &str) -> String {
         .collect()
 }
 
+/// Build the primary OpenAI-compatible request payload for keyword extraction,
+/// omitting `max_tokens` when `None` so providers impose no explicit output length cap.
+fn build_keyword_llm_chat_body(
+    model: &str,
+    messages: &serde_json::Value,
+    max_tokens: Option<u32>,
+    is_openrouter: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": messages,
+    });
+    if let Some(limit) = max_tokens {
+        body["max_tokens"] = serde_json::json!(limit);
+    }
+    if is_openrouter {
+        body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
+    }
+    body
+}
+
 /// Run a Host-proxied OpenAI-compatible chat completion using the stored
 /// keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
 #[tauri::command]
@@ -1166,7 +1188,6 @@ pub async fn keyword_llm_chat_complete(
     };
 
     let is_openrouter = is_openrouter_host(&chat_url);
-    let effective_max_tokens = max_tokens.unwrap_or(2400);
     let messages = serde_json::json!([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -1184,15 +1205,8 @@ pub async fn keyword_llm_chat_complete(
         req.send()
     };
 
-    let mut primary_body = serde_json::json!({
-        "model": cfg.model,
-        "temperature": 0,
-        "max_tokens": effective_max_tokens,
-        "messages": messages,
-    });
-    if is_openrouter {
-        primary_body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
-    }
+    let primary_body =
+        build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, is_openrouter);
     let fallback_body = serde_json::json!({
         "model": cfg.model,
         "messages": messages,
@@ -1278,7 +1292,7 @@ pub async fn keyword_llm_chat_complete(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_openai_compatible_url;
+    use super::{build_keyword_llm_chat_body, resolve_openai_compatible_url};
 
     #[test]
     fn resolves_openai_compatible_endpoints_without_double_suffix() {
@@ -1324,6 +1338,36 @@ mod tests {
             .unwrap()
             .as_str(),
             "https://api.deepseek.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn builds_keyword_llm_chat_body_without_max_tokens_by_default() {
+        let msgs = serde_json::json!([{"role": "user", "content": "hi"}]);
+
+        let unbounded = build_keyword_llm_chat_body("ernie-5.5-flash-preview", &msgs, None, false);
+        assert!(unbounded.get("max_tokens").is_none());
+        assert!(unbounded.get("reasoning").is_none());
+        assert_eq!(
+            unbounded.get("temperature").and_then(|v| v.as_i64()),
+            Some(0)
+        );
+
+        let bounded_openrouter = build_keyword_llm_chat_body(
+            "baidu/ernie-5.5-flash-preview:free",
+            &msgs,
+            Some(1024),
+            true,
+        );
+        assert_eq!(
+            bounded_openrouter
+                .get("max_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(1024)
+        );
+        assert_eq!(
+            bounded_openrouter["reasoning"],
+            serde_json::json!({"effort": "low", "exclude": true})
         );
     }
 }
