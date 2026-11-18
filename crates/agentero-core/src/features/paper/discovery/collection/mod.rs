@@ -38,8 +38,8 @@ pub use search::{
 pub use seed::{
     seed_bake_at, seed_sync, seed_sync_at, SeedBakeOptions, SeedBakeReport, SeedManifest,
     SeedPaperRecord, SeedShardEntry, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE,
-    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL, DEFAULT_SEED_MANIFEST_URL,
-    DEFAULT_X666_LLM_RPM,
+    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL, DEFAULT_BAKE_LLM_RPM,
+    DEFAULT_SEED_MANIFEST_URL,
 };
 pub use store::{
     clear_collection, clear_collection_at, config_update, config_update_at,
@@ -2041,7 +2041,7 @@ mod tests {
                 llm_api_key: None,
                 llm_concurrency: 1,
                 llm_batch_size: DEFAULT_BAKE_LLM_BATCH_SIZE,
-                llm_rpm: None,
+                llm_rpm: 0,
                 skip_refs: true,
                 skip_llm: false,
                 delta_since: None,

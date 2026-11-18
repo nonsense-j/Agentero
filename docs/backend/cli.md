@@ -269,7 +269,7 @@ agentero collection seed-import --url https://github.com/poco-ai/Agentero/releas
 | 子命令 | 说明 |
 |---|---|
 | `collection upsert-file` | 从 JSON 文件读取 `CollectionUpsertPapersArgs`（含 `items`、可选 `replaceVenueId`、`venueUpdate`、`arxivWatermarks`）批量写入 `collection.sqlite` 并同步解析池内引用图谱 |
-| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点（默认 `https://x666.me/v1` + `ernie-5.5-flash-preview`，自动限速 5 RPM 且默认 `reasoning: { effort: "low", exclude: true }` 并支持 `400`/`422` 自动回退、不设 `max_tokens` 上限）烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
+| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点（默认 `https://x666.me/v1` + `ernie-5.5-flash-preview`、`--llm-rpm` 默认 `5`、`--llm-api-key` 或 `AGENTERO_KEYWORD_LLM_API_KEY`；默认附带 `reasoning: { effort: "low", exclude: true }`、不设 `max_tokens` 上限并在 `400`/`422` 时自动退回）烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
 | `collection seed-import` | 从本地 `--manifest <path>` 或远端 `--url <manifest-url>` 校验 SHA-256 并流式导入未应用的分片，自动合并 `arxiv_watermarks` 与 Venue `lastFetchedAt` 水位线（传 `--force` 可重置 `seed_cleared` 标记强制重导） |
 
 ## 论文导入

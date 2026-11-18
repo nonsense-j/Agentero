@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
+use crate::openai_compat::{
+    acquire_rate_slot, extract_chat_message_content, resolve_openai_compatible_url,
+    send_chat_with_reasoning_fallback, ChatFallbackRequest,
+};
 
 use super::keywords::{canonicalize_keywords, normalize_keyword_key, SYNONYM_GROUPS};
 use super::models::{
@@ -43,7 +47,7 @@ pub const DEFAULT_BAKE_LLM_BASE_URL: &str = "https://x666.me/v1";
 pub const DEFAULT_BAKE_LLM_MODEL: &str = "ernie-5.5-flash-preview";
 pub const DEFAULT_BAKE_LLM_BATCH_SIZE: usize = 8;
 pub const DEFAULT_BAKE_LLM_CONCURRENCY: usize = 1;
-pub const DEFAULT_X666_LLM_RPM: u32 = 5;
+pub const DEFAULT_BAKE_LLM_RPM: u32 = 5;
 
 const OPENALEX_MAILTO: &str = "agentero@users.noreply.github.com";
 const OPENALEX_SELECT: &str =
@@ -686,8 +690,8 @@ pub struct SeedBakeOptions {
     pub llm_api_key: Option<String>,
     pub llm_concurrency: usize,
     pub llm_batch_size: usize,
-    /// Optional hard RPM limit (`None` auto-applies `5` RPM on `x666.me`; `Some(0)` disables).
-    pub llm_rpm: Option<u32>,
+    /// Hard RPM limit across workers (`0` disables pacing; defaults to [`DEFAULT_BAKE_LLM_RPM`]).
+    pub llm_rpm: u32,
     pub skip_refs: bool,
     pub skip_llm: bool,
     pub delta_since: Option<String>,
@@ -702,7 +706,7 @@ impl Default for SeedBakeOptions {
             llm_api_key: None,
             llm_concurrency: DEFAULT_BAKE_LLM_CONCURRENCY,
             llm_batch_size: DEFAULT_BAKE_LLM_BATCH_SIZE,
-            llm_rpm: None,
+            llm_rpm: DEFAULT_BAKE_LLM_RPM,
             skip_refs: false,
             skip_llm: false,
             delta_since: None,
@@ -749,23 +753,6 @@ struct ParsedOpenAlexWork {
     arxiv_id: Option<String>,
     abstract_text: Option<String>,
     refs: Vec<String>,
-}
-
-async fn acquire_oa_slot(
-    next_slot: &tokio::sync::Mutex<tokio::time::Instant>,
-    min_interval: Duration,
-) {
-    let wait_until = {
-        let mut guard = next_slot.lock().await;
-        let now = tokio::time::Instant::now();
-        let scheduled = (*guard).max(now);
-        *guard = scheduled + min_interval;
-        scheduled
-    };
-    let now = tokio::time::Instant::now();
-    if wait_until > now {
-        tokio::time::sleep(wait_until - now).await;
-    }
 }
 
 enum OpenAlexFetchResult {
@@ -1667,7 +1654,7 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
             let slot_c = Arc::clone(&oa_next_slot);
             let is_arxiv_only = arxiv_only_wids.contains(&t.work_id);
             Some(async move {
-                acquire_oa_slot(&slot_c, oa_slot_interval).await;
+                acquire_rate_slot(&slot_c, oa_slot_interval).await;
                 let res = fetch_openalex_json(&client_c, &url).await;
                 (t, is_arxiv_only, res)
             })
@@ -1785,7 +1772,7 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
                 if remaining.is_empty() {
                     break;
                 }
-                acquire_oa_slot(&oa_next_slot, Duration::from_millis(120)).await;
+                acquire_rate_slot(&oa_next_slot, Duration::from_millis(120)).await;
                 let url = format!(
                     "https://api.openalex.org/works?filter=locations.source.id:{sid},publication_year:2026&per-page=200&page={page}&select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}"
                 );
@@ -1944,7 +1931,7 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
                     batch_failed = page == 1;
                     break;
                 }
-                acquire_oa_slot(&oa_next_slot, Duration::from_millis(120)).await;
+                acquire_rate_slot(&oa_next_slot, Duration::from_millis(120)).await;
                 calls_used += 1;
                 let url = format!(
                     "{url_prefix}{joined},from_publication_date:2024-01-01&per-page=200&page={page}&select={encoded_select}&mailto={OPENALEX_MAILTO}{oa_key_param}"
@@ -2491,15 +2478,6 @@ struct LlmPaperTarget {
     source_label: String,
 }
 
-fn build_chat_completions_url(base_url: &str) -> String {
-    let trimmed = base_url.trim().trim_end_matches('/');
-    if trimmed.ends_with("/chat/completions") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/chat/completions")
-    }
-}
-
 const BAKE_KEYWORD_SYSTEM_PROMPT: &str = "\
 Extract 4 to 6 canonical English academic keywords for each paper from its Title and Abstract.
 Rules:
@@ -2623,58 +2601,13 @@ fn extract_string_array_canon(val: &Value) -> Vec<String> {
     canonicalize_keywords(&raw_kws)
 }
 
-fn parse_entry_usize(v: &Value) -> Option<usize> {
-    v.as_u64().map(|n| n as usize).or_else(|| {
-        v.as_str().and_then(|s| {
-            s.trim()
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim()
-                .parse::<usize>()
-                .ok()
-        })
-    })
-}
-
-fn parse_items_array(arr: &[Value], expected_len: usize, out: &mut HashMap<usize, Vec<String>>) {
-    let has_zero_id = arr.iter().any(|entry| {
-        entry
-            .get("idx")
-            .or_else(|| entry.get("id"))
-            .or_else(|| entry.get("index"))
-            .and_then(parse_entry_usize)
-            == Some(0)
-    });
-
-    for (pos, entry) in arr.iter().enumerate() {
-        let Some(kws_val) = entry.get("keywords") else {
-            continue;
-        };
-        let target_idx = if let Some(idx0) = entry.get("idx").and_then(parse_entry_usize) {
-            (idx0 < expected_len).then_some(idx0)
-        } else if let Some(raw_n) = entry
-            .get("id")
-            .or_else(|| entry.get("index"))
-            .and_then(parse_entry_usize)
-        {
-            if has_zero_id {
-                (raw_n < expected_len).then_some(raw_n)
-            } else if (1..=expected_len).contains(&raw_n) {
-                Some(raw_n - 1)
-            } else {
-                None
-            }
-        } else {
-            (pos < expected_len).then_some(pos)
-        };
-
-        if let Some(idx) = target_idx {
-            let canon = extract_string_array_canon(kws_val);
-            if !canon.is_empty() {
-                out.insert(idx, canon);
-            }
-        }
-    }
+fn parse_index_key(raw: &str) -> Option<usize> {
+    raw.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim()
+        .parse::<usize>()
+        .ok()
 }
 
 fn parse_llm_keyword_batch_json(content: &str, expected_len: usize) -> HashMap<usize, Vec<String>> {
@@ -2690,47 +2623,35 @@ fn parse_llm_keyword_batch_json(content: &str, expected_len: usize) -> HashMap<u
     let mut out = HashMap::new();
     match &val {
         Value::Object(map) => {
-            if let Some(arr) = map
-                .get("items")
-                .or_else(|| map.get("results"))
-                .or_else(|| map.get("papers"))
-                .and_then(Value::as_array)
-            {
-                parse_items_array(arr, expected_len, &mut out);
+            if let Some(arr) = map.get("items").and_then(Value::as_array) {
+                for (pos, entry) in arr.iter().enumerate() {
+                    let Some(kws_val) = entry.get("keywords") else {
+                        continue;
+                    };
+                    let idx = entry
+                        .get("idx")
+                        .and_then(|v| {
+                            v.as_u64()
+                                .map(|n| n as usize)
+                                .or_else(|| v.as_str().and_then(parse_index_key))
+                        })
+                        .unwrap_or(pos);
+                    if idx < expected_len {
+                        let canon = extract_string_array_canon(kws_val);
+                        if !canon.is_empty() {
+                            out.insert(idx, canon);
+                        }
+                    }
+                }
             }
 
-            // Primary `KEYWORD_SYSTEM_PROMPT` format: `{"0": ["..."], "1": ["..."]}`
-            let numeric_entries: Vec<(usize, &Value)> = map
-                .iter()
-                .filter(|(k, v)| *k != "items" && *k != "results" && *k != "papers" && v.is_array())
-                .filter_map(|(k, v)| {
-                    let parsed = k
-                        .trim()
-                        .trim_start_matches('[')
-                        .trim_end_matches(']')
-                        .trim()
-                        .parse::<usize>()
-                        .ok()?;
-                    Some((parsed, v))
-                })
-                .collect();
-
-            if !numeric_entries.is_empty() {
-                let has_zero = numeric_entries.iter().any(|(n, _)| *n == 0);
-                let is_strict_1based = !has_zero
-                    && numeric_entries.iter().any(|(n, _)| *n == expected_len)
-                    && numeric_entries
-                        .iter()
-                        .all(|(n, _)| (1..=expected_len).contains(n));
-
-                for (n, arr_val) in numeric_entries {
-                    let mapped_idx = if is_strict_1based {
-                        Some(n - 1)
-                    } else {
-                        (n < expected_len).then_some(n)
-                    };
-                    if let Some(idx) = mapped_idx {
-                        let canon = extract_string_array_canon(arr_val);
+            for (k, v) in map {
+                if k == "items" {
+                    continue;
+                }
+                if let Some(idx) = parse_index_key(k) {
+                    if idx < expected_len {
+                        let canon = extract_string_array_canon(v);
                         if !canon.is_empty() {
                             out.insert(idx, canon);
                         }
@@ -2747,14 +2668,10 @@ fn parse_llm_keyword_batch_json(content: &str, expected_len: usize) -> HashMap<u
                 }
             }
         }
-        Value::Array(arr) => {
-            if arr.iter().any(Value::is_object) {
-                parse_items_array(arr, expected_len, &mut out);
-            } else if expected_len == 1 {
-                let canon = extract_string_array_canon(&val);
-                if !canon.is_empty() {
-                    out.insert(0, canon);
-                }
+        Value::Array(arr) if expected_len == 1 && !arr.iter().any(Value::is_object) => {
+            let canon = extract_string_array_canon(&val);
+            if !canon.is_empty() {
+                out.insert(0, canon);
             }
         }
         _ => {}
@@ -2783,23 +2700,6 @@ fn extract_json_payload(raw: &str) -> &str {
         }
     }
     raw
-}
-
-fn extract_assistant_content(body_val: &Value) -> String {
-    let Some(content_val) = body_val.pointer("/choices/0/message/content") else {
-        return String::new();
-    };
-    if let Some(s) = content_val.as_str() {
-        return s.trim().to_string();
-    }
-    if let Some(parts) = content_val.as_array() {
-        let joined: String = parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect();
-        return joined.trim().to_string();
-    }
-    String::new()
 }
 
 /// Guard against an LLM echoing a paper's bespoke coined tool/model prefix before `:`
@@ -2971,36 +2871,6 @@ fn fallback_keywords_from_title_and_context(paper: &LlmPaperTarget) -> Vec<Strin
     }
 }
 
-fn is_x666_endpoint(endpoint_url: &str) -> bool {
-    url::Url::parse(endpoint_url)
-        .ok()
-        .and_then(|u| {
-            u.host_str().map(|h| {
-                h.eq_ignore_ascii_case("x666.me") || h.to_ascii_lowercase().ends_with(".x666.me")
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn build_bake_llm_chat_body(
-    model: &str,
-    messages: &Value,
-    include_reasoning: bool,
-    include_temperature: bool,
-) -> Value {
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-    });
-    if include_temperature {
-        body["temperature"] = serde_json::json!(0);
-    }
-    if include_reasoning {
-        body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
-    }
-    body
-}
-
 struct LlmBakeClientCtx {
     client: reqwest::Client,
     endpoint: String,
@@ -3008,53 +2878,6 @@ struct LlmBakeClientCtx {
     api_key: Option<String>,
     reasoning_rejected: Arc<AtomicBool>,
     rate_limiter: Option<(Arc<tokio::sync::Mutex<tokio::time::Instant>>, Duration)>,
-}
-
-async fn send_bake_chat_once(
-    ctx: &LlmBakeClientCtx,
-    payload: &Value,
-) -> Result<reqwest::Response, reqwest::Error> {
-    if let Some((ref slot, interval)) = ctx.rate_limiter {
-        acquire_oa_slot(slot, interval).await;
-    }
-    let mut req = ctx.client.post(&ctx.endpoint).json(payload);
-    if let Some(key) = ctx
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        req = req.bearer_auth(key);
-    }
-    req.send().await
-}
-
-fn is_unsupported_param_status(status: StatusCode) -> bool {
-    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY
-}
-
-async fn send_bake_chat_with_reasoning_fallback(
-    ctx: &LlmBakeClientCtx,
-    messages: &Value,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let try_reasoning = !ctx.reasoning_rejected.load(Ordering::Relaxed);
-    let primary_body = build_bake_llm_chat_body(&ctx.model, messages, try_reasoning, true);
-    let mut resp = send_bake_chat_once(ctx, &primary_body).await?;
-
-    if is_unsupported_param_status(resp.status()) && try_reasoning {
-        let no_reasoning_body = build_bake_llm_chat_body(&ctx.model, messages, false, true);
-        resp = send_bake_chat_once(ctx, &no_reasoning_body).await?;
-        if !is_unsupported_param_status(resp.status()) {
-            ctx.reasoning_rejected.store(true, Ordering::Relaxed);
-        }
-    }
-
-    if is_unsupported_param_status(resp.status()) {
-        let minimal_body = build_bake_llm_chat_body(&ctx.model, messages, false, false);
-        resp = send_bake_chat_once(ctx, &minimal_body).await?;
-    }
-
-    Ok(resp)
 }
 
 async fn request_llm_keywords_with_patient_backoff(
@@ -3065,7 +2888,24 @@ async fn request_llm_keywords_with_patient_backoff(
 
     let mut last_err = String::new();
     for (attempt, &base_secs) in LLM_RETRY_DELAYS_SECS.iter().enumerate() {
-        match send_bake_chat_with_reasoning_fallback(ctx, &messages).await {
+        match send_chat_with_reasoning_fallback(
+            &ChatFallbackRequest {
+                client: &ctx.client,
+                endpoint: &ctx.endpoint,
+                model: &ctx.model,
+                api_key: ctx.api_key.as_deref(),
+                messages: &messages,
+                max_tokens: None,
+                reasoning_rejected: Some(ctx.reasoning_rejected.as_ref()),
+            },
+            || async {
+                if let Some((ref slot, interval)) = ctx.rate_limiter {
+                    acquire_rate_slot(slot, interval).await;
+                }
+            },
+        )
+        .await
+        {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
@@ -3077,7 +2917,7 @@ async fn request_llm_keywords_with_patient_backoff(
                             continue;
                         }
                     };
-                    let content = extract_assistant_content(&body_val);
+                    let content = extract_chat_message_content(&body_val);
                     if content.is_empty() {
                         last_err = "empty assistant content".to_string();
                         tokio::time::sleep(Duration::from_secs(base_secs)).await;
@@ -3266,16 +3106,16 @@ async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<u
         return Ok(0);
     }
 
-    let endpoint = build_chat_completions_url(&opts.llm_base_url);
+    let endpoint = resolve_openai_compatible_url(
+        &opts.llm_base_url,
+        DEFAULT_BAKE_LLM_BASE_URL,
+        "/chat/completions",
+    )
+    .map_err(AppError::message)?
+    .to_string();
     let model = opts.llm_model.trim().to_string();
     let api_key = opts.llm_api_key.clone();
-    let effective_rpm = opts.llm_rpm.unwrap_or_else(|| {
-        if is_x666_endpoint(&endpoint) {
-            DEFAULT_X666_LLM_RPM
-        } else {
-            0
-        }
-    });
+    let effective_rpm = opts.llm_rpm;
     let rate_limiter = (effective_rpm > 0).then(|| {
         let interval_ms = (60_500u64 / u64::from(effective_rpm)).max(1);
         (
@@ -3283,11 +3123,7 @@ async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<u
             Duration::from_millis(interval_ms),
         )
     });
-    let concurrency = if effective_rpm > 0 && effective_rpm <= DEFAULT_X666_LLM_RPM {
-        opts.llm_concurrency.clamp(1, 2)
-    } else {
-        opts.llm_concurrency.clamp(1, 32)
-    };
+    let concurrency = opts.llm_concurrency.clamp(1, 32);
     let batch_size = opts.llm_batch_size.clamp(1, 32);
     let client = crate::http::client_with(Duration::from_secs(180), 5, crate::http::USER_AGENT)?;
 
@@ -3779,18 +3615,6 @@ mod tests {
         assert_eq!(
             parsed_items.get(&1).unwrap(),
             &vec!["Code Generation".to_string(), "Type System".to_string()]
-        );
-
-        // 3) Legacy 1-based `{"items": [{"id": "1", ...}, {"id": "2", ...}]}` format
-        let raw_items_1based = r#"{"items":[{"id":"1","keywords":["Formal Verification"]},{"id":"2","keywords":["Greybox Fuzzing"]}]}"#;
-        let parsed_1based = parse_llm_keyword_batch_json(raw_items_1based, 2);
-        assert_eq!(
-            parsed_1based.get(&0).unwrap(),
-            &vec!["Formal Verification".to_string()]
-        );
-        assert_eq!(
-            parsed_1based.get(&1).unwrap(),
-            &vec!["Greybox Fuzzing".to_string()]
         );
     }
 
@@ -4314,29 +4138,11 @@ mod tests {
     }
 
     #[test]
-    fn bake_llm_chat_body_defaults_to_reasoning_low_without_max_tokens() {
-        let msgs = serde_json::json!([{"role": "user", "content": "hi"}]);
-        let primary = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, true, true);
-        assert!(primary.get("max_tokens").is_none());
-        assert_eq!(primary["temperature"], 0);
-        assert_eq!(
-            primary["reasoning"],
-            serde_json::json!({"effort": "low", "exclude": true})
-        );
-
-        let no_reasoning = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, false, true);
-        assert!(no_reasoning.get("reasoning").is_none());
-        assert!(no_reasoning.get("max_tokens").is_none());
-        assert_eq!(no_reasoning["temperature"], 0);
-
-        let minimal = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, false, false);
-        assert!(minimal.get("reasoning").is_none());
-        assert!(minimal.get("temperature").is_none());
-        assert!(minimal.get("max_tokens").is_none());
-
-        assert!(is_x666_endpoint("https://x666.me/v1/chat/completions"));
-        assert!(!is_x666_endpoint(
-            "https://openrouter.ai/api/v1/chat/completions"
-        ));
+    fn seed_bake_options_default_to_generic_endpoint_and_rpm_limit() {
+        let opts = SeedBakeOptions::default();
+        assert_eq!(opts.llm_base_url, DEFAULT_BAKE_LLM_BASE_URL);
+        assert_eq!(opts.llm_model, DEFAULT_BAKE_LLM_MODEL);
+        assert_eq!(opts.llm_rpm, DEFAULT_BAKE_LLM_RPM);
+        assert_eq!(opts.llm_concurrency, DEFAULT_BAKE_LLM_CONCURRENCY);
     }
 }

@@ -33,6 +33,7 @@ const DEFAULT_LLM_BASE_URL = "https://x666.me/v1";
 const DEFAULT_LLM_MODEL = "ernie-5.5-flash-preview";
 const DEFAULT_LLM_CONCURRENCY = 1;
 const DEFAULT_LLM_BATCH_SIZE = 8;
+const DEFAULT_LLM_RPM = 5;
 const DEFAULT_RELEASE_TAG = "collection-seed-2026";
 const DEFAULT_YEAR = 2026;
 
@@ -81,10 +82,10 @@ Options:
   --out-dir <dir>             Output directory for seed bundle (default: ${DEFAULT_OUT_DIR})
   --llm-base-url <url>        OpenAI-compatible base URL (default: ${DEFAULT_LLM_BASE_URL})
   --llm-model <model>         Model name for seed-bake (default: ${DEFAULT_LLM_MODEL})
-  --llm-api-key <key>         API key for seed-bake LLM (or KEYWORD_LLM_API_KEY env)
+  --llm-api-key <key>         API key for seed-bake LLM (or AGENTERO_KEYWORD_LLM_API_KEY env)
   --llm-concurrency <n>       Concurrent LLM requests in seed-bake (default: ${DEFAULT_LLM_CONCURRENCY})
   --llm-batch-size <n>        Papers per LLM batch in seed-bake (default: ${DEFAULT_LLM_BATCH_SIZE})
-  --llm-rpm <n>               Hard RPM limit across workers (0 disables; omitted auto-caps x666.me at 5)
+  --llm-rpm <n>               Hard RPM limit across workers (0 disables; default: ${DEFAULT_LLM_RPM})
   --openalex-api-key <key>    OpenAlex API key for Step 1 (or OPENALEX_API_KEY env)
   --skip-refs                 Pass --skip-refs to agentero-cli collection seed-bake
   --skip-llm                  Pass --skip-llm to agentero-cli collection seed-bake
@@ -127,7 +128,7 @@ function parseCliOptions(argv) {
 				type: "string",
 				default: String(DEFAULT_LLM_BATCH_SIZE),
 			},
-			"llm-rpm": { type: "string" },
+			"llm-rpm": { type: "string", default: String(DEFAULT_LLM_RPM) },
 			"openalex-api-key": { type: "string" },
 			"skip-refs": { type: "boolean", default: false },
 			"skip-llm": { type: "boolean", default: false },
@@ -159,12 +160,9 @@ function parseCliOptions(argv) {
 			`Invalid --llm-batch-size value: ${values["llm-batch-size"]}`,
 		);
 	}
-	let llmRpm = null;
-	if (values["llm-rpm"] !== undefined) {
-		llmRpm = Number.parseInt(values["llm-rpm"], 10);
-		if (!Number.isFinite(llmRpm) || llmRpm < 0) {
-			throw new Error(`Invalid --llm-rpm value: ${values["llm-rpm"]}`);
-		}
+	const llmRpm = Number.parseInt(values["llm-rpm"], 10);
+	if (!Number.isFinite(llmRpm) || llmRpm < 0) {
+		throw new Error(`Invalid --llm-rpm value: ${values["llm-rpm"]}`);
 	}
 
 	const categories = values.categories
@@ -195,9 +193,7 @@ function parseCliOptions(argv) {
 		llmModel: values["llm-model"],
 		llmApiKey:
 			values["llm-api-key"] ??
-			process.env.AGENTERO_SEED_LLM_API_KEY ??
 			process.env.AGENTERO_KEYWORD_LLM_API_KEY ??
-			process.env.KEYWORD_LLM_API_KEY ??
 			undefined,
 		llmConcurrency,
 		llmBatchSize,
@@ -1220,10 +1216,9 @@ async function main() {
 		String(opts.llmConcurrency),
 		"--llm-batch-size",
 		String(opts.llmBatchSize),
+		"--llm-rpm",
+		String(opts.llmRpm),
 	];
-	if (opts.llmRpm !== null) {
-		bakeArgs.push("--llm-rpm", String(opts.llmRpm));
-	}
 	if (opts.dbPath) {
 		bakeArgs.push("--db", opts.dbPath);
 	}

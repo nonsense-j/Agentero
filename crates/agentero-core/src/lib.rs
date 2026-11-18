@@ -19,6 +19,7 @@ pub mod http;
 pub mod install_dirs;
 pub mod json;
 pub mod log_util;
+pub mod openai_compat;
 pub mod ops;
 pub mod paths;
 pub mod perf;
