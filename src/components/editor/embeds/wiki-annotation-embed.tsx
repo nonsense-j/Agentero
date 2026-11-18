@@ -295,7 +295,7 @@ export const WikiAnnotationEmbed = memo(function WikiAnnotationEmbed({
 	// Body is not a jump target — open via shared chrome ExternalLink only
 	// (same as markdown / attachment embeds) so selection & scroll stay usable.
 	return (
-		<div className={cn("block w-full px-3 py-2 text-left", className)}>
+		<div className={cn("block w-full px-3.5 py-2.5 text-left", className)}>
 			<AnnotationQuoteBlock
 				quote={hasQuote ? ref.quote : null}
 				translation={pairedTranslation && !isVisual ? pairedTranslation : null}
@@ -319,7 +319,7 @@ export const WikiAnnotationEmbed = memo(function WikiAnnotationEmbed({
 					/>
 					<MessageResponse
 						className={cn(
-							"min-w-0 flex-1 leading-relaxed [&_p]:my-0",
+							"agentero-markdown-compact min-w-0 flex-1 leading-relaxed [&_p]:my-0",
 							EMBED_NOTE_TEXT,
 						)}
 					>
@@ -349,7 +349,12 @@ export const WikiAnnotationEmbed = memo(function WikiAnnotationEmbed({
 						hasQuote || hasImage ? "mt-2" : "mt-1.5",
 					)}
 				>
-					<MessageResponse className={cn("leading-relaxed", EMBED_NOTE_TEXT)}>
+					<MessageResponse
+						className={cn(
+							"agentero-markdown-compact leading-relaxed",
+							EMBED_NOTE_TEXT,
+						)}
+					>
 						{ref.comment}
 					</MessageResponse>
 				</div>

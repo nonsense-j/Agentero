@@ -469,7 +469,7 @@ export function WikiEmbedElement({
 				ref={bodyRef}
 				contentEditable={false}
 				className={cn(
-					"group/embed block rounded-md border border-border bg-muted/20 shadow-raised",
+					"group/embed my-1.5 block overflow-hidden rounded-xl border border-border/65 bg-card/75 shadow-raised dark:bg-muted/20",
 					expandEmbeds
 						? "max-h-none overflow-visible"
 						: "max-h-96 overflow-auto",
@@ -485,7 +485,7 @@ export function WikiEmbedElement({
 				{/* Shared chrome: type icon + title · open source on the right */}
 				<span
 					className={cn(
-						"z-10 flex items-center gap-2 border-border border-b bg-background/95 px-3 py-1.5 backdrop-blur",
+						"z-10 flex items-center gap-2 border-border/50 border-b bg-muted/30 px-3.5 py-2 backdrop-blur-md",
 						expandEmbeds ? "relative" : "sticky top-0",
 					)}
 				>

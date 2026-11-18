@@ -110,11 +110,11 @@ function WikiLinkNavigationElement({
 			{...props}
 			as="span"
 			className={cn(
-				"relative underline-offset-2 transition-colors",
+				"relative underline-offset-[3px] transition-colors",
 				editing
 					? "cursor-text font-normal text-foreground"
 					: fallbackStatus === "resolved"
-						? "cursor-pointer font-medium text-primary underline decoration-primary/40 hover:decoration-primary"
+						? "cursor-pointer rounded-[4px] bg-brand/8 px-1 py-px font-medium text-brand hover:bg-brand/15"
 						: "cursor-pointer font-medium text-muted-foreground underline decoration-dashed decoration-muted-foreground/60 hover:text-foreground",
 			)}
 			attributes={{

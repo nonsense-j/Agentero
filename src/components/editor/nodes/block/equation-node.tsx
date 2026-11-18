@@ -183,7 +183,7 @@ export const EquationElement = memo(function EquationElement(
 	return (
 		<PlateElement
 			{...props}
-			className="my-2 block w-full min-w-0 rounded-sm hover:bg-primary/10 data-[selected=true]:bg-primary/10"
+			className="my-2.5 block w-full min-w-0 rounded-lg transition-colors hover:bg-muted/45 data-[selected=true]:bg-muted/60"
 			data-selected={selected}
 		>
 			<Popover open={open} onOpenChange={setOpen} modal={false}>
@@ -266,8 +266,8 @@ export const InlineEquationElement = memo(function InlineEquationElement(
 					<span
 						ref={wrapperRef}
 						className={cn(
-							"inline-flex max-w-full cursor-pointer items-baseline rounded-sm px-1 py-0.5 align-baseline hover:bg-primary/10",
-							selected && "bg-primary/10",
+							"inline-flex max-w-full cursor-pointer items-baseline rounded-[4px] px-1 py-0.5 align-baseline transition-colors hover:bg-muted/60",
+							selected && "bg-muted/75",
 							props.element.texExpression.length === 0 &&
 								"text-muted-foreground",
 						)}

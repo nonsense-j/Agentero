@@ -4,4 +4,4 @@
  */
 
 export const linkClassName =
-	"cursor-pointer font-medium text-primary underline decoration-primary/40 underline-offset-2";
+	"cursor-pointer font-medium text-brand underline decoration-brand/35 underline-offset-[3px] transition-colors hover:decoration-brand";

@@ -190,15 +190,15 @@ function WorkspacePane(props: IDockviewPanelProps<{ panelId: string }>) {
 	if (!tab) {
 		return <div className="h-full w-full bg-background" />;
 	}
-	const notesActive =
-		tab.mode === "html" &&
-		tab.notesPath != null &&
-		activePanelId === tabIdForPath(tab.notesPath);
+	const companionNotesFocused =
+		tab.notesPath != null && activePanelId === tabIdForPath(tab.notesPath);
+	const notesActive = tab.mode === "html" && companionNotesFocused;
 	const focused = activePanelId === panelId;
 	const active = focused || notesActive;
+	const showPathBar = focused || companionNotesFocused;
 	return (
 		<div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
-			{focused ? (
+			{showPathBar ? (
 				<PaperPathBar tab={tab} vaultPath={centerProps.vaultPath} />
 			) : null}
 			<DocView

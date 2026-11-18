@@ -102,8 +102,8 @@ export function ImageElement(props: PlateElementProps<TImageElement>) {
 						className={cn(
 							// 组内由 item 的 aspect-ratio 定形,图片铺满格子等高显示。
 							imageGroup
-								? "h-full w-full rounded-sm object-contain"
-								: "max-w-full rounded-sm",
+								? "h-full w-full rounded-lg object-contain ring-1 ring-inset ring-black/8 dark:ring-white/10"
+								: "max-w-full rounded-lg ring-1 ring-inset ring-black/8 dark:ring-white/10",
 							active &&
 								"ring-2 ring-default-ring ring-offset-2 ring-offset-background",
 						)}

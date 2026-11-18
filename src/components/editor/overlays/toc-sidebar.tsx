@@ -172,10 +172,10 @@ export function TocSidebar(props: TocSideBarProps) {
 		>
 			<div
 				className={cn(
-					"rounded-xl border border-transparent bg-transparent p-1",
+					"rounded-xl border border-transparent bg-transparent p-1.5",
 					"transition-[background-color,border-color,box-shadow] duration-200 ease-out",
-					"group-hover/toc:border-border/70 group-hover/toc:bg-background/95 group-hover/toc:shadow-overlay",
-					"group-focus-within/toc:border-border/70 group-focus-within/toc:bg-background/95 group-focus-within/toc:shadow-overlay",
+					"group-hover/toc:border-border/60 group-hover/toc:bg-popover/92 group-hover/toc:shadow-overlay group-hover/toc:backdrop-blur-md",
+					"group-focus-within/toc:border-border/60 group-focus-within/toc:bg-popover/92 group-focus-within/toc:shadow-overlay group-focus-within/toc:backdrop-blur-md",
 				)}
 			>
 				<div
@@ -243,14 +243,14 @@ export function TocSidebar(props: TocSideBarProps) {
 								<span
 									aria-hidden="true"
 									className={cn(
-										"absolute right-1.5 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-muted-foreground/35",
+										"absolute right-1.5 top-1/2 h-[2.5px] -translate-y-1/2 rounded-full bg-muted-foreground/30",
 										"transition-[height,width,background-color,box-shadow] duration-200 ease-out motion-reduce:transition-none",
 										markerWidthByDepth[
 											item.depth as keyof typeof markerWidthByDepth
 										] ?? markerWidthByDepth[6],
 										"group-hover/item:bg-muted-foreground/70",
 										active &&
-											"h-1 bg-foreground ring-2 ring-foreground/15 group-hover/item:bg-foreground",
+											"h-[3.5px] bg-brand ring-2 ring-brand/20 group-hover/item:bg-brand",
 									)}
 								/>
 							</button>

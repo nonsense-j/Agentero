@@ -7,7 +7,7 @@ export function TableElement(props: PlateElementProps) {
 		<PlateElement
 			{...props}
 			as="table"
-			className="my-2 w-full table-fixed border-collapse border border-border text-sm"
+			className="my-3 w-full table-fixed border-collapse border border-border/65 text-[0.875em]"
 		>
 			<tbody>{props.children}</tbody>
 		</PlateElement>
@@ -15,7 +15,13 @@ export function TableElement(props: PlateElementProps) {
 }
 
 export function TableRowElement(props: PlateElementProps) {
-	return <PlateElement {...props} as="tr" className="border-border border-b" />;
+	return (
+		<PlateElement
+			{...props}
+			as="tr"
+			className="border-border/60 border-b transition-colors hover:bg-muted/25"
+		/>
+	);
 }
 
 export function TableCellElement(props: PlateElementProps) {
@@ -23,7 +29,7 @@ export function TableCellElement(props: PlateElementProps) {
 		<PlateElement
 			{...props}
 			as="td"
-			className="border border-border px-3 py-1.5 align-top"
+			className="border border-border/60 px-3.5 py-2 align-top leading-relaxed"
 		>
 			{props.children}
 		</PlateElement>
@@ -35,7 +41,7 @@ export function TableCellHeaderElement(props: PlateElementProps) {
 		<PlateElement
 			{...props}
 			as="th"
-			className="border border-border bg-muted/50 px-3 py-1.5 text-left align-top font-semibold"
+			className="border border-border/65 bg-muted/45 px-3.5 py-2 text-left align-top font-semibold text-foreground/90"
 		>
 			{props.children}
 		</PlateElement>

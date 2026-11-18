@@ -47,79 +47,93 @@ type CalloutTheme = {
 const CALLOUT_THEMES: Record<string, CalloutTheme> = {
 	note: {
 		Icon: Pencil,
-		className: "border-blue-500/60 bg-blue-500/10",
+		className:
+			"border-blue-500/25 bg-blue-500/[0.06] dark:border-blue-400/25 dark:bg-blue-400/[0.08]",
 		iconClassName: "text-blue-600 dark:text-blue-400",
 	},
 	abstract: {
 		Icon: ClipboardList,
-		className: "border-cyan-500/60 bg-cyan-500/10",
+		className:
+			"border-cyan-500/25 bg-cyan-500/[0.06] dark:border-cyan-400/25 dark:bg-cyan-400/[0.08]",
 		iconClassName: "text-cyan-600 dark:text-cyan-400",
 	},
 	info: {
 		Icon: Info,
-		className: "border-blue-500/60 bg-blue-500/10",
+		className:
+			"border-blue-500/25 bg-blue-500/[0.06] dark:border-blue-400/25 dark:bg-blue-400/[0.08]",
 		iconClassName: "text-blue-600 dark:text-blue-400",
 	},
 	todo: {
 		Icon: ListChecks,
-		className: "border-blue-500/60 bg-blue-500/10",
+		className:
+			"border-blue-500/25 bg-blue-500/[0.06] dark:border-blue-400/25 dark:bg-blue-400/[0.08]",
 		iconClassName: "text-blue-600 dark:text-blue-400",
 	},
 	tip: {
 		Icon: Lightbulb,
-		className: "border-cyan-500/60 bg-cyan-500/10",
+		className:
+			"border-cyan-500/25 bg-cyan-500/[0.06] dark:border-cyan-400/25 dark:bg-cyan-400/[0.08]",
 		iconClassName: "text-cyan-600 dark:text-cyan-400",
 	},
 	success: {
 		Icon: CheckCircle2,
-		className: "border-emerald-500/60 bg-emerald-500/10",
+		className:
+			"border-emerald-500/25 bg-emerald-500/[0.06] dark:border-emerald-400/25 dark:bg-emerald-400/[0.08]",
 		iconClassName: "text-emerald-600 dark:text-emerald-400",
 	},
 	question: {
 		Icon: CircleHelp,
-		className: "border-amber-500/60 bg-amber-500/10",
+		className:
+			"border-amber-500/28 bg-amber-500/[0.06] dark:border-amber-400/25 dark:bg-amber-400/[0.08]",
 		iconClassName: "text-amber-600 dark:text-amber-400",
 	},
 	warning: {
 		Icon: TriangleAlert,
-		className: "border-amber-500/60 bg-amber-500/10",
+		className:
+			"border-amber-500/28 bg-amber-500/[0.06] dark:border-amber-400/25 dark:bg-amber-400/[0.08]",
 		iconClassName: "text-amber-600 dark:text-amber-400",
 	},
 	failure: {
 		Icon: XCircle,
-		className: "border-red-500/60 bg-red-500/10",
+		className:
+			"border-red-500/25 bg-red-500/[0.06] dark:border-red-400/25 dark:bg-red-400/[0.08]",
 		iconClassName: "text-red-600 dark:text-red-400",
 	},
 	danger: {
 		Icon: Zap,
-		className: "border-red-500/60 bg-red-500/10",
+		className:
+			"border-red-500/25 bg-red-500/[0.06] dark:border-red-400/25 dark:bg-red-400/[0.08]",
 		iconClassName: "text-red-600 dark:text-red-400",
 	},
 	bug: {
 		Icon: Bug,
-		className: "border-red-500/60 bg-red-500/10",
+		className:
+			"border-red-500/25 bg-red-500/[0.06] dark:border-red-400/25 dark:bg-red-400/[0.08]",
 		iconClassName: "text-red-600 dark:text-red-400",
 	},
 	example: {
 		Icon: ListChecks,
-		className: "border-violet-500/60 bg-violet-500/10",
+		className:
+			"border-violet-500/25 bg-violet-500/[0.06] dark:border-violet-400/25 dark:bg-violet-400/[0.08]",
 		iconClassName: "text-violet-600 dark:text-violet-400",
 	},
 	quote: {
 		Icon: MessageSquareQuote,
-		className: "border-slate-500/60 bg-slate-500/10",
+		className:
+			"border-slate-500/25 bg-slate-500/[0.06] dark:border-slate-400/25 dark:bg-slate-400/[0.08]",
 		iconClassName: "text-slate-600 dark:text-slate-400",
 	},
 	important: {
 		Icon: Flame,
-		className: "border-fuchsia-500/60 bg-fuchsia-500/10",
+		className:
+			"border-fuchsia-500/25 bg-fuchsia-500/[0.06] dark:border-fuchsia-400/25 dark:bg-fuchsia-400/[0.08]",
 		iconClassName: "text-fuchsia-600 dark:text-fuchsia-400",
 	},
 };
 
 const GENERIC_THEME: CalloutTheme = {
 	Icon: Info,
-	className: "border-border bg-muted/45",
+	className: "border-border/70 bg-muted/35",
 	iconClassName: "text-muted-foreground",
 };
 
@@ -214,7 +228,7 @@ export function CalloutElement(props: PlateElementProps) {
 		<PlateElement
 			{...props}
 			className={cn(
-				"relative my-3 rounded-md border border-l-4 px-4 py-2.5 not-italic",
+				"relative my-3.5 rounded-xl border px-4 py-3 not-italic shadow-[0_1px_2px_rgba(0,0,0,0.02)]",
 				theme.className,
 			)}
 		>

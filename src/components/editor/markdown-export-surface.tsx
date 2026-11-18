@@ -80,10 +80,10 @@ export function MarkdownExportSurface({
 							</p>
 						)}
 						{paperHeader.link ? (
-							<p className="mt-1.5 text-primary text-sm">
+							<p className="mt-1.5 text-brand text-sm">
 								<a
 									href={paperHeader.link}
-									className="underline underline-offset-2"
+									className="underline decoration-brand/35 underline-offset-[3px]"
 								>
 									{paperHeader.linkLabel || paperHeader.link}
 								</a>
@@ -98,7 +98,7 @@ export function MarkdownExportSurface({
 							<Plate editor={editor}>
 								<Editor
 									readOnly
-									className="min-h-0 w-full min-w-0 cursor-default break-words text-base leading-relaxed [&>*:first-child]:mt-0"
+									className="min-h-0 w-full min-w-0 cursor-default break-words text-[0.9375rem] leading-[1.72] tracking-normal [&>*:first-child]:mt-0"
 								/>
 							</Plate>
 						</MarkdownDocProvider>

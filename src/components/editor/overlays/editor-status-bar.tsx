@@ -128,8 +128,8 @@ export function EditorStatusBar({
 		<div
 			className={cn(
 				"@container/statusbar flex h-7 shrink-0 items-center gap-3 overflow-hidden",
-				"border-t border-border/80 bg-background/95 px-3",
-				"whitespace-nowrap text-xs text-muted-foreground tabular-nums select-none",
+				"border-t border-border/45 bg-background/92 px-3",
+				"whitespace-nowrap text-[0.6875rem] text-muted-foreground/80 tabular-nums select-none",
 			)}
 		>
 			{leading ? (

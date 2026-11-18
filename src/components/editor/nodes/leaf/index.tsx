@@ -23,19 +23,19 @@ function leafRenderer(
 export const CodeLeaf = leafRenderer(
 	"CodeLeaf",
 	"code",
-	"whitespace-pre-wrap rounded-md bg-muted px-[0.3em] py-[0.2em] font-mono text-sm",
+	"whitespace-pre-wrap rounded-[5px] border border-border/55 bg-muted/65 px-[0.35em] py-[0.12em] font-mono text-[0.86em] text-foreground/90",
 );
 
 export const HighlightLeaf = leafRenderer(
 	"HighlightLeaf",
 	"mark",
-	"bg-highlight/30 text-inherit",
+	"rounded-[3px] bg-highlight/35 px-0.5 text-inherit box-decoration-clone",
 );
 
 export const KbdLeaf = leafRenderer(
 	"KbdLeaf",
 	"kbd",
-	"rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-sm",
+	"rounded-[5px] border border-border/80 bg-muted/70 px-1.5 py-0.5 font-mono text-[0.82em] shadow-[0_1px_0_0_var(--border)]",
 );
 
 export const SearchHighlightLeaf = leafRenderer(

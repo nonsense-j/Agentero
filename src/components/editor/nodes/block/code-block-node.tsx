@@ -84,7 +84,7 @@ function CodeLanguageSelect() {
 						type="button"
 						aria-label={t("codeBlock.languageLabel")}
 						className={cn(
-							"flex h-6 items-center rounded-md bg-background px-1.5 font-mono text-xs text-muted-foreground opacity-0 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none group-focus-within:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100",
+							"flex h-6 items-center rounded-md px-1.5 font-mono text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:bg-muted data-[state=open]:text-foreground",
 						)}
 					>
 						{label}
@@ -192,7 +192,7 @@ function CopyCodeButton({ element }: { element: TCodeBlockElement }) {
 							aria-label={t("codeBlock.copy")}
 							onClick={onCopy}
 							className={cn(
-								"flex size-6 items-center justify-center rounded-md bg-background text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none group-focus-within:opacity-100 group-hover:opacity-100",
+								"flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
 							)}
 						>
 							{copied ? (
@@ -237,7 +237,7 @@ function MermaidModeButton({
 								// block by the click handler, not by this button.
 								event.preventDefault();
 							}}
-							className="flex size-6 items-center justify-center rounded-md bg-background text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none group-focus-within:opacity-100 group-hover:opacity-100"
+							className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 						>
 							{showSource ? (
 								<WorkflowIcon className="size-3.5" />
@@ -258,7 +258,7 @@ function MermaidPreview({ source }: { source: string }) {
 	const exportMode = useMarkdownExportMode();
 
 	return (
-		<div className="bg-background py-2" contentEditable={false}>
+		<div className="py-3" contentEditable={false}>
 			<MermaidDiagram
 				defer={!exportMode}
 				errorLabel={t("codeBlock.mermaidPreviewError")}
@@ -298,16 +298,18 @@ export function CodeBlockElement(props: PlateElementProps<TCodeBlockElement>) {
 		// beats Tailwind overflow-x-auto). The x-only modifier lets vertical wheel
 		// input continue to the document scroller. whitespace-pre overrides editor
 		// break-spaces.
-		<PlateElement className="max-w-full min-w-0 py-1" {...props}>
+		<PlateElement className="max-w-full min-w-0 py-2" {...props}>
 			<div
 				className={cn(
-					"agentero-codeblock group relative max-w-full min-w-0 overflow-hidden rounded-md",
-					showSource ? "bg-muted/50" : "bg-background",
+					"agentero-codeblock group relative max-w-full min-w-0 overflow-hidden rounded-xl border border-border/65",
+					showSource
+						? "bg-muted/35 shadow-[inset_0_1px_0_var(--magpie-edge)] dark:bg-muted/20"
+						: "bg-card/55 dark:bg-muted/15",
 				)}
 			>
 				<div
 					contentEditable={false}
-					className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1"
+					className="absolute top-2 right-2 z-10 flex items-center gap-0.5 rounded-lg border border-border/60 bg-popover/90 p-0.5 opacity-0 shadow-raised backdrop-blur-sm transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100"
 				>
 					{isMermaid && !readOnly ? (
 						<MermaidModeButton
@@ -321,7 +323,7 @@ export function CodeBlockElement(props: PlateElementProps<TCodeBlockElement>) {
 				</div>
 				<pre
 					className={cn(
-						"agentero-scroll-both agentero-scroll-x-only max-w-full overflow-x-auto p-4 font-mono text-sm leading-[normal] whitespace-pre [tab-size:2]",
+						"agentero-scroll-both agentero-scroll-x-only max-w-full overflow-x-auto px-4 py-3.5 font-mono text-[0.8125rem] leading-[1.6] whitespace-pre [tab-size:2]",
 						!showSource && "hidden",
 					)}
 				>

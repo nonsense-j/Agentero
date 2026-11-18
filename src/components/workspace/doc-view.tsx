@@ -333,7 +333,7 @@ const DocumentContent = memo(function DocumentContent({
 		)
 			return null;
 		return (
-			<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-muted/30">
+			<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
 				<Suspense fallback={<TabLoadingSkeleton />}>
 					<MarkdownEditor
 						// Stable per-tab key: external disk changes reload in place via

@@ -4,7 +4,7 @@ import { PlateElement, type PlateElementProps } from "platejs/react";
 
 export function ParagraphElement(props: PlateElementProps) {
 	return (
-		<PlateElement {...props} className="relative m-0 px-0 py-1">
+		<PlateElement {...props} className="relative m-0 px-0 py-[0.3rem]">
 			{props.children}
 		</PlateElement>
 	);

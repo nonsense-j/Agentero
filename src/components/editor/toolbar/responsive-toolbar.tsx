@@ -20,7 +20,7 @@ import { Toolbar, ToolbarButton } from "./primitives";
 /* shrink-0 in the flex editor column — avoid sticky+z-50 so the bar cannot
  * paint over dockview tab chrome if content height overflows. */
 const fixedBarClassName =
-	"h-9 w-full shrink-0 items-center justify-between rounded-none border-b border-b-border bg-background/95 p-1 backdrop-blur-sm supports-backdrop-blur:bg-background/60";
+	"h-9 w-full shrink-0 items-center justify-between rounded-none border-b border-b-border/50 bg-background/92 px-1.5 py-1 backdrop-blur-md supports-backdrop-blur:bg-background/75";
 
 export type ToolbarAction = {
 	id: string;
@@ -45,7 +45,7 @@ function ActionButton({
 	return (
 		<div className="flex shrink-0 items-center">
 			{showSeparator && (
-				<Separator orientation="vertical" className="mx-1.5 h-5" />
+				<Separator orientation="vertical" className="mx-1 h-4 bg-border/65" />
 			)}
 			<ToolbarButton
 				tooltip={action.label}
@@ -206,7 +206,7 @@ export function ResponsiveFixedToolbar({
 					{/* Always rendered: a separator that comes and goes with the
 					    visible count changes the trailing width, which changes the
 					    fit, which changes the visible count. */}
-					<Separator orientation="vertical" className="mx-1.5 h-5" />
+					<Separator orientation="vertical" className="mx-1 h-4 bg-border/65" />
 					{trailing}
 				</div>
 			) : null}

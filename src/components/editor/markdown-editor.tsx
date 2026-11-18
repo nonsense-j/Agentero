@@ -1167,7 +1167,7 @@ export const MarkdownEditor = memo(function MarkdownEditor({
 												// TOC strip (`right-2 w-10`) so it never covers text.
 												// Narrow panes hide that strip, so the gutter goes too.
 												className={cn(
-													"min-h-full pl-10 pr-14 pt-4 pb-48 @max-2xs/editor:pr-6 [&>*:first-child]:mt-0",
+													"min-h-full pl-10 pr-14 pt-6 pb-48 @max-2xs/editor:pr-6 [&>*:first-child]:mt-0",
 													markdownMaxWidth > 0 && "mx-auto w-full",
 												)}
 												style={editorTypographyStyle}
