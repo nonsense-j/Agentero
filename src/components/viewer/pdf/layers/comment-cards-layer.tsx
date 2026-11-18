@@ -35,23 +35,23 @@ import {
 	DEFAULT_HIGHLIGHT_COLOR,
 	swatchColorClass,
 } from "@/lib/pdf/highlight/palette";
-/** Card width in CSS px — also the gutter width reserved on the viewport. */
-export const COMMENT_CARD_WIDTH_PX = 200;
+/** Card width in CSS px — shared by saved cards and selection drafts. */
+export const COMMENT_CARD_WIDTH_PX = 216;
 /** Horizontal gap between the page edge and the rail. */
 export const COMMENT_CARD_GAP_PX = 8;
 /** Extra px so ring + shadow aren't clipped by the viewport overflow. */
-const COMMENT_RAIL_BLEED_PX = 4;
+const COMMENT_RAIL_BLEED_PX = 6;
 /** Viewport right padding that keeps the rail clear of horizontal scroll. */
 export const COMMENT_RAIL_WIDTH_PX =
 	COMMENT_CARD_WIDTH_PX + COMMENT_CARD_GAP_PX + COMMENT_RAIL_BLEED_PX;
 
 const CARD_GAP_PX = 8;
-/** text-xs leading-relaxed ≈ 12px × 1.625. */
+/** text-[0.8125rem] leading-[1.55] ≈ 13px × 1.55 ≈ 20px. */
 const CARD_LINE_HEIGHT_PX = 20;
-/** Conservative chars per line at w-50 with padding (CJK-heavy notes). */
-const CARD_CHARS_PER_LINE = 13;
-/** Padding + color-dot row + blockquote/comment margins. */
-const CARD_BASE_HEIGHT_PX = 54;
+/** Conservative chars per line at 216px with accent-strip padding (CJK-heavy notes). */
+const CARD_CHARS_PER_LINE = 14;
+/** Vertical padding (py-2.5 = 20px) + border (2px). */
+const CARD_BASE_HEIGHT_PX = 22;
 /** View-mode clamp for the note body. */
 const VIEW_COMMENT_LINES = 3;
 /** View-mode clamp for the inline visual-mark conversation preview. */
@@ -61,12 +61,12 @@ const EDIT_MIN_COMMENT_LINES = 3;
 /** In-place editor: layout estimate cap; textarea scrolls past this. */
 const EDIT_MAX_COMMENT_LINES = 12;
 const COMMENT_CARD_SURFACE_CLASS =
-	"group pointer-events-auto absolute select-none rounded-lg border border-white/55 bg-background/88 shadow-overlay ring-1 ring-foreground/10 backdrop-blur-xl backdrop-saturate-150 transition-[box-shadow,background-color,transform] duration-150 ease-out hover:z-[7] hover:shadow-dialog hover:!h-auto supports-backdrop-blur:bg-background/70 dark:border-white/10";
+	"group pointer-events-auto absolute select-none rounded-xl border border-border/65 bg-card/96 shadow-raised ring-1 ring-inset ring-white/50 backdrop-blur-md transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:z-[7] hover:border-foreground/20 hover:bg-card hover:shadow-overlay hover:!h-auto supports-backdrop-blur:bg-card/92 dark:border-white/10 dark:bg-card/94 dark:ring-white/5";
 const COMMENT_DRAFT_SURFACE_CLASS =
-	"group/draft pointer-events-auto absolute z-[6] cursor-text overflow-hidden rounded-lg border border-white/55 bg-background/88 text-left shadow-overlay ring-1 ring-foreground/10 backdrop-blur-xl backdrop-saturate-150 outline-none supports-backdrop-blur:bg-background/70 dark:border-white/10";
+	"group/draft pointer-events-auto absolute z-[7] cursor-text overflow-hidden rounded-xl border border-brand/50 bg-card text-left shadow-overlay ring-2 ring-brand/20 backdrop-blur-md outline-none dark:bg-card/96";
 /** Horizontal action bar floating just above the card's top-right corner. */
 const COMMENT_ACTION_BAR_CLASS =
-	"pointer-events-none absolute right-0 bottom-full z-[1] flex items-center gap-0.5 rounded-md border border-white/50 bg-background/82 p-0.5 shadow-raised ring-1 ring-foreground/10 backdrop-blur-xl backdrop-saturate-150 transition-opacity duration-150 group-hover:pointer-events-auto dark:border-white/10";
+	"pointer-events-none absolute right-0 bottom-full mb-1 z-[1] flex translate-y-0.5 items-center gap-0.5 rounded-lg border border-border/65 bg-popover/95 p-0.5 shadow-raised backdrop-blur-md transition-[opacity,transform] duration-150 ease-out group-hover:pointer-events-auto group-hover:translate-y-0 group-focus-within:translate-y-0 motion-reduce:transition-opacity dark:border-white/10";
 
 type CommentCardsLayerProps = {
 	inset?: boolean;
@@ -360,9 +360,9 @@ const CommentCard = memo(function CommentCard({
 			className={cn(
 				COMMENT_CARD_SURFACE_CLASS,
 				editing
-					? "z-[6] bg-background/92 shadow-dialog ring-2 ring-ring/50"
+					? "z-[6] border-brand/50 bg-card shadow-overlay ring-2 ring-brand/20"
 					: hovered
-						? "z-[6] bg-background/92 shadow-dialog ring-2 ring-primary/45"
+						? "z-[6] border-foreground/25 bg-card shadow-overlay"
 						: "",
 			)}
 			style={{
@@ -380,7 +380,7 @@ const CommentCard = memo(function CommentCard({
 			{/* biome-ignore lint/a11y/noStaticElementInteractions: blur/pointer isolation for the in-place editor */}
 			<div
 				className={cn(
-					"h-full rounded-[inherit] px-2.5 py-2",
+					"relative h-full rounded-[inherit] py-2.5 pr-3 pl-3.5",
 					editing
 						? "overflow-visible"
 						: "overflow-hidden group-hover:overflow-visible group-focus-within:overflow-visible",
@@ -408,23 +408,30 @@ const CommentCard = memo(function CommentCard({
 						: undefined
 				}
 			>
+				{/* Left highlight accent bar */}
+				<span
+					aria-hidden
+					className={cn(
+						"pointer-events-none absolute top-2.5 bottom-2.5 left-1.5 w-[3px] rounded-full",
+						item.kind === "visual"
+							? "bg-violet-500/75 dark:bg-violet-400/75"
+							: swatchColorClass(item.color),
+					)}
+				/>
 				<div className={cn(!editing && "max-h-[70vh] overflow-y-auto")}>
 					{editing ? (
 						<div className="block w-full text-left">
 							{item.kind === "visual" ? (
-								<Crop className="size-2.5 text-muted-foreground" aria-hidden />
-							) : (
-								<span
-									className={cn(
-										"block size-2 rounded-full",
-										swatchColorClass(item.color),
-									)}
-									aria-hidden
-								/>
-							)}
+								<div className="mb-1 flex items-center gap-1 text-muted-foreground">
+									<Crop
+										className="size-3 text-violet-600 dark:text-violet-400"
+										aria-hidden
+									/>
+								</div>
+							) : null}
 							<textarea
 								ref={textareaRef}
-								className="mt-1 max-h-60 w-full resize-none bg-transparent p-0 text-sm text-foreground/80 leading-relaxed outline-none placeholder:text-muted-foreground/70 select-text"
+								className="max-h-60 w-full resize-none bg-transparent p-0 text-[0.8125rem] text-foreground/92 leading-[1.55] outline-none placeholder:text-muted-foreground/65 select-text"
 								placeholder={t("annotations.placeholder")}
 								aria-label={t("annotations.editorLabel")}
 								defaultValue={item.comment}
@@ -465,7 +472,7 @@ const CommentCard = memo(function CommentCard({
 						<div
 							role="button"
 							tabIndex={0}
-							className="block w-full cursor-text text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+							className="block w-full cursor-text rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 							onClick={(e) => {
 								e.stopPropagation();
 								if ((e.target as Element).closest("a, button")) return;
@@ -479,35 +486,40 @@ const CommentCard = memo(function CommentCard({
 								}
 							}}
 						>
-							{item.kind === "visual" ? (
-								<Crop className="size-2.5 text-muted-foreground" aria-hidden />
-							) : (
-								<span
-									className={cn(
-										"block size-2 rounded-full",
-										swatchColorClass(item.color),
-									)}
-									aria-hidden
-								/>
-							)}
 							<div
 								className={cn(
-									"mt-1 max-h-[3.75rem] overflow-hidden break-words text-sm leading-relaxed group-hover:max-h-none group-hover:overflow-x-auto",
+									"max-h-[3.9rem] overflow-hidden break-words text-[0.8125rem] leading-[1.55] group-hover:max-h-none group-hover:overflow-x-auto",
 									item.comment.trim()
-										? "text-foreground/80"
-										: "text-muted-foreground/70",
+										? "text-foreground/90"
+										: "text-muted-foreground/65",
 								)}
 							>
-								{item.comment.trim() ? (
-									<MessageResponse className="text-sm leading-relaxed [&_p]:my-0 [&_table]:min-w-max">
-										{item.comment}
-									</MessageResponse>
+								{item.kind === "visual" && !item.comment.trim() ? (
+									<span className="inline-flex items-center gap-1">
+										<Crop
+											className="size-3 shrink-0 text-violet-600 dark:text-violet-400"
+											aria-hidden
+										/>
+										<span>{t("annotations.placeholder")}</span>
+									</span>
+								) : item.comment.trim() ? (
+									<div className="flex items-start gap-1.5">
+										{item.kind === "visual" ? (
+											<Crop
+												className="mt-1 size-3 shrink-0 text-violet-600 dark:text-violet-400"
+												aria-hidden
+											/>
+										) : null}
+										<MessageResponse className="agentero-markdown-compact min-w-0 flex-1 text-[0.8125rem] leading-[1.55] text-foreground/90 [&_p]:my-0 [&_table]:min-w-max">
+											{item.comment}
+										</MessageResponse>
+									</div>
 								) : (
 									t("annotations.placeholder")
 								)}
 							</div>
 							{item.messages && item.messages.length > 0 ? (
-								<div className="mt-1.5 border-t border-border/40 pt-1.5">
+								<div className="mt-2 border-border/45 border-t pt-1.5">
 									<div className="line-clamp-3 space-y-1 group-hover:line-clamp-none">
 										{item.messages.map((m) => (
 											<p
@@ -516,7 +528,7 @@ const CommentCard = memo(function CommentCard({
 													"whitespace-pre-wrap break-words text-caption leading-relaxed",
 													m.role === "assistant"
 														? "text-muted-foreground"
-														: "text-foreground/80",
+														: "font-medium text-foreground/85",
 												)}
 											>
 												{m.content}
@@ -720,15 +732,13 @@ const SelectionCommentAffordance = memo(function SelectionCommentAffordance({
 			aria-label={t("selection.note")}
 			data-pdf-chrome
 			data-selection-comment=""
-			className={cn(
-				COMMENT_DRAFT_SURFACE_CLASS,
-				"z-[7] w-56 bg-background/92 shadow-dialog ring-2 ring-ring/50",
-			)}
+			className={COMMENT_DRAFT_SURFACE_CLASS}
 			style={{
 				...(inset
 					? { right: COMMENT_CARD_GAP_PX }
 					: { left: `calc(100% + ${COMMENT_CARD_GAP_PX}px)` }),
 				top: topPx,
+				width: COMMENT_CARD_WIDTH_PX,
 				minHeight: heightPx,
 			}}
 			onPointerDown={(e) => {
@@ -737,17 +747,17 @@ const SelectionCommentAffordance = memo(function SelectionCommentAffordance({
 				e.stopPropagation();
 			}}
 		>
-			<div className="w-56 px-2.5 py-2">
+			<div className="relative py-2.5 pr-3 pl-3.5">
 				<span
 					className={cn(
-						"block size-2 rounded-full",
+						"pointer-events-none absolute top-2.5 bottom-2.5 left-1.5 w-[3px] rounded-full",
 						swatchColorClass(DEFAULT_HIGHLIGHT_COLOR),
 					)}
 					aria-hidden
 				/>
 				<textarea
 					ref={textareaRef}
-					className="mt-1 max-h-60 w-full resize-none bg-transparent p-0 text-sm text-foreground/80 leading-relaxed outline-none placeholder:text-muted-foreground/70 select-text"
+					className="max-h-60 w-full resize-none bg-transparent p-0 text-[0.8125rem] text-foreground/92 leading-[1.55] outline-none placeholder:text-muted-foreground/65 select-text"
 					placeholder={t("annotations.placeholder")}
 					aria-label={t("annotations.editorLabel")}
 					rows={EDIT_MIN_COMMENT_LINES}
@@ -898,8 +908,8 @@ export const CommentCardsLayer = memo(function CommentCardsLayer({
 					<path
 						d={connectorD}
 						fill="none"
-						className="stroke-background/95 dark:stroke-background/90"
-						strokeWidth={5}
+						className="stroke-background/85 dark:stroke-background/80"
+						strokeWidth={3.5}
 						strokeLinecap="round"
 						strokeLinejoin="round"
 						vectorEffect="non-scaling-stroke"
@@ -907,8 +917,8 @@ export const CommentCardsLayer = memo(function CommentCardsLayer({
 					<path
 						d={connectorD}
 						fill="none"
-						className="stroke-default-primary/85"
-						strokeWidth={2.5}
+						className="stroke-foreground/45"
+						strokeWidth={1.5}
 						strokeLinecap="round"
 						strokeLinejoin="round"
 						vectorEffect="non-scaling-stroke"

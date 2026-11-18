@@ -698,10 +698,10 @@ export function SelectionCard({
 		>
 			<header
 				className={cn(
-					"relative flex shrink-0 items-center gap-2 border-border/50 border-b px-3 py-1.5",
+					"relative flex shrink-0 items-center gap-2 border-border/45 border-b px-3.5 py-2",
 					draggable &&
 						"touch-none select-none cursor-grab active:cursor-grabbing",
-					draggable && showDragHandle && "pt-2",
+					draggable && showDragHandle && "pt-2.5",
 					headerClassName,
 				)}
 				onPointerDown={draggable ? startDrag : undefined}
@@ -796,7 +796,9 @@ export function SelectionCard({
 			</div>
 
 			{footer ? (
-				<div className="shrink-0 border-border/60 border-t p-2">{footer}</div>
+				<div className="shrink-0 border-border/45 border-t bg-muted/20 px-2.5 py-2">
+					{footer}
+				</div>
 			) : null}
 		</motion.div>
 	);

@@ -179,17 +179,17 @@ export const SelectionGutter = memo(function SelectionGutter({
 						<button
 							type="button"
 							className={cn(
-								"flex size-6 items-center justify-center rounded-md border shadow-raised transition-[opacity,background-color] duration-150 hover:scale-110",
+								"flex size-6 items-center justify-center rounded-lg border shadow-raised transition-[opacity,background-color,transform,box-shadow] duration-150 hover:scale-108 active:scale-95 motion-reduce:transform-none",
 								item.kind === "ask" && item.ended
-									? "border-amber-600/35 bg-background text-amber-600 dark:text-amber-400"
+									? "border-amber-500/35 bg-card/95 text-amber-600 dark:border-amber-400/30 dark:text-amber-400"
 									: item.kind === "translate"
-										? "border-sky-600/35 bg-background text-sky-700 dark:text-sky-400"
+										? "border-sky-500/35 bg-card/95 text-sky-600 dark:border-sky-400/30 dark:text-sky-400"
 										: item.kind === "visual" || item.kind === "agent-trace"
-											? "border-violet-600/35 bg-background text-violet-700 dark:text-violet-400"
-											: "border-border/80 bg-background text-muted-foreground",
+											? "border-violet-500/35 bg-card/95 text-violet-600 dark:border-violet-400/30 dark:text-violet-400"
+											: "border-border/75 bg-card/95 text-muted-foreground hover:text-foreground",
 								dimForText &&
-									"bg-background/55 opacity-40 backdrop-blur-[1px] hover:bg-background hover:opacity-100 focus-visible:bg-background focus-visible:opacity-100",
-								isActive && "ring-2 ring-ring ring-offset-1",
+									"bg-card/55 opacity-40 backdrop-blur-[2px] hover:bg-card hover:opacity-100 focus-visible:bg-card focus-visible:opacity-100",
+								isActive && "ring-2 ring-brand/45 ring-offset-1",
 							)}
 							aria-label={aria}
 							// Match SelectionCard pointer model so pin leave / card

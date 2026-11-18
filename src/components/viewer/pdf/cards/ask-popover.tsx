@@ -382,7 +382,7 @@ export function AskPopover({
 			footer={
 				<PromptInput
 					key={`${thread.id}-${initialPrompt ?? ""}`}
-					className="w-full rounded-full border-border/80 bg-background shadow-none"
+					className="w-full rounded-xl border-border/70 bg-background shadow-2xs focus-within:border-brand/50"
 					inputGroupClassName="h-auto overflow-visible"
 					onSubmit={({ text }) => {
 						const q = text.trim();
@@ -478,7 +478,7 @@ export function AskPopover({
 									from="user"
 									className="max-w-full"
 								>
-									<div className="ml-auto flex w-full flex-col gap-2 rounded-lg bg-black/5 px-3 py-2 ring-1 ring-black/10 dark:bg-white/10 dark:ring-white/15">
+									<div className="ml-auto flex w-full flex-col gap-2 rounded-xl border border-border/70 bg-muted/45 px-3 py-2 focus-within:border-brand/50 focus-within:ring-2 focus-within:ring-brand/15">
 										<textarea
 											ref={editTextareaRef}
 											className="max-h-28 min-h-12 w-full resize-none overflow-y-auto bg-transparent text-foreground text-sm leading-5 outline-none"

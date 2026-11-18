@@ -173,7 +173,7 @@ export function TranslateCard({
 			preferBelow
 			// Opaque card: the default translucent shell picks up the white paper
 			// behind it and reads as a washed-out gray in the dark theme.
-			className="bg-background!"
+			className="bg-popover!"
 			// Slightly tighter header than other selection cards.
 			headerClassName="pt-2 pb-1.5"
 			title={t("selection.translateTitle")}
@@ -225,12 +225,12 @@ export function TranslateCard({
 			<div
 				ref={scrollPortRef}
 				onScroll={handleScroll}
-				className="agentero-scroll mx-3 mt-2 mb-2.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-x-hidden overflow-y-auto py-0.5 pr-0.5 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden!"
+				className="agentero-scroll mx-3.5 mt-2.5 mb-3 flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto py-0.5 pr-0.5 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden!"
 			>
 				{source ? (
-					<div className="flex min-h-6 shrink-0 flex-col justify-end gap-0.5 border-border/60 border-l-2 pr-2.5 pl-2.5 text-muted-foreground">
+					<div className="flex min-h-6 shrink-0 flex-col justify-end gap-0.5 rounded-r-md border-brand/45 border-l-2 bg-muted/35 py-1.5 pr-2.5 pl-2.5 text-muted-foreground">
 						{source.title && (
-							<div className="mb-0.5 truncate font-medium text-[11px] tracking-[0.01em]">
+							<div className="mb-0.5 truncate font-medium text-[11px] tracking-[0.01em] text-foreground/80">
 								{source.title}
 							</div>
 						)}
@@ -244,7 +244,10 @@ export function TranslateCard({
 				) : null}
 
 				{showResult ? (
-					<MessageResponse className="min-w-0 whitespace-pre-wrap break-words text-[0.9375rem] text-foreground leading-relaxed">
+					<MessageResponse
+						isAnimating={streaming}
+						className="min-w-0 break-words text-[0.875rem] leading-[1.68]"
+					>
 						{result}
 					</MessageResponse>
 				) : null}

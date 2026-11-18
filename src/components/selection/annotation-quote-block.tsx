@@ -57,11 +57,11 @@ export function AnnotationQuoteBlock({
 				<blockquote
 					data-annotation-selectable={selectable ? "" : undefined}
 					className={cn(
-						"border-l-2 pl-2.5 leading-relaxed text-muted-foreground whitespace-pre-wrap break-words",
+						"rounded-r-md border-l-[2.5px] bg-muted/30 py-1.5 pr-2.5 pl-3 not-italic leading-relaxed text-muted-foreground whitespace-pre-wrap break-words",
 						locationLabel || showSwatch ? "mt-1.5" : undefined,
 						textClassName,
 						selectable && "cursor-text select-text",
-						showSwatch ? swatchBorderClass(color) : "border-border",
+						showSwatch ? swatchBorderClass(color) : "border-border/80",
 					)}
 				>
 					{quoteText}
