@@ -681,10 +681,8 @@ export function SurveyRunView({
 			) : null}
 
 			{run.status !== "running" && !run.result && run.content.trim() ? (
-				<div className="magpie-card select-text rounded-2xl p-4">
-					<MessageResponse className="prose prose-sm dark:prose-invert max-w-none text-sm leading-relaxed">
-						{run.content}
-					</MessageResponse>
+				<div className="magpie-card select-text rounded-2xl px-5 py-4">
+					<MessageResponse enableOpenUiBlocks>{run.content}</MessageResponse>
 				</div>
 			) : null}
 

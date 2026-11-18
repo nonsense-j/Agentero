@@ -121,12 +121,12 @@ Skill 语法由 Host 按 provider 分流（Claude `/id`，其它注入 `SKILL.md
 
 ## 消息 Markdown 渲染
 
-`MessageResponse` / `ReasoningContent` 用 Streamdown；表格与代码块走自研轻量壳，交互对齐：
+`MessageResponse` / `ReasoningContent` 用 Streamdown（`src/index.css` 通过 `@source` 扫描 `streamdown` 产物，并由 `.agentero-markdown` / `.agentero-markdown-compact` 提供按比例 `em` 缩放标题阶梯、外挂缩进列表、无斜体引用块与公式块排版）；表格与代码块走自研轻量壳，交互对齐：
 
 | 块 | 组件 | 悬停操作 |
 |---|---|---|
-| 表格 | `PlainTable` | 复制（Markdown / CSV / TSV）、下载（CSV / Markdown）、全屏 |
-| 代码块 | `PlainCodeBlock` | 左上角语言小标签；悬停复制/下载（按语言后缀）；无外侧卡片、无全屏 |
+| 表格 | `PlainTable` | 圆角边框容器与行悬停高亮；复制（Markdown / CSV / TSV）、下载（CSV / Markdown）、全屏 |
+| 代码块 | `PlainCodeBlock` | 圆角边框与左上角语言小标签；悬停复制/下载（按语言后缀）；无全屏 |
 | Mermaid | `MermaidBlock` | 默认只显示图形；悬停右上角出现源码、缩放和全屏操作；源码模式使用带语言标题的高亮代码块，并显示复制按钮；图形可拖拽平移，无法编译时自动回退源码 |
 
 表格全屏是应用内覆盖层（portal），保留粘性表头、Esc 关闭和复制/下载操作；不再对 `<table>` 直接调用 Fullscreen API，避免浏览器把表格拉伸到视口高度、露出透明背景。

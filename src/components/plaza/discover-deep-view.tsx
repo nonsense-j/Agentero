@@ -115,13 +115,23 @@ function ToolCallChip({ tool }: { tool: DeepToolCallRecord }) {
 	const running = tool.status === "pending" || tool.status === "in_progress";
 	const failed = tool.status === "failed";
 	const shortName = formatShortToolName(tool.title);
+	const hasPayload = tool.input !== undefined || tool.output !== undefined;
 
 	return (
-		<div className="rounded-lg border bg-muted/35 text-xs">
+		<div
+			className={cn(
+				"overflow-hidden rounded-xl border border-border/55 bg-card/75 text-xs transition-colors dark:bg-muted/25",
+				open && "col-span-full border-border/80 bg-card dark:bg-muted/35",
+			)}
+		>
 			<button
 				type="button"
-				onClick={() => setOpen((v) => !v)}
-				className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left"
+				disabled={!hasPayload}
+				onClick={() => hasPayload && setOpen((v) => !v)}
+				className={cn(
+					"flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors",
+					hasPayload && "hover:bg-muted/45",
+				)}
 			>
 				<span className="flex min-w-0 items-center gap-1.5">
 					{running ? (
@@ -129,30 +139,32 @@ function ToolCallChip({ tool }: { tool: DeepToolCallRecord }) {
 					) : failed ? (
 						<Wrench className="size-3 shrink-0 text-destructive" />
 					) : (
-						<CheckCircle2 className="size-3 shrink-0 text-brand" />
+						<CheckCircle2 className="size-3 shrink-0 text-brand/85" />
 					)}
-					<span className="truncate font-mono text-[0.6875rem] text-foreground">
+					<span className="truncate font-mono text-[0.6875rem] text-foreground/90">
 						{shortName}
 					</span>
 				</span>
-				<ChevronRight
-					className={cn(
-						"size-3 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none",
-						open && "rotate-90",
-					)}
-				/>
+				{hasPayload ? (
+					<ChevronRight
+						className={cn(
+							"size-3 shrink-0 text-muted-foreground/70 transition-transform duration-150 motion-reduce:transition-none",
+							open && "rotate-90",
+						)}
+					/>
+				) : null}
 			</button>
-			{open && (tool.input !== undefined || tool.output !== undefined) ? (
-				<div className="space-y-1.5 border-t px-2.5 py-2">
+			{open && hasPayload ? (
+				<div className="space-y-1.5 border-border/50 border-t bg-muted/20 px-2.5 py-2">
 					{tool.input !== undefined ? (
-						<pre className="agentero-scroll max-h-28 overflow-auto rounded bg-background/80 p-1.5 font-mono text-[0.6875rem] text-muted-foreground">
+						<pre className="agentero-scroll max-h-28 overflow-auto rounded-md border border-border/45 bg-background/90 p-2 font-mono text-[0.6875rem] leading-relaxed text-muted-foreground">
 							{typeof tool.input === "string"
 								? tool.input
 								: JSON.stringify(tool.input, null, 2)}
 						</pre>
 					) : null}
 					{tool.output !== undefined ? (
-						<pre className="agentero-scroll max-h-32 overflow-auto rounded bg-background/80 p-1.5 font-mono text-[0.6875rem] text-muted-foreground">
+						<pre className="agentero-scroll max-h-36 overflow-auto rounded-md border border-border/45 bg-background/90 p-2 font-mono text-[0.6875rem] leading-relaxed text-muted-foreground">
 							{typeof tool.output === "string"
 								? tool.output.slice(0, 1200)
 								: JSON.stringify(tool.output, null, 2).slice(0, 1200)}
@@ -711,24 +723,24 @@ export function DiscoverDeepView({
 				<ResizablePanel
 					id="deep-chat"
 					minSize={360}
-					className="flex min-h-0 min-w-0 flex-col overflow-hidden"
+					className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--magpie-canvas)]/55 dark:bg-background"
 				>
 					<div
 						ref={scrollRef}
 						onScroll={handleScroll}
-						className="agentero-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4"
+						className="agentero-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5"
 					>
 						{!activeSession || activeSession.messages.length === 0 ? (
-							<div className="mx-auto flex max-w-2xl flex-col gap-5 py-8">
+							<div className="mx-auto flex max-w-2xl flex-col gap-5 py-10">
 								<div className="space-y-2">
 									<div className="inline-flex items-center gap-1.5 rounded-md bg-brand/10 px-2 py-1 font-medium text-brand text-xs">
 										<Sparkles className="size-3.5" />
 										{t("plaza.discover.deepTitle")}
 									</div>
-									<h2 className="font-semibold text-base text-foreground">
+									<h2 className="font-heading font-semibold text-lg text-foreground tracking-tight">
 										{t("plaza.discover.deepEmptyTitle")}
 									</h2>
-									<p className="text-muted-foreground text-xs leading-relaxed">
+									<p className="text-muted-foreground text-[0.8125rem] leading-relaxed">
 										{t("plaza.discover.deepEmptyDesc")}
 									</p>
 									{store.agents.length === 0 ? (
@@ -738,14 +750,14 @@ export function DiscoverDeepView({
 									) : null}
 								</div>
 
-								<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+								<div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
 									{starters.map((starter) => (
 										<button
 											key={starter}
 											type="button"
 											disabled={isRunning || summary.totalCount === 0}
 											onClick={() => void submitPrompt(starter)}
-											className="magpie-card rounded-xl p-3 text-left text-foreground text-xs leading-relaxed transition-colors hover:border-brand/40 disabled:opacity-50"
+											className="magpie-card rounded-xl px-4 py-3.5 text-left text-foreground/90 text-xs leading-relaxed transition-all hover:-translate-y-0.5 hover:text-foreground disabled:opacity-50 motion-reduce:hover:translate-y-0"
 										>
 											{starter}
 										</button>
@@ -753,15 +765,15 @@ export function DiscoverDeepView({
 								</div>
 							</div>
 						) : (
-							<div className="mx-auto flex max-w-3xl flex-col gap-4">
+							<div className="mx-auto flex max-w-3xl flex-col gap-5">
 								{activeSession.messages.map((msg) => {
 									if (msg.role === "user") {
 										return (
 											<div
 												key={msg.id}
-												className="flex flex-col items-end gap-1"
+												className="flex flex-col items-end gap-1.5"
 											>
-												<div className="max-w-[85%] select-text whitespace-pre-wrap rounded-2xl bg-brand/12 px-3.5 py-2.5 text-foreground text-sm leading-relaxed">
+												<div className="max-w-[84%] select-text whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-secondary-foreground text-sm leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.04)] ring-1 ring-inset ring-foreground/6">
 													{msg.content}
 												</div>
 												{msg.referenceIds?.length ? (
@@ -779,7 +791,7 @@ export function DiscoverDeepView({
 									const reasoningOpen = openReasoningIds.has(msg.id);
 
 									return (
-										<div key={msg.id} className="flex flex-col gap-2">
+										<div key={msg.id} className="flex flex-col gap-2.5">
 											{/* MCP Tool Calls */}
 											{msg.toolCalls && msg.toolCalls.length > 0 ? (
 												<div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
@@ -791,7 +803,7 @@ export function DiscoverDeepView({
 
 											{/* Optional Reasoning collapse */}
 											{msg.reasoning ? (
-												<div className="rounded-lg border bg-muted/25 px-2.5 py-1.5">
+												<div className="overflow-hidden rounded-xl border border-border/55 bg-card/65 dark:bg-muted/20">
 													<button
 														type="button"
 														onClick={() =>
@@ -802,28 +814,36 @@ export function DiscoverDeepView({
 																return next;
 															})
 														}
-														className="flex items-center gap-1 font-medium text-[0.6875rem] text-muted-foreground hover:text-foreground"
+														className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left font-medium text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
 													>
 														<ChevronRight
 															className={cn(
-																"size-3 transition-transform",
+																"size-3 shrink-0 transition-transform duration-150 motion-reduce:transition-none",
 																reasoningOpen && "rotate-90",
 															)}
 														/>
 														{t("plaza.discover.thinking")}
 													</button>
 													{reasoningOpen ? (
-														<p className="mt-1.5 select-text whitespace-pre-wrap text-muted-foreground text-xs leading-relaxed">
-															{msg.reasoning}
-														</p>
+														<div className="border-border/45 border-t px-3.5 py-2.5">
+															<MessageResponse
+																isAnimating={Boolean(msg.streaming)}
+																className="agentero-markdown-compact text-muted-foreground"
+															>
+																{msg.reasoning}
+															</MessageResponse>
+														</div>
 													) : null}
 												</div>
 											) : null}
 
 											{/* Assistant Markdown Response */}
 											{msg.content ? (
-												<div className="magpie-card select-text rounded-xl p-3.5">
-													<MessageResponse className="prose prose-sm dark:prose-invert max-w-none text-sm leading-relaxed">
+												<div className="magpie-card select-text rounded-2xl px-5 py-4">
+													<MessageResponse
+														isAnimating={Boolean(msg.streaming)}
+														enableOpenUiBlocks
+													>
 														{msg.content}
 													</MessageResponse>
 												</div>
@@ -836,7 +856,7 @@ export function DiscoverDeepView({
 
 											{/* Inline error fallback */}
 											{msg.error ? (
-												<p className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive text-xs">
+												<p className="rounded-xl border border-destructive/20 bg-destructive/8 px-3.5 py-2.5 text-destructive text-xs leading-relaxed">
 													{msg.error}
 												</p>
 											) : null}
@@ -852,7 +872,7 @@ export function DiscoverDeepView({
 															type="button"
 															disabled={isRunning}
 															onClick={() => void submitPrompt(pill)}
-															className="rounded-full border bg-background px-3 py-1 text-left text-foreground text-xs transition-colors hover:border-brand/50 hover:bg-brand/8 disabled:opacity-50"
+															className="magpie-button-pop rounded-full px-3 py-1 text-left text-foreground/90 text-xs transition-colors hover:text-brand disabled:opacity-50"
 														>
 															{pill}
 														</button>
@@ -867,21 +887,23 @@ export function DiscoverDeepView({
 					</div>
 
 					{/* Always-visible Multi-Turn Composer */}
-					<div className="shrink-0 border-t bg-background/80 px-4 py-3">
+					<div className="shrink-0 border-border/50 border-t bg-background/85 px-5 py-3 backdrop-blur-md">
 						{selectedItems.length > 0 ? (
-							<div className="mx-auto mb-1.5 flex max-w-3xl">
+							<div className="mx-auto mb-2 flex max-w-3xl">
 								<button
 									type="button"
 									onClick={() => {
 										setTrayOpen(true);
 										setTrayTab("selected");
 									}}
-									className="inline-flex items-center gap-1 rounded-full border bg-brand/8 px-2 py-0.5 text-[0.6875rem] text-foreground tabular-nums transition-colors hover:border-brand/50"
+									className="magpie-chip hover:border-brand/50"
 								>
 									<Paperclip className="size-3 text-brand" />
-									{t("plaza.discover.attachedSelected", {
-										count: selectedItems.length,
-									})}
+									<span className="tabular-nums">
+										{t("plaza.discover.attachedSelected", {
+											count: selectedItems.length,
+										})}
+									</span>
 								</button>
 							</div>
 						) : null}
@@ -890,7 +912,7 @@ export function DiscoverDeepView({
 								e.preventDefault();
 								void submitPrompt(draft);
 							}}
-							className="mx-auto flex max-w-3xl items-end gap-2 rounded-xl border bg-background p-2 shadow-xs focus-within:border-brand/60"
+							className="magpie-card mx-auto flex max-w-3xl items-end gap-2 rounded-2xl px-3 py-2 focus-within:ring-2 focus-within:ring-brand/25"
 						>
 							<textarea
 								rows={2}
@@ -907,7 +929,7 @@ export function DiscoverDeepView({
 									}
 								}}
 								placeholder={t("plaza.discover.composerPlaceholder")}
-								className="agentero-scroll max-h-36 min-h-[2.5rem] flex-1 resize-none bg-transparent px-1.5 py-1 text-foreground text-xs leading-relaxed placeholder:text-muted-foreground focus:outline-none"
+								className="agentero-scroll max-h-36 min-h-[2.5rem] flex-1 resize-none bg-transparent px-1 py-1 text-foreground text-sm leading-relaxed placeholder:text-muted-foreground/75 focus:outline-none"
 							/>
 
 							{isRunning ? (
@@ -917,7 +939,7 @@ export function DiscoverDeepView({
 									size="icon-sm"
 									onClick={() => void stopDeepDiscoverTurn()}
 									aria-label={t("plaza.discover.stop")}
-									className="shrink-0 rounded-lg"
+									className="shrink-0 rounded-xl"
 								>
 									<Square className="size-3.5 fill-current" />
 								</Button>
@@ -927,7 +949,7 @@ export function DiscoverDeepView({
 									size="icon-sm"
 									disabled={!draft.trim() || summary.totalCount === 0}
 									aria-label={t("plaza.discover.send")}
-									className="shrink-0 rounded-lg"
+									className="shrink-0 rounded-xl"
 								>
 									<ArrowUp className="size-4" />
 								</Button>
@@ -950,9 +972,9 @@ export function DiscoverDeepView({
 						}}
 						className="min-h-0 overflow-hidden"
 					>
-						<aside className="flex h-full flex-col overflow-hidden bg-muted/15">
-							<div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
-								<div className="inline-flex items-center rounded-lg bg-muted/70 p-0.5">
+						<aside className="flex h-full flex-col overflow-hidden bg-background">
+							<div className="flex shrink-0 items-center justify-between gap-2 border-border/55 border-b px-3 py-2">
+								<div className="magpie-seg">
 									{(
 										[
 											["selected", "tabSelected", selectedItems.length],
@@ -963,13 +985,9 @@ export function DiscoverDeepView({
 										<button
 											key={tab}
 											type="button"
+											data-active={trayTab === tab}
 											onClick={() => setTrayTab(tab)}
-											className={cn(
-												"rounded-md px-2 py-1 font-medium text-xs tabular-nums transition-colors",
-												trayTab === tab
-													? "bg-background text-foreground shadow-xs"
-													: "text-muted-foreground hover:text-foreground",
-											)}
+											className="magpie-seg-btn tabular-nums"
 										>
 											{t(`plaza.discover.${labelKey}`, { count })}
 										</button>

@@ -108,7 +108,7 @@ export function PlainCodeBlock({
 		return (
 			<code
 				className={cn(
-					"rounded bg-muted px-1.5 py-0.5 font-mono text-sm",
+					"rounded-[5px] border border-border/55 bg-muted/65 px-[0.36em] py-[0.12em] font-mono text-[0.86em] text-foreground/90",
 					className,
 				)}
 				data-streamdown="inline-code"
@@ -148,14 +148,14 @@ export function PlainCodeBlockView({
 	}, [code, filename]);
 
 	const iconButtonClass =
-		"size-7 opacity-70 hover:opacity-100 focus-visible:opacity-100";
+		"size-6 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:opacity-100";
 	const label = (language || "text").toLowerCase();
 
 	return (
-		<CodeBlock className="group/code my-4 rounded-md bg-background">
-			<CodeBlockHeader className="h-8 justify-between border-b border-border/60 bg-muted/30 px-2.5 pt-0">
+		<CodeBlock className="group/code my-3.5 rounded-xl border-border/65 bg-muted/20 shadow-[inset_0_1px_0_var(--magpie-edge)] dark:bg-muted/15">
+			<CodeBlockHeader className="h-8 justify-between border-b border-border/50 bg-muted/45 px-3 pt-0">
 				<CodeBlockTitle
-					className="font-mono text-[11px] lowercase leading-none text-muted-foreground"
+					className="font-mono text-[0.6875rem] font-medium lowercase leading-none tracking-wide text-muted-foreground"
 					title={label}
 				>
 					{label}
@@ -163,7 +163,7 @@ export function PlainCodeBlockView({
 				<CodeBlockActions
 					className={cn(
 						"my-0 mr-0 gap-0.5",
-						"opacity-0 transition-opacity group-hover/code:opacity-100",
+						"opacity-0 transition-opacity duration-150 group-hover/code:opacity-100",
 						"focus-within:opacity-100 pointer-coarse:opacity-100",
 					)}
 				>
@@ -192,7 +192,7 @@ export function PlainCodeBlockView({
 										aria-label={actionLabel}
 										onClick={onClick}
 									>
-										<Icon className="size-4" />
+										<Icon className="size-3.5" />
 									</Button>
 								</TooltipTrigger>
 								<TooltipContent>
@@ -203,7 +203,12 @@ export function PlainCodeBlockView({
 					</TooltipProvider>
 				</CodeBlockActions>
 			</CodeBlockHeader>
-			<CodeBlockContent code={code} language={lang} showLineNumbers={false} />
+			<CodeBlockContent
+				code={code}
+				language={lang}
+				showLineNumbers={false}
+				className="px-3.5 py-3 text-[0.8125rem] leading-[1.6]"
+			/>
 		</CodeBlock>
 	);
 }

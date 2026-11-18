@@ -1,5 +1,6 @@
 "use client";
 
+import { ExternalLink } from "lucide-react";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { isValidElement, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -95,16 +96,19 @@ export function AgentCitationLink({
 		return rawLabel || t("sources.link");
 	}, [rawLabel, resolvedHref, incomplete, t]);
 
-	// Every resolved agent link is a pill. Ignore Streamdown's default
-	// `underline text-primary` className so chips stay chip-shaped.
+	const isExternal = Boolean(resolvedHref && isHttpUrl(resolvedHref));
+
+	// Every resolved agent link is a compact secondary pill (keeps paired
+	// secondary/secondary-foreground contrast across tweakcn themes). Ignore
+	// Streamdown's default `underline text-primary` className.
 	const link = (
 		<Button
 			asChild
 			variant="secondary"
 			size="xs"
 			className={cn(
-				"inline-flex h-auto max-w-[12rem] rounded-full px-2 py-0.5 align-baseline text-xs",
-				incomplete && "cursor-default opacity-70",
+				"mx-0.5 inline-flex h-[1.3rem] max-w-[13rem] items-center gap-1 rounded-md border border-border/60 px-1.5 py-0 align-baseline font-medium text-[0.75rem] leading-none no-underline shadow-[inset_0_0.5px_0_var(--magpie-edge)] hover:border-foreground/20",
+				incomplete && "pointer-events-none cursor-default opacity-65",
 			)}
 		>
 			<a
@@ -114,19 +118,22 @@ export function AgentCitationLink({
 				onClick={handleClick}
 			>
 				<span className="block min-w-0 truncate">{label}</span>
+				{isExternal ? (
+					<ExternalLink className="size-2.5 shrink-0 opacity-60" aria-hidden />
+				) : null}
 			</a>
 		</Button>
 	);
 	if (!resolvedHref || incomplete) return link;
 	return (
-		<HoverCard openDelay={100} closeDelay={100}>
+		<HoverCard openDelay={120} closeDelay={100}>
 			<HoverCardTrigger asChild>{link}</HoverCardTrigger>
-			<HoverCardContent className="flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-1">
-				<span className="font-medium">{label}</span>
+			<HoverCardContent className="flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-1 p-2.5">
+				<span className="font-medium text-xs text-foreground">{label}</span>
 				<a
 					href={resolvedHref}
 					onClick={handleClick}
-					className="break-all text-xs text-muted-foreground hover:text-foreground"
+					className="break-all font-mono text-[0.6875rem] text-muted-foreground transition-colors hover:text-foreground"
 				>
 					{resolvedHref}
 				</a>

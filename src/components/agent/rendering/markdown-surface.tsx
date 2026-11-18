@@ -42,7 +42,7 @@ export const MarkdownSurface = memo(
 			<Streamdown
 				mode={props.isAnimating ? "streaming" : "static"}
 				className={cn(
-					"w-full min-w-0 select-text text-base leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+					"agentero-markdown w-full min-w-0 select-text [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
 					className,
 				)}
 				components={{

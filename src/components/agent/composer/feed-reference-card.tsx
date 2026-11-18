@@ -30,7 +30,7 @@ import { formatFeedWhen } from "@/lib/plaza/feeds";
 
 /** Streamdown/typography defaults are chat-sized; the card is a 24rem preview. */
 const EXCERPT_CLASS =
-	"prose prose-sm dark:prose-invert mt-2 max-w-none break-words leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:mt-1 [&_h1]:mb-1 [&_h1]:font-medium [&_h1]:text-sm [&_h2]:mt-2 [&_h2]:mb-1 [&_h2]:font-medium [&_h2]:text-sm [&_h3]:mt-2 [&_h3]:mb-1 [&_h3]:font-medium [&_h3]:text-xs [&_h4]:mt-2 [&_h4]:mb-1 [&_h4]:text-xs [&_p]:my-1 [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0 [&_pre]:my-1 [&_pre]:text-[0.7rem] [&_blockquote]:my-1 [&_blockquote]:border-l-2 [&_blockquote]:pl-2 [&_a]:underline";
+	"agentero-markdown-compact mt-2 max-w-none break-words text-xs leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
 
 export function FeedReferenceCard({
 	path,

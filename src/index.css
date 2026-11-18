@@ -4,6 +4,8 @@
 @import "@fontsource-variable/geist";
 @import "dockview-react/dist/styles/dockview.css";
 
+@source "../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:is(.dark *));
 
 @keyframes library-shimmer {
@@ -1592,4 +1594,256 @@ html[data-offscreen-md-blocks] [data-slate-editor][data-selection-chat-origin="m
 		0 6px 20px -4px rgba(0, 0, 0, 0.14),
 		0 0 0 0.5px var(--magpie-hairline),
 		inset 0 1px 0 var(--magpie-edge);
+}
+
+/* ============================================================================
+ * Editorial Streamdown Typography (.agentero-markdown)
+ * Proportional em-scaled hierarchy, hanging-indent lists, CJK-safe blockquotes,
+ * and balanced vertical rhythm across Agent chat, Deep Search, Feeds, and PDF
+ * margin notes. Keeps Streamdown's memoized [data-streamdown] nodes intact.
+ * ============================================================================ */
+
+.agentero-markdown {
+	font-size: 0.875rem;
+	line-height: 1.68;
+	letter-spacing: 0em;
+	color: color-mix(in oklch, var(--foreground) 94%, transparent);
+	overflow-wrap: break-word;
+}
+
+.agentero-markdown > div,
+.agentero-markdown {
+	--tw-space-y-reverse: 0;
+}
+
+.agentero-markdown :where(p) {
+	margin-top: 0;
+	margin-bottom: 0;
+}
+
+.agentero-markdown > :where(* + *),
+.agentero-markdown [data-sd-block] > :where(* + *) {
+	margin-top: 0.75em;
+}
+
+.agentero-markdown [data-streamdown="strong"] {
+	font-weight: var(--font-weight-semibold);
+	color: var(--foreground);
+}
+
+.agentero-markdown [data-streamdown="heading-1"],
+.agentero-markdown [data-streamdown="heading-2"],
+.agentero-markdown [data-streamdown="heading-3"],
+.agentero-markdown [data-streamdown="heading-4"],
+.agentero-markdown [data-streamdown="heading-5"],
+.agentero-markdown [data-streamdown="heading-6"] {
+	font-family: var(--font-heading);
+	color: var(--foreground);
+}
+
+.agentero-markdown [data-streamdown="heading-1"] {
+	margin-top: 1.35em;
+	margin-bottom: 0.55em;
+	padding-bottom: 0.35em;
+	border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+	font-size: 1.3em;
+	font-weight: var(--font-weight-bold);
+	line-height: 1.28;
+	letter-spacing: -0.022em;
+}
+
+.agentero-markdown [data-streamdown="heading-2"] {
+	margin-top: 1.25em;
+	margin-bottom: 0.45em;
+	font-size: 1.15em;
+	font-weight: var(--font-weight-semibold);
+	line-height: 1.32;
+	letter-spacing: -0.016em;
+}
+
+.agentero-markdown [data-streamdown="heading-3"] {
+	margin-top: 1.1em;
+	margin-bottom: 0.35em;
+	font-size: 1.04em;
+	font-weight: var(--font-weight-semibold);
+	line-height: 1.38;
+	letter-spacing: -0.012em;
+}
+
+.agentero-markdown [data-streamdown="heading-4"] {
+	margin-top: 0.95em;
+	margin-bottom: 0.3em;
+	font-size: 0.96em;
+	font-weight: var(--font-weight-semibold);
+	line-height: 1.42;
+	letter-spacing: -0.006em;
+}
+
+.agentero-markdown [data-streamdown="heading-5"],
+.agentero-markdown [data-streamdown="heading-6"] {
+	margin-top: 0.85em;
+	margin-bottom: 0.25em;
+	font-size: 0.9em;
+	font-weight: var(--font-weight-medium);
+	line-height: 1.45;
+	color: var(--muted-foreground);
+}
+
+.agentero-markdown
+	:is(
+		[data-streamdown="heading-1"],
+		[data-streamdown="heading-2"],
+		[data-streamdown="heading-3"],
+		[data-streamdown="heading-4"],
+		[data-streamdown="heading-5"],
+		[data-streamdown="heading-6"]
+	):first-child {
+	margin-top: 0;
+}
+
+/* Hanging-indent lists: override Streamdown's `list-inside` and `[&>p]:inline`
+ * so wrapped lines align on the text edge rather than underneath the marker. */
+.agentero-markdown [data-streamdown="unordered-list"],
+.agentero-markdown [data-streamdown="ordered-list"] {
+	list-style-position: outside;
+	padding-inline-start: 1.375em;
+	margin-top: 0.55em;
+	margin-bottom: 0.55em;
+}
+
+.agentero-markdown [data-streamdown="unordered-list"] {
+	list-style-type: disc;
+}
+
+.agentero-markdown
+	[data-streamdown="unordered-list"]
+	[data-streamdown="unordered-list"] {
+	list-style-type: circle;
+}
+
+.agentero-markdown
+	[data-streamdown="unordered-list"]
+	[data-streamdown="unordered-list"]
+	[data-streamdown="unordered-list"] {
+	list-style-type: square;
+}
+
+.agentero-markdown [data-streamdown="ordered-list"] {
+	list-style-type: decimal;
+}
+
+.agentero-markdown [data-streamdown="list-item"] {
+	padding-top: 0.125em;
+	padding-bottom: 0.125em;
+	padding-inline-start: 0.15em;
+}
+
+.agentero-markdown [data-streamdown="list-item"]::marker {
+	color: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
+	font-variant-numeric: tabular-nums;
+}
+
+.agentero-markdown [data-streamdown="list-item"] > p {
+	display: block;
+	margin: 0;
+}
+
+.agentero-markdown [data-streamdown="list-item"] > p + p {
+	margin-top: 0.35em;
+}
+
+.agentero-markdown
+	[data-streamdown="list-item"]
+	> :is([data-streamdown="unordered-list"], [data-streamdown="ordered-list"]) {
+	margin-top: 0.25em;
+	margin-bottom: 0.15em;
+	padding-inline-start: 1.25em;
+}
+
+/* Editorial blockquote: no synthetic oblique slant on CJK characters. */
+.agentero-markdown [data-streamdown="blockquote"] {
+	margin-top: 0.75em;
+	margin-bottom: 0.75em;
+	border-inline-start: 2.5px solid
+		color-mix(in oklch, var(--brand) 52%, var(--border));
+	border-radius: 0 0.5rem 0.5rem 0;
+	background-color: color-mix(in oklch, var(--muted) 45%, transparent);
+	padding: 0.5rem 0.875rem;
+	font-style: normal;
+	color: color-mix(in oklch, var(--foreground) 82%, var(--muted-foreground));
+}
+
+.agentero-markdown [data-streamdown="blockquote"] > :first-child {
+	margin-top: 0;
+}
+
+.agentero-markdown [data-streamdown="blockquote"] > :last-child {
+	margin-bottom: 0;
+}
+
+.agentero-markdown [data-streamdown="horizontal-rule"] {
+	margin-top: 1.25em;
+	margin-bottom: 1.25em;
+	height: 1px;
+	border: 0;
+	background-color: color-mix(in oklch, var(--border) 72%, transparent);
+}
+
+.agentero-markdown [data-streamdown="image"] {
+	border-radius: 0.5rem;
+	box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.dark .agentero-markdown [data-streamdown="image"] {
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.agentero-markdown .katex-display {
+	margin: 0.75em 0;
+	padding: 0.5rem 0.75rem;
+	overflow-x: auto;
+	overflow-y: hidden;
+	border-radius: 0.5rem;
+	background-color: color-mix(in oklch, var(--muted) 32%, transparent);
+}
+
+.agentero-markdown section[data-footnotes] {
+	margin-top: 1.25em;
+	padding-top: 0.75em;
+	border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+	font-size: 0.85em;
+	color: var(--muted-foreground);
+}
+
+/* Compact variant for PDF margin notes & miniature hover cards */
+.agentero-markdown-compact {
+	font-size: 0.8125rem;
+	line-height: 1.55;
+}
+
+.agentero-markdown-compact.space-y-4 > :not(:last-child),
+.agentero-markdown-compact > :where(* + *) {
+	margin-top: 0.4em;
+	margin-bottom: 0;
+}
+
+.agentero-markdown-compact [data-streamdown="heading-1"],
+.agentero-markdown-compact [data-streamdown="heading-2"],
+.agentero-markdown-compact [data-streamdown="heading-3"] {
+	margin-top: 0.65em;
+	margin-bottom: 0.25em;
+	padding-bottom: 0;
+	border-bottom: 0;
+	font-size: 1.05em;
+}
+
+.agentero-markdown-compact [data-streamdown="blockquote"] {
+	margin-top: 0.4em;
+	margin-bottom: 0.4em;
+	padding: 0.3rem 0.6rem;
+}
+
+.agentero-markdown-compact .katex-display {
+	margin: 0.4em 0;
+	padding: 0.35rem 0.5rem;
 }

@@ -323,7 +323,7 @@ export function PlazaFeedItemDetail({
 				className="agentero-scroll min-h-0 flex-1 select-text overflow-y-auto px-5 py-4"
 			>
 				{markdown ? (
-					<MessageResponse className="prose prose-sm dark:prose-invert max-w-none text-sm leading-relaxed [&_h1]:mt-0 [&_h1]:mb-3 [&_h1]:font-medium [&_h1]:text-base [&_h1]:leading-snug">
+					<MessageResponse className="mx-auto max-w-3xl [&_h1]:mt-0 [&_h1]:mb-3 [&_h1]:border-b-0 [&_h1]:pb-0 [&_h1]:font-semibold [&_h1]:text-lg [&_h1]:leading-snug">
 						{markdown}
 					</MessageResponse>
 				) : null}

@@ -95,8 +95,15 @@ export function PlainTable({
 	}, []);
 
 	const iconButtonClass =
-		"size-7 opacity-70 hover:opacity-100 focus-visible:opacity-100";
-	const tableClassName = cn("w-full caption-bottom text-sm", className);
+		"size-6 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:opacity-100";
+	const tableClassName = cn(
+		"w-full border-collapse caption-bottom text-[0.8125rem]",
+		"[&_thead]:bg-muted/55 [&_thead_tr]:border-b [&_thead_tr]:border-border/65",
+		"[&_th]:px-3.5 [&_th]:py-2 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:tracking-wide [&_th]:text-foreground/85",
+		"[&_tbody]:divide-y [&_tbody]:divide-border/45 [&_tbody_tr]:transition-colors hover:[&_tbody_tr]:bg-muted/30",
+		"[&_td]:px-3.5 [&_td]:py-2 [&_td]:align-top [&_td]:text-[0.8125rem] [&_td]:leading-relaxed",
+		className,
+	);
 
 	const actionButtons = (
 		<TooltipProvider>
@@ -191,15 +198,17 @@ export function PlainTable({
 
 	return (
 		<>
-			<div className="group/table relative my-4 overflow-x-auto">
-				<table ref={tableRef} className={tableClassName} {...props}>
-					{children}
-				</table>
+			<div className="group/table relative my-3.5 overflow-hidden rounded-xl border border-border/65 bg-card/55 shadow-[0_1px_2px_rgba(0,0,0,0.02)] dark:bg-muted/15">
+				<div className="agentero-scroll-both agentero-scroll-x-only overflow-x-auto">
+					<table ref={tableRef} className={tableClassName} {...props}>
+						{children}
+					</table>
+				</div>
 
 				<div
 					className={cn(
-						"absolute right-2 top-2 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-raised",
-						"opacity-0 transition-opacity group-hover/table:opacity-100",
+						"absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded-lg border border-border/60 bg-popover/90 p-0.5 shadow-raised backdrop-blur-md",
+						"opacity-0 transition-opacity duration-150 group-hover/table:opacity-100",
 						"focus-within:opacity-100",
 					)}
 				>

@@ -594,7 +594,7 @@ const ChatTranscriptRow = memo(function ChatTranscriptRow({
 							{chipMarkup ? (
 								<InlineChipText markup={chipMarkup} onOpenPath={onOpenSource} />
 							) : (
-								<MessageResponse className="text-base leading-relaxed">
+								<MessageResponse className="text-sm leading-relaxed">
 									{userDisplay}
 								</MessageResponse>
 							)}
