@@ -461,28 +461,12 @@ export type EmbeddingSettings = {
 	model: string;
 };
 
-export type KeywordLlmProviderId = "x666" | "openrouter" | "openaiCompatible";
-
-export const KEYWORD_LLM_PROVIDER_IDS: readonly KeywordLlmProviderId[] = [
-	"x666",
-	"openrouter",
-	"openaiCompatible",
-] as const;
-
-export function isKeywordLlmProviderId(v: unknown): v is KeywordLlmProviderId {
-	return (
-		typeof v === "string" &&
-		(KEYWORD_LLM_PROVIDER_IDS as readonly string[]).includes(v)
-	);
-}
-
-/** Fallback keyword-extraction LLM settings (`x666` default preset, OpenRouter preset, or OpenAI-compatible BYOK). */
+/** Fallback keyword-extraction LLM settings (any OpenAI-compatible endpoint). */
 export type KeywordLlmSettings = {
-	provider: KeywordLlmProviderId;
-	/** OpenAI-compatible base URL; empty falls back to the selected preset or `https://api.openai.com/v1`. */
+	/** OpenAI-compatible base URL (defaults to `https://x666.me/v1`). */
 	baseUrl: string;
 	/** API key; masked (`*`) when echoed back from the Host. */
 	apiKey: string;
-	/** Chat model id (e.g. `ernie-5.5-flash-preview`, `gpt-4o-mini`). */
+	/** Chat model id (defaults to `ernie-5.5-flash-preview`). */
 	model: string;
 };

@@ -792,8 +792,6 @@ pub fn open_alex_key_get(app: AppHandle) -> ApiResult<Option<String>> {
 #[serde(rename_all = "camelCase")]
 pub struct KeywordLlmOverrideArgs {
     #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -809,91 +807,19 @@ pub struct KeywordLlmChatResult {
     pub content: String,
 }
 
-fn default_base_for_provider(provider: &str) -> &'static str {
-    use crate::features::system::settings::{
-        DEFAULT_OPENAI_COMPATIBLE_BASE_URL, DEFAULT_OPEN_ROUTER_BASE_URL, DEFAULT_X666_BASE_URL,
-        KEYWORD_LLM_PROVIDER_OPENROUTER, KEYWORD_LLM_PROVIDER_X666,
-    };
-    if provider == KEYWORD_LLM_PROVIDER_X666 {
-        DEFAULT_X666_BASE_URL
-    } else if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
-        DEFAULT_OPEN_ROUTER_BASE_URL
-    } else {
-        DEFAULT_OPENAI_COMPATIBLE_BASE_URL
-    }
-}
-
-fn strip_trailing_ci_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
-    if value.len() < suffix.len() {
-        return None;
-    }
-    let split = value.len() - suffix.len();
-    if value.is_char_boundary(split) && value[split..].eq_ignore_ascii_case(suffix) {
-        Some(&value[..split])
-    } else {
-        None
-    }
-}
-
-fn resolve_openai_compatible_url(
-    base_url: &str,
-    default_root: &str,
-    suffix: &str,
-) -> Result<Url, String> {
-    let trimmed = base_url.trim();
-    let raw = if trimmed.is_empty() {
-        default_root
-    } else {
-        trimmed
-    };
-    let mut cleaned = raw.trim_end_matches('/');
-    if let Some(rest) = strip_trailing_ci_suffix(cleaned, "/chat/completions") {
-        cleaned = rest.trim_end_matches('/');
-    } else if let Some(rest) = strip_trailing_ci_suffix(cleaned, "/models") {
-        cleaned = rest.trim_end_matches('/');
-    }
-    let mut url = Url::parse(cleaned).map_err(|e| e.to_string())?;
-    let scheme = url.scheme();
-    if (scheme != "http" && scheme != "https") || url.host_str().is_none() {
-        return Err("keyword LLM base URL must be http(s)".into());
-    }
-    let path = url.path().trim_end_matches('/').to_string();
-    let full_path = if path.is_empty() {
-        format!("/v1{suffix}")
-    } else {
-        format!("{path}{suffix}")
-    };
-    url.set_path(&full_path);
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
 fn merge_keyword_llm_overrides(
     store: &AppSettingsStore,
     args: Option<KeywordLlmOverrideArgs>,
 ) -> crate::features::system::settings::KeywordLlmSettings {
-    use crate::features::system::settings::{
-        is_translate_api_key_mask, normalize_keyword_llm_provider,
-    };
+    use crate::features::system::settings::is_translate_api_key_mask;
 
     let mut merged = store.keyword_llm_raw().unwrap_or_default();
     if let Some(ov) = args {
-        let provider_changed = ov.provider.as_deref().is_some_and(|p| {
-            normalize_keyword_llm_provider(p) != normalize_keyword_llm_provider(&merged.provider)
-        });
-        if let Some(provider) = ov.provider {
-            merged.provider = provider.trim().to_string();
-        }
         if let Some(base_url) = ov.base_url {
             merged.base_url = base_url.trim().to_string();
-        } else if provider_changed {
-            merged.base_url.clear();
         }
         if let Some(model) = ov.model {
             merged.model = model.trim().to_string();
-        } else if provider_changed {
-            merged.model.clear();
         }
         if let Some(api_key) = ov.api_key {
             let trimmed = api_key.trim();
@@ -907,27 +833,11 @@ fn merge_keyword_llm_overrides(
     merged
 }
 
-fn is_openrouter_host(url: &Url) -> bool {
-    url.host_str()
-        .is_some_and(|h| h.eq_ignore_ascii_case("openrouter.ai"))
-}
-
-fn is_x666_host(url: &Url) -> bool {
-    url.host_str().is_some_and(|h| {
-        h.eq_ignore_ascii_case("x666.me") || h.to_ascii_lowercase().ends_with(".x666.me")
-    })
-}
-
-fn is_unsupported_param_status(status: u16) -> bool {
-    status == 400 || status == 422
-}
-
-/// Whether a compile-time built-in API key is available for the default `x666`
-/// keyword-extraction preset.
+/// Whether a compile-time built-in API key is available for the default keyword-LLM endpoint.
 #[tauri::command]
 #[specta::specta]
 pub fn keyword_llm_has_builtin_key() -> ApiResult<bool> {
-    ApiResult::ok(crate::features::system::settings::default_x666_api_key().is_some())
+    ApiResult::ok(crate::features::system::settings::default_keyword_llm_api_key().is_some())
 }
 
 fn build_keyword_llm_client(
@@ -940,34 +850,8 @@ fn build_keyword_llm_client(
     )
 }
 
-fn extract_chat_message_content(json: &serde_json::Value) -> String {
-    let Some(content) = json
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-    else {
-        return String::new();
-    };
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-    if let Some(parts) = content.as_array() {
-        let mut out = String::new();
-        for part in parts {
-            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                out.push_str(t);
-            }
-        }
-        return out;
-    }
-    String::new()
-}
-
-/// Probe the keyword-extraction LLM configuration (either field overrides or
-/// stored settings). OpenRouter default `:free` preset checks `/auth/key` at
-/// zero token cost; other models and BYOK OpenAI-compatible endpoints run a
-/// minimal `/chat/completions` probe.
+/// Probe an OpenAI-compatible keyword-extraction LLM configuration (using either
+/// field overrides or stored settings) via a minimal `/chat/completions` call.
 #[tauri::command]
 #[specta::specta]
 pub async fn keyword_llm_probe(
@@ -975,7 +859,10 @@ pub async fn keyword_llm_probe(
     args: Option<KeywordLlmOverrideArgs>,
 ) -> ApiResult<bool> {
     use crate::features::system::settings::{
-        resolve_keyword_llm_config, DEFAULT_OPEN_ROUTER_MODEL,
+        resolve_keyword_llm_config, DEFAULT_KEYWORD_LLM_BASE_URL,
+    };
+    use agentero_core::openai_compat::{
+        is_unsupported_param_status, resolve_openai_compatible_url,
     };
 
     let store = app.state::<AppSettingsStore>();
@@ -983,40 +870,16 @@ pub async fn keyword_llm_probe(
     let Some(cfg) = resolve_keyword_llm_config(&merged) else {
         return ApiResult::ok(false);
     };
-    let default_root = default_base_for_provider(&cfg.provider);
-    let Ok(chat_url) =
-        resolve_openai_compatible_url(&cfg.base_url, default_root, "/chat/completions")
-    else {
+    let Ok(chat_url) = resolve_openai_compatible_url(
+        &cfg.base_url,
+        DEFAULT_KEYWORD_LLM_BASE_URL,
+        "/chat/completions",
+    ) else {
         return ApiResult::ok(false);
     };
     let Ok(client) = build_keyword_llm_client(15) else {
         return ApiResult::ok(false);
     };
-
-    if is_openrouter_host(&chat_url) && cfg.model == DEFAULT_OPEN_ROUTER_MODEL {
-        let Some(ref key) = cfg.api_key else {
-            return ApiResult::ok(false);
-        };
-        let Ok(auth_url) = resolve_openai_compatible_url(&cfg.base_url, default_root, "/auth/key")
-        else {
-            return ApiResult::ok(false);
-        };
-        let ok = match client
-            .get(auth_url)
-            .header("Accept", "application/json")
-            .bearer_auth(key)
-            .send()
-            .await
-        {
-            Ok(res) if res.status().is_success() => res
-                .json::<serde_json::Value>()
-                .await
-                .map(|json| json.get("data").is_some())
-                .unwrap_or(false),
-            _ => false,
-        };
-        return ApiResult::ok(ok);
-    }
 
     let primary_body = serde_json::json!({
         "model": cfg.model,
@@ -1061,10 +924,9 @@ pub async fn keyword_llm_probe(
     ApiResult::ok(ok)
 }
 
-/// Fetch available models from an OpenAI-compatible `/models` endpoint (using
-/// either field overrides or stored settings). For `x666`, `DEFAULT_X666_MODEL`
-/// appears first; for OpenRouter, `:free` models (starting with
-/// `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+/// Fetch available model ids from an OpenAI-compatible `/models` endpoint
+/// (using either field overrides or stored settings), sorted alphabetically with
+/// the configured model pinned first if present.
 #[tauri::command]
 #[specta::specta]
 pub async fn keyword_llm_models_list(
@@ -1072,33 +934,35 @@ pub async fn keyword_llm_models_list(
     args: Option<KeywordLlmOverrideArgs>,
 ) -> ApiResult<Vec<String>> {
     use crate::features::system::settings::{
-        default_x666_api_key, is_translate_api_key_mask, normalize_keyword_llm_provider,
-        DEFAULT_OPEN_ROUTER_MODEL, DEFAULT_X666_MODEL, KEYWORD_LLM_PROVIDER_OPENROUTER,
-        KEYWORD_LLM_PROVIDER_X666,
+        default_keyword_llm_api_key, is_default_keyword_llm_base_url, is_translate_api_key_mask,
+        DEFAULT_KEYWORD_LLM_BASE_URL, DEFAULT_KEYWORD_LLM_MODEL,
     };
+    use agentero_core::openai_compat::resolve_openai_compatible_url;
     use std::collections::BTreeSet;
 
     let store = app.state::<AppSettingsStore>();
     let merged = merge_keyword_llm_overrides(&store, args);
-    let provider = normalize_keyword_llm_provider(&merged.provider);
-    let default_root = default_base_for_provider(provider);
-    let models_url = match resolve_openai_compatible_url(&merged.base_url, default_root, "/models")
-    {
-        Ok(u) => u,
-        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+    let resolved_base = if merged.base_url.trim().is_empty() {
+        DEFAULT_KEYWORD_LLM_BASE_URL
+    } else {
+        merged.base_url.trim()
     };
+    let models_url =
+        match resolve_openai_compatible_url(resolved_base, DEFAULT_KEYWORD_LLM_BASE_URL, "/models")
+        {
+            Ok(u) => u,
+            Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+        };
     let client = match build_keyword_llm_client(15) {
         Ok(c) => c,
         Err(e) => return map_err(e),
     };
-    let mut req = client
-        .get(models_url.clone())
-        .header("Accept", "application/json");
+    let mut req = client.get(models_url).header("Accept", "application/json");
     let raw_key = merged.api_key.trim();
     let effective_key = if !raw_key.is_empty() && !is_translate_api_key_mask(raw_key) {
         Some(raw_key)
-    } else if provider == KEYWORD_LLM_PROVIDER_X666 {
-        default_x666_api_key()
+    } else if is_default_keyword_llm_base_url(resolved_base) {
+        default_keyword_llm_api_key()
     } else {
         None
     };
@@ -1136,82 +1000,22 @@ pub async fn keyword_llm_models_list(
         }
     }
 
-    if provider == KEYWORD_LLM_PROVIDER_X666 || is_x666_host(&models_url) {
-        let mut rest = all_ids;
-        rest.remove(DEFAULT_X666_MODEL);
-        let mut out = Vec::with_capacity(rest.len() + 1);
-        out.push(DEFAULT_X666_MODEL.to_string());
-        out.extend(rest);
-        return ApiResult::ok(out);
-    }
-
-    if provider == KEYWORD_LLM_PROVIDER_OPENROUTER || is_openrouter_host(&models_url) {
-        let mut free_set = BTreeSet::new();
-        let mut paid_set = BTreeSet::new();
-        for id in all_ids {
-            if id.to_ascii_lowercase().ends_with(":free") {
-                free_set.insert(id);
-            } else {
-                paid_set.insert(id);
-            }
+    let active_model = {
+        let trimmed = merged.model.trim();
+        if !trimmed.is_empty() {
+            trimmed
+        } else if is_default_keyword_llm_base_url(resolved_base) {
+            DEFAULT_KEYWORD_LLM_MODEL
+        } else {
+            ""
         }
-        let mut out = Vec::with_capacity(free_set.len() + paid_set.len() + 1);
-        free_set.remove(DEFAULT_OPEN_ROUTER_MODEL);
-        paid_set.remove(DEFAULT_OPEN_ROUTER_MODEL);
-        out.push(DEFAULT_OPEN_ROUTER_MODEL.to_string());
-        out.extend(free_set);
-        out.extend(paid_set);
-        return ApiResult::ok(out);
+    };
+    let mut out = Vec::with_capacity(all_ids.len());
+    if !active_model.is_empty() && all_ids.remove(active_model) {
+        out.push(active_model.to_string());
     }
-
-    ApiResult::ok(all_ids.into_iter().collect())
-}
-
-fn summarize_keyword_llm_error_body(raw: &str) -> String {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(msg) = json
-            .get("error")
-            .and_then(|e| e.get("message").or(Some(e)))
-            .and_then(|m| m.as_str())
-        {
-            let trimmed: String = msg.trim().chars().take(200).collect();
-            if !trimmed.is_empty() {
-                return trimmed;
-            }
-        }
-    }
-    raw.trim()
-        .replace(['\r', '\n'], " ")
-        .chars()
-        .take(200)
-        .collect()
-}
-
-/// Build an OpenAI-compatible request payload for keyword extraction, omitting
-/// `max_tokens` when `None` so providers impose no explicit output length cap.
-/// Sends `reasoning: {"effort": "low", "exclude": true}` by default so
-/// reasoning-capable models keep latency low while incompatible endpoints fall back cleanly.
-fn build_keyword_llm_chat_body(
-    model: &str,
-    messages: &serde_json::Value,
-    max_tokens: Option<u32>,
-    include_reasoning: bool,
-    include_temperature: bool,
-) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-    });
-    if include_temperature {
-        body["temperature"] = serde_json::json!(0);
-    }
-    if let Some(limit) = max_tokens {
-        body["max_tokens"] = serde_json::json!(limit);
-    }
-    if include_reasoning {
-        body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
-    }
-    body
+    out.extend(all_ids);
+    ApiResult::ok(out)
 }
 
 /// Run a Host-proxied OpenAI-compatible chat completion using the stored
@@ -1224,16 +1028,24 @@ pub async fn keyword_llm_chat_complete(
     user_prompt: String,
     max_tokens: Option<u32>,
 ) -> ApiResult<Option<KeywordLlmChatResult>> {
+    use crate::features::system::settings::DEFAULT_KEYWORD_LLM_BASE_URL;
+    use agentero_core::openai_compat::{
+        extract_chat_message_content, resolve_openai_compatible_url,
+        send_chat_with_reasoning_fallback, summarize_error_body, ChatFallbackRequest,
+    };
+
     let store = app.state::<AppSettingsStore>();
     let Some(cfg) = store.keyword_llm_config() else {
         return ApiResult::ok(None);
     };
-    let default_root = default_base_for_provider(&cfg.provider);
-    let chat_url =
-        match resolve_openai_compatible_url(&cfg.base_url, default_root, "/chat/completions") {
-            Ok(u) => u,
-            Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
-        };
+    let chat_url = match resolve_openai_compatible_url(
+        &cfg.base_url,
+        DEFAULT_KEYWORD_LLM_BASE_URL,
+        "/chat/completions",
+    ) {
+        Ok(u) => u,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+    };
     let client = match build_keyword_llm_client(60) {
         Ok(c) => c,
         Err(e) => return map_err(e),
@@ -1244,24 +1056,20 @@ pub async fn keyword_llm_chat_complete(
         {"role": "user", "content": user_prompt},
     ]);
 
-    let send_chat = |body: &serde_json::Value| {
-        let mut req = client
-            .post(chat_url.clone())
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .json(body);
-        if let Some(ref key) = cfg.api_key {
-            req = req.bearer_auth(key);
-        }
-        req.send()
-    };
-
-    let primary_body = build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, true, true);
-    let no_reasoning_body =
-        build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, false, true);
-    let minimal_body = build_keyword_llm_chat_body(&cfg.model, &messages, None, false, false);
-
-    let mut resp = match send_chat(&primary_body).await {
+    let resp = match send_chat_with_reasoning_fallback(
+        &ChatFallbackRequest {
+            client: &client,
+            endpoint: chat_url.as_str(),
+            model: &cfg.model,
+            api_key: cfg.api_key.as_deref(),
+            messages: &messages,
+            max_tokens,
+            reasoning_rejected: None,
+        },
+        || std::future::ready(()),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
@@ -1272,32 +1080,6 @@ pub async fn keyword_llm_chat_complete(
             return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
         }
     };
-    if is_unsupported_param_status(resp.status().as_u16()) {
-        resp = match send_chat(&no_reasoning_body).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!(
-                    "keyword_llm_chat_complete fallback transport error model={}: {}",
-                    cfg.model,
-                    e
-                );
-                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
-            }
-        };
-    }
-    if is_unsupported_param_status(resp.status().as_u16()) {
-        resp = match send_chat(&minimal_body).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!(
-                    "keyword_llm_chat_complete minimal fallback transport error model={}: {}",
-                    cfg.model,
-                    e
-                );
-                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
-            }
-        };
-    }
 
     let status = resp.status().as_u16();
     let raw_body = match resp.text().await {
@@ -1316,7 +1098,7 @@ pub async fn keyword_llm_chat_complete(
             "keyword_llm_chat_complete HTTP {} model={} detail={}",
             status,
             cfg.model,
-            summarize_keyword_llm_error_body(&raw_body)
+            summarize_error_body(&raw_body)
         );
         return ApiResult::ok(Some(KeywordLlmChatResult {
             status,
@@ -1350,87 +1132,4 @@ pub async fn keyword_llm_chat_complete(
         );
     }
     ApiResult::ok(Some(KeywordLlmChatResult { status, content }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{build_keyword_llm_chat_body, resolve_openai_compatible_url};
-
-    #[test]
-    fn resolves_openai_compatible_endpoints_without_double_suffix() {
-        let default_root = "https://api.openai.com/v1";
-        assert_eq!(
-            resolve_openai_compatible_url("", default_root, "/chat/completions")
-                .unwrap()
-                .as_str(),
-            "https://api.openai.com/v1/chat/completions"
-        );
-        assert_eq!(
-            resolve_openai_compatible_url(
-                "https://api.openai.com",
-                default_root,
-                "/chat/completions"
-            )
-            .unwrap()
-            .as_str(),
-            "https://api.openai.com/v1/chat/completions"
-        );
-        assert_eq!(
-            resolve_openai_compatible_url("https://api.openai.com/v1/", default_root, "/models")
-                .unwrap()
-                .as_str(),
-            "https://api.openai.com/v1/models"
-        );
-        assert_eq!(
-            resolve_openai_compatible_url(
-                "https://open.bigmodel.cn/api/paas/v4/",
-                default_root,
-                "/chat/completions",
-            )
-            .unwrap()
-            .as_str(),
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        );
-        assert_eq!(
-            resolve_openai_compatible_url(
-                "https://api.deepseek.com/v1/chat/completions",
-                default_root,
-                "/models",
-            )
-            .unwrap()
-            .as_str(),
-            "https://api.deepseek.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn builds_keyword_llm_chat_body_with_reasoning_default_and_fallbacks() {
-        let msgs = serde_json::json!([{"role": "user", "content": "hi"}]);
-
-        let primary =
-            build_keyword_llm_chat_body("ernie-5.5-flash-preview", &msgs, None, true, true);
-        assert!(primary.get("max_tokens").is_none());
-        assert_eq!(primary.get("temperature").and_then(|v| v.as_i64()), Some(0));
-        assert_eq!(
-            primary["reasoning"],
-            serde_json::json!({"effort": "low", "exclude": true})
-        );
-
-        let no_reasoning =
-            build_keyword_llm_chat_body("gpt-4o-mini", &msgs, Some(1024), false, true);
-        assert_eq!(
-            no_reasoning.get("max_tokens").and_then(|v| v.as_u64()),
-            Some(1024)
-        );
-        assert_eq!(
-            no_reasoning.get("temperature").and_then(|v| v.as_i64()),
-            Some(0)
-        );
-        assert!(no_reasoning.get("reasoning").is_none());
-
-        let minimal = build_keyword_llm_chat_body("o3-mini", &msgs, None, false, false);
-        assert!(minimal.get("temperature").is_none());
-        assert!(minimal.get("reasoning").is_none());
-        assert!(minimal.get("max_tokens").is_none());
-    }
 }

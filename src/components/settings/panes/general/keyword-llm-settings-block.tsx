@@ -12,47 +12,31 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
-import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { openExternalUrl } from "@/lib/core/open-external";
-import { hasSecret, isSecretMask, maskSecret } from "@/lib/core/secret-mask";
+import { hasSecret, unwrapMaskedSecretInput } from "@/lib/core/secret-mask";
 import {
 	fetchKeywordLlmModels,
 	hasBuiltinKeywordLlmKey,
+	isDefaultKeywordLlmBaseUrl,
 	isKeywordLlmConfigured,
+	KEYWORD_LLM_KEY_URL,
 	type KeywordLlmProbeStatus,
 	probeKeywordLlm,
-	switchKeywordLlmProviderDraft,
 } from "@/lib/keyword-llm";
 import {
 	type AppSettings,
-	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_X666_MODEL,
-	KEYWORD_LLM_PROVIDER_IDS,
-	KEYWORD_LLM_PROVIDER_PRESETS,
-	type KeywordLlmProviderId,
+	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_MODEL,
 	type KeywordLlmSettings,
 	saveSettingsAsync,
 } from "@/lib/settings";
 
-const PROVIDER_LABEL_KEYS = {
-	x666: "general.keywordLlm.providerX666",
-	openrouter: "general.keywordLlm.providerOpenRouter",
-	openaiCompatible: "general.keywordLlm.providerOpenAiCompatible",
-} as const satisfies Record<KeywordLlmProviderId, string>;
-
 function normalizeDraft(value: KeywordLlmSettings): KeywordLlmSettings {
 	return {
-		provider: value.provider,
 		baseUrl: value.baseUrl.trim(),
 		apiKey: value.apiKey.trim(),
 		model: value.model.trim(),
@@ -93,7 +77,7 @@ export function KeywordLlmSettingsBlock({
 
 	const configured =
 		isKeywordLlmConfigured(saved) ||
-		(saved.provider === "x666" && hasBuiltinKey);
+		(isDefaultKeywordLlmBaseUrl(saved.baseUrl) && hasBuiltinKey);
 
 	const runProbe = useCallback(async () => {
 		if (!configured) {
@@ -133,18 +117,9 @@ export function KeywordLlmSettingsBlock({
 		const a = normalizeDraft(saved);
 		const b = normalizeDraft(draft);
 		return (
-			a.provider !== b.provider ||
-			a.baseUrl !== b.baseUrl ||
-			a.apiKey !== b.apiKey ||
-			a.model !== b.model
+			a.baseUrl !== b.baseUrl || a.apiKey !== b.apiKey || a.model !== b.model
 		);
 	}, [saved, draft]);
-
-	const handleProviderChange = (value: string) => {
-		const nextProvider = value as KeywordLlmProviderId;
-		setModels([]);
-		setDraft((prev) => switchKeywordLlmProviderDraft(prev, nextProvider));
-	};
 
 	const handleConfirm = async () => {
 		const committed = normalizeDraft(draft);
@@ -171,18 +146,17 @@ export function KeywordLlmSettingsBlock({
 		}
 	};
 
+	const isDefaultEndpoint = isDefaultKeywordLlmBaseUrl(draft.baseUrl);
 	const modelOptions = useMemo(() => {
 		const unique = new Set<string>();
-		if (draft.provider === "x666") {
-			unique.add(DEFAULT_X666_MODEL);
-		} else if (draft.provider === "openrouter") {
-			unique.add(DEFAULT_OPEN_ROUTER_MODEL);
+		if (isDefaultEndpoint) {
+			unique.add(DEFAULT_KEYWORD_LLM_MODEL);
 		}
 		for (const id of models) {
 			if (id.trim()) unique.add(id.trim());
 		}
 		return Array.from(unique);
-	}, [draft.provider, models]);
+	}, [isDefaultEndpoint, models]);
 
 	const statusLabel = t(
 		status === "idle"
@@ -194,29 +168,18 @@ export function KeywordLlmSettingsBlock({
 					: "general.keywordLlm.probeFail",
 	);
 
-	const keyUrl = KEYWORD_LLM_PROVIDER_PRESETS[draft.provider].keyUrl;
 	const canRefreshModels =
 		hasSecret(draft.apiKey) ||
 		Boolean(draft.baseUrl.trim()) ||
-		(draft.provider === "x666" && hasBuiltinKey);
-	const keyPlaceholder =
-		draft.provider === "x666"
-			? t(
-					hasBuiltinKey
-						? "general.keywordLlm.keyPlaceholderBuiltin"
-						: "general.keywordLlm.keyPlaceholderX666",
-				)
-			: t(
-					draft.provider === "openrouter"
-						? "general.keywordLlm.keyPlaceholderOpenRouter"
-						: "general.keywordLlm.keyPlaceholderByok",
-				);
-	const modelPlaceholder =
-		draft.provider === "x666"
-			? DEFAULT_X666_MODEL
-			: draft.provider === "openrouter"
-				? DEFAULT_OPEN_ROUTER_MODEL
-				: t("general.keywordLlm.modelPlaceholderByok");
+		(isDefaultEndpoint && hasBuiltinKey);
+	const keyPlaceholder = t(
+		isDefaultEndpoint && hasBuiltinKey
+			? "general.keywordLlm.keyPlaceholderBuiltin"
+			: "general.keywordLlm.keyPlaceholder",
+	);
+	const modelPlaceholder = isDefaultEndpoint
+		? DEFAULT_KEYWORD_LLM_MODEL
+		: t("general.keywordLlm.modelPlaceholder");
 
 	return (
 		<div className="mb-5">
@@ -237,13 +200,13 @@ export function KeywordLlmSettingsBlock({
 							<p className="min-w-0 truncate font-medium text-sm">
 								{t("general.keywordLlm.section")}
 							</p>
-							{keyUrl ? (
+							{isDefaultEndpoint ? (
 								<Button
 									type="button"
 									variant="link"
 									size="xs"
 									className="-ml-1.5 h-auto shrink-0 px-1.5 text-primary"
-									onClick={() => void openExternalUrl(keyUrl)}
+									onClick={() => void openExternalUrl(KEYWORD_LLM_KEY_URL)}
 								>
 									<ExternalLink data-icon="inline-start" className="size-3" />
 									{t("general.keywordLlm.openKeyPage")}
@@ -265,28 +228,6 @@ export function KeywordLlmSettingsBlock({
 				/>
 				<div className="grid gap-1.5">
 					<ProviderFieldRow
-						label={t("general.keywordLlm.providerLabel")}
-						htmlFor="keyword-llm-provider"
-					>
-						<Select value={draft.provider} onValueChange={handleProviderChange}>
-							<SelectTrigger
-								id="keyword-llm-provider"
-								size="sm"
-								className="h-8 min-w-0 flex-1 text-xs"
-							>
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								{KEYWORD_LLM_PROVIDER_IDS.map((id) => (
-									<SelectItem key={id} value={id} className="text-xs">
-										{t(PROVIDER_LABEL_KEYS[id])}
-									</SelectItem>
-								))}
-							</SelectContent>
-						</Select>
-					</ProviderFieldRow>
-
-					<ProviderFieldRow
 						label={t("general.keywordLlm.baseUrlLabel")}
 						htmlFor="keyword-llm-base-url"
 					>
@@ -294,7 +235,7 @@ export function KeywordLlmSettingsBlock({
 							id="keyword-llm-base-url"
 							type="url"
 							autoComplete="off"
-							placeholder={KEYWORD_LLM_PROVIDER_PRESETS[draft.provider].baseUrl}
+							placeholder={DEFAULT_KEYWORD_LLM_BASE_URL}
 							className={PROVIDER_INPUT_CLASS}
 							value={draft.baseUrl}
 							onChange={(e) => {
@@ -321,17 +262,10 @@ export function KeywordLlmSettingsBlock({
 							className={PROVIDER_INPUT_CLASS}
 							value={draft.apiKey}
 							onChange={(e) => {
-								const next = e.currentTarget.value;
-								const shownMask = hasSecret(saved.apiKey)
-									? isSecretMask(saved.apiKey)
-										? saved.apiKey
-										: maskSecret(saved.apiKey)
-									: null;
-								const resolvedKey =
-									shownMask != null &&
-									(next === shownMask || next.startsWith(shownMask))
-										? next.slice(shownMask.length)
-										: next;
+								const resolvedKey = unwrapMaskedSecretInput(
+									e.currentTarget.value,
+									saved.apiKey,
+								);
 								setDraft((prev) => ({ ...prev, apiKey: resolvedKey }));
 							}}
 							onKeyDown={(e) => {

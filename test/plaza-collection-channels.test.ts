@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { commands } from "@/lib/core/bindings";
 import {
-	DEFAULT_OPEN_ROUTER_MODEL,
+	DEFAULT_KEYWORD_LLM_MODEL,
 	fetchKeywordLlmModels,
 	setCachedKeywordLlmConfigForTests,
 } from "@/lib/keyword-llm";
@@ -2042,8 +2042,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		];
 
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "test-openrouter-key",
+			apiKey: "test-llm-key",
 		});
 		try {
 			const openRouterPayloads: string[] = [];
@@ -2195,8 +2194,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		// 5. `refreshArxivCollection` heals already-cached `historyComplete: true` SQLite arXiv rows lacking keywords via Keyword LLM
 		resetCollectionMemoryForTests();
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "test-openrouter-key",
+			apiKey: "test-llm-key",
 		});
 		const ipc = installMockCollectionIpc({
 			categories: ["cs.SE"],
@@ -2466,8 +2464,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		}).join("\n");
 
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "test-openrouter-key",
+			apiKey: "test-llm-key",
 		});
 		try {
 			const jsonUrls: string[] = [];
@@ -2633,8 +2630,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 
 			// Refresh 2: User configures Keyword LLM -> both recent AND 120-day-old preprints get LLM keywords (`client_llm`) with 0 OpenAlex calls!
 			setCachedKeywordLlmConfigForTests({
-				provider: "openrouter",
-				apiKey: "test-openrouter-key",
+				apiKey: "test-llm-key",
 			});
 			const secondRefreshOpenAlexUrls: string[] = [];
 			let secondRefreshOpenRouterCalls = 0;
@@ -2729,16 +2725,19 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		const sp = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "sp-2026");
 		if (!sp) throw new Error("Missing sp-2026");
 
-		// Verify OpenRouter model catalog ordering (`:free` default first, then other `:free`, then paid models)
+		// Verify generic OpenAI-compatible model catalog ordering (active model pinned first if present, rest sorted alphabetically)
 		const models = await fetchKeywordLlmModels(
-			{ provider: "openrouter" },
+			{
+				baseUrl: "https://openrouter.ai/api/v1",
+				model: "qwen/qwen3-coder:free",
+			},
 			async () =>
 				new Response(
 					JSON.stringify({
 						data: [
 							{ id: "openai/gpt-5", name: "GPT-5" },
 							{
-								id: DEFAULT_OPEN_ROUTER_MODEL,
+								id: "baidu/ernie-5.5-flash-preview:free",
 								name: "Baidu: ERNIE 5.5 Flash Preview (free)",
 								context_length: 131072,
 							},
@@ -2753,14 +2752,13 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 				),
 		);
 		expect(models).toEqual([
-			DEFAULT_OPEN_ROUTER_MODEL,
 			"qwen/qwen3-coder:free",
+			"baidu/ernie-5.5-flash-preview:free",
 			"openai/gpt-5",
 		]);
 
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "test-openrouter-key",
+			apiKey: "test-llm-key",
 		});
 
 		try {
@@ -2832,7 +2830,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 							reasoning?: { effort?: string; exclude?: boolean };
 							messages?: Array<{ role: string; content: string }>;
 						};
-						expect(body.model).toBe(DEFAULT_OPEN_ROUTER_MODEL);
+						expect(body.model).toBe(DEFAULT_KEYWORD_LLM_MODEL);
 						// Simulate first-call 400 on custom reasoning check, then 200 with `<think>` block
 						if (callAttempt === 1) {
 							expect(body.reasoning).toEqual({
@@ -2898,8 +2896,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 	it("applies Smart Diff on Venue refresh: deletes extra SQLite rows, makes 0 OpenAlex calls on Group A, and sends only incomplete/new rows to Keyword LLM", async () => {
 		resetCollectionMemoryForTests();
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "test-openrouter-key",
+			apiKey: "test-llm-key",
 		});
 
 		const usenix = DEFAULT_COLLECTION_VENUES.find(

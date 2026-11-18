@@ -45,25 +45,20 @@ export const commands = {
 	 */
 	openAlexKeyGet: () => __TAURI_INVOKE<ApiResult<string | null>>("open_alex_key_get"),
 	/**
-	 *  Probe the keyword-extraction LLM configuration (either field overrides or
-	 *  stored settings). OpenRouter default `:free` preset checks `/auth/key` at
-	 *  zero token cost; other models and BYOK OpenAI-compatible endpoints run a
-	 *  minimal `/chat/completions` probe.
+	 *  Probe an OpenAI-compatible keyword-extraction LLM configuration (using either
+	 *  field overrides or stored settings) via a minimal `/chat/completions` call.
 	 */
 	keywordLlmProbe: (args: {
-	provider?: string | null,
 	baseUrl?: string | null,
 	apiKey?: string | null,
 	model?: string | null,
 } | null) => __TAURI_INVOKE<ApiResult<boolean>>("keyword_llm_probe", { args }),
 	/**
-	 *  Fetch available models from an OpenAI-compatible `/models` endpoint (using
-	 *  either field overrides or stored settings). For `x666`, `DEFAULT_X666_MODEL`
-	 *  appears first; for OpenRouter, `:free` models (starting with
-	 *  `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+	 *  Fetch available model ids from an OpenAI-compatible `/models` endpoint
+	 *  (using either field overrides or stored settings), sorted alphabetically with
+	 *  the configured model pinned first if present.
 	 */
 	keywordLlmModelsList: (args: {
-	provider?: string | null,
 	baseUrl?: string | null,
 	apiKey?: string | null,
 	model?: string | null,
@@ -73,10 +68,7 @@ export const commands = {
 	 *  keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
 	 */
 	keywordLlmChatComplete: (systemPrompt: string, userPrompt: string, maxTokens: number | null) => __TAURI_INVOKE<ApiResult<KeywordLlmChatResult | null>>("keyword_llm_chat_complete", { systemPrompt, userPrompt, maxTokens }),
-	/**
-	 *  Whether a compile-time built-in API key is available for the default `x666`
-	 *  keyword-extraction preset.
-	 */
+	/**  Whether a compile-time built-in API key is available for the default keyword-LLM endpoint. */
 	keywordLlmHasBuiltinKey: () => __TAURI_INVOKE<ApiResult<boolean>>("keyword_llm_has_builtin_key"),
 	/**
 	 *  Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
@@ -3828,24 +3820,18 @@ export type KeywordLlmChatResult = {
 
 /**  Optional field overrides when probing or listing models before saving. */
 export type KeywordLlmOverrideArgs = {
-	provider?: string | null,
 	baseUrl?: string | null,
 	apiKey?: string | null,
 	model?: string | null,
 };
 
-/**
- *  Keyword-extraction fallback LLM configuration (x666 default preset, OpenRouter preset,
- *  or custom OpenAI-compatible BYOK endpoint).
- */
+/**  Generic OpenAI-compatible LLM configuration for fallback keyword extraction. */
 export type KeywordLlmSettings = {
-	/**  `x666` (default preset) | `openrouter` (preset) | `openaiCompatible` (BYOK). */
-	provider?: string,
-	/**  OpenAI-compatible API base URL (e.g. `https://x666.me/v1` or `https://openrouter.ai/api/v1`). */
+	/**  OpenAI-compatible API base URL (defaults to `https://x666.me/v1`). */
 	baseUrl?: string,
-	/**  API key; masked (`*`) when echoed back from the Host. */
+	/**  Optional API key; masked (`*`) when echoed back from the Host. */
 	apiKey?: string,
-	/**  Chat model id (e.g. `ernie-5.5-flash-preview`, `gpt-4o-mini`). */
+	/**  Chat model id (defaults to `ernie-5.5-flash-preview`). */
 	model?: string,
 };
 

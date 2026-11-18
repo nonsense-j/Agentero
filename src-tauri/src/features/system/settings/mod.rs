@@ -21,19 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_NETWORK_PROXY_URL: &str = "http://127.0.0.1:7890";
-/// Default x666 OpenAI-compatible API base URL for keyword extraction.
-pub const DEFAULT_X666_BASE_URL: &str = "https://x666.me/v1";
-/// Default x666 chat model id used for fallback keyword extraction.
-pub const DEFAULT_X666_MODEL: &str = "ernie-5.5-flash-preview";
-/// Default OpenRouter API base URL (OpenAI-compatible) for the OpenRouter preset.
-pub const DEFAULT_OPEN_ROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-/// Default OpenAI-compatible base URL when BYOK `baseUrl` is left empty.
-pub const DEFAULT_OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.openai.com/v1";
-/// Default free OpenRouter model used for fallback venue keyword extraction.
-pub const DEFAULT_OPEN_ROUTER_MODEL: &str = "baidu/ernie-5.5-flash-preview:free";
-pub const KEYWORD_LLM_PROVIDER_X666: &str = "x666";
-pub const KEYWORD_LLM_PROVIDER_OPENROUTER: &str = "openrouter";
-pub const KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE: &str = "openaiCompatible";
+/// Default OpenAI-compatible API base URL for keyword extraction (`x666.me`).
+pub const DEFAULT_KEYWORD_LLM_BASE_URL: &str = "https://x666.me/v1";
+/// Default chat model id used for fallback keyword extraction.
+pub const DEFAULT_KEYWORD_LLM_MODEL: &str = "ernie-5.5-flash-preview";
 /// Default System One endpoint (TypeSafe jEV). Clef/OpenAI presets override it.
 pub const DEFAULT_DECISION_BASE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 /// Default Zotero Connector port (must match the official extension default).
@@ -91,13 +82,6 @@ pub struct AppSettings {
     /// Optional LLM endpoint for fallback paper keyword extraction.
     #[serde(default)]
     pub keyword_llm: KeywordLlmSettings,
-    /// Legacy local-dev OpenRouter fields migrated into `keyword_llm` on load.
-    #[serde(default, skip_serializing)]
-    #[specta(skip)]
-    open_router_key: String,
-    #[serde(default, skip_serializing)]
-    #[specta(skip)]
-    open_router_model: String,
     #[serde(default)]
     pub network_proxy_enabled: bool,
     #[serde(default = "default_network_proxy_url")]
@@ -311,32 +295,27 @@ impl Default for DecisionSettings {
     }
 }
 
-/// Keyword-extraction fallback LLM configuration (x666 default preset, OpenRouter preset,
-/// or custom OpenAI-compatible BYOK endpoint).
+/// Generic OpenAI-compatible LLM configuration for fallback keyword extraction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct KeywordLlmSettings {
-    /// `x666` (default preset) | `openrouter` (preset) | `openaiCompatible` (BYOK).
-    #[serde(default = "default_keyword_llm_provider")]
-    pub provider: String,
-    /// OpenAI-compatible API base URL (e.g. `https://x666.me/v1` or `https://openrouter.ai/api/v1`).
-    #[serde(default = "default_x666_base_url")]
+    /// OpenAI-compatible API base URL (defaults to `https://x666.me/v1`).
+    #[serde(default = "default_keyword_llm_base_url")]
     pub base_url: String,
-    /// API key; masked (`*`) when echoed back from the Host.
+    /// Optional API key; masked (`*`) when echoed back from the Host.
     #[serde(default)]
     pub api_key: String,
-    /// Chat model id (e.g. `ernie-5.5-flash-preview`, `gpt-4o-mini`).
-    #[serde(default = "default_x666_model")]
+    /// Chat model id (defaults to `ernie-5.5-flash-preview`).
+    #[serde(default = "default_keyword_llm_model")]
     pub model: String,
 }
 
 impl Default for KeywordLlmSettings {
     fn default() -> Self {
         Self {
-            provider: default_keyword_llm_provider(),
-            base_url: default_x666_base_url(),
+            base_url: default_keyword_llm_base_url(),
             api_key: String::new(),
-            model: default_x666_model(),
+            model: default_keyword_llm_model(),
         }
     }
 }
@@ -498,8 +477,6 @@ impl Default for AppSettings {
             easy_scholar_key: String::new(),
             open_alex_key: String::new(),
             keyword_llm: KeywordLlmSettings::default(),
-            open_router_key: String::new(),
-            open_router_model: String::new(),
             network_proxy_enabled: false,
             network_proxy_url: default_network_proxy_url(),
             institution_proxy_prefix: String::new(),
@@ -560,29 +537,23 @@ fn default_true() -> bool {
 fn default_network_proxy_url() -> String {
     DEFAULT_NETWORK_PROXY_URL.to_string()
 }
-fn default_keyword_llm_provider() -> String {
-    KEYWORD_LLM_PROVIDER_X666.to_string()
+fn default_keyword_llm_base_url() -> String {
+    DEFAULT_KEYWORD_LLM_BASE_URL.to_string()
 }
-fn default_x666_base_url() -> String {
-    DEFAULT_X666_BASE_URL.to_string()
-}
-fn default_x666_model() -> String {
-    DEFAULT_X666_MODEL.to_string()
-}
-fn default_open_router_base_url() -> String {
-    DEFAULT_OPEN_ROUTER_BASE_URL.to_string()
-}
-fn default_open_router_model() -> String {
-    DEFAULT_OPEN_ROUTER_MODEL.to_string()
+fn default_keyword_llm_model() -> String {
+    DEFAULT_KEYWORD_LLM_MODEL.to_string()
 }
 
-/// Optional compile-time API key for the default `x666` keyword-LLM preset.
-/// Keeps secrets out of tracked source code and `settings.json` while letting
-/// `.env` / release builds work out of the box when no user key is entered.
-pub fn default_x666_api_key() -> Option<&'static str> {
+/// Optional compile-time API key for the default keyword-LLM endpoint.
+pub fn default_keyword_llm_api_key() -> Option<&'static str> {
     option_env!("AGENTERO_KEYWORD_LLM_API_KEY")
         .map(str::trim)
         .filter(|k| !k.is_empty())
+}
+
+pub fn is_default_keyword_llm_base_url(base_url: &str) -> bool {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case(DEFAULT_KEYWORD_LLM_BASE_URL)
 }
 fn default_decision_provider() -> String {
     "jev".to_string()
@@ -1178,68 +1149,47 @@ impl AppSettingsStore {
 /// Normalized runtime configuration for keyword extraction LLM calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeywordLlmResolvedConfig {
-    pub provider: String,
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
 }
 
-pub fn normalize_keyword_llm_provider(raw: &str) -> &'static str {
-    let trimmed = raw.trim();
-    if trimmed.eq_ignore_ascii_case(KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE)
-        || trimmed.eq_ignore_ascii_case("custom")
-    {
-        KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE
-    } else if trimmed.eq_ignore_ascii_case(KEYWORD_LLM_PROVIDER_OPENROUTER) {
-        KEYWORD_LLM_PROVIDER_OPENROUTER
-    } else {
-        KEYWORD_LLM_PROVIDER_X666
-    }
-}
-
 /// Resolve a `KeywordLlmSettings` snapshot into an executable endpoint configuration.
-/// Returns `None` when the provider is not configured for runtime requests.
+/// Returns `None` when the configuration cannot supply a runnable endpoint/model pair.
 pub fn resolve_keyword_llm_config(raw: &KeywordLlmSettings) -> Option<KeywordLlmResolvedConfig> {
-    let provider = normalize_keyword_llm_provider(&raw.provider).to_string();
+    let raw_base = raw.base_url.trim().trim_end_matches('/');
+    let base_url = if raw_base.is_empty() {
+        DEFAULT_KEYWORD_LLM_BASE_URL.to_string()
+    } else {
+        raw_base.to_string()
+    };
+    let is_default_endpoint = is_default_keyword_llm_base_url(&base_url);
+
     let key = raw.api_key.trim();
     let api_key = if key.is_empty() || is_translate_api_key_mask(key) {
-        if provider == KEYWORD_LLM_PROVIDER_X666 {
-            default_x666_api_key().map(str::to_string)
+        if is_default_endpoint {
+            default_keyword_llm_api_key().map(str::to_string)
         } else {
             None
         }
     } else {
         Some(key.to_string())
     };
-    let raw_base = raw.base_url.trim().trim_end_matches('/');
-    let base_url = if !raw_base.is_empty() {
-        raw_base.to_string()
-    } else if provider == KEYWORD_LLM_PROVIDER_X666 {
-        DEFAULT_X666_BASE_URL.to_string()
-    } else if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
-        DEFAULT_OPEN_ROUTER_BASE_URL.to_string()
-    } else {
-        DEFAULT_OPENAI_COMPATIBLE_BASE_URL.to_string()
-    };
+
     let trimmed_model = raw.model.trim();
     let model = if !trimmed_model.is_empty() {
         trimmed_model.to_string()
-    } else if provider == KEYWORD_LLM_PROVIDER_X666 {
-        DEFAULT_X666_MODEL.to_string()
-    } else if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
-        DEFAULT_OPEN_ROUTER_MODEL.to_string()
+    } else if is_default_endpoint {
+        DEFAULT_KEYWORD_LLM_MODEL.to_string()
     } else {
         return None;
     };
 
-    if provider == KEYWORD_LLM_PROVIDER_X666 || provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
-        api_key.as_ref()?;
-    } else if api_key.is_none() && raw_base.is_empty() {
+    if is_default_endpoint && api_key.is_none() {
         return None;
     }
 
     Some(KeywordLlmResolvedConfig {
-        provider,
         base_url,
         api_key,
         model,
@@ -1393,49 +1343,14 @@ fn normalize(s: &mut AppSettings) {
     }
     s.easy_scholar_key = s.easy_scholar_key.trim().to_string();
     s.open_alex_key = s.open_alex_key.trim().to_string();
-    let legacy_open_router_key = s.open_router_key.trim().to_string();
-    let legacy_open_router_model = s.open_router_model.trim().to_string();
-    if s.keyword_llm.api_key.trim().is_empty() && !legacy_open_router_key.is_empty() {
-        s.keyword_llm.provider = KEYWORD_LLM_PROVIDER_OPENROUTER.to_string();
-        if s.keyword_llm.base_url.trim().is_empty()
-            || s.keyword_llm.base_url.trim() == DEFAULT_X666_BASE_URL
-        {
-            s.keyword_llm.base_url = default_open_router_base_url();
-        }
-        s.keyword_llm.api_key = legacy_open_router_key;
-        if !legacy_open_router_model.is_empty()
-            && (s.keyword_llm.model.trim().is_empty()
-                || s.keyword_llm.model.trim() == DEFAULT_X666_MODEL
-                || s.keyword_llm.model.trim() == DEFAULT_OPEN_ROUTER_MODEL)
-        {
-            s.keyword_llm.model = legacy_open_router_model;
-        } else if s.keyword_llm.model.trim().is_empty()
-            || s.keyword_llm.model.trim() == DEFAULT_X666_MODEL
-        {
-            s.keyword_llm.model = default_open_router_model();
-        }
-    }
-    s.open_router_key.clear();
-    s.open_router_model.clear();
-
-    s.keyword_llm.provider = normalize_keyword_llm_provider(&s.keyword_llm.provider).to_string();
     s.keyword_llm.api_key = s.keyword_llm.api_key.trim().to_string();
     s.keyword_llm.base_url = s.keyword_llm.base_url.trim().to_string();
     s.keyword_llm.model = s.keyword_llm.model.trim().to_string();
-    if s.keyword_llm.provider == KEYWORD_LLM_PROVIDER_X666 {
-        if s.keyword_llm.base_url.is_empty() {
-            s.keyword_llm.base_url = default_x666_base_url();
-        }
-        if s.keyword_llm.model.is_empty() {
-            s.keyword_llm.model = default_x666_model();
-        }
-    } else if s.keyword_llm.provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
-        if s.keyword_llm.base_url.is_empty() {
-            s.keyword_llm.base_url = default_open_router_base_url();
-        }
-        if s.keyword_llm.model.is_empty() {
-            s.keyword_llm.model = default_open_router_model();
-        }
+    if s.keyword_llm.base_url.is_empty() {
+        s.keyword_llm.base_url = default_keyword_llm_base_url();
+    }
+    if s.keyword_llm.model.is_empty() {
+        s.keyword_llm.model = default_keyword_llm_model();
     }
     s.decision.api_key = s.decision.api_key.trim().to_string();
     let provider = s.decision.provider.trim().to_ascii_lowercase();
@@ -2702,25 +2617,22 @@ mod tests {
     }
 
     #[test]
-    fn keyword_llm_redacts_merges_supports_byok_and_migrates_legacy_key() {
+    fn keyword_llm_redacts_merges_and_supports_custom_endpoints() {
         let store = AppSettingsStore::for_tests(AppSettings::default());
         let initial = store.get().unwrap().settings;
-        assert_eq!(initial.keyword_llm.provider, KEYWORD_LLM_PROVIDER_X666);
-        assert_eq!(initial.keyword_llm.base_url, DEFAULT_X666_BASE_URL);
-        assert_eq!(initial.keyword_llm.model, DEFAULT_X666_MODEL);
-        if default_x666_api_key().is_none() {
+        assert_eq!(initial.keyword_llm.base_url, DEFAULT_KEYWORD_LLM_BASE_URL);
+        assert_eq!(initial.keyword_llm.model, DEFAULT_KEYWORD_LLM_MODEL);
+        if default_keyword_llm_api_key().is_none() {
             assert!(store.keyword_llm_config().is_none());
         } else {
-            let x666_resolved = store.keyword_llm_config().unwrap();
-            assert_eq!(x666_resolved.provider, KEYWORD_LLM_PROVIDER_X666);
-            assert_eq!(x666_resolved.base_url, DEFAULT_X666_BASE_URL);
-            assert_eq!(x666_resolved.model, DEFAULT_X666_MODEL);
+            let resolved = store.keyword_llm_config().unwrap();
+            assert_eq!(resolved.base_url, DEFAULT_KEYWORD_LLM_BASE_URL);
+            assert_eq!(resolved.model, DEFAULT_KEYWORD_LLM_MODEL);
         }
 
         let mut incoming = AppSettings {
             keyword_llm: KeywordLlmSettings {
-                provider: KEYWORD_LLM_PROVIDER_OPENROUTER.to_string(),
-                base_url: String::new(),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: "  test-router-secret  ".to_string(),
                 model: "openai/gpt-4o-mini".to_string(),
             },
@@ -2728,74 +2640,61 @@ mod tests {
         };
         let redacted = store.set(incoming.clone()).unwrap();
         assert_eq!(redacted.keyword_llm.api_key, "******************");
-        assert_eq!(redacted.keyword_llm.base_url, DEFAULT_OPEN_ROUTER_BASE_URL);
+        assert_eq!(
+            redacted.keyword_llm.base_url,
+            "https://openrouter.ai/api/v1"
+        );
         assert_eq!(redacted.keyword_llm.model, "openai/gpt-4o-mini");
         let resolved = store.keyword_llm_config().unwrap();
-        assert_eq!(resolved.provider, KEYWORD_LLM_PROVIDER_OPENROUTER);
-        assert_eq!(resolved.base_url, DEFAULT_OPEN_ROUTER_BASE_URL);
+        assert_eq!(resolved.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("test-router-secret"));
         assert_eq!(resolved.model, "openai/gpt-4o-mini");
 
-        // Mask preserves previous secret; switching to openaiCompatible BYOK defaults to OpenAI base URL.
+        // Mask preserves previous secret across updates.
         incoming.keyword_llm = KeywordLlmSettings {
-            provider: KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE.to_string(),
-            base_url: String::new(),
+            base_url: "https://api.openai.com/v1".to_string(),
             api_key: redacted.keyword_llm.api_key.clone(),
             model: "gpt-4o-mini".to_string(),
         };
         let updated = store.set(incoming.clone()).unwrap();
-        assert_eq!(
-            updated.keyword_llm.provider,
-            KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE
-        );
         assert_eq!(updated.keyword_llm.api_key, "******************");
         let byok_resolved = store.keyword_llm_config().unwrap();
-        assert_eq!(byok_resolved.base_url, DEFAULT_OPENAI_COMPATIBLE_BASE_URL);
+        assert_eq!(byok_resolved.base_url, "https://api.openai.com/v1");
         assert_eq!(byok_resolved.api_key.as_deref(), Some("test-router-secret"));
         assert_eq!(byok_resolved.model, "gpt-4o-mini");
 
-        // Keyless local OpenAI-compatible server with explicit baseUrl + model is valid; all-empty is inactive.
+        // Keyless local OpenAI-compatible server with explicit baseUrl + model is active.
         incoming.keyword_llm = KeywordLlmSettings {
-            provider: "custom".to_string(),
             base_url: "http://localhost:11434/v1".to_string(),
             api_key: String::new(),
             model: "qwen2.5:7b".to_string(),
         };
         store.set(incoming.clone()).unwrap();
         let local_resolved = store.keyword_llm_config().unwrap();
-        assert_eq!(
-            local_resolved.provider,
-            KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE
-        );
         assert_eq!(local_resolved.base_url, "http://localhost:11434/v1");
         assert!(local_resolved.api_key.is_none());
 
-        incoming.keyword_llm = KeywordLlmSettings {
-            provider: KEYWORD_LLM_PROVIDER_OPENAI_COMPATIBLE.to_string(),
-            base_url: String::new(),
-            api_key: String::new(),
-            model: String::new(),
-        };
-        store.set(incoming).unwrap();
-        assert!(store.keyword_llm_config().is_none());
-
-        // Legacy `openRouterKey` / `openRouterModel` JSON migrates into `keywordLlm`.
+        // Legacy settings JSON with an extra `provider` field deserializes cleanly into `{baseUrl, apiKey, model}`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         fs::write(
             &path,
             serde_json::json!({
-                "openRouterKey": "sk-or-legacy",
-                "openRouterModel": "qwen/qwen3-coder:free"
+                "keywordLlm": {
+                    "provider": "openrouter",
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "apiKey": "sk-or-saved",
+                    "model": "qwen/qwen3-coder:free"
+                }
             })
             .to_string(),
         )
         .unwrap();
-        let (migrated, existed) = read_file(&path);
+        let (loaded, existed) = read_file(&path);
         assert!(existed);
-        assert_eq!(migrated.keyword_llm.api_key, "sk-or-legacy");
-        assert_eq!(migrated.keyword_llm.model, "qwen/qwen3-coder:free");
-        assert_eq!(migrated.keyword_llm.base_url, DEFAULT_OPEN_ROUTER_BASE_URL);
+        assert_eq!(loaded.keyword_llm.api_key, "sk-or-saved");
+        assert_eq!(loaded.keyword_llm.model, "qwen/qwen3-coder:free");
+        assert_eq!(loaded.keyword_llm.base_url, "https://openrouter.ai/api/v1");
     }
 }
 

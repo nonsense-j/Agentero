@@ -18,3 +18,20 @@ export function isSecretMask(secret: string | undefined): boolean {
 export function hasSecret(secret: string | undefined): boolean {
 	return Boolean(secret?.trim());
 }
+
+/**
+ * Strip the leading `*` mask echoed by Host when the user types into a masked
+ * password input, so typing appends or replaces instead of mixing `*` with key text.
+ */
+export function unwrapMaskedSecretInput(
+	nextValue: string,
+	savedSecret: string,
+): string {
+	if (!hasSecret(savedSecret)) return nextValue;
+	const shownMask = isSecretMask(savedSecret)
+		? savedSecret
+		: maskSecret(savedSecret);
+	return nextValue === shownMask || nextValue.startsWith(shownMask)
+		? nextValue.slice(shownMask.length)
+		: nextValue;
+}

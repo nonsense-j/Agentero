@@ -27,14 +27,12 @@ import {
 	DECISION_PROVIDER_PRESETS,
 	DEFAULT_DECISION_SETTINGS,
 	DEFAULT_EMBEDDING_SETTINGS,
+	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_MODEL,
 	DEFAULT_KEYWORD_LLM_SETTINGS,
-	DEFAULT_OPEN_ROUTER_BASE_URL,
-	DEFAULT_OPEN_ROUTER_MODEL,
 	DEFAULT_PAPER_READER_SETTINGS,
 	DEFAULT_PDF_ASK_SETTINGS,
 	DEFAULT_SETTINGS,
-	DEFAULT_X666_BASE_URL,
-	DEFAULT_X666_MODEL,
 	snapUiScale,
 } from "@/lib/settings/defaults";
 import { normalizeFontFamilyValue } from "@/lib/settings/fonts";
@@ -317,8 +315,6 @@ function normalizePartial(
 		downloadFulltextWhenNoRemotePreview?: boolean;
 		/** @deprecated pre-#242 single editor font preset */
 		editorFontFamily?: string;
-		openRouterKey?: string;
-		openRouterModel?: string;
 	},
 ): AppSettings {
 	const {
@@ -329,8 +325,6 @@ function normalizePartial(
 		downloadFulltextToLocal: _d1,
 		downloadFulltextWhenNoRemotePreview: _d2,
 		editorFontFamily: legacyEditorFontFamily,
-		openRouterKey: legacyOpenRouterKey,
-		openRouterModel: legacyOpenRouterModel,
 		...rest
 	} = parsed;
 	const merged = { ...DEFAULT_SETTINGS, ...rest };
@@ -355,8 +349,6 @@ function normalizePartial(
 	}
 	merged.keywordLlm = normalizeKeywordLlmSettings(
 		(parsed as { keywordLlm?: Partial<KeywordLlmSettings> }).keywordLlm,
-		legacyOpenRouterKey,
-		legacyOpenRouterModel,
 	);
 	if (typeof parsed.networkProxyEnabled !== "boolean") {
 		merged.networkProxyEnabled = DEFAULT_SETTINGS.networkProxyEnabled;
@@ -569,70 +561,19 @@ function normalizeDecisionSettings(raw: unknown): DecisionSettings {
 	return base;
 }
 
-function normalizeKeywordLlmSettings(
-	raw: unknown,
-	legacyKey?: string,
-	legacyModel?: string,
-): KeywordLlmSettings {
+function normalizeKeywordLlmSettings(raw: unknown): KeywordLlmSettings {
 	const base: KeywordLlmSettings = { ...DEFAULT_KEYWORD_LLM_SETTINGS };
 	const partial =
 		raw && typeof raw === "object" ? (raw as Partial<KeywordLlmSettings>) : {};
-	const rawProvider =
-		typeof partial.provider === "string"
-			? partial.provider.trim().toLowerCase()
-			: "";
-	if (rawProvider === "openaicompatible" || rawProvider === "custom") {
-		base.provider = "openaiCompatible";
-	} else if (rawProvider === "openrouter") {
-		base.provider = "openrouter";
-	} else {
-		base.provider = "x666";
-	}
 	if (typeof partial.apiKey === "string") {
 		base.apiKey = partial.apiKey.trim();
 	}
 	// Do not strip trailing slash here so typing e.g. ".../v1/" is not eaten mid-keystroke.
 	if (typeof partial.baseUrl === "string") {
-		base.baseUrl = partial.baseUrl.trim();
-	} else if (base.provider === "openrouter") {
-		base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
-	} else if (base.provider === "openaiCompatible") {
-		base.baseUrl = "";
+		base.baseUrl = partial.baseUrl.trim() || DEFAULT_KEYWORD_LLM_BASE_URL;
 	}
 	if (typeof partial.model === "string") {
-		base.model = partial.model.trim();
-	} else if (base.provider === "openrouter") {
-		base.model = DEFAULT_OPEN_ROUTER_MODEL;
-	} else if (base.provider === "openaiCompatible") {
-		base.model = "";
-	}
-	const trimmedLegacyKey =
-		typeof legacyKey === "string" ? legacyKey.trim() : "";
-	const trimmedLegacyModel =
-		typeof legacyModel === "string" ? legacyModel.trim() : "";
-	if (!base.apiKey && trimmedLegacyKey) {
-		base.provider = "openrouter";
-		if (!base.baseUrl || base.baseUrl === DEFAULT_X666_BASE_URL) {
-			base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
-		}
-		base.apiKey = trimmedLegacyKey;
-		if (
-			trimmedLegacyModel &&
-			(!base.model ||
-				base.model === DEFAULT_X666_MODEL ||
-				base.model === DEFAULT_OPEN_ROUTER_MODEL)
-		) {
-			base.model = trimmedLegacyModel;
-		} else if (!base.model || base.model === DEFAULT_X666_MODEL) {
-			base.model = DEFAULT_OPEN_ROUTER_MODEL;
-		}
-	}
-	if (base.provider === "x666") {
-		if (!base.baseUrl) base.baseUrl = DEFAULT_X666_BASE_URL;
-		if (!base.model) base.model = DEFAULT_X666_MODEL;
-	} else if (base.provider === "openrouter") {
-		if (!base.baseUrl) base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
-		if (!base.model) base.model = DEFAULT_OPEN_ROUTER_MODEL;
+		base.model = partial.model.trim() || DEFAULT_KEYWORD_LLM_MODEL;
 	}
 	return base;
 }

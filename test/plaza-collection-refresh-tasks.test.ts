@@ -377,7 +377,6 @@ describe("Plaza Paper Collection background task integration", () => {
 
 	it("emits live intermediate percentages and per-paper sub-progress during arXiv cold-start, preload, and keyword backfill", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openaiCompatible",
 			baseUrl: "https://mock.llm.local/v1",
 			apiKey: "test-key",
 			model: "mock-model",
@@ -475,7 +474,6 @@ describe("Plaza Paper Collection background task integration", () => {
 
 	it("reports chunk progress and aborts promptly via AbortSignal in extractKeywordsWithKeywordLlmBatch", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openaiCompatible",
 			baseUrl: "https://mock.llm.local/v1",
 			apiKey: "test-key",
 			model: "mock-model",

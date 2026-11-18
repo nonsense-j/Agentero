@@ -1,11 +1,9 @@
 /**
- * Fallback LLM helpers for academic keyword extraction across arXiv and Venue
- * papers when upstream publisher / OpenAlex keywords are absent.
+ * Generic OpenAI-compatible helpers for academic keyword extraction across arXiv
+ * and Venue papers when upstream publisher / OpenAlex keywords are absent.
  *
- * Supports:
- * - `x666` default preset (`https://x666.me/v1`, default `ernie-5.5-flash-preview`)
- * - `openrouter` preset (`https://openrouter.ai/api/v1`, default `baidu/ernie-5.5-flash-preview:free`)
- * - `openaiCompatible` BYOK (`Base URL`, `API Key`, `Model`, defaulting to `https://api.openai.com/v1`)
+ * Defaults to `https://x666.me/v1` + `ernie-5.5-flash-preview` and works with any
+ * OpenAI-compatible endpoint (`Base URL`, `API Key`, `Model`).
  *
  * On desktop (`isTauri()`), probes, `/models` fetches, and `/chat/completions`
  * execute inside the Rust Host so BYOK keys remain masked (`*`) in the WebView,
@@ -18,30 +16,16 @@ import { callApi } from "@/lib/core/ipc";
 import { hasSecret, isSecretMask } from "@/lib/core/secret-mask";
 import { isTauri } from "@/lib/core/tauri";
 import {
-	DEFAULT_OPEN_ROUTER_BASE_URL,
-	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
-	DEFAULT_X666_BASE_URL,
-	DEFAULT_X666_MODEL,
+	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_MODEL,
 } from "@/lib/settings/defaults";
 import { loadSettings } from "@/lib/settings/store";
-import {
-	isKeywordLlmProviderId,
-	type KeywordLlmProviderId,
-	type KeywordLlmSettings,
-} from "@/lib/settings/types";
+import type { KeywordLlmSettings } from "@/lib/settings/types";
 import type { ProbeStatus } from "@/lib/ui/probe-status";
 
-export {
-	DEFAULT_OPEN_ROUTER_BASE_URL,
-	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
-	DEFAULT_X666_BASE_URL,
-	DEFAULT_X666_MODEL,
-};
+export { DEFAULT_KEYWORD_LLM_BASE_URL, DEFAULT_KEYWORD_LLM_MODEL };
 
-export const X666_KEY_URL = "https://x666.me";
-export const OPENROUTER_KEY_URL = "https://openrouter.ai/settings/keys";
+export const KEYWORD_LLM_KEY_URL = "https://x666.me";
 
 export type KeywordLlmProbeStatus = ProbeStatus;
 
@@ -70,48 +54,6 @@ export const KEYWORD_SYSTEM_PROMPT = [
 
 let testConfigOverride: KeywordLlmSettings | null | undefined;
 
-function defaultBaseUrlForProvider(provider: KeywordLlmProviderId): string {
-	if (provider === "x666") return DEFAULT_X666_BASE_URL;
-	if (provider === "openrouter") return DEFAULT_OPEN_ROUTER_BASE_URL;
-	return DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
-}
-
-function defaultModelForProvider(provider: KeywordLlmProviderId): string {
-	if (provider === "x666") return DEFAULT_X666_MODEL;
-	if (provider === "openrouter") return DEFAULT_OPEN_ROUTER_MODEL;
-	return "";
-}
-
-/** Switch provider in UI draft state, swapping untouched preset URLs/models cleanly. */
-export function switchKeywordLlmProviderDraft(
-	prev: KeywordLlmSettings,
-	nextProvider: KeywordLlmProviderId,
-): KeywordLlmSettings {
-	const trimmedUrl = prev.baseUrl.trim();
-	const trimmedModel = prev.model.trim();
-	const presetUrls = new Set([
-		"",
-		DEFAULT_X666_BASE_URL,
-		DEFAULT_OPEN_ROUTER_BASE_URL,
-		DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
-	]);
-	const presetModels = new Set([
-		"",
-		DEFAULT_X666_MODEL,
-		DEFAULT_OPEN_ROUTER_MODEL,
-	]);
-	return {
-		...prev,
-		provider: nextProvider,
-		baseUrl: presetUrls.has(trimmedUrl)
-			? defaultBaseUrlForProvider(nextProvider)
-			: prev.baseUrl,
-		model: presetModels.has(trimmedModel)
-			? defaultModelForProvider(nextProvider)
-			: prev.model,
-	};
-}
-
 function stripTrailingCiSuffix(value: string, suffix: string): string | null {
 	if (value.length < suffix.length) return null;
 	if (value.slice(-suffix.length).toLowerCase() === suffix.toLowerCase()) {
@@ -122,18 +64,16 @@ function stripTrailingCiSuffix(value: string, suffix: string): string | null {
 
 function resolveOpenAiCompatibleEndpoint(
 	baseUrl: string | null | undefined,
-	provider: KeywordLlmProviderId,
 	suffix: "/chat/completions" | "/models",
 ): string {
-	const fallbackRoot = defaultBaseUrlForProvider(provider);
-	const raw = baseUrl?.trim() || fallbackRoot;
+	const raw = baseUrl?.trim() || DEFAULT_KEYWORD_LLM_BASE_URL;
 	let cleaned = raw.replace(/\/+$/, "");
-	const withoutChat = stripTrailingCiSuffix(cleaned, "/chat/completions");
-	const withoutModels = stripTrailingCiSuffix(cleaned, "/models");
-	if (withoutChat !== null) {
-		cleaned = withoutChat.replace(/\/+$/, "");
-	} else if (withoutModels !== null) {
-		cleaned = withoutModels.replace(/\/+$/, "");
+	for (const known of ["/chat/completions", "/models"]) {
+		const stripped = stripTrailingCiSuffix(cleaned, known);
+		if (stripped !== null) {
+			cleaned = stripped.replace(/\/+$/, "");
+			break;
+		}
 	}
 	try {
 		const url = new URL(cleaned);
@@ -148,56 +88,33 @@ function resolveOpenAiCompatibleEndpoint(
 	}
 }
 
-export function resolveKeywordLlmChatUrl(
-	baseUrl?: string | null,
-	provider: KeywordLlmProviderId = "openaiCompatible",
-): string {
-	return resolveOpenAiCompatibleEndpoint(
-		baseUrl,
-		provider,
-		"/chat/completions",
+export function resolveKeywordLlmChatUrl(baseUrl?: string | null): string {
+	return resolveOpenAiCompatibleEndpoint(baseUrl, "/chat/completions");
+}
+
+export function resolveKeywordLlmModelsUrl(baseUrl?: string | null): string {
+	return resolveOpenAiCompatibleEndpoint(baseUrl, "/models");
+}
+
+/** True when `baseUrl` is empty or matches the built-in default endpoint. */
+export function isDefaultKeywordLlmBaseUrl(baseUrl?: string | null): boolean {
+	const normalized = resolveKeywordLlmChatUrl(baseUrl);
+	return (
+		Boolean(normalized) &&
+		normalized === resolveKeywordLlmChatUrl(DEFAULT_KEYWORD_LLM_BASE_URL)
 	);
 }
 
-export function resolveKeywordLlmModelsUrl(
-	baseUrl?: string | null,
-	provider: KeywordLlmProviderId = "openaiCompatible",
-): string {
-	return resolveOpenAiCompatibleEndpoint(baseUrl, provider, "/models");
-}
-
-function isOpenRouterEndpoint(urlStr: string): boolean {
-	try {
-		return new URL(urlStr).hostname.toLowerCase() === "openrouter.ai";
-	} catch {
-		return false;
-	}
-}
-
-function isX666Endpoint(urlStr: string): boolean {
-	try {
-		const host = new URL(urlStr).hostname.toLowerCase();
-		return host === "x666.me" || host.endsWith(".x666.me");
-	} catch {
-		return false;
-	}
-}
-
 export function isKeywordLlmConfigured(cfg: KeywordLlmSettings): boolean {
-	if (cfg.provider === "x666") {
-		const model = cfg.model.trim() || DEFAULT_X666_MODEL;
-		return hasSecret(cfg.apiKey) && Boolean(model);
-	}
-	if (cfg.provider === "openrouter") {
-		const model = cfg.model.trim() || DEFAULT_OPEN_ROUTER_MODEL;
-		return hasSecret(cfg.apiKey) && Boolean(model);
-	}
+	const baseUrl = cfg.baseUrl.trim() || DEFAULT_KEYWORD_LLM_BASE_URL;
 	const model = cfg.model.trim();
 	if (!model) return false;
-	return hasSecret(cfg.apiKey) || Boolean(cfg.baseUrl.trim());
+	if (hasSecret(cfg.apiKey)) return true;
+	// Allow keyless custom endpoints (e.g. Ollama / vLLM), while requiring a key on the default endpoint.
+	return !isDefaultKeywordLlmBaseUrl(baseUrl);
 }
 
-/** True when the Rust Host embeds a compile-time `AGENTERO_KEYWORD_LLM_API_KEY` for `x666`. */
+/** True when the Rust Host embeds a compile-time `AGENTERO_KEYWORD_LLM_API_KEY`. */
 export async function hasBuiltinKeywordLlmKey(): Promise<boolean> {
 	if (!isTauri()) return false;
 	try {
@@ -209,19 +126,18 @@ export async function hasBuiltinKeywordLlmKey(): Promise<boolean> {
 	}
 }
 
+export type KeywordLlmOverride = Partial<Omit<KeywordLlmSettings, "apiKey">> & {
+	apiKey?: string | null;
+};
+
 /**
  * Override or reset the keyword-LLM config in unit tests.
  * - `undefined`: clear override and read from `loadSettings().keywordLlm`
  * - `null`: force-disable keyword extraction
- * - `{ ... }`: supply active in-memory provider/baseUrl/apiKey/model
+ * - `{ ... }`: supply active in-memory baseUrl/apiKey/model
  */
 export function setCachedKeywordLlmConfigForTests(
-	override:
-		| (Partial<Omit<KeywordLlmSettings, "apiKey">> & {
-				apiKey?: string | null;
-		  })
-		| null
-		| undefined,
+	override: KeywordLlmOverride | null | undefined,
 ): void {
 	if (override === undefined) {
 		testConfigOverride = undefined;
@@ -231,24 +147,18 @@ export function setCachedKeywordLlmConfigForTests(
 		testConfigOverride = null;
 		return;
 	}
-	const provider: KeywordLlmProviderId = isKeywordLlmProviderId(
-		override.provider,
-	)
-		? override.provider
-		: "x666";
+	const baseUrl =
+		override.baseUrl !== undefined
+			? override.baseUrl.trim() || DEFAULT_KEYWORD_LLM_BASE_URL
+			: DEFAULT_KEYWORD_LLM_BASE_URL;
+	const model =
+		override.model !== undefined
+			? override.model.trim() || DEFAULT_KEYWORD_LLM_MODEL
+			: DEFAULT_KEYWORD_LLM_MODEL;
 	testConfigOverride = {
-		provider,
-		baseUrl:
-			override.baseUrl !== undefined
-				? override.baseUrl.trim()
-				: provider === "openaiCompatible"
-					? ""
-					: defaultBaseUrlForProvider(provider),
+		baseUrl,
 		apiKey: (override.apiKey ?? "").trim(),
-		model:
-			override.model !== undefined
-				? override.model.trim()
-				: defaultModelForProvider(provider),
+		model,
 	};
 }
 
@@ -264,22 +174,14 @@ export function getKeywordLlmConfigSignature(): string {
 	if (!cfg || !isKeywordLlmConfigured(cfg)) {
 		return "disabled";
 	}
-	const model = cfg.model.trim() || defaultModelForProvider(cfg.provider);
-	return [cfg.provider, cfg.baseUrl.trim(), cfg.apiKey.trim(), model].join(
-		"\0",
-	);
+	const baseUrl = cfg.baseUrl.trim() || DEFAULT_KEYWORD_LLM_BASE_URL;
+	const model = cfg.model.trim() || DEFAULT_KEYWORD_LLM_MODEL;
+	return [baseUrl, cfg.apiKey.trim(), model].join("\0");
 }
 
-function toOverrideArgs(
-	override?:
-		| (Partial<Omit<KeywordLlmSettings, "apiKey">> & {
-				apiKey?: string | null;
-		  })
-		| null,
-) {
+function toOverrideArgs(override?: KeywordLlmOverride | null) {
 	if (!override) return null;
 	return {
-		provider: override.provider ?? null,
 		baseUrl: override.baseUrl ?? null,
 		apiKey: override.apiKey ?? null,
 		model: override.model ?? null,
@@ -288,47 +190,24 @@ function toOverrideArgs(
 
 function sortModelIds(
 	ids: Iterable<string>,
-	mode: "x666" | "openrouter" | "alpha",
+	pinnedModel?: string | null,
 ): string[] {
 	const all = new Set<string>();
 	for (const raw of ids) {
 		const id = raw.trim();
 		if (id) all.add(id);
 	}
-	if (mode === "x666") {
-		all.delete(DEFAULT_X666_MODEL);
-		return [
-			DEFAULT_X666_MODEL,
-			...Array.from(all).sort((a, b) => a.localeCompare(b)),
-		];
-	}
-	if (mode === "alpha") {
-		return Array.from(all).sort((a, b) => a.localeCompare(b));
-	}
-	const free: string[] = [];
-	const paid: string[] = [];
-	for (const id of all) {
-		if (id === DEFAULT_OPEN_ROUTER_MODEL) continue;
-		if (id.toLowerCase().endsWith(":free")) {
-			free.push(id);
-		} else {
-			paid.push(id);
-		}
-	}
-	free.sort((a, b) => a.localeCompare(b));
-	paid.sort((a, b) => a.localeCompare(b));
-	return [DEFAULT_OPEN_ROUTER_MODEL, ...free, ...paid];
+	const pin = pinnedModel?.trim() ?? "";
+	const hasPinned = Boolean(pin && all.delete(pin));
+	const sorted = Array.from(all).sort((a, b) => a.localeCompare(b));
+	return hasPinned ? [pin, ...sorted] : sorted;
 }
 
 /**
  * Probe a keyword-LLM configuration (field overrides or stored Host settings).
  */
 export async function probeKeywordLlm(
-	override?:
-		| (Partial<Omit<KeywordLlmSettings, "apiKey">> & {
-				apiKey?: string | null;
-		  })
-		| null,
+	override?: KeywordLlmOverride | null,
 	signal?: AbortSignal,
 ): Promise<boolean> {
 	if (!isTauri()) return false;
@@ -345,39 +224,29 @@ export async function probeKeywordLlm(
 }
 
 /**
- * Fetch available model IDs from an OpenAI-compatible `/models` endpoint.
- * For OpenRouter, `:free` models (starting with `DEFAULT_OPEN_ROUTER_MODEL`)
- * are placed first, followed by paid models.
+ * Fetch available model IDs from an OpenAI-compatible `/models` endpoint,
+ * sorted alphabetically with the configured model pinned first if present.
  */
 export async function fetchKeywordLlmModels(
-	override?:
-		| (Partial<Omit<KeywordLlmSettings, "apiKey">> & {
-				apiKey?: string | null;
-		  })
-		| null,
+	override?: KeywordLlmOverride | null,
 	fetchFn?: typeof fetch,
 ): Promise<string[]> {
 	const stored = loadSettings().keywordLlm;
-	const provider: KeywordLlmProviderId = isKeywordLlmProviderId(
-		override?.provider,
-	)
-		? override.provider
-		: stored.provider;
 	const baseUrl =
-		override?.baseUrl !== undefined
+		(override?.baseUrl !== undefined
 			? override.baseUrl
-			: provider === stored.provider
-				? stored.baseUrl
-				: defaultBaseUrlForProvider(provider);
+			: stored.baseUrl
+		).trim() || DEFAULT_KEYWORD_LLM_BASE_URL;
 	const explicitKey =
 		override?.apiKey !== undefined ? (override.apiKey ?? "") : stored.apiKey;
 	const usableKey =
 		explicitKey.trim() && !isSecretMask(explicitKey)
 			? explicitKey.trim()
 			: null;
-	const fallbackList = defaultModelForProvider(provider)
-		? [defaultModelForProvider(provider)]
-		: [];
+	const configuredModel =
+		(override?.model !== undefined ? override.model : stored.model).trim() ||
+		(isDefaultKeywordLlmBaseUrl(baseUrl) ? DEFAULT_KEYWORD_LLM_MODEL : "");
+	const fallbackList = configuredModel ? [configuredModel] : [];
 
 	// Use explicit `fetchFn` directly (allows unit tests to mock even under mocked `isTauri()`).
 	if (fetchFn === undefined && isTauri()) {
@@ -396,7 +265,7 @@ export async function fetchKeywordLlmModels(
 	}
 
 	const activeFetch = fetchFn ?? globalThis.fetch;
-	const modelsUrl = resolveKeywordLlmModelsUrl(baseUrl, provider);
+	const modelsUrl = resolveKeywordLlmModelsUrl(baseUrl);
 	if (typeof activeFetch === "function" && modelsUrl) {
 		try {
 			const headers: Record<string, string> = { Accept: "application/json" };
@@ -414,13 +283,7 @@ export async function fetchKeywordLlmModels(
 					const id = item.id?.trim() ?? "";
 					if (id) ids.push(id);
 				}
-				const sortMode =
-					provider === "x666" || isX666Endpoint(modelsUrl)
-						? "x666"
-						: provider === "openrouter" || isOpenRouterEndpoint(modelsUrl)
-							? "openrouter"
-							: "alpha";
-				return sortModelIds(ids, sortMode);
+				return sortModelIds(ids, configuredModel);
 			}
 		} catch {
 			// Fall back below.
@@ -548,18 +411,6 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-function isX666Config(cfg: KeywordLlmSettings): boolean {
-	if (cfg.provider === "x666") return true;
-	const chatUrl = resolveKeywordLlmChatUrl(cfg.baseUrl, cfg.provider);
-	return Boolean(chatUrl) && isX666Endpoint(chatUrl);
-}
-
-function isOpenRouterFreeTierConfig(cfg: KeywordLlmSettings): boolean {
-	if (cfg.provider !== "openrouter") return false;
-	const model = (cfg.model.trim() || DEFAULT_OPEN_ROUTER_MODEL).toLowerCase();
-	return model.endsWith(":free");
-}
-
 function resolveBackoffWaitMs(
 	baseWaitMs: number,
 	retryAfterMs: number | undefined,
@@ -682,11 +533,11 @@ async function callKeywordLlmChunkViaFetch(
 	if (signal?.aborted) {
 		throw new BackgroundTaskCancelledError();
 	}
-	const chatUrl = resolveKeywordLlmChatUrl(cfg.baseUrl, cfg.provider);
+	const chatUrl = resolveKeywordLlmChatUrl(cfg.baseUrl);
 	if (!chatUrl) {
 		return { byIndex: {}, abortRemaining: true };
 	}
-	const model = cfg.model.trim() || defaultModelForProvider(cfg.provider);
+	const model = cfg.model.trim() || DEFAULT_KEYWORD_LLM_MODEL;
 	if (!model) {
 		return { byIndex: {}, abortRemaining: true };
 	}
@@ -739,23 +590,25 @@ async function callKeywordLlmChunkViaFetch(
 
 	return runChunkWithPatientRetries(async () => {
 		const tryReasoning = !(batchState?.reasoningRejected ?? false);
-		let resp = await sendOnce(tryReasoning, true);
-		if (signal?.aborted) {
-			throw new BackgroundTaskCancelledError();
-		}
-		if (isUnsupportedParamStatus(resp.status) && tryReasoning) {
-			resp = await sendOnce(false, true);
+		const tiers: Array<{ reasoning: boolean; temperature: boolean }> = [
+			...(tryReasoning ? [{ reasoning: true, temperature: true }] : []),
+			{ reasoning: false, temperature: true },
+			{ reasoning: false, temperature: false },
+		];
+		let resp!: Response;
+		for (let i = 0; i < tiers.length; i += 1) {
+			const tier = tiers[i];
+			if (!tier) break;
+			resp = await sendOnce(tier.reasoning, tier.temperature);
 			if (signal?.aborted) {
 				throw new BackgroundTaskCancelledError();
 			}
-			if (!isUnsupportedParamStatus(resp.status) && batchState) {
+			const unsupported = isUnsupportedParamStatus(resp.status);
+			if (tryReasoning && i === 1 && !unsupported && batchState) {
 				batchState.reasoningRejected = true;
 			}
-		}
-		if (isUnsupportedParamStatus(resp.status)) {
-			resp = await sendOnce(false, false);
-			if (signal?.aborted) {
-				throw new BackgroundTaskCancelledError();
+			if (!unsupported || i === tiers.length - 1) {
+				break;
 			}
 		}
 		if (!resp.ok) {
@@ -824,6 +677,7 @@ export async function extractKeywordsWithKeywordLlmBatch(
 	options?: {
 		batchSize?: number;
 		concurrency?: number;
+		minSpacingMs?: number;
 		fetchFn?: typeof fetch;
 		signal?: AbortSignal;
 		onProgress?: (completed: number, total: number) => void;
@@ -841,7 +695,6 @@ export async function extractKeywordsWithKeywordLlmBatch(
 		!isTauri();
 
 	let directCfg: KeywordLlmSettings | null = null;
-	let activeCfg: KeywordLlmSettings | null = null;
 	if (useDirectFetch) {
 		directCfg =
 			testConfigOverride === undefined
@@ -855,16 +708,17 @@ export async function extractKeywordsWithKeywordLlmBatch(
 		}
 		const activeFetch = options?.fetchFn ?? globalThis.fetch;
 		if (typeof activeFetch !== "function") return result;
-		activeCfg = directCfg;
 	} else {
 		const storedCfg = loadSettings().keywordLlm;
 		if (
 			!isKeywordLlmConfigured(storedCfg) &&
-			!(storedCfg.provider === "x666" && (await hasBuiltinKeywordLlmKey()))
+			!(
+				isDefaultKeywordLlmBaseUrl(storedCfg.baseUrl) &&
+				(await hasBuiltinKeywordLlmKey())
+			)
 		) {
 			return result;
 		}
-		activeCfg = storedCfg;
 	}
 
 	const validItems = items.filter(
@@ -873,23 +727,8 @@ export async function extractKeywordsWithKeywordLlmBatch(
 	if (validItems.length === 0) return result;
 
 	const batchSize = Math.max(1, Math.min(8, options?.batchSize ?? 6));
-	const isX666 = Boolean(activeCfg && isX666Config(activeCfg));
-	const isFreeTier = Boolean(
-		activeCfg && isOpenRouterFreeTierConfig(activeCfg),
-	);
-	const defaultConcurrency = isX666 || isFreeTier ? 1 : 2;
-	const concurrency = Math.max(
-		1,
-		Math.min(4, options?.concurrency ?? defaultConcurrency),
-	);
-	const minSpacingMs =
-		testConfigOverride === undefined
-			? isX666
-				? 12_200
-				: isFreeTier
-					? 1_200
-					: 0
-			: 0;
+	const concurrency = Math.max(1, Math.min(4, options?.concurrency ?? 1));
+	const minSpacingMs = Math.max(0, options?.minSpacingMs ?? 0);
 	const chunks: KeywordLlmInput[][] = [];
 	for (let i = 0; i < validItems.length; i += batchSize) {
 		chunks.push(validItems.slice(i, i + batchSize));
@@ -915,10 +754,11 @@ export async function extractKeywordsWithKeywordLlmBatch(
 			try {
 				if (minSpacingMs > 0) {
 					const now = Date.now();
-					if (nextSlotMs > now) {
-						await sleepAbortable(nextSlotMs - now, options?.signal);
+					const waitUntil = Math.max(now, nextSlotMs);
+					nextSlotMs = waitUntil + minSpacingMs;
+					if (waitUntil > now) {
+						await sleepAbortable(waitUntil - now, options?.signal);
 					}
-					nextSlotMs = Date.now() + minSpacingMs;
 				}
 				const { byIndex, abortRemaining } =
 					useDirectFetch && directCfg

@@ -7,16 +7,12 @@ import {
 	resolveKeywordLlmChatUrl,
 	resolveKeywordLlmModelsUrl,
 	setCachedKeywordLlmConfigForTests,
-	switchKeywordLlmProviderDraft,
 } from "@/lib/keyword-llm";
 import {
+	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_MODEL,
 	DEFAULT_KEYWORD_LLM_SETTINGS,
-	DEFAULT_OPEN_ROUTER_BASE_URL,
-	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
 	DEFAULT_SETTINGS,
-	DEFAULT_X666_BASE_URL,
-	DEFAULT_X666_MODEL,
 } from "@/lib/settings/defaults";
 import { applyExternalSettings, loadSettings } from "@/lib/settings/store";
 import type { AppSettings } from "@/lib/settings/types";
@@ -26,55 +22,34 @@ afterEach(() => {
 	applyExternalSettings(DEFAULT_SETTINGS);
 });
 
-describe("Keyword LLM settings migration, URL resolution & batch extraction", () => {
-	it("migrates legacy openRouterKey/openRouterModel into keywordLlm and preserves BYOK settings", () => {
+describe("Keyword LLM settings normalization, URL resolution & batch extraction", () => {
+	it("uses single OpenAI-compatible 3-field defaults and ignores unknown legacy fields", () => {
 		expect(DEFAULT_KEYWORD_LLM_SETTINGS).toEqual({
-			provider: "x666",
-			baseUrl: DEFAULT_X666_BASE_URL,
+			baseUrl: DEFAULT_KEYWORD_LLM_BASE_URL,
 			apiKey: "",
-			model: DEFAULT_X666_MODEL,
-		});
-
-		const switchedRouter = switchKeywordLlmProviderDraft(
-			DEFAULT_KEYWORD_LLM_SETTINGS,
-			"openrouter",
-		);
-		expect(switchedRouter).toEqual({
-			provider: "openrouter",
-			baseUrl: DEFAULT_OPEN_ROUTER_BASE_URL,
-			apiKey: "",
-			model: DEFAULT_OPEN_ROUTER_MODEL,
-		});
-		const switchedByok = switchKeywordLlmProviderDraft(
-			switchedRouter,
-			"openaiCompatible",
-		);
-		expect(switchedByok).toEqual({
-			provider: "openaiCompatible",
-			baseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
-			apiKey: "",
-			model: "",
+			model: DEFAULT_KEYWORD_LLM_MODEL,
 		});
 
 		const legacyPayload = {
 			...DEFAULT_SETTINGS,
-			openRouterKey: "sk-or-legacy-123",
-			openRouterModel: "openai/gpt-4o-mini",
-		} as Record<string, unknown>;
-		delete legacyPayload.keywordLlm;
-		applyExternalSettings(legacyPayload as unknown as AppSettings);
+			keywordLlm: {
+				provider: "x666",
+				baseUrl: "",
+				apiKey: "  sk-legacy-123 ",
+				model: "",
+			},
+		} as unknown as AppSettings;
+		applyExternalSettings(legacyPayload);
 
 		expect(loadSettings().keywordLlm).toEqual({
-			provider: "openrouter",
-			baseUrl: DEFAULT_OPEN_ROUTER_BASE_URL,
-			apiKey: "sk-or-legacy-123",
-			model: "openai/gpt-4o-mini",
+			baseUrl: DEFAULT_KEYWORD_LLM_BASE_URL,
+			apiKey: "sk-legacy-123",
+			model: DEFAULT_KEYWORD_LLM_MODEL,
 		});
 
 		applyExternalSettings({
 			...DEFAULT_SETTINGS,
 			keywordLlm: {
-				provider: "openaiCompatible",
 				baseUrl: "  https://api.example.com/v1/  ",
 				apiKey: "  sk-byok-456 ",
 				model: " gpt-4.1-mini ",
@@ -82,7 +57,6 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		});
 
 		expect(loadSettings().keywordLlm).toEqual({
-			provider: "openaiCompatible",
 			baseUrl: "https://api.example.com/v1/",
 			apiKey: "sk-byok-456",
 			model: "gpt-4.1-mini",
@@ -103,39 +77,25 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 	});
 
 	it("resolves OpenAI-compatible /chat/completions and /models endpoints without double /v1", () => {
-		expect(resolveKeywordLlmChatUrl("", "openaiCompatible")).toBe(
-			"https://api.openai.com/v1/chat/completions",
+		expect(resolveKeywordLlmChatUrl("")).toBe(
+			"https://x666.me/v1/chat/completions",
 		);
-		expect(resolveKeywordLlmModelsUrl("", "openaiCompatible")).toBe(
-			"https://api.openai.com/v1/models",
+		expect(resolveKeywordLlmModelsUrl("")).toBe("https://x666.me/v1/models");
+		expect(resolveKeywordLlmChatUrl("https://my-gateway.example.com")).toBe(
+			"https://my-gateway.example.com/v1/chat/completions",
+		);
+		expect(resolveKeywordLlmChatUrl("http://localhost:11434/v1/")).toBe(
+			"http://localhost:11434/v1/chat/completions",
 		);
 		expect(
-			resolveKeywordLlmChatUrl(
-				"https://my-gateway.example.com",
-				"openaiCompatible",
-			),
-		).toBe("https://my-gateway.example.com/v1/chat/completions");
-		expect(
-			resolveKeywordLlmChatUrl(
-				"http://localhost:11434/v1/",
-				"openaiCompatible",
-			),
-		).toBe("http://localhost:11434/v1/chat/completions");
-		expect(
-			resolveKeywordLlmModelsUrl(
-				"http://localhost:8000/v1/chat/completions",
-				"openaiCompatible",
-			),
+			resolveKeywordLlmModelsUrl("http://localhost:8000/v1/chat/completions"),
 		).toBe("http://localhost:8000/v1/models");
 		expect(
-			resolveKeywordLlmChatUrl(
-				"https://openrouter.ai/api/v1/models",
-				"openrouter",
-			),
+			resolveKeywordLlmChatUrl("https://openrouter.ai/api/v1/models"),
 		).toBe("https://openrouter.ai/api/v1/chat/completions");
 	});
 
-	it("parses JSON responses (with <think> blocks or code fences) on OpenRouter preset including non-free models", async () => {
+	it("parses JSON responses (with <think> blocks or code fences) and sorts /models alphabetically with configured model first", async () => {
 		const parsed = parseKeywordBatchJson(
 			`<think>Analyzing subfield and methodology</think>\n\`\`\`json\n{"0":["Code Generation","Random Testing","Unit Test Generation"],"1":["Vulnerability Detection","Static Analysis"]}\n\`\`\``,
 		);
@@ -145,12 +105,16 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		});
 
 		const models = await fetchKeywordLlmModels(
-			{ provider: "openrouter" },
+			{
+				baseUrl: "https://openrouter.ai/api/v1",
+				model: "qwen/qwen3-coder:free",
+			},
 			async () =>
 				new Response(
 					JSON.stringify({
 						data: [
 							{ id: "openai/gpt-4o-mini" },
+							{ id: "anthropic/claude-3.5-sonnet" },
 							{ id: "qwen/qwen3-coder:free" },
 						],
 					}),
@@ -158,13 +122,13 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 				),
 		);
 		expect(models).toEqual([
-			"baidu/ernie-5.5-flash-preview:free",
 			"qwen/qwen3-coder:free",
+			"anthropic/claude-3.5-sonnet",
 			"openai/gpt-4o-mini",
 		]);
 
-		const x666Models = await fetchKeywordLlmModels(
-			{ provider: "x666" },
+		const defaultModels = await fetchKeywordLlmModels(
+			undefined,
 			async () =>
 				new Response(
 					JSON.stringify({
@@ -177,14 +141,14 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 					{ status: 200 },
 				),
 		);
-		expect(x666Models).toEqual([
+		expect(defaultModels).toEqual([
 			"ernie-5.5-flash-preview",
 			"deepseek-v3.2",
 			"gpt-4o-mini",
 		]);
 
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
 			apiKey: "sk-or-test-key",
 			model: "openai/gpt-4o-mini",
 		});
@@ -242,11 +206,10 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		]);
 	});
 
-	it("serializes OpenRouter :free chunks and patiently retries multiple HTTP 429s + empty reasoning outputs on the configured model", async () => {
+	it("serializes default concurrency chunks and patiently retries multiple HTTP 429s + empty reasoning outputs on the configured model", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openrouter",
-			apiKey: "sk-or-free-key",
-			model: DEFAULT_OPEN_ROUTER_MODEL,
+			apiKey: "sk-test-key",
+			model: DEFAULT_KEYWORD_LLM_MODEL,
 		});
 
 		let activeRequests = 0;
@@ -274,7 +237,7 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 					reasoning?: { effort?: string; exclude?: boolean };
 				};
 				// Strictly uses the user's configured model on every attempt
-				expect(body.model).toBe(DEFAULT_OPEN_ROUTER_MODEL);
+				expect(body.model).toBe(DEFAULT_KEYWORD_LLM_MODEL);
 				expect(body.max_tokens).toBeUndefined();
 				expect(body.reasoning).toEqual({ effort: "low", exclude: true });
 
@@ -327,7 +290,6 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 
 	it("supports BYOK OpenAI-compatible endpoints with custom Base URL, optional API key, and any model ID", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openaiCompatible",
 			baseUrl: "http://127.0.0.1:11434/v1/",
 			apiKey: "",
 			model: "qwen2.5:14b",
@@ -384,7 +346,6 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 
 	it("falls back cleanly without reasoning when an endpoint rejects reasoning with HTTP 400/422", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openaiCompatible",
 			baseUrl: "http://127.0.0.1:8000/v1",
 			apiKey: "sk-local",
 			model: "local-instruct",
@@ -447,7 +408,6 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 
 	it("preserves full untruncated abstracts in user prompts and retries HTTP 429 Retry-After + 503 transient errors", async () => {
 		setCachedKeywordLlmConfigForTests({
-			provider: "openaiCompatible",
 			baseUrl: "http://127.0.0.1:8011/v1",
 			apiKey: "",
 			model: "mercury-3-instant",
