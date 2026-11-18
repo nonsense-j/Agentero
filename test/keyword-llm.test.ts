@@ -7,12 +7,16 @@ import {
 	resolveKeywordLlmChatUrl,
 	resolveKeywordLlmModelsUrl,
 	setCachedKeywordLlmConfigForTests,
+	switchKeywordLlmProviderDraft,
 } from "@/lib/keyword-llm";
 import {
 	DEFAULT_KEYWORD_LLM_SETTINGS,
 	DEFAULT_OPEN_ROUTER_BASE_URL,
 	DEFAULT_OPEN_ROUTER_MODEL,
+	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
 	DEFAULT_SETTINGS,
+	DEFAULT_X666_BASE_URL,
+	DEFAULT_X666_MODEL,
 } from "@/lib/settings/defaults";
 import { applyExternalSettings, loadSettings } from "@/lib/settings/store";
 import type { AppSettings } from "@/lib/settings/types";
@@ -25,10 +29,31 @@ afterEach(() => {
 describe("Keyword LLM settings migration, URL resolution & batch extraction", () => {
 	it("migrates legacy openRouterKey/openRouterModel into keywordLlm and preserves BYOK settings", () => {
 		expect(DEFAULT_KEYWORD_LLM_SETTINGS).toEqual({
+			provider: "x666",
+			baseUrl: DEFAULT_X666_BASE_URL,
+			apiKey: "",
+			model: DEFAULT_X666_MODEL,
+		});
+
+		const switchedRouter = switchKeywordLlmProviderDraft(
+			DEFAULT_KEYWORD_LLM_SETTINGS,
+			"openrouter",
+		);
+		expect(switchedRouter).toEqual({
 			provider: "openrouter",
 			baseUrl: DEFAULT_OPEN_ROUTER_BASE_URL,
 			apiKey: "",
 			model: DEFAULT_OPEN_ROUTER_MODEL,
+		});
+		const switchedByok = switchKeywordLlmProviderDraft(
+			switchedRouter,
+			"openaiCompatible",
+		);
+		expect(switchedByok).toEqual({
+			provider: "openaiCompatible",
+			baseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+			apiKey: "",
+			model: "",
 		});
 
 		const legacyPayload = {
@@ -136,6 +161,26 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 			"baidu/ernie-5.5-flash-preview:free",
 			"qwen/qwen3-coder:free",
 			"openai/gpt-4o-mini",
+		]);
+
+		const x666Models = await fetchKeywordLlmModels(
+			{ provider: "x666" },
+			async () =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-4o-mini" },
+							{ id: "ernie-5.5-flash-preview" },
+							{ id: "deepseek-v3.2" },
+						],
+					}),
+					{ status: 200 },
+				),
+		);
+		expect(x666Models).toEqual([
+			"ernie-5.5-flash-preview",
+			"deepseek-v3.2",
+			"gpt-4o-mini",
 		]);
 
 		setCachedKeywordLlmConfigForTests({
@@ -329,7 +374,7 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		expect(capturedHeaders.Authorization).toBeUndefined();
 		expect(capturedBody.model).toBe("qwen2.5:14b");
 		expect(capturedBody.max_tokens).toBeUndefined();
-		expect(capturedBody.reasoning).toBeUndefined();
+		expect(capturedBody.reasoning).toEqual({ effort: "low", exclude: true });
 		expect(batchMap.get("venue:sp-2026:1")).toEqual([
 			"Trusted Execution Environment",
 			"Confidential Computing",
@@ -337,7 +382,70 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		]);
 	});
 
-	it("preserves up to 1600 abstract characters in user prompts and retries HTTP 429 Retry-After + 503 transient errors", async () => {
+	it("falls back cleanly without reasoning when an endpoint rejects reasoning with HTTP 400/422", async () => {
+		setCachedKeywordLlmConfigForTests({
+			provider: "openaiCompatible",
+			baseUrl: "http://127.0.0.1:8000/v1",
+			apiKey: "sk-local",
+			model: "local-instruct",
+		});
+
+		const bodies: Array<Record<string, unknown>> = [];
+		const out = await extractKeywordsWithKeywordLlmBatch(
+			[
+				{
+					id: "p1",
+					title: "Static Taint Analysis for Rust",
+					abstract: "Abstract 1",
+				},
+				{
+					id: "p2",
+					title: "Coverage-Guided Fuzzing for Kernel",
+					abstract: "Abstract 2",
+				},
+			],
+			{
+				batchSize: 1,
+				concurrency: 1,
+				fetchFn: async (_input, init) => {
+					const body = JSON.parse(String(init?.body ?? "{}")) as Record<
+						string,
+						unknown
+					>;
+					bodies.push(body);
+					if (body.reasoning !== undefined) {
+						return new Response('{"error":"unknown field: reasoning"}', {
+							status: 422,
+						});
+					}
+					return new Response(
+						JSON.stringify({
+							choices: [
+								{
+									message: {
+										content:
+											'{"0":["Static Analysis","Rust","Taint Analysis"]}',
+									},
+								},
+							],
+						}),
+						{ status: 200 },
+					);
+				},
+			},
+		);
+
+		// Chunk 0: tries reasoning -> 422 -> retries without reasoning -> 200.
+		// Chunk 1: skips reasoning directly -> 200 (3 total calls instead of 4).
+		expect(bodies).toHaveLength(3);
+		expect(bodies[0]?.reasoning).toEqual({ effort: "low", exclude: true });
+		expect(bodies[1]?.reasoning).toBeUndefined();
+		expect(bodies[1]?.temperature).toBe(0);
+		expect(bodies[2]?.reasoning).toBeUndefined();
+		expect(out.size).toBe(2);
+	});
+
+	it("preserves full untruncated abstracts in user prompts and retries HTTP 429 Retry-After + 503 transient errors", async () => {
 		setCachedKeywordLlmConfigForTests({
 			provider: "openaiCompatible",
 			baseUrl: "http://127.0.0.1:8011/v1",
@@ -346,13 +454,12 @@ describe("Keyword LLM settings migration, URL resolution & batch extraction", ()
 		});
 
 		const filler = "Background motivation on distributed verification. ".repeat(
-			22,
-		); // ~1122 chars (> 900)
+			45,
+		); // ~2205 chars (> 1600)
 		const tailMethod =
 			"We introduce Relational E-Graph Saturation with Counterexample-Guided Inductive Generalization.";
 		const longAbstract = `${filler}${tailMethod}`;
-		expect(longAbstract.length).toBeGreaterThan(1150);
-		expect(longAbstract.length).toBeLessThan(1600);
+		expect(longAbstract.length).toBeGreaterThan(2200);
 
 		let capturedUserPrompt = "";
 		let attempts = 0;

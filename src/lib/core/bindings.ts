@@ -58,8 +58,9 @@ export const commands = {
 } | null) => __TAURI_INVOKE<ApiResult<boolean>>("keyword_llm_probe", { args }),
 	/**
 	 *  Fetch available models from an OpenAI-compatible `/models` endpoint (using
-	 *  either field overrides or stored settings). For OpenRouter, `:free` models
-	 *  (starting with `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+	 *  either field overrides or stored settings). For `x666`, `DEFAULT_X666_MODEL`
+	 *  appears first; for OpenRouter, `:free` models (starting with
+	 *  `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
 	 */
 	keywordLlmModelsList: (args: {
 	provider?: string | null,
@@ -72,6 +73,11 @@ export const commands = {
 	 *  keyword-extraction LLM configuration (keeps BYOK secrets off the WebView).
 	 */
 	keywordLlmChatComplete: (systemPrompt: string, userPrompt: string, maxTokens: number | null) => __TAURI_INVOKE<ApiResult<KeywordLlmChatResult | null>>("keyword_llm_chat_complete", { systemPrompt, userPrompt, maxTokens }),
+	/**
+	 *  Whether a compile-time built-in API key is available for the default `x666`
+	 *  keyword-extraction preset.
+	 */
+	keywordLlmHasBuiltinKey: () => __TAURI_INVOKE<ApiResult<boolean>>("keyword_llm_has_builtin_key"),
 	/**
 	 *  Probe the configured institution proxy (EZProxy/WebVPN/CARSI) by fetching a
 	 *  known paywalled DOI through the rewrite and checking the response is a
@@ -3829,17 +3835,17 @@ export type KeywordLlmOverrideArgs = {
 };
 
 /**
- *  Keyword-extraction fallback LLM configuration (OpenRouter preset or
- *  custom OpenAI-compatible BYOK endpoint).
+ *  Keyword-extraction fallback LLM configuration (x666 default preset, OpenRouter preset,
+ *  or custom OpenAI-compatible BYOK endpoint).
  */
 export type KeywordLlmSettings = {
-	/**  `openrouter` (preset) | `openaiCompatible` (BYOK). */
+	/**  `x666` (default preset) | `openrouter` (preset) | `openaiCompatible` (BYOK). */
 	provider?: string,
-	/**  OpenAI-compatible API base URL (e.g. `https://openrouter.ai/api/v1` or `https://api.openai.com/v1`). */
+	/**  OpenAI-compatible API base URL (e.g. `https://x666.me/v1` or `https://openrouter.ai/api/v1`). */
 	baseUrl?: string,
 	/**  API key; masked (`*`) when echoed back from the Host. */
 	apiKey?: string,
-	/**  Chat model id (e.g. `baidu/ernie-5.5-flash-preview:free`, `gpt-4o-mini`). */
+	/**  Chat model id (e.g. `ernie-5.5-flash-preview`, `gpt-4o-mini`). */
 	model?: string,
 };
 

@@ -13,6 +13,7 @@ pub fn attach_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<ta
         crate::features::system::settings::commands::keyword_llm_probe,
         crate::features::system::settings::commands::keyword_llm_models_list,
         crate::features::system::settings::commands::keyword_llm_chat_complete,
+        crate::features::system::settings::commands::keyword_llm_has_builtin_key,
         crate::features::system::settings::commands::institution_proxy_probe,
         crate::features::system::settings::commands::institution_access_detect,
         crate::features::system::settings::commands::institution_proxy_login_open,

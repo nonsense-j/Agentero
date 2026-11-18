@@ -34,6 +34,7 @@ const BUILD_ENV_KEYS: &[&str] = &[
     "AGENTERO_BUILTIN_TRANSLATE_MODEL",
     "AGENTERO_BUILTIN_EMBEDDING_MODEL",
     "AGENTERO_BUILTIN_OCR_MODEL",
+    "AGENTERO_KEYWORD_LLM_API_KEY",
 ];
 
 /// Forward the build-time variables to `rustc`. An explicit env var wins;

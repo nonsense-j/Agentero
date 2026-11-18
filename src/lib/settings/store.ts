@@ -33,6 +33,8 @@ import {
 	DEFAULT_PAPER_READER_SETTINGS,
 	DEFAULT_PDF_ASK_SETTINGS,
 	DEFAULT_SETTINGS,
+	DEFAULT_X666_BASE_URL,
+	DEFAULT_X666_MODEL,
 	snapUiScale,
 } from "@/lib/settings/defaults";
 import { normalizeFontFamilyValue } from "@/lib/settings/fonts";
@@ -581,8 +583,10 @@ function normalizeKeywordLlmSettings(
 			: "";
 	if (rawProvider === "openaicompatible" || rawProvider === "custom") {
 		base.provider = "openaiCompatible";
-	} else {
+	} else if (rawProvider === "openrouter") {
 		base.provider = "openrouter";
+	} else {
+		base.provider = "x666";
 	}
 	if (typeof partial.apiKey === "string") {
 		base.apiKey = partial.apiKey.trim();
@@ -590,11 +594,15 @@ function normalizeKeywordLlmSettings(
 	// Do not strip trailing slash here so typing e.g. ".../v1/" is not eaten mid-keystroke.
 	if (typeof partial.baseUrl === "string") {
 		base.baseUrl = partial.baseUrl.trim();
+	} else if (base.provider === "openrouter") {
+		base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
 	} else if (base.provider === "openaiCompatible") {
 		base.baseUrl = "";
 	}
 	if (typeof partial.model === "string") {
 		base.model = partial.model.trim();
+	} else if (base.provider === "openrouter") {
+		base.model = DEFAULT_OPEN_ROUTER_MODEL;
 	} else if (base.provider === "openaiCompatible") {
 		base.model = "";
 	}
@@ -603,15 +611,26 @@ function normalizeKeywordLlmSettings(
 	const trimmedLegacyModel =
 		typeof legacyModel === "string" ? legacyModel.trim() : "";
 	if (!base.apiKey && trimmedLegacyKey) {
+		base.provider = "openrouter";
+		if (!base.baseUrl || base.baseUrl === DEFAULT_X666_BASE_URL) {
+			base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
+		}
 		base.apiKey = trimmedLegacyKey;
 		if (
 			trimmedLegacyModel &&
-			(!base.model || base.model === DEFAULT_OPEN_ROUTER_MODEL)
+			(!base.model ||
+				base.model === DEFAULT_X666_MODEL ||
+				base.model === DEFAULT_OPEN_ROUTER_MODEL)
 		) {
 			base.model = trimmedLegacyModel;
+		} else if (!base.model || base.model === DEFAULT_X666_MODEL) {
+			base.model = DEFAULT_OPEN_ROUTER_MODEL;
 		}
 	}
-	if (base.provider === "openrouter") {
+	if (base.provider === "x666") {
+		if (!base.baseUrl) base.baseUrl = DEFAULT_X666_BASE_URL;
+		if (!base.model) base.model = DEFAULT_X666_MODEL;
+	} else if (base.provider === "openrouter") {
 		if (!base.baseUrl) base.baseUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
 		if (!base.model) base.model = DEFAULT_OPEN_ROUTER_MODEL;
 	}

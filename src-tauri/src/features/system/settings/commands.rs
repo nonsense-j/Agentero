@@ -811,10 +811,12 @@ pub struct KeywordLlmChatResult {
 
 fn default_base_for_provider(provider: &str) -> &'static str {
     use crate::features::system::settings::{
-        DEFAULT_OPENAI_COMPATIBLE_BASE_URL, DEFAULT_OPEN_ROUTER_BASE_URL,
-        KEYWORD_LLM_PROVIDER_OPENROUTER,
+        DEFAULT_OPENAI_COMPATIBLE_BASE_URL, DEFAULT_OPEN_ROUTER_BASE_URL, DEFAULT_X666_BASE_URL,
+        KEYWORD_LLM_PROVIDER_OPENROUTER, KEYWORD_LLM_PROVIDER_X666,
     };
-    if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
+    if provider == KEYWORD_LLM_PROVIDER_X666 {
+        DEFAULT_X666_BASE_URL
+    } else if provider == KEYWORD_LLM_PROVIDER_OPENROUTER {
         DEFAULT_OPEN_ROUTER_BASE_URL
     } else {
         DEFAULT_OPENAI_COMPATIBLE_BASE_URL
@@ -871,18 +873,27 @@ fn merge_keyword_llm_overrides(
     store: &AppSettingsStore,
     args: Option<KeywordLlmOverrideArgs>,
 ) -> crate::features::system::settings::KeywordLlmSettings {
-    use crate::features::system::settings::is_translate_api_key_mask;
+    use crate::features::system::settings::{
+        is_translate_api_key_mask, normalize_keyword_llm_provider,
+    };
 
     let mut merged = store.keyword_llm_raw().unwrap_or_default();
     if let Some(ov) = args {
+        let provider_changed = ov.provider.as_deref().is_some_and(|p| {
+            normalize_keyword_llm_provider(p) != normalize_keyword_llm_provider(&merged.provider)
+        });
         if let Some(provider) = ov.provider {
             merged.provider = provider.trim().to_string();
         }
         if let Some(base_url) = ov.base_url {
             merged.base_url = base_url.trim().to_string();
+        } else if provider_changed {
+            merged.base_url.clear();
         }
         if let Some(model) = ov.model {
             merged.model = model.trim().to_string();
+        } else if provider_changed {
+            merged.model.clear();
         }
         if let Some(api_key) = ov.api_key {
             let trimmed = api_key.trim();
@@ -899,6 +910,24 @@ fn merge_keyword_llm_overrides(
 fn is_openrouter_host(url: &Url) -> bool {
     url.host_str()
         .is_some_and(|h| h.eq_ignore_ascii_case("openrouter.ai"))
+}
+
+fn is_x666_host(url: &Url) -> bool {
+    url.host_str().is_some_and(|h| {
+        h.eq_ignore_ascii_case("x666.me") || h.to_ascii_lowercase().ends_with(".x666.me")
+    })
+}
+
+fn is_unsupported_param_status(status: u16) -> bool {
+    status == 400 || status == 422
+}
+
+/// Whether a compile-time built-in API key is available for the default `x666`
+/// keyword-extraction preset.
+#[tauri::command]
+#[specta::specta]
+pub fn keyword_llm_has_builtin_key() -> ApiResult<bool> {
+    ApiResult::ok(crate::features::system::settings::default_x666_api_key().is_some())
 }
 
 fn build_keyword_llm_client(
@@ -1015,7 +1044,7 @@ pub async fn keyword_llm_probe(
         Ok(r) => r,
         Err(_) => return ApiResult::ok(false),
     };
-    if resp.status().as_u16() == 400 {
+    if is_unsupported_param_status(resp.status().as_u16()) {
         resp = match send_probe(&fallback_body).await {
             Ok(r) => r,
             Err(_) => return ApiResult::ok(false),
@@ -1033,8 +1062,9 @@ pub async fn keyword_llm_probe(
 }
 
 /// Fetch available models from an OpenAI-compatible `/models` endpoint (using
-/// either field overrides or stored settings). For OpenRouter, `:free` models
-/// (starting with `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
+/// either field overrides or stored settings). For `x666`, `DEFAULT_X666_MODEL`
+/// appears first; for OpenRouter, `:free` models (starting with
+/// `DEFAULT_OPEN_ROUTER_MODEL`) appear before paid models.
 #[tauri::command]
 #[specta::specta]
 pub async fn keyword_llm_models_list(
@@ -1042,8 +1072,9 @@ pub async fn keyword_llm_models_list(
     args: Option<KeywordLlmOverrideArgs>,
 ) -> ApiResult<Vec<String>> {
     use crate::features::system::settings::{
-        is_translate_api_key_mask, normalize_keyword_llm_provider, DEFAULT_OPEN_ROUTER_MODEL,
-        KEYWORD_LLM_PROVIDER_OPENROUTER,
+        default_x666_api_key, is_translate_api_key_mask, normalize_keyword_llm_provider,
+        DEFAULT_OPEN_ROUTER_MODEL, DEFAULT_X666_MODEL, KEYWORD_LLM_PROVIDER_OPENROUTER,
+        KEYWORD_LLM_PROVIDER_X666,
     };
     use std::collections::BTreeSet;
 
@@ -1063,8 +1094,15 @@ pub async fn keyword_llm_models_list(
     let mut req = client
         .get(models_url.clone())
         .header("Accept", "application/json");
-    let key = merged.api_key.trim();
-    if !key.is_empty() && !is_translate_api_key_mask(key) {
+    let raw_key = merged.api_key.trim();
+    let effective_key = if !raw_key.is_empty() && !is_translate_api_key_mask(raw_key) {
+        Some(raw_key)
+    } else if provider == KEYWORD_LLM_PROVIDER_X666 {
+        default_x666_api_key()
+    } else {
+        None
+    };
+    if let Some(key) = effective_key {
         req = req.bearer_auth(key);
     }
     let resp = match req.send().await {
@@ -1096,6 +1134,15 @@ pub async fn keyword_llm_models_list(
                 all_ids.insert(id.to_string());
             }
         }
+    }
+
+    if provider == KEYWORD_LLM_PROVIDER_X666 || is_x666_host(&models_url) {
+        let mut rest = all_ids;
+        rest.remove(DEFAULT_X666_MODEL);
+        let mut out = Vec::with_capacity(rest.len() + 1);
+        out.push(DEFAULT_X666_MODEL.to_string());
+        out.extend(rest);
+        return ApiResult::ok(out);
     }
 
     if provider == KEYWORD_LLM_PROVIDER_OPENROUTER || is_openrouter_host(&models_url) {
@@ -1140,23 +1187,28 @@ fn summarize_keyword_llm_error_body(raw: &str) -> String {
         .collect()
 }
 
-/// Build the primary OpenAI-compatible request payload for keyword extraction,
-/// omitting `max_tokens` when `None` so providers impose no explicit output length cap.
+/// Build an OpenAI-compatible request payload for keyword extraction, omitting
+/// `max_tokens` when `None` so providers impose no explicit output length cap.
+/// Sends `reasoning: {"effort": "low", "exclude": true}` by default so
+/// reasoning-capable models keep latency low while incompatible endpoints fall back cleanly.
 fn build_keyword_llm_chat_body(
     model: &str,
     messages: &serde_json::Value,
     max_tokens: Option<u32>,
-    is_openrouter: bool,
+    include_reasoning: bool,
+    include_temperature: bool,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
-        "temperature": 0,
         "messages": messages,
     });
+    if include_temperature {
+        body["temperature"] = serde_json::json!(0);
+    }
     if let Some(limit) = max_tokens {
         body["max_tokens"] = serde_json::json!(limit);
     }
-    if is_openrouter {
+    if include_reasoning {
         body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
     }
     body
@@ -1187,7 +1239,6 @@ pub async fn keyword_llm_chat_complete(
         Err(e) => return map_err(e),
     };
 
-    let is_openrouter = is_openrouter_host(&chat_url);
     let messages = serde_json::json!([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -1205,12 +1256,10 @@ pub async fn keyword_llm_chat_complete(
         req.send()
     };
 
-    let primary_body =
-        build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, is_openrouter);
-    let fallback_body = serde_json::json!({
-        "model": cfg.model,
-        "messages": messages,
-    });
+    let primary_body = build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, true, true);
+    let no_reasoning_body =
+        build_keyword_llm_chat_body(&cfg.model, &messages, max_tokens, false, true);
+    let minimal_body = build_keyword_llm_chat_body(&cfg.model, &messages, None, false, false);
 
     let mut resp = match send_chat(&primary_body).await {
         Ok(r) => r,
@@ -1223,12 +1272,25 @@ pub async fn keyword_llm_chat_complete(
             return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
         }
     };
-    if resp.status().as_u16() == 400 {
-        resp = match send_chat(&fallback_body).await {
+    if is_unsupported_param_status(resp.status().as_u16()) {
+        resp = match send_chat(&no_reasoning_body).await {
             Ok(r) => r,
             Err(e) => {
                 log::warn!(
                     "keyword_llm_chat_complete fallback transport error model={}: {}",
+                    cfg.model,
+                    e
+                );
+                return ApiResult::err(agentero_core::error::AppError::message(e.to_string()));
+            }
+        };
+    }
+    if is_unsupported_param_status(resp.status().as_u16()) {
+        resp = match send_chat(&minimal_body).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(
+                    "keyword_llm_chat_complete minimal fallback transport error model={}: {}",
                     cfg.model,
                     e
                 );
@@ -1342,32 +1404,33 @@ mod tests {
     }
 
     #[test]
-    fn builds_keyword_llm_chat_body_without_max_tokens_by_default() {
+    fn builds_keyword_llm_chat_body_with_reasoning_default_and_fallbacks() {
         let msgs = serde_json::json!([{"role": "user", "content": "hi"}]);
 
-        let unbounded = build_keyword_llm_chat_body("ernie-5.5-flash-preview", &msgs, None, false);
-        assert!(unbounded.get("max_tokens").is_none());
-        assert!(unbounded.get("reasoning").is_none());
+        let primary =
+            build_keyword_llm_chat_body("ernie-5.5-flash-preview", &msgs, None, true, true);
+        assert!(primary.get("max_tokens").is_none());
+        assert_eq!(primary.get("temperature").and_then(|v| v.as_i64()), Some(0));
         assert_eq!(
-            unbounded.get("temperature").and_then(|v| v.as_i64()),
-            Some(0)
+            primary["reasoning"],
+            serde_json::json!({"effort": "low", "exclude": true})
         );
 
-        let bounded_openrouter = build_keyword_llm_chat_body(
-            "baidu/ernie-5.5-flash-preview:free",
-            &msgs,
-            Some(1024),
-            true,
-        );
+        let no_reasoning =
+            build_keyword_llm_chat_body("gpt-4o-mini", &msgs, Some(1024), false, true);
         assert_eq!(
-            bounded_openrouter
-                .get("max_tokens")
-                .and_then(|v| v.as_u64()),
+            no_reasoning.get("max_tokens").and_then(|v| v.as_u64()),
             Some(1024)
         );
         assert_eq!(
-            bounded_openrouter["reasoning"],
-            serde_json::json!({"effort": "low", "exclude": true})
+            no_reasoning.get("temperature").and_then(|v| v.as_i64()),
+            Some(0)
         );
+        assert!(no_reasoning.get("reasoning").is_none());
+
+        let minimal = build_keyword_llm_chat_body("o3-mini", &msgs, None, false, false);
+        assert!(minimal.get("temperature").is_none());
+        assert!(minimal.get("reasoning").is_none());
+        assert!(minimal.get("max_tokens").is_none());
     }
 }

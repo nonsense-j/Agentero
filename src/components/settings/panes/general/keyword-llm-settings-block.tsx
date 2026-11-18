@@ -1,6 +1,7 @@
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { KeywordLlmModelPicker } from "@/components/settings/keyword-llm-model-picker";
 import {
 	PROVIDER_INPUT_CLASS,
 	ProbeDot,
@@ -24,19 +25,18 @@ import {
 } from "@/components/ui/tooltip";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { hasSecret, isSecretMask, maskSecret } from "@/lib/core/secret-mask";
-import { cn } from "@/lib/core/utils";
 import {
 	fetchKeywordLlmModels,
+	hasBuiltinKeywordLlmKey,
 	isKeywordLlmConfigured,
 	type KeywordLlmProbeStatus,
-	OPENROUTER_KEY_URL,
 	probeKeywordLlm,
+	switchKeywordLlmProviderDraft,
 } from "@/lib/keyword-llm";
 import {
 	type AppSettings,
-	DEFAULT_OPEN_ROUTER_BASE_URL,
 	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+	DEFAULT_X666_MODEL,
 	KEYWORD_LLM_PROVIDER_IDS,
 	KEYWORD_LLM_PROVIDER_PRESETS,
 	type KeywordLlmProviderId,
@@ -44,7 +44,11 @@ import {
 	saveSettingsAsync,
 } from "@/lib/settings";
 
-const KEYWORD_LLM_DATALIST_ID = "keyword-llm-models";
+const PROVIDER_LABEL_KEYS = {
+	x666: "general.keywordLlm.providerX666",
+	openrouter: "general.keywordLlm.providerOpenRouter",
+	openaiCompatible: "general.keywordLlm.providerOpenAiCompatible",
+} as const satisfies Record<KeywordLlmProviderId, string>;
 
 function normalizeDraft(value: KeywordLlmSettings): KeywordLlmSettings {
 	return {
@@ -70,13 +74,26 @@ export function KeywordLlmSettingsBlock({
 	const [saving, setSaving] = useState(false);
 	const [models, setModels] = useState<string[]>([]);
 	const [refreshingModels, setRefreshingModels] = useState(false);
+	const [hasBuiltinKey, setHasBuiltinKey] = useState(false);
 	const abortRef = useRef<AbortController | null>(null);
 
 	useEffect(() => {
 		setDraft(saved);
 	}, [saved]);
 
-	const configured = isKeywordLlmConfigured(saved);
+	useEffect(() => {
+		let cancelled = false;
+		void hasBuiltinKeywordLlmKey().then((ok) => {
+			if (!cancelled) setHasBuiltinKey(ok);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	const configured =
+		isKeywordLlmConfigured(saved) ||
+		(saved.provider === "x666" && hasBuiltinKey);
 
 	const runProbe = useCallback(async () => {
 		if (!configured) {
@@ -99,6 +116,19 @@ export function KeywordLlmSettingsBlock({
 		};
 	}, [runProbe]);
 
+	useEffect(() => {
+		if (!configured) return;
+		let cancelled = false;
+		void fetchKeywordLlmModels(normalizeDraft(saved)).then((list) => {
+			if (!cancelled && list.length > 0) {
+				setModels(list);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [configured, saved]);
+
 	const changed = useMemo(() => {
 		const a = normalizeDraft(saved);
 		const b = normalizeDraft(draft);
@@ -113,33 +143,7 @@ export function KeywordLlmSettingsBlock({
 	const handleProviderChange = (value: string) => {
 		const nextProvider = value as KeywordLlmProviderId;
 		setModels([]);
-		setDraft((prev) => {
-			const trimmedUrl = prev.baseUrl.trim();
-			const trimmedModel = prev.model.trim();
-			let nextUrl = prev.baseUrl;
-			let nextModel = prev.model;
-			if (nextProvider === "openrouter") {
-				if (!trimmedUrl || trimmedUrl === DEFAULT_OPENAI_COMPATIBLE_BASE_URL) {
-					nextUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
-				}
-				if (!trimmedModel) {
-					nextModel = DEFAULT_OPEN_ROUTER_MODEL;
-				}
-			} else {
-				if (!trimmedUrl || trimmedUrl === DEFAULT_OPEN_ROUTER_BASE_URL) {
-					nextUrl = DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
-				}
-				if (trimmedModel === DEFAULT_OPEN_ROUTER_MODEL) {
-					nextModel = "";
-				}
-			}
-			return {
-				...prev,
-				provider: nextProvider,
-				baseUrl: nextUrl,
-				model: nextModel,
-			};
-		});
+		setDraft((prev) => switchKeywordLlmProviderDraft(prev, nextProvider));
 	};
 
 	const handleConfirm = async () => {
@@ -169,7 +173,9 @@ export function KeywordLlmSettingsBlock({
 
 	const modelOptions = useMemo(() => {
 		const unique = new Set<string>();
-		if (draft.provider === "openrouter") {
+		if (draft.provider === "x666") {
+			unique.add(DEFAULT_X666_MODEL);
+		} else if (draft.provider === "openrouter") {
 			unique.add(DEFAULT_OPEN_ROUTER_MODEL);
 		}
 		for (const id of models) {
@@ -188,8 +194,29 @@ export function KeywordLlmSettingsBlock({
 					: "general.keywordLlm.probeFail",
 	);
 
+	const keyUrl = KEYWORD_LLM_PROVIDER_PRESETS[draft.provider].keyUrl;
 	const canRefreshModels =
-		hasSecret(draft.apiKey) || Boolean(draft.baseUrl.trim());
+		hasSecret(draft.apiKey) ||
+		Boolean(draft.baseUrl.trim()) ||
+		(draft.provider === "x666" && hasBuiltinKey);
+	const keyPlaceholder =
+		draft.provider === "x666"
+			? t(
+					hasBuiltinKey
+						? "general.keywordLlm.keyPlaceholderBuiltin"
+						: "general.keywordLlm.keyPlaceholderX666",
+				)
+			: t(
+					draft.provider === "openrouter"
+						? "general.keywordLlm.keyPlaceholderOpenRouter"
+						: "general.keywordLlm.keyPlaceholderByok",
+				);
+	const modelPlaceholder =
+		draft.provider === "x666"
+			? DEFAULT_X666_MODEL
+			: draft.provider === "openrouter"
+				? DEFAULT_OPEN_ROUTER_MODEL
+				: t("general.keywordLlm.modelPlaceholderByok");
 
 	return (
 		<div className="mb-5">
@@ -210,13 +237,13 @@ export function KeywordLlmSettingsBlock({
 							<p className="min-w-0 truncate font-medium text-sm">
 								{t("general.keywordLlm.section")}
 							</p>
-							{draft.provider === "openrouter" ? (
+							{keyUrl ? (
 								<Button
 									type="button"
 									variant="link"
 									size="xs"
 									className="-ml-1.5 h-auto shrink-0 px-1.5 text-primary"
-									onClick={() => void openExternalUrl(OPENROUTER_KEY_URL)}
+									onClick={() => void openExternalUrl(keyUrl)}
 								>
 									<ExternalLink data-icon="inline-start" className="size-3" />
 									{t("general.keywordLlm.openKeyPage")}
@@ -252,11 +279,7 @@ export function KeywordLlmSettingsBlock({
 							<SelectContent>
 								{KEYWORD_LLM_PROVIDER_IDS.map((id) => (
 									<SelectItem key={id} value={id} className="text-xs">
-										{t(
-											id === "openrouter"
-												? "general.keywordLlm.providerOpenRouter"
-												: "general.keywordLlm.providerOpenAiCompatible",
-										)}
+										{t(PROVIDER_LABEL_KEYS[id])}
 									</SelectItem>
 								))}
 							</SelectContent>
@@ -294,11 +317,7 @@ export function KeywordLlmSettingsBlock({
 							id="keyword-llm-key"
 							type="password"
 							autoComplete="off"
-							placeholder={t(
-								draft.provider === "openrouter"
-									? "general.keywordLlm.keyPlaceholderOpenRouter"
-									: "general.keywordLlm.keyPlaceholderByok",
-							)}
+							placeholder={keyPlaceholder}
 							className={PROVIDER_INPUT_CLASS}
 							value={draft.apiKey}
 							onChange={(e) => {
@@ -327,57 +346,27 @@ export function KeywordLlmSettingsBlock({
 						label={t("general.keywordLlm.modelLabel")}
 						htmlFor="keyword-llm-model"
 					>
-						<div className="flex min-w-0 flex-1 items-center gap-1.5">
-							<Input
-								id="keyword-llm-model"
-								list={KEYWORD_LLM_DATALIST_ID}
-								autoComplete="off"
-								placeholder={
-									draft.provider === "openrouter"
-										? DEFAULT_OPEN_ROUTER_MODEL
-										: t("general.keywordLlm.modelPlaceholderByok")
+						<KeywordLlmModelPicker
+							id="keyword-llm-model"
+							value={draft.model}
+							placeholder={modelPlaceholder}
+							options={modelOptions}
+							refreshing={refreshingModels}
+							canRefresh={canRefreshModels}
+							chooseLabel={t("general.keywordLlm.chooseModel")}
+							searchPlaceholder={t("general.keywordLlm.searchModels")}
+							emptyLabel={t("general.keywordLlm.noModelsFound")}
+							refreshLabel={t("general.keywordLlm.refreshModels")}
+							onChange={(nextModel) => {
+								setDraft((prev) => ({ ...prev, model: nextModel }));
+							}}
+							onSubmit={() => {
+								if (changed && !saving) {
+									void handleConfirm();
 								}
-								className={PROVIDER_INPUT_CLASS}
-								value={draft.model}
-								onChange={(e) => {
-									const nextModel = e.currentTarget.value;
-									setDraft((prev) => ({ ...prev, model: nextModel }));
-								}}
-								onKeyDown={(e) => {
-									if (e.key === "Enter" && changed && !saving) {
-										void handleConfirm();
-									}
-								}}
-							/>
-							<datalist id={KEYWORD_LLM_DATALIST_ID}>
-								{modelOptions.map((id) => (
-									<option key={id} value={id} />
-								))}
-							</datalist>
-							<Tooltip>
-								<TooltipTrigger asChild>
-									<Button
-										type="button"
-										variant="outline"
-										size="icon-xs"
-										className="size-8 shrink-0"
-										disabled={refreshingModels || !canRefreshModels}
-										aria-label={t("general.keywordLlm.refreshModels")}
-										onClick={() => void handleRefreshModels()}
-									>
-										<RefreshCw
-											className={cn(
-												"size-3.5",
-												refreshingModels && "animate-spin",
-											)}
-										/>
-									</Button>
-								</TooltipTrigger>
-								<TooltipContent>
-									{t("general.keywordLlm.refreshModels")}
-								</TooltipContent>
-							</Tooltip>
-						</div>
+							}}
+							onRefreshModels={handleRefreshModels}
+						/>
 					</ProviderFieldRow>
 				</div>
 			</ProviderCard>

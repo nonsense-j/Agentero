@@ -96,6 +96,8 @@ export const DECISION_PROVIDER_PRESETS: Record<
 export const DEFAULT_TRANSLATOR_BASE_URL =
 	"https://translation-server.agentero.app";
 export const DEFAULT_NETWORK_PROXY_URL = "http://127.0.0.1:7890";
+export const DEFAULT_X666_BASE_URL = "https://x666.me/v1";
+export const DEFAULT_X666_MODEL = "ernie-5.5-flash-preview";
 export const DEFAULT_OPEN_ROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_OPEN_ROUTER_MODEL = "baidu/ernie-5.5-flash-preview:free";
@@ -104,6 +106,11 @@ export const KEYWORD_LLM_PROVIDER_PRESETS: Record<
 	KeywordLlmProviderId,
 	{ baseUrl: string; model: string; keyUrl: string }
 > = {
+	x666: {
+		baseUrl: DEFAULT_X666_BASE_URL,
+		model: DEFAULT_X666_MODEL,
+		keyUrl: "https://x666.me",
+	},
 	openrouter: {
 		baseUrl: DEFAULT_OPEN_ROUTER_BASE_URL,
 		model: DEFAULT_OPEN_ROUTER_MODEL,
@@ -117,10 +124,10 @@ export const KEYWORD_LLM_PROVIDER_PRESETS: Record<
 };
 
 export const DEFAULT_KEYWORD_LLM_SETTINGS: KeywordLlmSettings = {
-	provider: "openrouter",
-	baseUrl: DEFAULT_OPEN_ROUTER_BASE_URL,
+	provider: "x666",
+	baseUrl: DEFAULT_X666_BASE_URL,
 	apiKey: "",
-	model: DEFAULT_OPEN_ROUTER_MODEL,
+	model: DEFAULT_X666_MODEL,
 };
 
 /** Gateway flavour for the institution proxy (`institutionProxyType`). */

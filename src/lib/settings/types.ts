@@ -461,9 +461,10 @@ export type EmbeddingSettings = {
 	model: string;
 };
 
-export type KeywordLlmProviderId = "openrouter" | "openaiCompatible";
+export type KeywordLlmProviderId = "x666" | "openrouter" | "openaiCompatible";
 
 export const KEYWORD_LLM_PROVIDER_IDS: readonly KeywordLlmProviderId[] = [
+	"x666",
 	"openrouter",
 	"openaiCompatible",
 ] as const;
@@ -475,13 +476,13 @@ export function isKeywordLlmProviderId(v: unknown): v is KeywordLlmProviderId {
 	);
 }
 
-/** Fallback keyword-extraction LLM settings (OpenRouter preset or OpenAI-compatible BYOK). */
+/** Fallback keyword-extraction LLM settings (`x666` default preset, OpenRouter preset, or OpenAI-compatible BYOK). */
 export type KeywordLlmSettings = {
 	provider: KeywordLlmProviderId;
-	/** OpenAI-compatible base URL; empty falls back to `https://api.openai.com/v1` in `openaiCompatible` mode. */
+	/** OpenAI-compatible base URL; empty falls back to the selected preset or `https://api.openai.com/v1`. */
 	baseUrl: string;
 	/** API key; masked (`*`) when echoed back from the Host. */
 	apiKey: string;
-	/** Chat model id (e.g. `baidu/ernie-5.5-flash-preview:free`, `gpt-4o-mini`). */
+	/** Chat model id (e.g. `ernie-5.5-flash-preview`, `gpt-4o-mini`). */
 	model: string;
 };

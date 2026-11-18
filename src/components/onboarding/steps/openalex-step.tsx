@@ -3,13 +3,13 @@ import {
 	ExternalLink,
 	KeyRound,
 	LoaderCircle,
-	RefreshCw,
 	Sparkles,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChoiceCard } from "@/components/onboarding/choice-card";
 import type { OnboardingStepId } from "@/components/onboarding/flow";
+import { KeywordLlmModelPicker } from "@/components/settings/keyword-llm-model-picker";
 import { ProbeDot } from "@/components/settings/provider-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,22 +24,29 @@ import { openExternalUrl } from "@/lib/core/open-external";
 import { hasSecret, isSecretMask, maskSecret } from "@/lib/core/secret-mask";
 import {
 	fetchKeywordLlmModels,
+	hasBuiltinKeywordLlmKey,
 	isKeywordLlmConfigured,
-	OPENROUTER_KEY_URL,
 	probeKeywordLlm,
+	switchKeywordLlmProviderDraft,
 } from "@/lib/keyword-llm";
 import { OPENALEX_KEY_URL, probeOpenAlexKey } from "@/lib/openalex";
 import {
 	type AppSettings,
-	DEFAULT_OPEN_ROUTER_BASE_URL,
 	DEFAULT_OPEN_ROUTER_MODEL,
-	DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+	DEFAULT_X666_MODEL,
 	KEYWORD_LLM_PROVIDER_IDS,
+	KEYWORD_LLM_PROVIDER_PRESETS,
 	type KeywordLlmProviderId,
 	type KeywordLlmSettings,
 	saveSettingsAsync,
 } from "@/lib/settings";
 import type { ProbeStatus } from "@/lib/ui/probe-status";
+
+const PROVIDER_LABEL_KEYS = {
+	x666: "openalex.providerX666",
+	openrouter: "openalex.providerOpenRouter",
+	openaiCompatible: "openalex.providerOpenAiCompatible",
+} as const satisfies Record<KeywordLlmProviderId, string>;
 
 const PROBE_LABEL_KEYS = {
 	ok: "openalex.probeOk",
@@ -47,8 +54,6 @@ const PROBE_LABEL_KEYS = {
 	probing: "openalex.probeProbing",
 	idle: "openalex.probeIdle",
 } as const satisfies Record<ProbeStatus, string>;
-
-const ONBOARDING_KEYWORD_MODELS_DATALIST_ID = "onboarding-keyword-llm-models";
 
 function normalizeKeywordLlm(value: KeywordLlmSettings): KeywordLlmSettings {
 	return {
@@ -96,6 +101,7 @@ export function OpenAlexStep({
 	const [keywordProbe, setKeywordProbe] = useState<ProbeStatus>("idle");
 	const [models, setModels] = useState<string[]>([]);
 	const [loadingModels, setLoadingModels] = useState(false);
+	const [hasBuiltinKey, setHasBuiltinKey] = useState(false);
 
 	const latestKeywordLlmRef = useRef(settings.keywordLlm);
 	latestKeywordLlmRef.current = draftKeywordLlm;
@@ -103,6 +109,16 @@ export function OpenAlexStep({
 	useEffect(() => {
 		setDraftKeywordLlm(settings.keywordLlm);
 	}, [settings.keywordLlm]);
+
+	useEffect(() => {
+		let cancelled = false;
+		void hasBuiltinKeywordLlmKey().then((ok) => {
+			if (!cancelled) setHasBuiltinKey(ok);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	// Both OpenAlex and keyword LLM fallback are optional, so Next is always allowed.
 	useEffect(() => {
@@ -175,37 +191,16 @@ export function OpenAlexStep({
 		const nextProvider = value as KeywordLlmProviderId;
 		setModels([]);
 		setKeywordProbe("idle");
-		const trimmedUrl = draftKeywordLlm.baseUrl.trim();
-		const trimmedModel = draftKeywordLlm.model.trim();
-		let nextUrl = draftKeywordLlm.baseUrl;
-		let nextModel = draftKeywordLlm.model;
-		if (nextProvider === "openrouter") {
-			if (!trimmedUrl || trimmedUrl === DEFAULT_OPENAI_COMPATIBLE_BASE_URL) {
-				nextUrl = DEFAULT_OPEN_ROUTER_BASE_URL;
-			}
-			if (!trimmedModel) {
-				nextModel = DEFAULT_OPEN_ROUTER_MODEL;
-			}
-		} else {
-			if (!trimmedUrl || trimmedUrl === DEFAULT_OPEN_ROUTER_BASE_URL) {
-				nextUrl = DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
-			}
-			if (trimmedModel === DEFAULT_OPEN_ROUTER_MODEL) {
-				nextModel = "";
-			}
-		}
-		const updated: KeywordLlmSettings = {
-			...draftKeywordLlm,
-			provider: nextProvider,
-			baseUrl: nextUrl,
-			model: nextModel,
-		};
+		const updated = switchKeywordLlmProviderDraft(
+			draftKeywordLlm,
+			nextProvider,
+		);
 		setDraftKeywordLlm(updated);
 		void persistKeywordLlm(updated);
 	};
 
 	const confirmKeywordLlm = async () => {
-		if (!isKeywordLlmConfigured(draftKeywordLlm)) return;
+		if (!keywordConfigured) return;
 		await persistKeywordLlm(draftKeywordLlm);
 		setKeywordProbe("probing");
 		const ok = await probeKeywordLlm(null);
@@ -214,7 +209,9 @@ export function OpenAlexStep({
 
 	const modelOptions = useMemo(() => {
 		const unique = new Set<string>();
-		if (draftKeywordLlm.provider === "openrouter") {
+		if (draftKeywordLlm.provider === "x666") {
+			unique.add(DEFAULT_X666_MODEL);
+		} else if (draftKeywordLlm.provider === "openrouter") {
 			unique.add(DEFAULT_OPEN_ROUTER_MODEL);
 		}
 		for (const id of models) {
@@ -223,7 +220,20 @@ export function OpenAlexStep({
 		return Array.from(unique);
 	}, [draftKeywordLlm.provider, models]);
 
-	const keywordConfigured = isKeywordLlmConfigured(draftKeywordLlm);
+	const keywordConfigured =
+		isKeywordLlmConfigured(draftKeywordLlm) ||
+		(draftKeywordLlm.provider === "x666" && hasBuiltinKey);
+	const keyUrl = KEYWORD_LLM_PROVIDER_PRESETS[draftKeywordLlm.provider].keyUrl;
+	const canRefreshModels =
+		hasSecret(draftKeywordLlm.apiKey) ||
+		Boolean(draftKeywordLlm.baseUrl.trim()) ||
+		(draftKeywordLlm.provider === "x666" && hasBuiltinKey);
+	const modelPlaceholder =
+		draftKeywordLlm.provider === "x666"
+			? DEFAULT_X666_MODEL
+			: draftKeywordLlm.provider === "openrouter"
+				? DEFAULT_OPEN_ROUTER_MODEL
+				: t("openalex.keywordModelPlaceholder");
 
 	if (mode === "choose") {
 		return (
@@ -344,13 +354,13 @@ export function OpenAlexStep({
 					<span className="font-medium text-sm">
 						{t("openalex.keywordLlmLabel")}
 					</span>
-					{draftKeywordLlm.provider === "openrouter" ? (
+					{keyUrl ? (
 						<Button
 							type="button"
 							variant="ghost"
 							size="xs"
 							className="shrink-0"
-							onClick={() => void openExternalUrl(OPENROUTER_KEY_URL)}
+							onClick={() => void openExternalUrl(keyUrl)}
 						>
 							<ExternalLink data-icon="inline-start" className="size-3.5" />
 							{t("openalex.openDocsLabel")}
@@ -393,11 +403,7 @@ export function OpenAlexStep({
 					<SelectContent>
 						{KEYWORD_LLM_PROVIDER_IDS.map((id) => (
 							<SelectItem key={id} value={id} className="text-xs">
-								{t(
-									id === "openrouter"
-										? "openalex.providerOpenRouter"
-										: "openalex.providerOpenAiCompatible",
-								)}
+								{t(PROVIDER_LABEL_KEYS[id])}
 							</SelectItem>
 						))}
 					</SelectContent>
@@ -408,9 +414,8 @@ export function OpenAlexStep({
 					autoComplete="off"
 					value={draftKeywordLlm.baseUrl}
 					placeholder={
-						draftKeywordLlm.provider === "openrouter"
-							? DEFAULT_OPEN_ROUTER_BASE_URL
-							: t("openalex.baseUrlPlaceholder")
+						KEYWORD_LLM_PROVIDER_PRESETS[draftKeywordLlm.provider].baseUrl ||
+						t("openalex.baseUrlPlaceholder")
 					}
 					aria-label={t("openalex.baseUrlPlaceholder")}
 					onChange={(e) => {
@@ -431,8 +436,16 @@ export function OpenAlexStep({
 					type="password"
 					autoComplete="off"
 					value={draftKeywordLlm.apiKey}
-					placeholder={t("openalex.keywordKeyPlaceholder")}
-					aria-label={t("openalex.keywordKeyPlaceholder")}
+					placeholder={t(
+						draftKeywordLlm.provider === "x666" && hasBuiltinKey
+							? "openalex.keywordKeyPlaceholderBuiltin"
+							: "openalex.keywordKeyPlaceholder",
+					)}
+					aria-label={t(
+						draftKeywordLlm.provider === "x666" && hasBuiltinKey
+							? "openalex.keywordKeyPlaceholderBuiltin"
+							: "openalex.keywordKeyPlaceholder",
+					)}
 					onChange={(e) => {
 						const next = e.currentTarget.value;
 						const savedKey = settings.keywordLlm.apiKey;
@@ -458,49 +471,32 @@ export function OpenAlexStep({
 					className="h-8 font-mono text-xs"
 				/>
 
-				<div className="flex items-center gap-1.5">
-					<Input
-						list={ONBOARDING_KEYWORD_MODELS_DATALIST_ID}
-						autoComplete="off"
-						value={draftKeywordLlm.model}
-						placeholder={
-							draftKeywordLlm.provider === "openrouter"
-								? DEFAULT_OPEN_ROUTER_MODEL
-								: t("openalex.keywordModelPlaceholder")
-						}
-						aria-label={t("openalex.keywordModelPlaceholder")}
-						onChange={(e) => {
-							const nextModel = e.currentTarget.value;
-							setDraftKeywordLlm((prev) => ({ ...prev, model: nextModel }));
-							setKeywordProbe("idle");
-						}}
-						onBlur={() => void persistKeywordLlm(draftKeywordLlm)}
-						onKeyDown={(e) => {
-							if (e.key === "Enter") {
-								void confirmKeywordLlm();
-							}
-						}}
-						className="h-8 min-w-0 flex-1 font-mono text-xs"
-					/>
-					<datalist id={ONBOARDING_KEYWORD_MODELS_DATALIST_ID}>
-						{modelOptions.map((id) => (
-							<option key={id} value={id} />
-						))}
-					</datalist>
-					<Button
-						type="button"
-						variant="ghost"
-						size="icon-xs"
-						disabled={loadingModels}
-						aria-label={t("openalex.refreshModels")}
-						title={t("openalex.refreshModels")}
-						onClick={() => void loadModels(draftKeywordLlm)}
-					>
-						<RefreshCw
-							className={loadingModels ? "size-3.5 animate-spin" : "size-3.5"}
-						/>
-					</Button>
-				</div>
+				<KeywordLlmModelPicker
+					compact
+					value={draftKeywordLlm.model}
+					placeholder={modelPlaceholder}
+					ariaLabel={t("openalex.keywordModelPlaceholder")}
+					options={modelOptions}
+					refreshing={loadingModels}
+					canRefresh={canRefreshModels}
+					chooseLabel={t("openalex.chooseModel")}
+					searchPlaceholder={t("openalex.searchModels")}
+					emptyLabel={t("openalex.noModelsFound")}
+					refreshLabel={t("openalex.refreshModels")}
+					onChange={(nextModel) => {
+						setDraftKeywordLlm((prev) => ({ ...prev, model: nextModel }));
+						setKeywordProbe("idle");
+					}}
+					onSelectOption={(nextModel) => {
+						const updated = { ...draftKeywordLlm, model: nextModel };
+						setDraftKeywordLlm(updated);
+						setKeywordProbe("idle");
+						void persistKeywordLlm(updated);
+					}}
+					onBlur={() => void persistKeywordLlm(draftKeywordLlm)}
+					onSubmit={() => void confirmKeywordLlm()}
+					onRefreshModels={() => loadModels(draftKeywordLlm)}
+				/>
 			</div>
 		</div>
 	);
