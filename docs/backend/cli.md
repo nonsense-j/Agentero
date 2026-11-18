@@ -261,7 +261,7 @@ pnpm collection:seed-publish --skip-fetch --out-dir dist/seed --upload
 # 2. 直接调用 CLI 子命令（支持自定义 --db 路径与 --json 输出）
 agentero collection upsert-file --input batch.json --json
 agentero collection seed-bake --out-dir dist/seed \
-  --llm-base-url http://127.0.0.1:8011/v1 --llm-model mercury-3-instant --llm-concurrency 16 --json
+  --llm-base-url https://x666.me/v1 --llm-model ernie-5.5-flash-preview --llm-concurrency 1 --llm-batch-size 8 --json
 agentero collection seed-import --manifest dist/seed/manifest.json --json
 agentero collection seed-import --url https://github.com/poco-ai/Agentero/releases/download/collection-seed-2026/manifest.json --force --json
 ```
@@ -269,7 +269,7 @@ agentero collection seed-import --url https://github.com/poco-ai/Agentero/releas
 | 子命令 | 说明 |
 |---|---|
 | `collection upsert-file` | 从 JSON 文件读取 `CollectionUpsertPapersArgs`（含 `items`、可选 `replaceVenueId`、`venueUpdate`、`arxivWatermarks`）批量写入 `collection.sqlite` 并同步解析池内引用图谱 |
-| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点并发烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
+| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点（默认 `https://x666.me/v1` + `ernie-5.5-flash-preview`，自动限速 5 RPM 且默认 `reasoning: { effort: "low", exclude: true }` 并支持 `400`/`422` 自动回退、不设 `max_tokens` 上限）烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
 | `collection seed-import` | 从本地 `--manifest <path>` 或远端 `--url <manifest-url>` 校验 SHA-256 并流式导入未应用的分片，自动合并 `arxiv_watermarks` 与 Venue `lastFetchedAt` 水位线（传 `--force` 可重置 `seed_cleared` 标记强制重导） |
 
 ## 论文导入

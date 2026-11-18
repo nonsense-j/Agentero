@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use agentero_core::features::paper::discovery::collection::{
     self, CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionUpsertPapersArgs,
-    SeedBakeOptions, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_MODEL,
+    SeedBakeOptions, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE,
+    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL,
 };
 use clap::{Subcommand, ValueHint};
 use serde::Deserialize;
@@ -17,6 +18,15 @@ use crate::resolve::GlobalOpts;
 
 const DEFAULT_DESKTOP_PROXY_URL: &str = "http://127.0.0.1:7890";
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DesktopKeywordLlmSettings {
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DesktopNetworkSettings {
@@ -26,6 +36,8 @@ struct DesktopNetworkSettings {
     network_proxy_url: String,
     #[serde(default)]
     open_alex_key: String,
+    #[serde(default)]
+    keyword_llm: DesktopKeywordLlmSettings,
 }
 
 fn default_desktop_proxy_url() -> String {
@@ -70,6 +82,99 @@ fn apply_desktop_network_settings_from(settings_file: &Path) {
 
 fn ensure_desktop_network_settings_loaded() {
     apply_desktop_network_settings_from(&agentero_core::paths::settings_path());
+}
+
+fn non_masked_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '*') {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn read_dotenv_key(path: &Path, keys: &[&str]) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let cleaned = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let Some((k, v)) = cleaned.split_once('=') else {
+            continue;
+        };
+        let key_name = k.trim();
+        if !keys.contains(&key_name) {
+            continue;
+        }
+        let unquoted = v.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if let Some(usable) = non_masked_key(unquoted) {
+            return Some(usable);
+        }
+    }
+    None
+}
+
+fn extract_url_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = after_scheme.split(['/', '?', '#']).next()?.trim();
+    let host_port = authority.rsplit('@').next()?.trim();
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next()?.trim()
+    } else {
+        host_port.split(':').next()?.trim()
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+fn resolve_bake_llm_api_key(explicit: Option<String>, llm_base_url: &str) -> Option<String> {
+    if let Some(k) = explicit.as_deref().and_then(non_masked_key) {
+        return Some(k);
+    }
+    const ENV_KEYS: &[&str] = &[
+        "AGENTERO_SEED_LLM_API_KEY",
+        "AGENTERO_KEYWORD_LLM_API_KEY",
+        "KEYWORD_LLM_API_KEY",
+    ];
+    for name in ENV_KEYS {
+        if let Ok(val) = std::env::var(name) {
+            if let Some(usable) = non_masked_key(&val) {
+                return Some(usable);
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor.join(".env");
+            if candidate.is_file() {
+                if let Some(usable) = read_dotenv_key(&candidate, ENV_KEYS) {
+                    return Some(usable);
+                }
+                break;
+            }
+        }
+    }
+    let settings_file = agentero_core::paths::settings_path();
+    if let Ok(raw) = std::fs::read_to_string(&settings_file) {
+        if let Some(cfg) = parse_desktop_network_settings(&raw) {
+            let req_host = extract_url_host(llm_base_url);
+            let saved_host = extract_url_host(&cfg.keyword_llm.base_url);
+            if req_host.is_none() || saved_host.is_none() || req_host == saved_host {
+                if let Some(usable) = non_masked_key(&cfg.keyword_llm.api_key) {
+                    return Some(usable);
+                }
+            }
+        }
+    }
+    option_env!("AGENTERO_KEYWORD_LLM_API_KEY").and_then(non_masked_key)
 }
 
 #[derive(Debug, Subcommand)]
@@ -125,9 +230,23 @@ pub enum CollectionCmd {
             env = "AGENTERO_SEED_LLM_API_KEY"
         )]
         llm_api_key: Option<String>,
-        /// Number of concurrent 8-paper LLM batches.
-        #[arg(long = "llm-concurrency", value_name = "N", default_value_t = 6)]
+        /// Number of concurrent LLM batches (kept low by default for RPM-capped endpoints).
+        #[arg(
+            long = "llm-concurrency",
+            value_name = "N",
+            default_value_t = DEFAULT_BAKE_LLM_CONCURRENCY
+        )]
         llm_concurrency: usize,
+        /// Number of papers packed per LLM batch request (1-32).
+        #[arg(
+            long = "llm-batch-size",
+            value_name = "N",
+            default_value_t = DEFAULT_BAKE_LLM_BATCH_SIZE
+        )]
+        llm_batch_size: usize,
+        /// Hard RPM cap across workers (`0` disables pacing; omitted auto-caps `x666.me` at 5 RPM).
+        #[arg(long = "llm-rpm", value_name = "N")]
+        llm_rpm: Option<u32>,
         /// Skip Step A (OpenAlex + Semantic Scholar reference backfill).
         #[arg(long = "skip-refs")]
         skip_refs: bool,
@@ -167,18 +286,23 @@ pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliE
             llm_model,
             llm_api_key,
             llm_concurrency,
+            llm_batch_size,
+            llm_rpm,
             skip_refs,
             skip_llm,
             delta_since,
         } => {
             ensure_desktop_network_settings_loaded();
             let db_path = db.unwrap_or_else(collection::collection_db_path);
+            let resolved_api_key = resolve_bake_llm_api_key(llm_api_key, &llm_base_url);
             let opts = SeedBakeOptions {
                 out_dir,
                 llm_base_url,
                 llm_model,
-                llm_api_key,
+                llm_api_key: resolved_api_key,
                 llm_concurrency,
+                llm_batch_size,
+                llm_rpm,
                 skip_refs,
                 skip_llm,
                 delta_since,
@@ -373,6 +497,8 @@ mod tests {
                 llm_model: DEFAULT_BAKE_LLM_MODEL.into(),
                 llm_api_key: None,
                 llm_concurrency: 1,
+                llm_batch_size: DEFAULT_BAKE_LLM_BATCH_SIZE,
+                llm_rpm: None,
                 skip_refs: true,
                 skip_llm: true,
                 delta_since: None,

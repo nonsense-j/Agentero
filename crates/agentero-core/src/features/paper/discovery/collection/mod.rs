@@ -37,8 +37,9 @@ pub use search::{
 };
 pub use seed::{
     seed_bake_at, seed_sync, seed_sync_at, SeedBakeOptions, SeedBakeReport, SeedManifest,
-    SeedPaperRecord, SeedShardEntry, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_MODEL,
-    DEFAULT_SEED_MANIFEST_URL,
+    SeedPaperRecord, SeedShardEntry, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE,
+    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL, DEFAULT_SEED_MANIFEST_URL,
+    DEFAULT_X666_LLM_RPM,
 };
 pub use store::{
     clear_collection, clear_collection_at, config_update, config_update_at,
@@ -2007,7 +2008,11 @@ mod tests {
                     if attempt == 0 {
                         let resp = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 9\r\nConnection: close\r\n\r\nrate limit";
                         let _ = sock.write_all(resp.as_bytes()).await;
+                    } else if attempt == 1 && req_str.contains("\"reasoning\"") {
+                        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 21\r\nConnection: close\r\n\r\nunsupported reasoning";
+                        let _ = sock.write_all(resp.as_bytes()).await;
                     } else {
+                        assert!(!req_str.contains("\"max_tokens\""));
                         let body = serde_json::json!({
                             "choices": [{
                                 "message": {
@@ -2035,6 +2040,8 @@ mod tests {
                 llm_model: "mercury-3-instant".into(),
                 llm_api_key: None,
                 llm_concurrency: 1,
+                llm_batch_size: DEFAULT_BAKE_LLM_BATCH_SIZE,
+                llm_rpm: None,
                 skip_refs: true,
                 skip_llm: false,
                 delta_since: None,
@@ -2043,7 +2050,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(llm_hits.load(Ordering::SeqCst) >= 2);
+        assert!(llm_hits.load(Ordering::SeqCst) >= 3);
         assert_eq!(bake_report.llm_enriched_papers, 1);
         assert_eq!(bake_report.shards.len(), 2); // core + addon-cs-ai
 

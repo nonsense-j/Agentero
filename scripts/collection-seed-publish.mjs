@@ -29,11 +29,38 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 
 const DEFAULT_CATEGORIES = "cs.SE,cs.CR,cs.PL";
 const DEFAULT_OUT_DIR = "dist/seed";
-const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8011/v1";
-const DEFAULT_LLM_MODEL = "mercury-3-instant";
-const DEFAULT_LLM_CONCURRENCY = 16;
+const DEFAULT_LLM_BASE_URL = "https://x666.me/v1";
+const DEFAULT_LLM_MODEL = "ernie-5.5-flash-preview";
+const DEFAULT_LLM_CONCURRENCY = 1;
+const DEFAULT_LLM_BATCH_SIZE = 8;
 const DEFAULT_RELEASE_TAG = "collection-seed-2026";
 const DEFAULT_YEAR = 2026;
+
+function loadRepoDotenv() {
+	const envPath = path.join(REPO_ROOT, ".env");
+	if (!existsSync(envPath)) return;
+	const raw = readFileSync(envPath, "utf8");
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const cleaned = trimmed.startsWith("export ")
+			? trimmed.slice(7).trim()
+			: trimmed;
+		const eqIdx = cleaned.indexOf("=");
+		if (eqIdx <= 0) continue;
+		const key = cleaned.slice(0, eqIdx).trim();
+		let val = cleaned.slice(eqIdx + 1).trim();
+		if (
+			(val.startsWith('"') && val.endsWith('"')) ||
+			(val.startsWith("'") && val.endsWith("'"))
+		) {
+			val = val.slice(1, -1);
+		}
+		if (key && process.env[key] === undefined) {
+			process.env[key] = val;
+		}
+	}
+}
 
 const HELP_TEXT = `Usage: node scripts/collection-seed-publish.mjs [options]
 
@@ -56,6 +83,8 @@ Options:
   --llm-model <model>         Model name for seed-bake (default: ${DEFAULT_LLM_MODEL})
   --llm-api-key <key>         API key for seed-bake LLM (or KEYWORD_LLM_API_KEY env)
   --llm-concurrency <n>       Concurrent LLM requests in seed-bake (default: ${DEFAULT_LLM_CONCURRENCY})
+  --llm-batch-size <n>        Papers per LLM batch in seed-bake (default: ${DEFAULT_LLM_BATCH_SIZE})
+  --llm-rpm <n>               Hard RPM limit across workers (0 disables; omitted auto-caps x666.me at 5)
   --openalex-api-key <key>    OpenAlex API key for Step 1 (or OPENALEX_API_KEY env)
   --skip-refs                 Pass --skip-refs to agentero-cli collection seed-bake
   --skip-llm                  Pass --skip-llm to agentero-cli collection seed-bake
@@ -94,6 +123,11 @@ function parseCliOptions(argv) {
 				type: "string",
 				default: String(DEFAULT_LLM_CONCURRENCY),
 			},
+			"llm-batch-size": {
+				type: "string",
+				default: String(DEFAULT_LLM_BATCH_SIZE),
+			},
+			"llm-rpm": { type: "string" },
 			"openalex-api-key": { type: "string" },
 			"skip-refs": { type: "boolean", default: false },
 			"skip-llm": { type: "boolean", default: false },
@@ -118,6 +152,19 @@ function parseCliOptions(argv) {
 		throw new Error(
 			`Invalid --llm-concurrency value: ${values["llm-concurrency"]}`,
 		);
+	}
+	const llmBatchSize = Number.parseInt(values["llm-batch-size"], 10);
+	if (!Number.isFinite(llmBatchSize) || llmBatchSize < 1 || llmBatchSize > 32) {
+		throw new Error(
+			`Invalid --llm-batch-size value: ${values["llm-batch-size"]}`,
+		);
+	}
+	let llmRpm = null;
+	if (values["llm-rpm"] !== undefined) {
+		llmRpm = Number.parseInt(values["llm-rpm"], 10);
+		if (!Number.isFinite(llmRpm) || llmRpm < 0) {
+			throw new Error(`Invalid --llm-rpm value: ${values["llm-rpm"]}`);
+		}
 	}
 
 	const categories = values.categories
@@ -147,8 +194,14 @@ function parseCliOptions(argv) {
 		llmBaseUrl: values["llm-base-url"],
 		llmModel: values["llm-model"],
 		llmApiKey:
-			values["llm-api-key"] ?? process.env.KEYWORD_LLM_API_KEY ?? undefined,
+			values["llm-api-key"] ??
+			process.env.AGENTERO_SEED_LLM_API_KEY ??
+			process.env.AGENTERO_KEYWORD_LLM_API_KEY ??
+			process.env.KEYWORD_LLM_API_KEY ??
+			undefined,
 		llmConcurrency,
+		llmBatchSize,
+		llmRpm,
 		openAlexApiKey:
 			values["openalex-api-key"] ?? process.env.OPENALEX_API_KEY ?? null,
 		skipRefs: Boolean(values["skip-refs"]),
@@ -1015,6 +1068,7 @@ async function bootstrapNetworkProxy() {
 }
 
 async function main() {
+	loadRepoDotenv();
 	const opts = parseCliOptions(process.argv.slice(2));
 	if (opts.help) {
 		process.stdout.write(HELP_TEXT);
@@ -1164,7 +1218,12 @@ async function main() {
 		opts.llmModel,
 		"--llm-concurrency",
 		String(opts.llmConcurrency),
+		"--llm-batch-size",
+		String(opts.llmBatchSize),
 	];
+	if (opts.llmRpm !== null) {
+		bakeArgs.push("--llm-rpm", String(opts.llmRpm));
+	}
 	if (opts.dbPath) {
 		bakeArgs.push("--db", opts.dbPath);
 	}

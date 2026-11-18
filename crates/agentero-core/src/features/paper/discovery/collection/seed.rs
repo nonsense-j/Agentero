@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -37,8 +39,11 @@ use super::store::{
 pub const DEFAULT_SEED_MANIFEST_URL: &str =
     "https://github.com/nonsense-j/Agentero/releases/download/collection-seed-2026/manifest.json";
 
-pub const DEFAULT_BAKE_LLM_BASE_URL: &str = "http://127.0.0.1:8011/v1";
-pub const DEFAULT_BAKE_LLM_MODEL: &str = "mercury-3-instant";
+pub const DEFAULT_BAKE_LLM_BASE_URL: &str = "https://x666.me/v1";
+pub const DEFAULT_BAKE_LLM_MODEL: &str = "ernie-5.5-flash-preview";
+pub const DEFAULT_BAKE_LLM_BATCH_SIZE: usize = 8;
+pub const DEFAULT_BAKE_LLM_CONCURRENCY: usize = 1;
+pub const DEFAULT_X666_LLM_RPM: u32 = 5;
 
 const OPENALEX_MAILTO: &str = "agentero@users.noreply.github.com";
 const OPENALEX_SELECT: &str =
@@ -680,6 +685,9 @@ pub struct SeedBakeOptions {
     pub llm_model: String,
     pub llm_api_key: Option<String>,
     pub llm_concurrency: usize,
+    pub llm_batch_size: usize,
+    /// Optional hard RPM limit (`None` auto-applies `5` RPM on `x666.me`; `Some(0)` disables).
+    pub llm_rpm: Option<u32>,
     pub skip_refs: bool,
     pub skip_llm: bool,
     pub delta_since: Option<String>,
@@ -692,7 +700,9 @@ impl Default for SeedBakeOptions {
             llm_base_url: DEFAULT_BAKE_LLM_BASE_URL.to_string(),
             llm_model: DEFAULT_BAKE_LLM_MODEL.to_string(),
             llm_api_key: None,
-            llm_concurrency: 6,
+            llm_concurrency: DEFAULT_BAKE_LLM_CONCURRENCY,
+            llm_batch_size: DEFAULT_BAKE_LLM_BATCH_SIZE,
+            llm_rpm: None,
             skip_refs: false,
             skip_llm: false,
             delta_since: None,
@@ -2560,13 +2570,12 @@ fn build_bake_llm_messages(chunk: &[LlmPaperTarget]) -> Value {
                 format!("[{idx}] Title: {title} | Abstract: (Title-only entry; Venue/Field: {ctx})")
             }
         } else {
-            let abs_with_ctx = if abs_collapsed.chars().count() < 48 && !ctx.is_empty() {
+            let abs_full = if abs_collapsed.chars().count() < 48 && !ctx.is_empty() {
                 format!("{abs_collapsed} (Venue/Field: {ctx})")
             } else {
                 abs_collapsed
             };
-            let abs_trunc: String = abs_with_ctx.chars().take(1600).collect();
-            format!("[{idx}] Title: {title} | Abstract: {abs_trunc}")
+            format!("[{idx}] Title: {title} | Abstract: {abs_full}")
         };
         user_lines.push(line);
     }
@@ -2962,28 +2971,101 @@ fn fallback_keywords_from_title_and_context(paper: &LlmPaperTarget) -> Vec<Strin
     }
 }
 
-async fn request_llm_keywords_with_patient_backoff(
-    client: &reqwest::Client,
-    endpoint: &str,
+fn is_x666_endpoint(endpoint_url: &str) -> bool {
+    url::Url::parse(endpoint_url)
+        .ok()
+        .and_then(|u| {
+            u.host_str().map(|h| {
+                h.eq_ignore_ascii_case("x666.me") || h.to_ascii_lowercase().ends_with(".x666.me")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn build_bake_llm_chat_body(
     model: &str,
-    api_key: Option<&str>,
+    messages: &Value,
+    include_reasoning: bool,
+    include_temperature: bool,
+) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+    });
+    if include_temperature {
+        body["temperature"] = serde_json::json!(0);
+    }
+    if include_reasoning {
+        body["reasoning"] = serde_json::json!({"effort": "low", "exclude": true});
+    }
+    body
+}
+
+struct LlmBakeClientCtx {
+    client: reqwest::Client,
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
+    reasoning_rejected: Arc<AtomicBool>,
+    rate_limiter: Option<(Arc<tokio::sync::Mutex<tokio::time::Instant>>, Duration)>,
+}
+
+async fn send_bake_chat_once(
+    ctx: &LlmBakeClientCtx,
+    payload: &Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if let Some((ref slot, interval)) = ctx.rate_limiter {
+        acquire_oa_slot(slot, interval).await;
+    }
+    let mut req = ctx.client.post(&ctx.endpoint).json(payload);
+    if let Some(key) = ctx
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        req = req.bearer_auth(key);
+    }
+    req.send().await
+}
+
+fn is_unsupported_param_status(status: StatusCode) -> bool {
+    status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY
+}
+
+async fn send_bake_chat_with_reasoning_fallback(
+    ctx: &LlmBakeClientCtx,
+    messages: &Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let try_reasoning = !ctx.reasoning_rejected.load(Ordering::Relaxed);
+    let primary_body = build_bake_llm_chat_body(&ctx.model, messages, try_reasoning, true);
+    let mut resp = send_bake_chat_once(ctx, &primary_body).await?;
+
+    if is_unsupported_param_status(resp.status()) && try_reasoning {
+        let no_reasoning_body = build_bake_llm_chat_body(&ctx.model, messages, false, true);
+        resp = send_bake_chat_once(ctx, &no_reasoning_body).await?;
+        if !is_unsupported_param_status(resp.status()) {
+            ctx.reasoning_rejected.store(true, Ordering::Relaxed);
+        }
+    }
+
+    if is_unsupported_param_status(resp.status()) {
+        let minimal_body = build_bake_llm_chat_body(&ctx.model, messages, false, false);
+        resp = send_bake_chat_once(ctx, &minimal_body).await?;
+    }
+
+    Ok(resp)
+}
+
+async fn request_llm_keywords_with_patient_backoff(
+    ctx: &LlmBakeClientCtx,
     chunk: &[LlmPaperTarget],
 ) -> Result<HashMap<usize, Vec<String>>, AppError> {
-    let payload = serde_json::json!({
-        "model": model,
-        "temperature": 0.1,
-        "max_tokens": 2400,
-        "messages": build_bake_llm_messages(chunk),
-    });
+    let messages = build_bake_llm_messages(chunk);
 
     let mut last_err = String::new();
     for (attempt, &base_secs) in LLM_RETRY_DELAYS_SECS.iter().enumerate() {
-        let mut req = client.post(endpoint).json(&payload);
-        if let Some(key) = api_key.map(str::trim).filter(|s| !s.is_empty()) {
-            req = req.bearer_auth(key);
-        }
-
-        match req.send().await {
+        match send_bake_chat_with_reasoning_fallback(ctx, &messages).await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
@@ -3047,14 +3129,10 @@ async fn request_llm_keywords_with_patient_backoff(
 }
 
 async fn extract_batch_with_single_fallback(
-    client: &reqwest::Client,
-    endpoint: &str,
-    model: &str,
-    api_key: Option<&str>,
+    ctx: &LlmBakeClientCtx,
     chunk: Vec<LlmPaperTarget>,
 ) -> Result<Vec<(LlmPaperTarget, Vec<String>)>, AppError> {
-    let batch_map =
-        request_llm_keywords_with_patient_backoff(client, endpoint, model, api_key, &chunk).await?;
+    let batch_map = request_llm_keywords_with_patient_backoff(ctx, &chunk).await?;
     let mut out = Vec::with_capacity(chunk.len());
     for (idx, paper) in chunk.into_iter().enumerate() {
         let cleaned_batch = batch_map
@@ -3069,15 +3147,7 @@ async fn extract_batch_with_single_fallback(
 
         // Single-paper patient retry so partial batch omissions or title-only entries are never dropped.
         let single_slice = std::slice::from_ref(&paper);
-        let single_kws = match request_llm_keywords_with_patient_backoff(
-            client,
-            endpoint,
-            model,
-            api_key,
-            single_slice,
-        )
-        .await
-        {
+        let single_kws = match request_llm_keywords_with_patient_backoff(ctx, single_slice).await {
             Ok(single_map) => single_map
                 .get(&0)
                 .cloned()
@@ -3199,29 +3269,56 @@ async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<u
     let endpoint = build_chat_completions_url(&opts.llm_base_url);
     let model = opts.llm_model.trim().to_string();
     let api_key = opts.llm_api_key.clone();
-    let concurrency = opts.llm_concurrency.clamp(1, 32);
-    let client = crate::http::client_with(Duration::from_secs(90), 5, crate::http::USER_AGENT)?;
-
-    let chunks: Vec<Vec<LlmPaperTarget>> = targets.chunks(8).map(|c| c.to_vec()).collect();
-    let mut futs = stream::iter(chunks.into_iter().map(|chunk| {
-        let client_c = client.clone();
-        let endpoint_c = endpoint.clone();
-        let model_c = model.clone();
-        let api_key_c = api_key.clone();
-        async move {
-            extract_batch_with_single_fallback(
-                &client_c,
-                &endpoint_c,
-                &model_c,
-                api_key_c.as_deref(),
-                chunk,
-            )
-            .await
+    let effective_rpm = opts.llm_rpm.unwrap_or_else(|| {
+        if is_x666_endpoint(&endpoint) {
+            DEFAULT_X666_LLM_RPM
+        } else {
+            0
         }
+    });
+    let rate_limiter = (effective_rpm > 0).then(|| {
+        let interval_ms = (60_500u64 / u64::from(effective_rpm)).max(1);
+        (
+            Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now())),
+            Duration::from_millis(interval_ms),
+        )
+    });
+    let concurrency = if effective_rpm > 0 && effective_rpm <= DEFAULT_X666_LLM_RPM {
+        opts.llm_concurrency.clamp(1, 2)
+    } else {
+        opts.llm_concurrency.clamp(1, 32)
+    };
+    let batch_size = opts.llm_batch_size.clamp(1, 32);
+    let client = crate::http::client_with(Duration::from_secs(180), 5, crate::http::USER_AGENT)?;
+
+    let ctx = Arc::new(LlmBakeClientCtx {
+        client,
+        endpoint,
+        model,
+        api_key,
+        reasoning_rejected: Arc::new(AtomicBool::new(false)),
+        rate_limiter,
+    });
+
+    let total_targets = targets.len();
+    let chunks: Vec<Vec<LlmPaperTarget>> = targets.chunks(batch_size).map(|c| c.to_vec()).collect();
+    let total_chunks = chunks.len();
+    let started_at = Instant::now();
+    if total_chunks > 1 {
+        eprintln!(
+            "[seed-bake llm] {} papers in {} batches (batch_size={}, concurrency={}, rpm={})",
+            total_targets, total_chunks, batch_size, concurrency, effective_rpm
+        );
+    }
+
+    let mut futs = stream::iter(chunks.into_iter().map(|chunk| {
+        let ctx_c = Arc::clone(&ctx);
+        async move { extract_batch_with_single_fallback(&ctx_c, chunk).await }
     }))
     .buffer_unordered(concurrency);
 
     let mut total_updated = 0usize;
+    let mut completed_chunks = 0usize;
     while let Some(res) = futs.next().await {
         let extracted = res?;
         let db_p = db_path.to_path_buf();
@@ -3229,6 +3326,22 @@ async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<u
             tokio::task::spawn_blocking(move || persist_maintainer_llm_batch(&db_p, &extracted))
                 .await
                 .map_err(|e| AppError::message(format!("persist llm batch: {e}")))??;
+        completed_chunks += 1;
+        if total_chunks >= 10
+            && (completed_chunks.is_multiple_of(10) || completed_chunks == total_chunks)
+        {
+            let elapsed_s = started_at.elapsed().as_secs_f64();
+            let rate = completed_chunks as f64 / elapsed_s.max(0.1);
+            let remaining_s = ((total_chunks - completed_chunks) as f64 / rate.max(1e-6)) / 60.0;
+            eprintln!(
+                "[seed-bake llm] {}/{} batches ({} papers updated, elapsed {:.1}m, eta {:.1}m)",
+                completed_chunks,
+                total_chunks,
+                total_updated,
+                elapsed_s / 60.0,
+                remaining_s
+            );
+        }
     }
 
     Ok(total_updated)
@@ -3588,7 +3701,11 @@ mod tests {
 
     #[test]
     fn bake_prompt_matches_keyword_llm_rules_and_formats_zero_based_lines() {
-        let long_abs = format!("We study smart contract fuzzing. {}", "x".repeat(2000));
+        let long_abs = format!(
+            "We study smart contract fuzzing. {} Conclusion on EVM invariants.",
+            "x".repeat(2000)
+        );
+        let expected_abs = long_abs.clone();
         let chunk = vec![
             LlmPaperTarget {
                 id: "arxiv:2603.00001".into(),
@@ -3619,7 +3736,7 @@ mod tests {
         assert!(lines[0]
             .starts_with("[0] Title: DuFP: Dual-Path Fuzzing for Smart Contracts | Abstract: "));
         let (_, abs_part) = lines[0].split_once(" | Abstract: ").unwrap();
-        assert_eq!(abs_part.chars().count(), 1600);
+        assert_eq!(abs_part, expected_abs);
         assert!(lines[1].starts_with(
             "[1] Title: VulnGPT: Automated Program Repair via Symbolic Execution | Abstract: (Title-only entry; Venue/Field: ICSE 2026)"
         ));
@@ -4194,5 +4311,32 @@ mod tests {
             updated_paper.abstract_text,
             "Recovered abstract from OpenAlex."
         );
+    }
+
+    #[test]
+    fn bake_llm_chat_body_defaults_to_reasoning_low_without_max_tokens() {
+        let msgs = serde_json::json!([{"role": "user", "content": "hi"}]);
+        let primary = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, true, true);
+        assert!(primary.get("max_tokens").is_none());
+        assert_eq!(primary["temperature"], 0);
+        assert_eq!(
+            primary["reasoning"],
+            serde_json::json!({"effort": "low", "exclude": true})
+        );
+
+        let no_reasoning = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, false, true);
+        assert!(no_reasoning.get("reasoning").is_none());
+        assert!(no_reasoning.get("max_tokens").is_none());
+        assert_eq!(no_reasoning["temperature"], 0);
+
+        let minimal = build_bake_llm_chat_body(DEFAULT_BAKE_LLM_MODEL, &msgs, false, false);
+        assert!(minimal.get("reasoning").is_none());
+        assert!(minimal.get("temperature").is_none());
+        assert!(minimal.get("max_tokens").is_none());
+
+        assert!(is_x666_endpoint("https://x666.me/v1/chat/completions"));
+        assert!(!is_x666_endpoint(
+            "https://openrouter.ai/api/v1/chat/completions"
+        ));
     }
 }
