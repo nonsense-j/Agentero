@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: "Target desktop platform to build (windows, macos-arm64, macos-x64, linux-x64, linux-arm64, all)"
+        description: "Target desktop platform to build (desktop = windows + macos-arm64)"
         required: false
-        default: "windows"
+        default: "desktop"
         type: choice
         options:
+          - desktop
           - windows
           - macos-arm64
           - macos-x64
@@ -16,9 +17,9 @@ on:
           - linux-arm64
           - all
       tag:
-        description: "Release tag name (e.g. v0.15.4-se.1)"
+        description: "Release tag name (e.g. v0.16.0)"
         required: false
-        default: "v0.15.4-se.1"
+        default: "v0.16.0"
         type: string
   push:
     tags:
@@ -28,8 +29,8 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ github.event.inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v0.15.4-se.1' }}
-  TARGET_PLATFORM: ${{ github.event.inputs.platform || 'windows' }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v0.16.0' }}
+  TARGET_PLATFORM: ${{ github.event.inputs.platform || 'desktop' }}
 
 jobs:
   prepare:
@@ -51,7 +52,7 @@ jobs:
   build-windows:
     name: Build Windows App (x64)
     needs: prepare
-    if: ${{ (github.event.inputs.platform || 'windows') == 'windows' || github.event.inputs.platform == 'all' }}
+    if: ${{ (github.event.inputs.platform || 'desktop') == 'desktop' || github.event.inputs.platform == 'windows' || github.event.inputs.platform == 'all' }}
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -80,7 +81,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Configure Windows NSIS-only bundle & unsigned updater
+      - name: Configure Windows NSIS-only bundle & updater signing
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -88,19 +89,23 @@ jobs:
           set -euo pipefail
           if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
             echo "HAS_UPDATER_KEY=false" >> "$GITHUB_ENV"
-            node -e '
-              const fs = require("fs");
-              const p = "src-tauri/tauri.conf.json";
-              const c = JSON.parse(fs.readFileSync(p, "utf8"));
-              if (c.bundle) {
-                c.bundle.createUpdaterArtifacts = false;
-                c.bundle.targets = ["nsis"];
-              }
-              fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
-            '
+            HAS_KEY=false
           else
             echo "HAS_UPDATER_KEY=true" >> "$GITHUB_ENV"
+            HAS_KEY=true
           fi
+          HAS_KEY="$HAS_KEY" node -e '
+            const fs = require("fs");
+            const p = "src-tauri/tauri.conf.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            if (c.bundle) {
+              c.bundle.targets = ["nsis"];
+              if (process.env.HAS_KEY !== "true") {
+                c.bundle.createUpdaterArtifacts = false;
+              }
+            }
+            fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+          '
 
       - name: Build Windows Tauri Installer
         uses: tauri-apps/tauri-action@v1
@@ -130,7 +135,7 @@ jobs:
   build-macos-arm64:
     name: Build macOS App (Apple Silicon)
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'macos-arm64' || github.event.inputs.platform == 'all' }}
+    if: ${{ (github.event.inputs.platform || 'desktop') == 'desktop' || github.event.inputs.platform == 'macos-arm64' || github.event.inputs.platform == 'all' }}
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -398,3 +403,30 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
           uploadUpdaterSignatures: ${{ env.HAS_UPDATER_KEY == 'true' }}
+
+  updater-json:
+    name: Rewrite updater manifest
+    needs:
+      - build-windows
+      - build-macos-arm64
+      - build-macos-x64
+      - build-linux-x64
+      - build-linux-arm64
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Point updater downloads at the release CDN
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ env.RELEASE_TAG }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "Unsigned build; skipping latest.json rewrite."
+            exit 0
+          fi
+          node scripts/rewrite-updater-json.mjs
