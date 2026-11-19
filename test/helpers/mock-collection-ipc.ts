@@ -95,6 +95,17 @@ function toPaperSummaryDto(item: CollectionPaperItem): CollectionPaperSummary {
 		pages: item.pages ?? null,
 		coolPapersId: item.coolPapersId ?? null,
 		recommendedAt: item.recommendedAt ?? null,
+		linkedPeer: item.linkedPeer
+			? {
+					id: item.linkedPeer.id,
+					sourceType: item.linkedPeer.sourceType,
+					sourceLabel: item.linkedPeer.sourceLabel,
+					categories: [...item.linkedPeer.categories],
+					venueId: item.linkedPeer.venueId ?? null,
+					venueKind: item.linkedPeer.venueKind ?? null,
+					ccfRank: item.linkedPeer.ccfRank ?? null,
+				}
+			: null,
 	};
 }
 
@@ -855,6 +866,9 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					return {
 						ok: true,
 						data: {
+							citedByCount: 0,
+							referencesCount: 0,
+							sharedRefCount: 0,
 							citedByInPool: [],
 							referencesInPool: [],
 							sharedRefPeers: [],
@@ -943,13 +957,28 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 					target,
 					Boolean(args.vaultPath),
 				);
+				const topShared = sharedRefPeers.slice(0, 10);
+
+				if (args.countsOnly) {
+					const out: CollectionPaperLineageOut = {
+						citedByCount: citedByInPool.length,
+						referencesCount: referencesInPool.length,
+						sharedRefCount: topShared.length,
+						citedByInPool: [],
+						referencesInPool: [],
+						sharedRefPeers: [],
+						vaultMatches,
+					};
+					return { ok: true, data: out, error: null };
+				}
 
 				const out: CollectionPaperLineageOut = {
-					citedByInPool: citedByInPool.slice(0, 20).map(toPaperSummaryDto),
-					referencesInPool: referencesInPool
-						.slice(0, 20)
-						.map(toPaperSummaryDto),
-					sharedRefPeers: sharedRefPeers.slice(0, 10).map((p) => ({
+					citedByCount: citedByInPool.length,
+					referencesCount: referencesInPool.length,
+					sharedRefCount: topShared.length,
+					citedByInPool: citedByInPool.map(toPaperSummaryDto),
+					referencesInPool: referencesInPool.map(toPaperSummaryDto),
+					sharedRefPeers: topShared.map((p) => ({
 						paper: toPaperSummaryDto(p.paper),
 						sharedCount: p.sharedCount,
 					})),
@@ -1135,6 +1164,18 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 				};
 				return { ok: true, data: out, error: null };
 			}),
+
+		vi
+			.spyOn(commands, "plazaCollectionBackfillRefs")
+			.mockImplementation(async () => ({
+				ok: true,
+				data: {
+					checkedWorks: 0,
+					enrichedWorks: 0,
+					state: buildSummary(),
+				},
+				error: null,
+			})),
 
 		vi
 			.spyOn(commands, "plazaCollectionSearch")

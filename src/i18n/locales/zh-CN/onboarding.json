@@ -120,7 +120,7 @@
 		"useDefaultDesc": "直接使用默认公共额度，无需配置；之后随时可以在「设置 → 通用」中填写。",
 		"primaryLabel": "OpenAlex",
 		"keywordLlmLabel": "关键词提取模型（可选）",
-		"openDocsLabel": "获取免费 Key",
+		"openDocsLabel": "获取免费 OpenRouter API Key（50 次/天）",
 		"apiKeyPlaceholder": "OpenAlex API Key",
 		"baseUrlPlaceholder": "Base URL（如 https://api.openai.com/v1）",
 		"keywordKeyPlaceholder": "API Key（可选）",

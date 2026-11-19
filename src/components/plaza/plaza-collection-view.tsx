@@ -6,7 +6,7 @@
  *    `Venue` (`Conference` + `Journal`, 2026 Main/Research/Technical Track) entry cards
  *    powered by `CollectionSummarySnapshot` (zero paper rows in JS memory).
  * 2. List View: Top navigation bar with source switcher, `arXiv`-only time filter
- *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 100-paper paginated SQLite query
+ *    (`2026-Now` / `30d` / `7d`), sub-entry chips, 50-paper paginated SQLite query
  *    with +50 Load More increments, and full detail dialog on card click.
  */
 
@@ -15,21 +15,21 @@ import {
 	ArrowUpRight,
 	BookOpen,
 	Check,
-	CheckSquare,
 	ChevronDown,
 	Download,
 	GitFork,
+	ListChecks,
 	Loader2,
 	Pencil,
 	Plus,
 	RefreshCw,
 	Settings2,
 	Sparkles,
-	Square,
 	Trash2,
 	X,
 } from "lucide-react";
 import {
+	memo,
 	useCallback,
 	useEffect,
 	useMemo,
@@ -38,7 +38,10 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
+import {
+	PlazaSourceBadge,
+	PlazaSourceJumpButton,
+} from "@/components/icons/plaza-icons";
 import {
 	COLLECTION_OUTLINE_BTN_CLASS,
 	COLLECTION_PRIMARY_BTN_CLASS,
@@ -55,6 +58,7 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "@/components/ui/popover";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Tooltip,
 	TooltipContent,
@@ -66,6 +70,7 @@ import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
+	type CollectionLinkedPeer,
 	type CollectionListPapersQuery,
 	type CollectionPaperItem,
 	type CollectionSourceType,
@@ -73,6 +78,8 @@ import {
 	DEFAULT_ARXIV_CATEGORIES,
 	ensureCollectionSummaryHydrated,
 	fetchMoreArxivCollection,
+	formatArxivCategoriesLabel,
+	getCollectionPaperDetail,
 	getCollectionSummarySnapshot,
 	inferVenueKind,
 	isPreloadingCollection,
@@ -102,8 +109,9 @@ type ViewStage = "hub" | "list";
 type TimeRangeFilter = "all" | "30d" | "7d";
 type DomainFilter = "all" | VenueDomain;
 
-const INITIAL_DISPLAY_COUNT = 100;
+const INITIAL_DISPLAY_COUNT = 50;
 const LOAD_MORE_STEP = 50;
+const SKELETON_CARD_KEYS = ["sk-1", "sk-2", "sk-3", "sk-4", "sk-5"] as const;
 
 const COLLECTION_ICON_BTN_CLASS =
 	"text-foreground/80 hover:bg-black/[0.06] hover:text-foreground dark:bg-white/[0.08] dark:text-zinc-100 dark:ring-1 dark:ring-inset dark:ring-white/15 dark:hover:bg-white/[0.15] dark:hover:text-white";
@@ -147,12 +155,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const refreshingArxiv = useCollectionRefreshStore((s) => s.refreshingArxiv);
 	const refreshingVenue = useCollectionRefreshStore((s) => s.refreshingVenue);
-	const arxivRefreshLabel = useCollectionRefreshStore(
-		(s) => s.arxivRefreshLabel,
-	);
-	const venueRefreshLabel = useCollectionRefreshStore(
-		(s) => s.venueRefreshLabel,
-	);
 	const refreshingCategories = useCollectionRefreshStore(
 		(s) => s.refreshingCategories,
 	);
@@ -173,6 +175,9 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
 		null,
 	);
+	const [pendingDetailPeer, setPendingDetailPeer] =
+		useState<CollectionLinkedPeer | null>(null);
+	const linkedPeerReqSeqRef = useRef(0);
 
 	// Hydrate lightweight SQLite summary on open; never auto-fetch arXiv or Venue
 	useEffect(() => {
@@ -354,6 +359,52 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		[resetPagination],
 	);
 
+	const handleJumpToLinkedVenue = useCallback(
+		(peer: CollectionLinkedPeer) => {
+			const matchedVenue = summary.venues.find(
+				(v) =>
+					(peer.venueId && v.id === peer.venueId) ||
+					v.name.toLowerCase() === peer.sourceLabel.toLowerCase(),
+			);
+			const targetKind: VenueKindFilter =
+				peer.venueKind ?? matchedVenue?.kind ?? "all";
+			const targetVenueId = peer.venueId ?? matchedVenue?.id ?? null;
+			handleEnterVenue(targetKind, targetVenueId);
+		},
+		[handleEnterVenue, summary.venues],
+	);
+
+	const handleOpenDetailPaper = useCallback((paper: CollectionPaperItem) => {
+		linkedPeerReqSeqRef.current += 1;
+		setPendingDetailPeer(null);
+		setDetailPaper(paper);
+	}, []);
+
+	const handleOpenLinkedArxiv = useCallback(
+		async (peer: CollectionLinkedPeer) => {
+			const seq = ++linkedPeerReqSeqRef.current;
+			setDetailPaper(null);
+			setPendingDetailPeer(peer);
+			try {
+				const detail = await getCollectionPaperDetail(peer.id);
+				if (seq !== linkedPeerReqSeqRef.current) return;
+				if (detail) {
+					const { citationText: _cite, ...paperItem } = detail;
+					setPendingDetailPeer(null);
+					setDetailPaper(paperItem);
+				} else {
+					setPendingDetailPeer(null);
+				}
+			} catch (err) {
+				if (seq === linkedPeerReqSeqRef.current) {
+					setPendingDetailPeer(null);
+					notifyError(errorText(err));
+				}
+			}
+		},
+		[],
+	);
+
 	const handleCategoriesChange = useCallback(
 		(cats: string[]) => {
 			if (selectedCategory && !cats.includes(selectedCategory)) {
@@ -508,20 +559,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 				? refreshedVenueIds.has(selectedVenueId)
 				: isAllFilteredVenuesRefreshed);
 
-	const hubRefreshTarget = useMemo(() => {
-		const parts = [arxivRefreshLabel, venueRefreshLabel].filter(
-			(part): part is string => Boolean(part),
-		);
-		return parts.length > 0 ? parts.join(" · ") : null;
-	}, [arxivRefreshLabel, venueRefreshLabel]);
-
-	const listRefreshTarget = useMemo(() => {
-		if (activeSource === "arxiv") {
-			return arxivRefreshLabel;
-		}
-		return refreshingVenue ? venueRefreshLabel : null;
-	}, [activeSource, arxivRefreshLabel, refreshingVenue, venueRefreshLabel]);
-
 	const scopedRefreshLabel = useMemo(() => {
 		const base = t("plaza.collection.refresh");
 		if (activeSource === "arxiv") {
@@ -609,10 +646,17 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		[batchImporting],
 	);
 
+	const handleImportSinglePaper = useCallback(
+		(paper: CollectionPaperItem) => importPapers([paper]),
+		[importPapers],
+	);
+
 	const selectedPapers = useMemo(
 		() => pageItems.filter((p) => selectedIds.has(p.id)),
 		[pageItems, selectedIds],
 	);
+	const allDisplayedSelected =
+		pageItems.length > 0 && pageItems.every((p) => selectedIds.has(p.id));
 
 	return (
 		<div
@@ -629,27 +673,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-background/80 px-4 py-2 shadow-[0_0.5px_0_0_var(--magpie-hairline)] backdrop-blur-xl backdrop-saturate-150"
 					>
 						<div className="flex items-center gap-2 text-muted-foreground text-xs">
-							{hubRefreshTarget ? (
-								<span className="inline-flex items-center gap-1.5 text-brand">
-									<Loader2 className="size-3.5 animate-spin" />
-									<span>
-										{t("plaza.collection.refreshingTarget", {
-											target: hubRefreshTarget,
-										})}
-									</span>
-								</span>
-							) : preloading ? (
-								<span className="inline-flex items-center gap-1.5 text-brand">
-									<Loader2 className="size-3.5 animate-spin" />
-									<span>{t("plaza.collection.preloading")}</span>
-								</span>
-							) : (
-								<span className="font-mono tabular-nums">
-									{t("plaza.collection.papersCount", {
-										count: summary.totalCount,
-									})}
-								</span>
-							)}
+							<span className="font-mono tabular-nums">
+								{t("plaza.collection.papersCount", {
+									count: summary.totalCount,
+								})}
+							</span>
 						</div>
 
 						<div className="flex items-center gap-1.5">
@@ -850,25 +878,6 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 							{/* Right actions */}
 							<div className="ml-auto flex items-center gap-1.5">
-								{isCurrentViewRefreshing && listRefreshTarget ? (
-									<span className="inline-flex items-center gap-1.5 text-brand text-xs">
-										<Loader2 className="size-3 animate-spin" />
-										<span className="max-w-56 truncate">
-											{t("plaza.collection.refreshingTarget", {
-												target: listRefreshTarget,
-											})}
-										</span>
-									</span>
-								) : activeSource === "arxiv" && preloading ? (
-									<span
-										className="hidden items-center gap-1.5 text-[11px] text-brand xl:inline-flex"
-										title={t("plaza.collection.preloading")}
-									>
-										<Loader2 className="size-3 animate-spin" />
-										<span>{t("plaza.collection.preloading")}</span>
-									</span>
-								) : null}
-
 								{selectedPapers.length > 0 ? (
 									<Button
 										type="button"
@@ -900,14 +909,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											onClick={toggleSelectAllDisplayed}
 											disabled={pageItems.length === 0}
 											aria-label={t("plaza.collection.toggleSelectAll")}
-											className={COLLECTION_ICON_BTN_CLASS}
-										>
-											{pageItems.length > 0 &&
-											pageItems.every((p) => selectedIds.has(p.id)) ? (
-												<CheckSquare className="size-3.5 text-brand" />
-											) : (
-												<Square className="size-3.5" />
+											aria-pressed={allDisplayedSelected}
+											className={cn(
+												COLLECTION_ICON_BTN_CLASS,
+												allDisplayedSelected &&
+													"bg-brand/12 text-brand hover:bg-brand/18 hover:text-brand dark:bg-brand/20 dark:text-brand",
 											)}
+										>
+											<ListChecks className="size-3.5" />
 										</Button>
 									</TooltipTrigger>
 									<TooltipContent>
@@ -1069,19 +1078,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						)}
 					</div>
 
-					{/* Main Paper List (100 initial, +50 per Load More from SQLite) */}
+					{/* Main Paper List (50 initial, +50 per Load More from SQLite) */}
 					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
 						{(isCurrentViewRefreshing || loadingPage) &&
 						pageItems.length === 0 ? (
-							<div className="flex items-center justify-center gap-2 py-14 text-muted-foreground text-xs">
-								<Loader2 className="size-4 animate-spin" />
-								<span>
-									{listRefreshTarget
-										? t("plaza.collection.refreshingTarget", {
-												target: listRefreshTarget,
-											})
-										: t("plaza.collection.loading")}
-								</span>
+							<div className="grid gap-2.5" data-collection-list-skeleton>
+								{SKELETON_CARD_KEYS.map((key) => (
+									<CollectionPaperCardSkeleton key={key} />
+								))}
 							</div>
 						) : pageItems.length === 0 ? (
 							<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
@@ -1114,11 +1118,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 									<CollectionPaperCard
 										key={paper.id}
 										paper={paper}
+										orderedCategories={summary.categories}
 										selected={selectedIds.has(paper.id)}
 										imported={checkPaperImported(paper, importedIds)}
-										onToggleSelect={() => toggleSelect(paper.id)}
-										onImport={() => void importPapers([paper])}
-										onOpenDetail={() => setDetailPaper(paper)}
+										onToggleSelect={toggleSelect}
+										onImport={handleImportSinglePaper}
+										onOpenDetail={handleOpenDetailPaper}
+										onJumpToVenue={handleJumpToLinkedVenue}
+										onOpenLinkedArxiv={handleOpenLinkedArxiv}
 									/>
 								))}
 
@@ -1200,14 +1207,20 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			{/* Complete Paper Detail Dialog on Card Click */}
 			<CollectionPaperDetailDialog
 				paper={detailPaper}
-				open={detailPaper !== null}
+				pendingPeer={pendingDetailPeer}
+				open={detailPaper !== null || pendingDetailPeer !== null}
 				imported={
 					detailPaper !== null && checkPaperImported(detailPaper, importedIds)
 				}
 				onOpenChange={(open) => {
-					if (!open) setDetailPaper(null);
+					if (!open) {
+						linkedPeerReqSeqRef.current += 1;
+						setDetailPaper(null);
+						setPendingDetailPeer(null);
+					}
 				}}
-				onImport={(p) => importPapers([p])}
+				onImport={handleImportSinglePaper}
+				onJumpToVenue={handleJumpToLinkedVenue}
 				onPaperUpdated={(updated) => {
 					setDetailPaper(updated);
 					setPageItems((prev) =>
@@ -1219,20 +1232,56 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 }
 
-function CollectionPaperCard({
+function CollectionPaperCardSkeleton() {
+	return (
+		<div className="magpie-card flex items-start gap-3 p-3.5">
+			<Skeleton className="mt-0.5 size-4 shrink-0 rounded" />
+			<div className="min-w-0 flex-1 space-y-2">
+				<div className="flex flex-wrap items-center gap-1.5">
+					<Skeleton className="h-5 w-16 rounded-full" />
+					<Skeleton className="h-5 w-12 rounded" />
+					<Skeleton className="h-5 w-20 rounded" />
+					<Skeleton className="h-4 w-36 rounded" />
+				</div>
+				<Skeleton className="h-4 w-5/6 rounded" />
+				<div className="space-y-1.5 pt-0.5">
+					<Skeleton className="h-3 w-full rounded" />
+					<Skeleton className="h-3 w-11/12 rounded" />
+				</div>
+				<div className="flex items-center gap-1.5 pt-0.5">
+					<Skeleton className="h-4 w-16 rounded" />
+					<Skeleton className="h-4 w-20 rounded" />
+					<Skeleton className="h-4 w-14 rounded" />
+				</div>
+			</div>
+			<div className="flex shrink-0 items-center gap-1">
+				<Skeleton className="size-7 rounded-md" />
+				<Skeleton className="size-7 rounded-md" />
+			</div>
+		</div>
+	);
+}
+
+const CollectionPaperCard = memo(function CollectionPaperCard({
 	paper,
+	orderedCategories,
 	selected,
 	imported,
 	onToggleSelect,
 	onImport,
 	onOpenDetail,
+	onJumpToVenue,
+	onOpenLinkedArxiv,
 }: {
 	paper: CollectionPaperItem;
+	orderedCategories: readonly string[];
 	selected: boolean;
 	imported: boolean;
-	onToggleSelect: () => void;
-	onImport: () => Promise<void> | void;
-	onOpenDetail: () => void;
+	onToggleSelect: (id: string) => void;
+	onImport: (paper: CollectionPaperItem) => Promise<void> | void;
+	onOpenDetail: (paper: CollectionPaperItem) => void;
+	onJumpToVenue: (peer: CollectionLinkedPeer) => void;
+	onOpenLinkedArxiv: (peer: CollectionLinkedPeer) => Promise<void> | void;
 }) {
 	const { t } = useTranslation("sidebar");
 	const [busy, setBusy] = useState(false);
@@ -1241,13 +1290,18 @@ function CollectionPaperCard({
 		if (busy || imported) return;
 		setBusy(true);
 		try {
-			await onImport();
+			await onImport(paper);
 		} finally {
 			setBusy(false);
 		}
 	};
 
 	const topKeywords = paper.keywords?.slice(0, 4) ?? [];
+	const primaryLabel =
+		paper.sourceType === "arxiv"
+			? formatArxivCategoriesLabel(paper, orderedCategories)
+			: paper.sourceLabel;
+	const linkedPeer = paper.linkedPeer;
 
 	return (
 		<div
@@ -1259,116 +1313,131 @@ function CollectionPaperCard({
 			<div className="pt-0.5">
 				<Checkbox
 					checked={selected}
-					onCheckedChange={() => onToggleSelect()}
+					onCheckedChange={() => onToggleSelect(paper.id)}
 					aria-label={paper.title}
 				/>
 			</div>
 
-			<button
-				type="button"
-				onClick={onOpenDetail}
-				className="min-w-0 flex-1 cursor-pointer text-left focus:outline-none"
-			>
+			<div className="min-w-0 flex-1">
 				<div className="flex flex-wrap items-center gap-1.5">
-					<PlazaSourceBadge
-						source={paper.sourceType}
-						label={paper.sourceLabel}
-					/>
+					<PlazaSourceBadge source={paper.sourceType} label={primaryLabel} />
+					{paper.sourceType === "arxiv" &&
+					linkedPeer?.sourceType === "venue" ? (
+						<PlazaSourceJumpButton
+							source="venue"
+							label={linkedPeer.sourceLabel}
+							onClick={(e) => {
+								e.stopPropagation();
+								onJumpToVenue(linkedPeer);
+							}}
+						/>
+					) : null}
+					{paper.sourceType === "venue" &&
+					linkedPeer?.sourceType === "arxiv" ? (
+						<PlazaSourceJumpButton
+							source="arxiv"
+							label={formatArxivCategoriesLabel(linkedPeer, orderedCategories)}
+							onClick={(e) => {
+								e.stopPropagation();
+								void onOpenLinkedArxiv(linkedPeer);
+							}}
+						/>
+					) : null}
 					{paper.ccfRank ? (
-						<span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] text-brand">
+						<span className="inline-flex h-5 items-center rounded bg-brand/10 px-1.5 font-mono text-[0.625rem] text-brand leading-none">
 							{paper.ccfRank}
 						</span>
 					) : null}
-					<span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+					<span className="inline-flex h-5 items-center font-mono text-[0.6875rem] text-muted-foreground tabular-nums leading-none">
 						{paper.publishedAt.slice(0, 10)}
 					</span>
 					<span
 						title={t("plaza.collection.citations", {
 							count: paper.citationCount ?? 0,
 						})}
-						className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tabular-nums"
+						className="inline-flex h-5 items-center gap-1 rounded bg-muted/60 px-1.5 font-mono text-[0.625rem] text-muted-foreground tabular-nums leading-none"
 					>
-						<GitFork className="size-2.5" />
+						<GitFork className="size-2.5 shrink-0" />
 						{paper.citationCount ?? 0}
 					</span>
 					{paper.authors.length > 0 ? (
-						<span className="truncate text-caption text-muted-foreground">
-							· {paper.authors.slice(0, 3).join(", ")}
-							{paper.authors.length > 3 ? " et al." : ""}
+						<span className="inline-flex h-5 max-w-full items-center text-caption text-muted-foreground leading-none">
+							<span className="truncate">
+								· {paper.authors.slice(0, 3).join(", ")}
+								{paper.authors.length > 3 ? " et al." : ""}
+							</span>
 						</span>
 					) : null}
 				</div>
 
-				<h3
-					className="mt-1 line-clamp-2 font-medium text-foreground text-sm leading-snug group-hover:text-brand"
-					title={paper.title}
+				<button
+					type="button"
+					onClick={() => onOpenDetail(paper)}
+					className="mt-1 block w-full cursor-pointer text-left focus:outline-none"
 				>
-					{paper.title}
-				</h3>
+					<h3
+						className="line-clamp-2 font-medium text-foreground text-sm leading-snug group-hover:text-brand"
+						title={paper.title}
+					>
+						{paper.title}
+					</h3>
 
-				{paper.abstract ? (
-					<p className="mt-1.5 line-clamp-3 text-muted-foreground text-xs leading-relaxed">
-						{paper.abstract}
-					</p>
-				) : null}
+					{paper.abstract ? (
+						<p className="mt-1.5 line-clamp-3 text-muted-foreground text-xs leading-relaxed">
+							{paper.abstract}
+						</p>
+					) : null}
 
-				{topKeywords.length > 0 ? (
-					<div className="mt-2 flex flex-wrap items-center gap-1">
-						{topKeywords.map((kw) => (
-							<span
-								key={kw}
-								className="rounded bg-[var(--magpie-surface)] px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-[0_0_0_0.5px_var(--magpie-hairline)]"
-							>
-								{kw}
-							</span>
-						))}
-					</div>
-				) : null}
-			</button>
+					{topKeywords.length > 0 ? (
+						<div className="mt-2 flex flex-wrap items-center gap-1">
+							{topKeywords.map((kw) => (
+								<span
+									key={kw}
+									className="rounded bg-[var(--magpie-surface)] px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-[0_0_0_0.5px_var(--magpie-hairline)]"
+								>
+									{kw}
+								</span>
+							))}
+						</div>
+					) : null}
+				</button>
+			</div>
 
 			<div className="flex shrink-0 items-center gap-1">
 				{paper.arxivId ? (
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-sm"
-								aria-label={t("plaza.arxivRec.read")}
-								className={COLLECTION_ICON_BTN_CLASS}
-								onClick={() =>
-									openRemoteArxivPaper({
-										arxivId: paper.arxivId ?? "",
-										title: paper.title,
-										abstract: paper.abstract,
-										url: paper.url,
-										score: 1,
-									})
-								}
-							>
-								<BookOpen className="size-3.5" />
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent>{t("plaza.arxivRec.read")}</TooltipContent>
-					</Tooltip>
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon-sm"
+						title={t("plaza.arxivRec.read")}
+						aria-label={t("plaza.arxivRec.read")}
+						className={COLLECTION_ICON_BTN_CLASS}
+						onClick={() =>
+							openRemoteArxivPaper({
+								arxivId: paper.arxivId ?? "",
+								title: paper.title,
+								abstract: paper.abstract,
+								url: paper.url,
+								score: 1,
+							})
+						}
+					>
+						<BookOpen className="size-3.5" />
+					</Button>
 				) : null}
 
 				{paper.url ? (
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-sm"
-								aria-label={t("plaza.feeds.openOriginal")}
-								className={COLLECTION_ICON_BTN_CLASS}
-								onClick={() => openExternalUrl(paper.url)}
-							>
-								<ArrowUpRight className="size-3.5" />
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent>{t("plaza.feeds.openOriginal")}</TooltipContent>
-					</Tooltip>
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon-sm"
+						title={t("plaza.feeds.openOriginal")}
+						aria-label={t("plaza.feeds.openOriginal")}
+						className={COLLECTION_ICON_BTN_CLASS}
+						onClick={() => openExternalUrl(paper.url)}
+					>
+						<ArrowUpRight className="size-3.5" />
+					</Button>
 				) : null}
 
 				{imported ? (
@@ -1379,31 +1448,27 @@ function CollectionPaperCard({
 						<Check className="size-3.5" />
 					</span>
 				) : (
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon-sm"
-								disabled={busy}
-								aria-label={t("plaza.feeds.import")}
-								className={COLLECTION_CARD_IMPORT_BTN_CLASS}
-								onClick={() => void triggerImport()}
-							>
-								{busy ? (
-									<Loader2 className="size-3.5 animate-spin" />
-								) : (
-									<Download className="size-3.5" />
-								)}
-							</Button>
-						</TooltipTrigger>
-						<TooltipContent>{t("plaza.feeds.import")}</TooltipContent>
-					</Tooltip>
+					<Button
+						type="button"
+						variant="ghost"
+						size="icon-sm"
+						disabled={busy}
+						title={t("plaza.feeds.import")}
+						aria-label={t("plaza.feeds.import")}
+						className={COLLECTION_CARD_IMPORT_BTN_CLASS}
+						onClick={() => void triggerImport()}
+					>
+						{busy ? (
+							<Loader2 className="size-3.5 animate-spin" />
+						) : (
+							<Download className="size-3.5" />
+						)}
+					</Button>
 				)}
 			</div>
 		</div>
 	);
-}
+});
 
 function parseTracksInput(raw: string): string[] {
 	return Array.from(

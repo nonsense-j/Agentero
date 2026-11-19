@@ -15,6 +15,7 @@ import {
 } from "@/lib/core/bindings";
 import { callApi } from "@/lib/core/ipc";
 import {
+	type CollectionLinkedPeer,
 	type CollectionPaperItem,
 	type CollectionSourceType,
 	formatPaperCitationText,
@@ -165,6 +166,18 @@ export type CollectionSeedSyncResult = {
 	skipped: boolean;
 };
 
+export type CollectionBackfillRefsInput = {
+	sourceType?: "arxiv" | "venue" | "all" | null;
+	categories?: string[];
+	venueIds?: string[];
+};
+
+export type CollectionBackfillRefsResult = {
+	checkedWorks: number;
+	enrichedWorks: number;
+	state: CollectionStateSummary;
+};
+
 export type { CollectionVaultPaperMatch };
 
 export type CollectionSharedRefPeerResult = {
@@ -173,6 +186,10 @@ export type CollectionSharedRefPeerResult = {
 };
 
 export type CollectionPaperLineageResult = {
+	citedByCount: number;
+	referencesCount: number;
+	sharedRefCount: number;
+	itemsLoaded: boolean;
 	citedByInPool: CollectionPaperItem[];
 	referencesInPool: CollectionPaperItem[];
 	sharedRefPeers: CollectionSharedRefPeerResult[];
@@ -206,6 +223,16 @@ export type CollectionConfigUpdateInput = {
 
 // ─── DTO Wire Shapes & Mappers ───
 
+type WireLinkedPeerLike = {
+	id: string;
+	sourceType: string;
+	sourceLabel: string;
+	categories: string[];
+	venueId?: string | null;
+	venueKind?: string | null;
+	ccfRank?: string | null;
+};
+
 export type WirePaperSummaryLike = {
 	id: string;
 	title: string;
@@ -233,6 +260,7 @@ export type WirePaperSummaryLike = {
 	pages?: string | null;
 	coolPapersId?: string | null;
 	recommendedAt?: string | null;
+	linkedPeer?: WireLinkedPeerLike | null;
 };
 
 export type WirePaperDetailLike = WirePaperSummaryLike & {
@@ -303,6 +331,26 @@ function coerceKeywordSource(raw?: string | null): KeywordSource | undefined {
 	return undefined;
 }
 
+function fromLinkedPeerDto(
+	dto: WireLinkedPeerLike | null | undefined,
+): CollectionLinkedPeer | undefined {
+	if (!dto?.id) return undefined;
+	const spec = dto.venueId ? VENUE_SPEC_BY_ID.get(dto.venueId) : undefined;
+	const sourceType: CollectionSourceType =
+		dto.sourceType === "venue" ? "venue" : "arxiv";
+	const venueKind = coerceVenueKind(dto.venueKind) ?? spec?.kind;
+	const ccfRank = coerceCcfRank(dto.ccfRank) ?? spec?.ccfRank;
+	return {
+		id: dto.id,
+		sourceType,
+		sourceLabel: dto.sourceLabel,
+		categories: dto.categories ?? [],
+		...(dto.venueId ? { venueId: dto.venueId } : {}),
+		...(venueKind ? { venueKind } : {}),
+		...(ccfRank ? { ccfRank } : {}),
+	};
+}
+
 export function fromPaperSummaryDto(
 	dto: WirePaperSummaryLike,
 ): CollectionPaperItem {
@@ -313,6 +361,7 @@ export function fromPaperSummaryDto(
 	const venueDomain = coerceVenueDomain(dto.venueDomain) ?? spec?.domain;
 	const ccfRank = coerceCcfRank(dto.ccfRank) ?? spec?.ccfRank;
 	const keywordSource = coerceKeywordSource(dto.keywordSource);
+	const linkedPeer = fromLinkedPeerDto(dto.linkedPeer);
 
 	return {
 		id: dto.id,
@@ -341,6 +390,7 @@ export function fromPaperSummaryDto(
 		...(dto.pages ? { pages: dto.pages } : {}),
 		...(dto.coolPapersId ? { coolPapersId: dto.coolPapersId } : {}),
 		...(dto.recommendedAt ? { recommendedAt: dto.recommendedAt } : {}),
+		...(linkedPeer ? { linkedPeer } : {}),
 	};
 }
 
@@ -756,22 +806,32 @@ export async function upsertCollectionPapers(
 export async function getCollectionPaperLineage(
 	id: string,
 	vaultPath?: string | null,
+	options?: { countsOnly?: boolean },
 ): Promise<CollectionPaperLineageResult> {
+	const countsOnly = Boolean(options?.countsOnly);
 	const dto = await callApi(
 		() =>
 			commands.plazaCollectionPaperLineage({
 				id,
 				vaultPath: vaultPath ?? null,
+				countsOnly: countsOnly ? true : null,
 			}),
 		{ fallback: "Failed to load paper citation lineage" },
 	);
+	const citedByInPool = dto.citedByInPool.map(fromPaperSummaryDto);
+	const referencesInPool = dto.referencesInPool.map(fromPaperSummaryDto);
+	const sharedRefPeers = dto.sharedRefPeers.map((entry) => ({
+		paper: fromPaperSummaryDto(entry.paper),
+		sharedCount: entry.sharedCount,
+	}));
 	return {
-		citedByInPool: dto.citedByInPool.map(fromPaperSummaryDto),
-		referencesInPool: dto.referencesInPool.map(fromPaperSummaryDto),
-		sharedRefPeers: dto.sharedRefPeers.map((entry) => ({
-			paper: fromPaperSummaryDto(entry.paper),
-			sharedCount: entry.sharedCount,
-		})),
+		citedByCount: dto.citedByCount ?? citedByInPool.length,
+		referencesCount: dto.referencesCount ?? referencesInPool.length,
+		sharedRefCount: dto.sharedRefCount ?? sharedRefPeers.length,
+		itemsLoaded: !countsOnly,
+		citedByInPool,
+		referencesInPool,
+		sharedRefPeers,
 		vaultMatches: dto.vaultMatches.map((m) => ({
 			relPath: m.relPath,
 			title: m.title,
@@ -839,6 +899,29 @@ export async function syncCollectionSeed(
 		appliedShards: [...dto.appliedShards],
 		importedPapers: dto.importedPapers,
 		skipped: dto.skipped,
+	};
+}
+
+export async function backfillCollectionMissingRefs(
+	args?: CollectionBackfillRefsInput,
+): Promise<CollectionBackfillRefsResult> {
+	const dto = await callApi(
+		() =>
+			commands.plazaCollectionBackfillRefs({
+				sourceType: args?.sourceType ?? "all",
+				categories: args?.categories ?? [],
+				venueIds: args?.venueIds ?? [],
+			}),
+		{ fallback: "Failed to backfill OpenAlex references" },
+	);
+	const state = applySummaryToStore(
+		fromStateSummaryDto(dto.state),
+		dto.enrichedWorks > 0,
+	);
+	return {
+		checkedWorks: dto.checkedWorks,
+		enrichedWorks: dto.enrichedWorks,
+		state,
 	};
 }
 

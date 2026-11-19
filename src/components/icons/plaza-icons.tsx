@@ -1,4 +1,5 @@
-import type { SVGProps } from "react";
+import { ArrowUpRight } from "lucide-react";
+import type { MouseEvent, SVGProps } from "react";
 import { cn } from "@/lib/core/utils";
 
 /**
@@ -244,7 +245,7 @@ export function PlazaSourceBadge({
 	return (
 		<span
 			className={cn(
-				"inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 font-medium font-mono text-[10px] tracking-tight shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]",
+				"inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 font-medium font-mono text-[0.625rem] leading-none tracking-tight shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]",
 				cfg.tone,
 				className,
 			)}
@@ -255,5 +256,51 @@ export function PlazaSourceBadge({
 			/>
 			{label || cfg.label}
 		</span>
+	);
+}
+
+/**
+ * Interactive cross-portal jump pill matching {@link PlazaSourceBadge} styling,
+ * used to jump from an arXiv paper to its accepted Venue or from a Venue paper
+ * to its linked arXiv card.
+ */
+export function PlazaSourceJumpButton({
+	source,
+	label,
+	title,
+	onClick,
+	className,
+}: {
+	source: string;
+	label?: string;
+	title?: string;
+	onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+	className?: string;
+}) {
+	const key = source.toLowerCase();
+	const cfg = PROVIDER_STYLES[key] ?? {
+		label: label || source,
+		tone: "text-muted-foreground bg-foreground/8",
+	};
+	const text = label || cfg.label;
+	return (
+		<button
+			type="button"
+			title={title ?? text}
+			aria-label={title ?? text}
+			onClick={onClick}
+			className={cn(
+				"inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full px-2 font-medium font-mono text-[0.625rem] leading-none tracking-tight shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)] transition-[filter,box-shadow] hover:brightness-95 hover:ring-1 hover:ring-current/35 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current/50 dark:hover:brightness-115",
+				cfg.tone,
+				className,
+			)}
+		>
+			<span
+				className="size-1.5 rounded-full bg-current opacity-80"
+				aria-hidden
+			/>
+			<span>{text}</span>
+			<ArrowUpRight className="size-2.5 opacity-75" aria-hidden />
+		</button>
 	);
 }

@@ -58,6 +58,7 @@ export type LocalActivityInput = {
 export type LocalActivityContext = {
 	id: string;
 	signal: AbortSignal;
+	setTitle: (title: string) => void;
 	setProgress: (n: number | null) => void;
 	setDetail: (d: string) => void;
 };
@@ -165,7 +166,8 @@ export async function runLocalActivity<T>(
 		const result = await fn({
 			id,
 			signal: controller.signal,
-			// Absolute: callers (e.g. layout analysis) publish overall document %.
+			setTitle: (title) => updateBackgroundTask(id, { title }),
+			// Absolute: callers (e.g. layout analysis, Plaza refresh) publish exact %.
 			setProgress: (n) =>
 				updateBackgroundTask(id, { progress: n }, { absoluteProgress: true }),
 			setDetail: (d) => updateBackgroundTask(id, { detail: d }),

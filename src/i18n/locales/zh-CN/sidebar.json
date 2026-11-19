@@ -253,7 +253,8 @@
 				"sharedRefs": "同题共引",
 				"inVault": "已在库中",
 				"citesVault": "引用库内论文",
-				"back": "返回：{{title}}"
+				"back": "返回：{{title}}",
+				"searchTitlePlaceholder": "按标题筛选…"
 			},
 			"citationInfo": "引用信息",
 			"copyCitation": "复制引用",

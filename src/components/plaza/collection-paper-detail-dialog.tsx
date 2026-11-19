@@ -18,7 +18,10 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
+import {
+	PlazaSourceBadge,
+	PlazaSourceJumpButton,
+} from "@/components/icons/plaza-icons";
 import { CollectionPaperLineageSection } from "@/components/plaza/collection-paper-lineage-section";
 import { SelectionSurface } from "@/components/selection/selection-surface";
 import { Button } from "@/components/ui/button";
@@ -30,6 +33,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Tooltip,
 	TooltipContent,
@@ -38,12 +42,16 @@ import {
 import { openExternalUrl } from "@/lib/core/open-external";
 import { cn } from "@/lib/core/utils";
 import {
+	type CollectionLinkedPeer,
 	type CollectionPaperItem,
 	ensurePaperFullDetails,
+	formatArxivCategoriesLabel,
 	formatPaperBibtex,
 	formatPaperCitationText,
 	getCollectionPaperDetail,
+	getCollectionSummarySnapshot,
 	shouldEnrichPaperOnDemand,
+	subscribeCollectionSummary,
 } from "@/lib/plaza/collection";
 import {
 	type CollectionPaperLineageResult,
@@ -62,30 +70,43 @@ export const COLLECTION_OUTLINE_BTN_CLASS =
 
 export function CollectionPaperDetailDialog({
 	paper,
+	pendingPeer = null,
 	open,
 	imported,
 	onOpenChange,
 	onImport,
 	onPaperUpdated,
+	onJumpToVenue,
 }: {
 	paper: CollectionPaperItem | null;
+	pendingPeer?: CollectionLinkedPeer | null;
 	open: boolean;
 	imported: boolean;
 	onOpenChange: (open: boolean) => void;
 	onImport: (paper: CollectionPaperItem) => Promise<void> | void;
 	onPaperUpdated?: (updated: CollectionPaperItem) => void;
+	onJumpToVenue?: (peer: CollectionLinkedPeer) => void;
 }) {
 	const { t } = useTranslation("sidebar");
 	const vaultPath = useSyncExternalStore(vaultStore.subscribe, getVaultPath);
+	const collectionSummary = useSyncExternalStore(
+		subscribeCollectionSummary,
+		getCollectionSummarySnapshot,
+	);
+	const orderedCategories = collectionSummary.categories;
 	const bodyScrollRef = useRef<HTMLDivElement | null>(null);
 
 	const [history, setHistory] = useState<CollectionPaperItem[]>([]);
 	const [navTarget, setNavTarget] = useState<CollectionPaperItem | null>(paper);
+	const [internalPendingPeer, setInternalPendingPeer] =
+		useState<CollectionLinkedPeer | null>(null);
 	const [resolvedPaper, setResolvedPaper] =
 		useState<CollectionPaperItem | null>(paper);
 	const [lineage, setLineage] = useState<CollectionPaperLineageResult | null>(
 		null,
 	);
+	const [lineageCountsLoading, setLineageCountsLoading] = useState(false);
+	const [lineageItemsLoading, setLineageItemsLoading] = useState(false);
 	const [serverCitationText, setServerCitationText] = useState<string | null>(
 		null,
 	);
@@ -100,6 +121,9 @@ export function CollectionPaperDetailDialog({
 
 	const prevExternalIdRef = useRef<string | null>(paper?.id ?? null);
 	const prevOpenRef = useRef<boolean>(open);
+	const lineageItemsReqIdRef = useRef<string | null>(null);
+	const lineageExpandedForIdRef = useRef<string | null>(null);
+	const peerNavReqSeqRef = useRef(0);
 
 	// Reset navigation stack when dialog closes or caller switches to a different root paper
 	useEffect(() => {
@@ -110,48 +134,69 @@ export function CollectionPaperDetailDialog({
 		prevExternalIdRef.current = externalId;
 
 		if (!open) {
+			peerNavReqSeqRef.current += 1;
 			setHistory([]);
 			setNavTarget(paper);
+			setInternalPendingPeer(null);
 			setLineage(null);
+			setLineageCountsLoading(false);
+			setLineageItemsLoading(false);
+			lineageItemsReqIdRef.current = null;
+			lineageExpandedForIdRef.current = null;
 			return;
 		}
 
 		if (reopened || rootChanged) {
+			peerNavReqSeqRef.current += 1;
 			setHistory([]);
 			setNavTarget(paper);
+			setInternalPendingPeer(null);
 		} else if (paper && navTarget && paper.id === navTarget.id) {
 			setNavTarget(paper);
 		}
 	}, [open, paper, navTarget]);
 
-	const targetPaper = navTarget ?? paper;
+	const targetPaper = internalPendingPeer ? null : (navTarget ?? paper);
+	const activePendingPeer =
+		internalPendingPeer ?? (!targetPaper ? pendingPeer : null);
 
 	useEffect(() => {
 		setResolvedPaper(targetPaper);
 		setServerCitationText(null);
 		setCopiedKind(null);
 		setLineage(null);
+		setLineageItemsLoading(false);
+		lineageItemsReqIdRef.current = null;
+		lineageExpandedForIdRef.current = null;
 		if (!open || !targetPaper) {
 			setEnriching(false);
+			setLineageCountsLoading(false);
 			return;
 		}
 
 		let cancelled = false;
 		const needsInitialEnrich = shouldEnrichPaperOnDemand(targetPaper);
 		setEnriching(needsInitialEnrich);
+		setLineageCountsLoading(true);
 
 		void (async () => {
 			try {
 				const [dbDetail, dbLineage] = await Promise.all([
 					getCollectionPaperDetail(targetPaper.id).catch(() => null),
-					getCollectionPaperLineage(targetPaper.id, vaultPath).catch(
-						() => null,
-					),
+					getCollectionPaperLineage(targetPaper.id, vaultPath, {
+						countsOnly: true,
+					}).catch(() => null),
 				]);
 				if (cancelled) return;
 
+				setLineageCountsLoading(false);
 				if (dbLineage) {
-					setLineage(dbLineage);
+					setLineage((prev) =>
+						prev?.itemsLoaded &&
+						lineageExpandedForIdRef.current === targetPaper.id
+							? prev
+							: dbLineage,
+					);
 				}
 
 				let candidate: CollectionPaperItem = targetPaper;
@@ -173,9 +218,11 @@ export function CollectionPaperDetailDialog({
 				if (updated.id === paper?.id) {
 					onPaperUpdated?.(updated);
 				}
+				const wantFull = lineageExpandedForIdRef.current === updated.id;
 				const refreshedLineage = await getCollectionPaperLineage(
 					updated.id,
 					vaultPath,
+					wantFull ? undefined : { countsOnly: true },
 				).catch(() => null);
 				if (!cancelled && refreshedLineage) {
 					setLineage(refreshedLineage);
@@ -183,7 +230,10 @@ export function CollectionPaperDetailDialog({
 			} catch {
 				// Ignore transient network / offline failures; fall back to local formatting
 			} finally {
-				if (!cancelled) setEnriching(false);
+				if (!cancelled) {
+					setEnriching(false);
+					setLineageCountsLoading(false);
+				}
 			}
 		})();
 
@@ -195,9 +245,36 @@ export function CollectionPaperDetailDialog({
 	const active = resolvedPaper ?? targetPaper;
 	const keywords = active?.keywords ?? [];
 
+	const handleRequestFullLineage = useCallback(() => {
+		const targetId = active?.id;
+		if (!targetId) return;
+		lineageExpandedForIdRef.current = targetId;
+		if (lineage?.itemsLoaded || lineageItemsReqIdRef.current === targetId) {
+			return;
+		}
+		lineageItemsReqIdRef.current = targetId;
+		setLineageItemsLoading(true);
+		void getCollectionPaperLineage(targetId, vaultPath)
+			.then((full) => {
+				if (lineageItemsReqIdRef.current !== targetId) return;
+				setLineage(full);
+			})
+			.catch(() => {
+				// Keep existing counts if full load fails
+			})
+			.finally(() => {
+				if (lineageItemsReqIdRef.current === targetId) {
+					lineageItemsReqIdRef.current = null;
+					setLineageItemsLoading(false);
+				}
+			});
+	}, [active?.id, lineage?.itemsLoaded, vaultPath]);
+
 	const handleSelectLineagePaper = useCallback(
 		(next: CollectionPaperItem) => {
 			if (!active || next.id === active.id) return;
+			peerNavReqSeqRef.current += 1;
+			setInternalPendingPeer(null);
 			setHistory((prev) => [...prev, active]);
 			setNavTarget(next);
 			bodyScrollRef.current?.scrollTo({ top: 0 });
@@ -205,7 +282,35 @@ export function CollectionPaperDetailDialog({
 		[active],
 	);
 
+	const handleJumpLinkedPeer = useCallback(
+		async (peer: CollectionLinkedPeer) => {
+			if (peer.sourceType === "venue" && onJumpToVenue) {
+				onJumpToVenue(peer);
+				onOpenChange(false);
+				return;
+			}
+			const seq = ++peerNavReqSeqRef.current;
+			if (active) {
+				setHistory((prev) => [...prev, active]);
+			}
+			setInternalPendingPeer(peer);
+			bodyScrollRef.current?.scrollTo({ top: 0 });
+			const detail = await getCollectionPaperDetail(peer.id).catch(() => null);
+			if (seq !== peerNavReqSeqRef.current) return;
+			setInternalPendingPeer(null);
+			if (detail) {
+				const { citationText: _cite, ...paperItem } = detail;
+				setNavTarget(paperItem);
+			} else if (active) {
+				setHistory((prev) => prev.slice(0, -1));
+			}
+		},
+		[active, onJumpToVenue, onOpenChange],
+	);
+
 	const handleNavigateBack = useCallback(() => {
+		peerNavReqSeqRef.current += 1;
+		setInternalPendingPeer(null);
 		setHistory((prev) => {
 			if (prev.length === 0) return prev;
 			const nextStack = prev.slice(0, -1);
@@ -236,6 +341,81 @@ export function CollectionPaperDetailDialog({
 		[active],
 	);
 
+	if (!active && !activePendingPeer) return null;
+
+	const previousPaper = history.length > 0 ? history[history.length - 1] : null;
+
+	if (!active && activePendingPeer) {
+		const peerBadgeLabel =
+			activePendingPeer.sourceType === "arxiv"
+				? formatArxivCategoriesLabel(activePendingPeer, orderedCategories)
+				: activePendingPeer.sourceLabel;
+		return (
+			<Dialog open={open} onOpenChange={onOpenChange}>
+				<DialogContent
+					data-paper-detail-skeleton
+					className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
+				>
+					<DialogHeader className="shrink-0 border-b px-5 pt-4 pr-11 pb-3.5">
+						<div className="flex flex-wrap items-center gap-1.5">
+							{previousPaper ? (
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-xs"
+									onClick={handleNavigateBack}
+									aria-label={t("plaza.collection.lineage.back", {
+										title: previousPaper.title,
+									})}
+									className="-ml-1 mr-0.5 text-muted-foreground hover:text-foreground"
+								>
+									<ArrowLeft className="size-3.5" />
+								</Button>
+							) : null}
+							<PlazaSourceBadge
+								source={activePendingPeer.sourceType}
+								label={peerBadgeLabel}
+							/>
+							{activePendingPeer.ccfRank ? (
+								<span className="inline-flex h-5 items-center rounded-md bg-brand/12 px-1.5 font-medium font-mono text-[0.6875rem] text-brand leading-none">
+									{activePendingPeer.ccfRank}
+								</span>
+							) : null}
+							<Skeleton className="h-5 w-20 rounded-md" />
+							<Skeleton className="h-5 w-24 rounded-md" />
+						</div>
+						<DialogTitle className="mt-2">
+							<span className="sr-only">{peerBadgeLabel}</span>
+							<Skeleton className="h-5 w-11/12" />
+							<Skeleton className="mt-1.5 h-5 w-2/3" />
+						</DialogTitle>
+						<DialogDescription asChild>
+							<div className="pt-1">
+								<Skeleton className="h-3.5 w-3/4" />
+							</div>
+						</DialogDescription>
+					</DialogHeader>
+
+					<div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+						<div className="flex flex-wrap gap-1.5">
+							<Skeleton className="h-5 w-20 rounded-md" />
+							<Skeleton className="h-5 w-24 rounded-md" />
+							<Skeleton className="h-5 w-16 rounded-md" />
+						</div>
+						<div className="space-y-2 rounded-lg bg-[var(--magpie-surface)] p-3.5 shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]">
+							<Skeleton className="h-3.5 w-full" />
+							<Skeleton className="h-3.5 w-full" />
+							<Skeleton className="h-3.5 w-11/12" />
+							<Skeleton className="h-3.5 w-4/5" />
+						</div>
+						<Skeleton className="h-9 w-full rounded-lg" />
+						<Skeleton className="h-24 w-full rounded-lg" />
+					</div>
+				</DialogContent>
+			</Dialog>
+		);
+	}
+
 	if (!active) return null;
 
 	const isSelfInVault = Boolean(
@@ -245,7 +425,17 @@ export function CollectionPaperDetailDialog({
 		(active.id === paper?.id && imported) ||
 		locallyImportedIds.has(active.id) ||
 		isSelfInVault;
-	const previousPaper = history.length > 0 ? history[history.length - 1] : null;
+	const cleanArxivId = active.arxivId?.trim() || null;
+	const rawDoi = active.doi?.trim() || null;
+	const cleanDoi =
+		rawDoi &&
+		!(cleanArxivId && rawDoi.toLowerCase().startsWith("10.48550/arxiv."))
+			? rawDoi
+			: null;
+	const linkedArxivPeer =
+		active.sourceType === "venue" && active.linkedPeer?.sourceType === "arxiv"
+			? active.linkedPeer
+			: null;
 
 	const copyText = async (kind: "citation" | "bibtex") => {
 		try {
@@ -292,7 +482,7 @@ export function CollectionPaperDetailDialog({
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-				<DialogHeader className="shrink-0 border-b px-5 pt-5 pr-11 pb-3.5">
+				<DialogHeader className="shrink-0 border-b px-5 pt-4 pr-11 pb-3.5">
 					<div className="flex flex-wrap items-center gap-1.5">
 						{previousPaper ? (
 							<Tooltip>
@@ -320,36 +510,60 @@ export function CollectionPaperDetailDialog({
 
 						<PlazaSourceBadge
 							source={active.sourceType}
-							label={active.sourceLabel}
+							label={
+								active.sourceType === "arxiv"
+									? formatArxivCategoriesLabel(active, orderedCategories)
+									: active.sourceLabel
+							}
 						/>
+						{active.sourceType === "arxiv" &&
+						active.linkedPeer?.sourceType === "venue" ? (
+							<PlazaSourceJumpButton
+								source="venue"
+								label={active.linkedPeer.sourceLabel}
+								onClick={() => {
+									if (active.linkedPeer) {
+										void handleJumpLinkedPeer(active.linkedPeer);
+									}
+								}}
+							/>
+						) : null}
+						{active.sourceType === "venue" &&
+						active.linkedPeer?.sourceType === "arxiv" ? (
+							<PlazaSourceJumpButton
+								source="arxiv"
+								label={formatArxivCategoriesLabel(
+									active.linkedPeer,
+									orderedCategories,
+								)}
+								onClick={() => {
+									if (active.linkedPeer) {
+										void handleJumpLinkedPeer(active.linkedPeer);
+									}
+								}}
+							/>
+						) : null}
 						{active.ccfRank ? (
-							<span className="rounded-md bg-brand/12 px-1.5 py-0.5 font-medium font-mono text-[11px] text-brand">
+							<span className="inline-flex h-5 items-center rounded-md bg-brand/12 px-1.5 font-medium font-mono text-[0.6875rem] text-brand leading-none">
 								{active.ccfRank}
 							</span>
 						) : null}
 						{active.venueDomain ? (
-							<span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+							<span className="inline-flex h-5 items-center rounded-md bg-muted px-1.5 font-mono text-[0.6875rem] text-muted-foreground leading-none">
 								{active.venueDomain}
 							</span>
 						) : null}
-						<span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+						<span className="inline-flex h-5 items-center font-mono text-[0.6875rem] text-muted-foreground tabular-nums leading-none">
 							{active.publishedAt.slice(0, 10)}
 						</span>
-						<span className="inline-flex items-center gap-1 rounded-md bg-muted/70 px-1.5 py-0.5 font-medium text-[11px] text-foreground tabular-nums">
-							<GitFork className="size-2.5 text-muted-foreground" />
+						<span className="inline-flex h-5 items-center gap-1 rounded-md bg-muted/70 px-1.5 font-medium text-[0.6875rem] text-foreground tabular-nums leading-none">
+							<GitFork className="size-2.5 shrink-0 text-muted-foreground" />
 							{t("plaza.collection.citations", {
-								count: active.citationCount ?? 0,
+								count: lineage
+									? lineage.citedByCount
+									: (active.citationCount ?? 0),
 							})}
 						</span>
-						{active.arxivId ? (
-							<span className="font-mono text-[11px] text-muted-foreground">
-								arXiv:{active.arxivId}
-							</span>
-						) : active.doi ? (
-							<span className="max-w-[200px] truncate font-mono text-[11px] text-muted-foreground">
-								DOI:{active.doi}
-							</span>
-						) : null}
 					</div>
 
 					<DialogTitle className="mt-1.5 select-text font-semibold text-base leading-snug">
@@ -361,6 +575,50 @@ export function CollectionPaperDetailDialog({
 							? active.authors.join(", ")
 							: active.sourceLabel}
 					</DialogDescription>
+
+					{cleanDoi || cleanArxivId ? (
+						<div
+							data-paper-identifiers
+							className="mt-1.5 flex flex-wrap items-center gap-1.5"
+						>
+							{cleanDoi ? (
+								<button
+									type="button"
+									data-paper-doi-tag
+									onClick={() =>
+										openExternalUrl(
+											cleanDoi.startsWith("http")
+												? cleanDoi
+												: `https://doi.org/${cleanDoi}`,
+										)
+									}
+									className="inline-flex h-5.5 max-w-full items-center gap-1 rounded-md bg-[var(--magpie-surface)] px-2 font-mono text-[0.6875rem] text-muted-foreground leading-none shadow-[0_1px_2px_rgba(0,0,0,0.08),inset_0_0.5px_0_var(--magpie-edge)] ring-1 ring-border/60 ring-inset transition-colors hover:bg-muted hover:text-foreground dark:bg-white/[0.06] dark:ring-white/12 dark:hover:bg-white/[0.11]"
+									title={cleanDoi}
+								>
+									<span className="truncate">DOI: {cleanDoi}</span>
+									<ArrowUpRight className="size-3 shrink-0 opacity-70" />
+								</button>
+							) : null}
+							{cleanArxivId ? (
+								<button
+									type="button"
+									data-paper-arxiv-tag
+									onClick={() => {
+										if (linkedArxivPeer) {
+											void handleJumpLinkedPeer(linkedArxivPeer);
+										} else {
+											openExternalUrl(`https://arxiv.org/abs/${cleanArxivId}`);
+										}
+									}}
+									className="inline-flex h-5.5 items-center gap-1 rounded-md bg-amber-500/10 px-2 font-mono text-[0.6875rem] text-amber-700 leading-none shadow-[0_1px_2px_rgba(0,0,0,0.08)] ring-1 ring-amber-500/25 ring-inset transition-colors hover:bg-amber-500/18 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/30 dark:hover:bg-amber-500/25"
+									title={`arXiv:${cleanArxivId}`}
+								>
+									<span>arXiv: {cleanArxivId}</span>
+									<ArrowUpRight className="size-3 shrink-0 opacity-80" />
+								</button>
+							) : null}
+						</div>
+					) : null}
 				</DialogHeader>
 
 				<div
@@ -413,12 +671,27 @@ export function CollectionPaperDetailDialog({
 								{active.abstract}
 							</SelectionSurface>
 						</section>
+					) : enriching ? (
+						<section className="space-y-1.5">
+							<h4 className="font-medium text-muted-foreground text-xs">
+								{t("plaza.collection.abstract")}
+							</h4>
+							<div className="space-y-2 rounded-lg bg-[var(--magpie-surface)] p-3.5 shadow-[inset_0_0.5px_0_var(--magpie-edge),0_0_0_0.5px_var(--magpie-hairline)]">
+								<Skeleton className="h-3.5 w-full" />
+								<Skeleton className="h-3.5 w-11/12" />
+								<Skeleton className="h-3.5 w-4/5" />
+							</div>
+						</section>
 					) : null}
 
 					{/* In-Pool Paper Lineage & Personal Vault Association */}
 					<CollectionPaperLineageSection
+						key={active.id}
 						lineage={lineage}
+						loadingCounts={lineageCountsLoading}
+						loadingItems={lineageItemsLoading}
 						vaultPath={vaultPath}
+						onRequestItems={handleRequestFullLineage}
 						onSelectPaper={handleSelectLineagePaper}
 						onOpenVaultPaper={handleOpenVaultPaper}
 					/>

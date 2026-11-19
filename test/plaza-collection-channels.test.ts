@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { BackgroundTaskCancelledError } from "@/lib/core/background-tasks";
 import { commands } from "@/lib/core/bindings";
 import {
 	DEFAULT_KEYWORD_LLM_MODEL,
@@ -70,9 +71,13 @@ import {
 	OPENALEX_SELECT,
 	openAlexWorkToVenueItem,
 	semanticScholarWorkToVenueItem,
+	wrapFetchJsonWithAbort,
+	wrapFetchTextWithAbort,
 } from "@/lib/plaza/collection-enrichment";
 import {
 	backfillMissingMetadataFromChannel,
+	createPoliteFetchJson,
+	createPoliteFetchText,
 	fetchAclAnthologyVenuePapers,
 	fetchMiniConfVenuePapers,
 	parseAclAnthologyVolumeHtml,
@@ -344,7 +349,7 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			},
 		);
 		expect(
-			deltaUrls.some((u) => u.includes("submittedDate:[202605092000+TO+")),
+			deltaUrls.some((u) => u.includes("submittedDate:[202605080800+TO+")),
 		).toBe(true);
 		expect(deltaSync.deltaItems).toHaveLength(1);
 		expect(deltaSync.deltaItems[0]?.arxivId).toBe("2605.10009");
@@ -3958,5 +3963,356 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			"Zero-Knowledge Proofs at Line Rate",
 		]);
 		expect(spFallbackBundle.authoritativeMainTrack).toBe(true);
+	});
+
+	it("enforces serialized host gate exclusivity and prevents re-entrant double-wrap self-deadlock for JSON and text fetchers", async () => {
+		const flushMicrotasks = async () => {
+			for (let i = 0; i < 6; i++) {
+				await Promise.resolve();
+			}
+		};
+
+		// 1. Prove SERIALIZED_HOSTS genuinely serializes concurrent requests (not a test-env no-op)
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const startedUrls: string[] = [];
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+
+		const politeJson = createPoliteFetchJson(async <T>(url: string) => {
+			startedUrls.push(url);
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			try {
+				if (url.endsWith("/1")) {
+					await firstGate;
+				}
+				return { url } as T;
+			} finally {
+				inFlight -= 1;
+			}
+		});
+
+		const req1 = politeJson<{ url: string }>(
+			"https://api.crossref.org/works/1",
+		);
+		const req2 = politeJson<{ url: string }>(
+			"https://api.crossref.org/works/2",
+		);
+		await flushMicrotasks();
+
+		expect(startedUrls).toEqual(["https://api.crossref.org/works/1"]);
+		expect(maxInFlight).toBe(1);
+
+		releaseFirst();
+		const [res1, res2] = await Promise.all([req1, req2]);
+		expect(res1.url).toBe("https://api.crossref.org/works/1");
+		expect(res2.url).toBe("https://api.crossref.org/works/2");
+		expect(startedUrls).toEqual([
+			"https://api.crossref.org/works/1",
+			"https://api.crossref.org/works/2",
+		]);
+		expect(maxInFlight).toBe(1);
+
+		// 2. Direct double-wrapping is idempotent and never self-deadlocks
+		let rawJsonCalls = 0;
+		const basePoliteJson = createPoliteFetchJson(async <T>(url: string) => {
+			rawJsonCalls += 1;
+			return { ok: url } as T;
+		});
+		const doublePoliteJson = createPoliteFetchJson(basePoliteJson);
+		expect(doublePoliteJson).toBe(basePoliteJson);
+		await expect(
+			doublePoliteJson<{ ok: string }>("https://api.crossref.org/works/direct"),
+		).resolves.toEqual({ ok: "https://api.crossref.org/works/direct" });
+		expect(rawJsonCalls).toBe(1);
+
+		let rawTextCalls = 0;
+		const basePoliteText = createPoliteFetchText(async (url: string) => {
+			rawTextCalls += 1;
+			return `html:${url}`;
+		});
+		const doublePoliteText = createPoliteFetchText(basePoliteText);
+		expect(doublePoliteText).toBe(basePoliteText);
+		await expect(
+			doublePoliteText("https://papers.cool/venue/ICLR.2026"),
+		).resolves.toBe("html:https://papers.cool/venue/ICLR.2026");
+		expect(rawTextCalls).toBe(1);
+
+		// 3. Indirect double-wrapping through opaque closures (e.g. wrapFetch*WithAbort + tracking) never self-deadlocks
+		const ctrl = new AbortController();
+		const indirectJson = createPoliteFetchJson(
+			async <T>(url: string) =>
+				await wrapFetchJsonWithAbort(basePoliteJson, ctrl.signal)<T>(url),
+			ctrl.signal,
+		);
+		await expect(
+			indirectJson<{ ok: string }>(
+				"https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+			),
+		).resolves.toEqual({
+			ok: "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+		});
+
+		const indirectText = createPoliteFetchText(
+			async (url: string, accept?: string) =>
+				await wrapFetchTextWithAbort(basePoliteText, ctrl.signal)(url, accept),
+			ctrl.signal,
+		);
+		await expect(
+			indirectText("https://conf.researchr.org/home/ase-2026"),
+		).resolves.toBe("html:https://conf.researchr.org/home/ase-2026");
+	});
+
+	it("composes AbortSignals across re-wrapped polite fetchers, preserves FIFO serialization on queued abort, and propagates signal in fetchMultiChannelVenuePapers", async () => {
+		const flushMicrotasks = async () => {
+			for (let i = 0; i < 6; i++) {
+				await Promise.resolve();
+			}
+		};
+
+		// Part A: stricter inner signal aborts a queued waiter while keeping later waiters behind the blocker
+		let releaseBlocker!: () => void;
+		const blockerGate = new Promise<void>((resolve) => {
+			releaseBlocker = resolve;
+		});
+		const executedUrls: string[] = [];
+
+		const blockerFetch = createPoliteFetchJson(async <T>(url: string) => {
+			executedUrls.push(url);
+			await blockerGate;
+			return { url } as T;
+		});
+
+		const outerCtrl = new AbortController();
+		const innerCtrl = new AbortController();
+		const innerRawCalls: string[] = [];
+		const outerPolite = createPoliteFetchJson(async <T>(url: string) => {
+			innerRawCalls.push(url);
+			return { url } as T;
+		}, outerCtrl.signal);
+		const reWrappedStricter = createPoliteFetchJson(
+			outerPolite,
+			innerCtrl.signal,
+		);
+
+		const waiter3Fetch = createPoliteFetchJson(async <T>(url: string) => {
+			executedUrls.push(url);
+			return { url } as T;
+		});
+
+		const blockerPromise = blockerFetch("https://api.crossref.org/works/hold");
+		try {
+			await flushMicrotasks();
+			expect(executedUrls).toEqual(["https://api.crossref.org/works/hold"]);
+
+			const queuedAborted = reWrappedStricter(
+				"https://api.crossref.org/works/aborted",
+			);
+			const waiter3Promise = waiter3Fetch(
+				"https://api.crossref.org/works/waiter3",
+			);
+			await flushMicrotasks();
+
+			innerCtrl.abort();
+			await expect(queuedAborted).rejects.toBeInstanceOf(
+				BackgroundTaskCancelledError,
+			);
+			expect(innerRawCalls).toEqual([]);
+
+			// Waiter 3 must remain queued behind the still-running blocker
+			await flushMicrotasks();
+			expect(executedUrls).toEqual(["https://api.crossref.org/works/hold"]);
+
+			releaseBlocker();
+			await Promise.all([blockerPromise, waiter3Promise]);
+			expect(executedUrls).toEqual([
+				"https://api.crossref.org/works/hold",
+				"https://api.crossref.org/works/waiter3",
+			]);
+			expect(innerRawCalls).toEqual([]);
+		} finally {
+			releaseBlocker();
+			await blockerPromise.catch(() => undefined);
+		}
+
+		// Part B: outer signal still aborts an in-flight call on a re-wrapped polite fetcher and releases the host gate
+		const outerCtrl2 = new AbortController();
+		const innerCtrl2 = new AbortController();
+		const hangingOuter = createPoliteFetchJson(
+			async <T>(_url: string) => await new Promise<T>(() => {}),
+			outerCtrl2.signal,
+		);
+		const reWrappedWithInner = createPoliteFetchJson(
+			hangingOuter,
+			innerCtrl2.signal,
+		);
+		const inFlightPromise = reWrappedWithInner(
+			"https://api.crossref.org/works/hang",
+		);
+		await flushMicrotasks();
+		outerCtrl2.abort();
+		await expect(inFlightPromise).rejects.toBeInstanceOf(
+			BackgroundTaskCancelledError,
+		);
+
+		// Gate must be unlocked after the aborted in-flight call
+		const afterAbort = createPoliteFetchJson(async <T>(url: string) => {
+			return { ok: url } as T;
+		});
+		await expect(
+			afterAbort<{ ok: string }>("https://api.crossref.org/works/after-abort"),
+		).resolves.toEqual({ ok: "https://api.crossref.org/works/after-abort" });
+
+		// Part C: fetchMultiChannelVenuePapers propagates options.signal into its polite host-gate wait
+		const ase = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ase-2026");
+		if (!ase) throw new Error("Missing ase-2026");
+
+		let releaseResearchr!: () => void;
+		const researchrGate = new Promise<void>((resolve) => {
+			releaseResearchr = resolve;
+		});
+		const researchrBlocker = createPoliteFetchText(async (url: string) => {
+			await researchrGate;
+			return url;
+		});
+		const researchrBlockerPromise = researchrBlocker(
+			"https://conf.researchr.org/home/blocker",
+		);
+
+		const venueCtrl = new AbortController();
+		let venueRawTextCalls = 0;
+		try {
+			await flushMicrotasks();
+			const venuePromise = fetchMultiChannelVenuePapers(
+				ase,
+				2026,
+				async <T>() => ({ results: [] }) as T,
+				async () => {
+					venueRawTextCalls += 1;
+					return "";
+				},
+				{ signal: venueCtrl.signal },
+			);
+			await flushMicrotasks();
+
+			// Abort while fetchOfficialTrackRoster is queued on conf.researchr.org
+			venueCtrl.abort();
+			await expect(venuePromise).rejects.toBeInstanceOf(
+				BackgroundTaskCancelledError,
+			);
+			expect(venueRawTextCalls).toBe(0);
+		} finally {
+			releaseResearchr();
+			await researchrBlockerPromise.catch(() => undefined);
+		}
+	});
+
+	it("refreshes TOSEM 2026 via ensureVenueLoaded without custom fetchJson without self-deadlocking on api.crossref.org", async () => {
+		const tosem = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "tosem-2026");
+		if (!tosem) throw new Error("Missing tosem-2026");
+
+		resetCollectionMemoryForTests();
+		setCachedKeywordLlmConfigForTests(null);
+		setCachedOpenAlexApiKeyForTests(null);
+		installMockCollectionIpc({
+			initialState: {
+				categories: ["cs.SE"],
+				venues: [tosem],
+			},
+		});
+		await ensureCollectionSummaryHydrated();
+
+		let crossrefCalls = 0;
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url =
+				typeof input === "string"
+					? input
+					: input instanceof URL
+						? input.toString()
+						: input.url;
+			if (url.includes("api.openalex.org/works")) {
+				return new Response(
+					JSON.stringify({
+						meta: { count: 0 },
+						results: [],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			if (url.includes("api.crossref.org/works")) {
+				crossrefCalls += 1;
+				return new Response(
+					JSON.stringify({
+						message: {
+							"total-results": 1,
+							"next-cursor": null,
+							items: [
+								{
+									DOI: "10.1145/3799001",
+									type: "journal-article",
+									ISSN: ["1049-331X"],
+									title: [
+										"Automated Program Repair Verification for Industrial Systems",
+									],
+									author: [
+										{ given: "Ada", family: "Lovelace" },
+										{ given: "Grace", family: "Hopper" },
+									],
+									abstract:
+										"<jats:p>A rigorous empirical evaluation of automated program repair verification on industrial software repositories.</jats:p>",
+									subject: ["Software Engineering", "Program Repair"],
+									"container-title": [
+										"ACM Transactions on Software Engineering and Methodology",
+									],
+									published: { "date-parts": [[2026, 3, 15]] },
+									"is-referenced-by-count": 4,
+								},
+							],
+						},
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			return new Response(JSON.stringify({ results: [], data: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const ctrl = new AbortController();
+			const summary = await ensureVenueLoaded("tosem-2026", {
+				signal: ctrl.signal,
+			});
+			expect(crossrefCalls).toBeGreaterThanOrEqual(1);
+			expect(summary.totalCount).toBe(1);
+			const page = await listCollectionPapers({
+				sourceType: "venue",
+				venueId: "tosem-2026",
+				timePreset: "all",
+				limit: 10,
+				offset: 0,
+			});
+			expect(page.items).toHaveLength(1);
+			expect(page.items[0]?.doi).toBe("10.1145/3799001");
+			expect(page.items[0]?.title).toBe(
+				"Automated Program Repair Verification for Industrial Systems",
+			);
+		} finally {
+			vi.unstubAllGlobals();
+			setCachedKeywordLlmConfigForTests(undefined);
+			setCachedOpenAlexApiKeyForTests(undefined);
+			resetCollectionMemoryForTests();
+		}
 	});
 });

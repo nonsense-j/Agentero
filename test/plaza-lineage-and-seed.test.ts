@@ -12,6 +12,7 @@ import {
 	type CollectionPaperItem,
 	clearCollection,
 	ensureCollectionSummaryHydrated,
+	formatArxivCategoriesLabel,
 	getCollectionSummarySnapshot,
 	parseArxivAtomXml,
 	refreshArxivCollection,
@@ -388,14 +389,26 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		).toBeNull();
 		expect(document.querySelector("[data-lineage-graph]")).toBeNull();
 
-		// Personal Vault highlight bar renders "citesVault" and opens Vault paper on click
+		// Personal Vault highlight bar renders "citesVault" immediately even while Lineage list is collapsed
 		const vaultBar = document.querySelector("[data-lineage-vault-matches]");
 		expect(vaultBar?.textContent).toContain("citesVault");
 		expect(vaultBar?.textContent).toContain("Foundational Reference Paper #1");
 
+		// Lineage section starts collapsed with counts visible and zero row buttons rendered
+		const lineageToggle = lineageSection?.querySelector(
+			"button[data-lineage-toggle]",
+		) as HTMLButtonElement | null;
+		expect(lineageToggle?.getAttribute("aria-expanded")).toBe("false");
+		expect(lineageSection?.querySelector(".agentero-scroll")).toBeNull();
+
+		// Expand Lineage to lazy-load full list rows
+		lineageToggle?.click();
+		await flush(8);
+		expect(lineageToggle?.getAttribute("aria-expanded")).toBe("true");
+
 		// Click a row in the list view to navigate inside the dialog
 		const citingRow = Array.from(
-			lineageSection?.querySelectorAll("button") ?? [],
+			lineageSection?.querySelectorAll(".agentero-scroll button") ?? [],
 		).find((btn) => btn.textContent?.includes("Follow-up Citing Paper #1"));
 		expect(citingRow).toBeDefined();
 		citingRow?.click();
@@ -428,6 +441,231 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 			"C:/Users/Test/MyVault/papers/ref-1",
 		);
 		expect(dialogOpen).toBe(false);
+
+		root.unmount();
+	});
+
+	it("shows all >40 cited-in-pool papers matching header count and filters strictly by title", async () => {
+		const target = makePaper({
+			id: "doi:10.1145/target.45",
+			title: "Target Paper With Many Citations",
+			doi: "10.1145/target.45",
+		});
+		const citers: CollectionPaperItem[] = Array.from({ length: 45 }, (_, i) =>
+			makePaper({
+				id: `doi:10.1145/citer.${i + 1}`,
+				title:
+					i === 42
+						? "Symbolic Execution for Kernel Drivers"
+						: `General Paper Number ${i + 1}`,
+				abstract:
+					i === 1
+						? "This abstract mentions Symbolic Execution in body only."
+						: "Standard empirical study abstract.",
+				doi: `10.1145/citer.${i + 1}`,
+				rawRefs: ["doi:10.1145/target.45"],
+				publishedAt: `2026-04-${String((i % 28) + 1).padStart(2, "0")}T00:00:00Z`,
+			}),
+		);
+
+		mockDb.seed({ items: [target, ...citers] });
+		const syncedTarget = mockDb.getRawItem(target.id) ?? target;
+
+		const host = document.createElement("div");
+		document.body.append(host);
+		const root = createRoot(host);
+
+		root.render(
+			createElement(
+				TooltipProvider,
+				{ delayDuration: 0 },
+				createElement(CollectionPaperDetailDialog, {
+					paper: syncedTarget,
+					open: true,
+					imported: false,
+					onOpenChange: () => {},
+					onImport: () => {},
+				}),
+			),
+		);
+		await flush(8);
+
+		// Header cited count and collapsed Cited in Pool pill both show all 45 (not capped at 40)
+		expect(document.body.textContent).toContain("citations:45");
+		const lineageSection = document.querySelector("[data-lineage-section]");
+		expect(lineageSection).not.toBeNull();
+		const citedCountPill = lineageSection?.querySelector(
+			"button[data-lineage-count-pill='cited']",
+		) as HTMLButtonElement | null;
+		expect(citedCountPill?.textContent).toContain("45");
+		// Collapsed by default: no rows mounted until user clicks to expand
+		expect(lineageSection?.querySelector(".agentero-scroll")).toBeNull();
+
+		// Clicking the Cited count pill expands and lazy-loads all 45 rows without rendering a duplicate tab bar
+		citedCountPill?.click();
+		await flush(8);
+
+		expect(citedCountPill?.getAttribute("data-active")).toBe("true");
+		expect(lineageSection?.querySelector(".magpie-seg-btn")).toBeNull();
+
+		// Displays all 45 citing papers inside the scroll box (<=50 initial step)
+		const getVisibleRows = () =>
+			lineageSection?.querySelectorAll(".agentero-scroll button") ?? [];
+		expect(getVisibleRows().length).toBe(45);
+
+		// Title search matches only paper #43 whose title contains "Symbolic Execution"
+		// (ignores paper #2 which mentions it only in abstract)
+		const titleInput = lineageSection?.querySelector(
+			"input[data-lineage-title-search]",
+		) as HTMLInputElement | null;
+		expect(titleInput).not.toBeNull();
+		const setter = Object.getOwnPropertyDescriptor(
+			window.HTMLInputElement.prototype,
+			"value",
+		)?.set;
+		setter?.call(titleInput, "symbolic execution");
+		titleInput?.dispatchEvent(new Event("input", { bubbles: true }));
+		await flush(4);
+
+		expect(getVisibleRows().length).toBe(1);
+		expect(getVisibleRows()[0]?.textContent).toContain(
+			"Symbolic Execution for Kernel Drivers",
+		);
+
+		// Clearing restores all 45 rows
+		setter?.call(titleInput, "");
+		titleInput?.dispatchEvent(new Event("input", { bubbles: true }));
+		await flush(4);
+		expect(getVisibleRows().length).toBe(45);
+
+		root.unmount();
+	});
+
+	it("formats multi-category arXiv badges in Collection order (SE, CR, PL) and renders cross-portal jump buttons", async () => {
+		expect(
+			formatArxivCategoriesLabel(
+				{ sourceLabel: "cs.PL", categories: ["cs.PL", "cs.SE", "cs.AI"] },
+				["cs.SE", "cs.CR", "cs.PL"],
+			),
+		).toBe("cs.SE/PL");
+		expect(
+			formatArxivCategoriesLabel(
+				{ sourceLabel: "cs.PL", categories: ["cs.PL", "cs.CR", "cs.SE"] },
+				["cs.SE", "cs.CR", "cs.PL"],
+			),
+		).toBe("cs.SE/CR/PL");
+
+		const arxivPaper = makePaper({
+			id: "arxiv:2605.30001",
+			title: "Cross-Portal Twin Study",
+			sourceType: "arxiv",
+			sourceLabel: "cs.PL",
+			categories: ["cs.PL", "cs.SE"],
+			arxivId: "2605.30001",
+			venueId: undefined,
+			venueKind: undefined,
+			venueDomain: undefined,
+			ccfRank: undefined,
+			linkedPeer: {
+				id: "doi:10.1145/icse.30001",
+				sourceType: "venue",
+				sourceLabel: "ICSE 2026",
+				categories: ["ICSE 2026"],
+				venueId: "icse-2026",
+				venueKind: "conference",
+				ccfRank: "CCF-A",
+			},
+		});
+		const venuePaper = makePaper({
+			id: "doi:10.1145/icse.30001",
+			title: "Cross-Portal Twin Study",
+			sourceType: "venue",
+			sourceLabel: "ICSE 2026",
+			categories: ["ICSE 2026"],
+			arxivId: "2605.30001",
+			doi: "10.1145/icse.30001",
+			venueId: "icse-2026",
+			venueKind: "conference",
+			ccfRank: "CCF-A",
+			linkedPeer: {
+				id: "arxiv:2605.30001",
+				sourceType: "arxiv",
+				sourceLabel: "cs.PL",
+				categories: ["cs.PL", "cs.SE"],
+			},
+		});
+
+		mockDb.seed({
+			categories: ["cs.SE", "cs.CR", "cs.PL"],
+			items: [arxivPaper, venuePaper],
+		});
+		await ensureCollectionSummaryHydrated();
+
+		const jumpVenueSpy = vi.fn();
+		let dialogOpen = true;
+		const host = document.createElement("div");
+		document.body.append(host);
+		const root = createRoot(host);
+
+		// 1. arXiv card shows cs.SE/PL and clickable ICSE 2026 jump button
+		root.render(
+			createElement(
+				TooltipProvider,
+				{ delayDuration: 0 },
+				createElement(CollectionPaperDetailDialog, {
+					paper: arxivPaper,
+					open: dialogOpen,
+					imported: false,
+					onOpenChange: (next) => {
+						dialogOpen = next;
+					},
+					onImport: () => {},
+					onJumpToVenue: jumpVenueSpy,
+				}),
+			),
+		);
+		await flush(6);
+
+		expect(document.body.textContent).toContain("cs.SE/PL");
+		const venueJumpBtn = document.querySelector(
+			"button[aria-label='ICSE 2026']",
+		) as HTMLButtonElement | null;
+		expect(venueJumpBtn).not.toBeNull();
+		venueJumpBtn?.click();
+		await flush(2);
+		expect(jumpVenueSpy).toHaveBeenCalledWith(arxivPaper.linkedPeer);
+		expect(dialogOpen).toBe(false);
+
+		// 2. Venue card shows both DOI and clickable arXiv ID tags below authors, and clicking arXiv tag jumps to arXiv card
+		dialogOpen = true;
+		root.render(
+			createElement(
+				TooltipProvider,
+				{ delayDuration: 0 },
+				createElement(CollectionPaperDetailDialog, {
+					paper: venuePaper,
+					open: dialogOpen,
+					imported: false,
+					onOpenChange: (next) => {
+						dialogOpen = next;
+					},
+					onImport: () => {},
+				}),
+			),
+		);
+		await flush(6);
+
+		const doiTag = document.querySelector(
+			"[data-paper-identifiers] button[data-paper-doi-tag]",
+		) as HTMLButtonElement | null;
+		const arxivIdTag = document.querySelector(
+			"[data-paper-identifiers] button[data-paper-arxiv-tag]",
+		) as HTMLButtonElement | null;
+		expect(doiTag?.textContent).toContain("10.1145/icse.30001");
+		expect(arxivIdTag?.textContent).toContain("2605.30001");
+		arxivIdTag?.click();
+		await flush(6);
+		expect(document.querySelector("button[aria-label='back']")).not.toBeNull();
 
 		root.unmount();
 	});

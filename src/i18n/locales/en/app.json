@@ -254,7 +254,13 @@
 		"plazaVenueRefresh": "Refresh Venue",
 		"plazaSeedSync": "Sync collection seed",
 		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
-		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
+		"plazaVenueProgress": "Venue {{completed}}/{{total}}",
+		"plazaArxivFinished": "arXiv {{targets}} finished",
+		"plazaVenueFinished": "Venue {{targets}} finished",
+		"plazaPreparingPapers": "{{current}}/{{total}} Preparing {{target}}",
+		"plazaPreparingPapersCount": "{{current}}/{{total}} Preparing {{target}} ({{completed}}/{{totalPapers}})",
+		"plazaCollectingPapers": "Collecting {{target}} ({{completed}}/{{total}})",
+		"plazaCollectingPapersPending": "Collecting {{target}}…"
 	},
 	"reminders": {
 		"dismiss": "Don't remind me again",

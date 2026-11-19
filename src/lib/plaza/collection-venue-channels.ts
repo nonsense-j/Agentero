@@ -7,6 +7,7 @@
  * without any DBLP dependency.
  */
 
+import { isBackgroundTaskCancelledError } from "@/lib/core/background-tasks";
 import { extractKeywordsWithKeywordLlmBatch } from "@/lib/keyword-llm";
 import { hasCachedOpenAlexApiKey } from "@/lib/openalex";
 import {
@@ -33,15 +34,15 @@ import {
 	normalizeOpenAlexId,
 	normalizePaperKeywords,
 	normalizeRawRefs,
+	raceWithAbort,
 	type S2BulkPaper,
 	scoreCameraReadyCandidateMatch,
 	semanticScholarWorkToVenueItem,
+	sleepWithAbort,
 	throwIfAborted,
 	VENUE_SPEC_BY_ID,
 	type VenueConfig,
 	type VenueSpec,
-	wrapFetchJsonWithAbort,
-	wrapFetchTextWithAbort,
 } from "@/lib/plaza/collection-enrichment";
 
 const IS_TEST_ENV =
@@ -80,7 +81,61 @@ const SERIALIZED_HOSTS = new Set([
 
 const hostNextSlotMs = new Map<string, number>();
 const hostInFlightChain = new Map<string, Promise<void>>();
+const activeSyncHostGateDepth = new Map<string, number>();
 let openAlexListCooldownUntil = 0;
+
+type PoliteTextMeta = {
+	raw: FetchTextFn;
+	signal?: AbortSignal;
+};
+
+type PoliteJsonMeta = {
+	raw: FetchJsonFn;
+	signal?: AbortSignal;
+};
+
+const politeFetchTextMeta = new WeakMap<FetchTextFn, PoliteTextMeta>();
+const politeFetchJsonMeta = new WeakMap<FetchJsonFn, PoliteJsonMeta>();
+
+function combineAbortSignals(
+	first?: AbortSignal,
+	second?: AbortSignal,
+): AbortSignal | undefined {
+	if (!first) return second;
+	if (!second || first === second) return first;
+	if (typeof AbortSignal?.any === "function") {
+		return AbortSignal.any([first, second]);
+	}
+	if (first.aborted) return first;
+	if (second.aborted) return second;
+	const controller = new AbortController();
+	const onAbort = () => {
+		first.removeEventListener("abort", onAbort);
+		second.removeEventListener("abort", onAbort);
+		controller.abort();
+	};
+	first.addEventListener("abort", onAbort, { once: true });
+	second.addEventListener("abort", onAbort, { once: true });
+	return controller.signal;
+}
+
+function runWithActiveHostGate<T>(
+	host: string,
+	task: () => Promise<T>,
+): Promise<T> {
+	if (!host) return task();
+	const prevDepth = activeSyncHostGateDepth.get(host) ?? 0;
+	activeSyncHostGateDepth.set(host, prevDepth + 1);
+	try {
+		return task();
+	} finally {
+		if (prevDepth === 0) {
+			activeSyncHostGateDepth.delete(host);
+		} else {
+			activeSyncHostGateDepth.set(host, prevDepth);
+		}
+	}
+}
 
 function extractHostname(url: string): string {
 	try {
@@ -106,7 +161,12 @@ function isOpenAlexListUrl(url: string): boolean {
 	}
 }
 
-async function acquireHostSlot(host: string, url: string): Promise<void> {
+async function acquireHostSlot(
+	host: string,
+	url: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	throwIfAborted(signal);
 	if (IS_TEST_ENV || !host) return;
 	const interval =
 		host === "api.openalex.org"
@@ -125,14 +185,16 @@ async function acquireHostSlot(host: string, url: string): Promise<void> {
 	hostNextSlotMs.set(host, scheduled + interval);
 	const waitMs = scheduled - now;
 	if (waitMs > 0) {
-		await new Promise((resolve) => setTimeout(resolve, waitMs));
+		await sleepWithAbort(waitMs, signal);
 	}
 }
 
 async function withHostGate<T>(
 	url: string,
 	task: () => Promise<T>,
+	signal?: AbortSignal,
 ): Promise<T> {
+	throwIfAborted(signal);
 	const host = extractHostname(url);
 	if (
 		!IS_TEST_ENV &&
@@ -141,9 +203,13 @@ async function withHostGate<T>(
 	) {
 		throw new Error(`OpenAlex list rate-limit cooldown active for ${url}`);
 	}
-	if (IS_TEST_ENV || !SERIALIZED_HOSTS.has(host)) {
-		await acquireHostSlot(host, url);
-		return await task();
+	if (host && (activeSyncHostGateDepth.get(host) ?? 0) > 0) {
+		return await raceWithAbort(task(), signal);
+	}
+	if (!SERIALIZED_HOSTS.has(host)) {
+		await acquireHostSlot(host, url, signal);
+		const taskPromise = runWithActiveHostGate(host, task);
+		return await raceWithAbort(taskPromise, signal);
 	}
 
 	const prev = hostInFlightChain.get(host) ?? Promise.resolve();
@@ -153,56 +219,122 @@ async function withHostGate<T>(
 	});
 	hostInFlightChain.set(host, current);
 
-	await prev;
+	let acquired = false;
 	try {
-		await acquireHostSlot(host, url);
-		return await task();
+		await raceWithAbort(prev, signal);
+		acquired = true;
+		await acquireHostSlot(host, url, signal);
+		const taskPromise = runWithActiveHostGate(host, task);
+		return await raceWithAbort(taskPromise, signal);
 	} finally {
-		if (hostInFlightChain.get(host) === current) {
-			hostInFlightChain.delete(host);
+		if (acquired) {
+			if (hostInFlightChain.get(host) === current) {
+				hostInFlightChain.delete(host);
+			}
+			release();
+		} else {
+			// Wait for `prev` before releasing `current` so later waiters remain serialized behind `prev`.
+			void prev.finally(() => {
+				if (hostInFlightChain.get(host) === current) {
+					hostInFlightChain.delete(host);
+				}
+				release();
+			});
 		}
-		release();
 	}
 }
 
 function isTransientNetworkError(msg: string): boolean {
-	return /\b(?:429|502|503|504)\b|timeout|timed\s*out|aborted|fetch\s+failed|econnreset/i.test(
+	return /\b(?:429|502|503|504)\b|timeout|timed\s*out|fetch\s+failed|econnreset/i.test(
 		msg,
 	);
 }
 
-export function createPoliteFetchText(rawFetchText: FetchTextFn): FetchTextFn {
-	return async (url: string, accept?: string): Promise<string> => {
+export function createPoliteFetchText(
+	rawFetchText: FetchTextFn,
+	signal?: AbortSignal,
+): FetchTextFn {
+	const existing = politeFetchTextMeta.get(rawFetchText);
+	if (existing) {
+		if (!signal || signal === existing.signal) {
+			return rawFetchText;
+		}
+		return createPoliteFetchText(
+			existing.raw,
+			combineAbortSignals(existing.signal, signal),
+		);
+	}
+
+	const wrapped: FetchTextFn = async (
+		url: string,
+		accept?: string,
+	): Promise<string> => {
+		throwIfAborted(signal);
+		const host = extractHostname(url);
+		if (host && (activeSyncHostGateDepth.get(host) ?? 0) > 0) {
+			return await raceWithAbort(rawFetchText(url, accept), signal);
+		}
 		try {
-			return await withHostGate(url, () => rawFetchText(url, accept));
+			return await withHostGate(url, () => rawFetchText(url, accept), signal);
 		} catch (err) {
+			if (signal?.aborted || isBackgroundTaskCancelledError(err)) {
+				throw err;
+			}
 			const msg = err instanceof Error ? err.message : String(err);
 			if (!IS_TEST_ENV && isTransientNetworkError(msg)) {
-				await new Promise((resolve) => setTimeout(resolve, 1500));
-				return await withHostGate(url, () => rawFetchText(url, accept));
+				await sleepWithAbort(1500, signal);
+				return await withHostGate(url, () => rawFetchText(url, accept), signal);
 			}
 			throw err;
 		}
 	};
+
+	politeFetchTextMeta.set(wrapped, { raw: rawFetchText, signal });
+	return wrapped;
 }
 
-export function createPoliteFetchJson(rawFetchJson: FetchJsonFn): FetchJsonFn {
-	return async <T = unknown>(url: string): Promise<T> => {
+export function createPoliteFetchJson(
+	rawFetchJson: FetchJsonFn,
+	signal?: AbortSignal,
+): FetchJsonFn {
+	const existing = politeFetchJsonMeta.get(rawFetchJson);
+	if (existing) {
+		if (!signal || signal === existing.signal) {
+			return rawFetchJson;
+		}
+		return createPoliteFetchJson(
+			existing.raw,
+			combineAbortSignals(existing.signal, signal),
+		);
+	}
+
+	const wrapped: FetchJsonFn = async <T = unknown>(url: string): Promise<T> => {
+		throwIfAborted(signal);
+		const host = extractHostname(url);
+		if (host && (activeSyncHostGateDepth.get(host) ?? 0) > 0) {
+			return await raceWithAbort(rawFetchJson<T>(url), signal);
+		}
 		try {
-			return await withHostGate(url, () => rawFetchJson<T>(url));
+			return await withHostGate(url, () => rawFetchJson<T>(url), signal);
 		} catch (err) {
+			if (signal?.aborted || isBackgroundTaskCancelledError(err)) {
+				throw err;
+			}
 			const msg = err instanceof Error ? err.message : String(err);
 			if (!IS_TEST_ENV && isOpenAlexListUrl(url) && /\b429\b/.test(msg)) {
 				openAlexListCooldownUntil = Date.now() + 5 * 60_000;
 				throw err;
 			}
 			if (!IS_TEST_ENV && isTransientNetworkError(msg)) {
-				await new Promise((resolve) => setTimeout(resolve, 1500));
-				return await withHostGate(url, () => rawFetchJson<T>(url));
+				await sleepWithAbort(1500, signal);
+				return await withHostGate(url, () => rawFetchJson<T>(url), signal);
 			}
 			throw err;
 		}
 	};
+
+	politeFetchJsonMeta.set(wrapped, { raw: rawFetchJson, signal });
+	return wrapped;
 }
 
 function decodeHtmlEntities(raw: string): string {
@@ -824,12 +956,14 @@ export async function fetchCoolPapersVenuePapers(
 			let html = "";
 			try {
 				html = await fetchText(url, "text/html,application/xhtml+xml,*/*");
-			} catch {
+			} catch (err) {
+				if (isBackgroundTaskCancelledError(err)) throw err;
 				if (IS_TEST_ENV) break;
 				try {
 					await new Promise((resolve) => setTimeout(resolve, 1200));
 					html = await fetchText(url, "text/html,application/xhtml+xml,*/*");
-				} catch {
+				} catch (retryErr) {
+					if (isBackgroundTaskCancelledError(retryErr)) throw retryErr;
 					break;
 				}
 			}
@@ -1639,6 +1773,7 @@ export async function fetchOfficialTrackRoster(
 		try {
 			html = await fetchText(trackUrl, "text/html,application/xhtml+xml,*/*");
 		} catch (err) {
+			if (isBackgroundTaskCancelledError(err)) throw err;
 			lastFetchErr = err;
 			if (!IS_TEST_ENV) {
 				try {
@@ -1648,6 +1783,7 @@ export async function fetchOfficialTrackRoster(
 						"text/html,application/xhtml+xml,*/*",
 					);
 				} catch (retryErr) {
+					if (isBackgroundTaskCancelledError(retryErr)) throw retryErr;
 					lastFetchErr = retryErr;
 					continue;
 				}
@@ -3143,7 +3279,11 @@ async function enrichSubsetInPlace(
 	venue: VenueConfig,
 	fetchJson: FetchJsonFn,
 	preloadedItems?: readonly CollectionPaperItem[],
-	skipTitleSearch?: boolean,
+	options?: {
+		skipTitleSearch?: boolean;
+		signal?: AbortSignal;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
+	},
 ): Promise<CollectionPaperItem[]> {
 	if (targetIndices.length === 0) return items;
 	const subset = targetIndices
@@ -3156,7 +3296,11 @@ async function enrichSubsetInPlace(
 		venue,
 		fetchJson,
 		preloadedItems,
-		skipTitleSearch ? { skipTitleSearch: true } : undefined,
+		{
+			...(options?.skipTitleSearch ? { skipTitleSearch: true } : {}),
+			signal: options?.signal,
+			onProgress: options?.onProgress,
+		},
 	);
 	const next = [...items];
 	if (enrichedSubset.length === targetIndices.length) {
@@ -3174,7 +3318,11 @@ async function enrichSubsetInPlace(
 
 async function backfillMissingVenueKeywordsWithKeywordLlm(
 	items: CollectionPaperItem[],
-	keywordLlmFetch?: typeof fetch,
+	options?: {
+		keywordLlmFetch?: typeof fetch;
+		signal?: AbortSignal;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
+	},
 ): Promise<CollectionPaperItem[]> {
 	const missingIndices: number[] = [];
 	for (let idx = 0; idx < items.length; idx++) {
@@ -3195,7 +3343,10 @@ async function backfillMissingVenueKeywordsWithKeywordLlm(
 	if (batchInputs.length === 0) return items;
 
 	const extracted = await extractKeywordsWithKeywordLlmBatch(batchInputs, {
-		fetchFn: keywordLlmFetch,
+		fetchFn: options?.keywordLlmFetch,
+		signal: options?.signal,
+		onProgress: (completed, total) =>
+			options?.onProgress?.({ completed, total }),
 	});
 	if (extracted.size === 0) return items;
 
@@ -3226,6 +3377,8 @@ export async function finalizeVenuePapersWithSmartDiff(
 	options?: {
 		existingItems?: readonly CollectionPaperItem[];
 		keywordLlmFetch?: typeof fetch;
+		signal?: AbortSignal;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
 	},
 ): Promise<CollectionPaperItem[]> {
 	if (freshItems.length === 0) return [];
@@ -3254,11 +3407,16 @@ export async function finalizeVenuePapersWithSmartDiff(
 		venue,
 		fetchJson,
 		existingLookup.completeItems,
+		{
+			signal: options?.signal,
+			onProgress: options?.onProgress,
+		},
 	);
-	return backfillMissingVenueKeywordsWithKeywordLlm(
-		enriched,
-		options?.keywordLlmFetch,
-	);
+	return backfillMissingVenueKeywordsWithKeywordLlm(enriched, {
+		keywordLlmFetch: options?.keywordLlmFetch,
+		signal: options?.signal,
+		onProgress: options?.onProgress,
+	});
 }
 
 /**
@@ -3593,44 +3751,35 @@ export async function fetchMultiChannelVenuePapers(
 	throwIfAborted(options?.signal);
 	let requestCount = 0;
 	let lastError: unknown = null;
-	const abortableRawFetchJson = wrapFetchJsonWithAbort(
-		rawFetchJson,
-		options?.signal,
-	);
-	const abortableRawFetchText = wrapFetchTextWithAbort(
-		rawFetchText,
-		options?.signal,
-	);
+	const politeFetchJson = createPoliteFetchJson(rawFetchJson, options?.signal);
+	const politeFetchText = createPoliteFetchText(rawFetchText, options?.signal);
 
-	const trackedFetchJson: FetchJsonFn = async <T = unknown>(
+	const fetchJson: FetchJsonFn = async <T = unknown>(
 		url: string,
 	): Promise<T> => {
 		throwIfAborted(options?.signal);
 		requestCount += 1;
 		try {
-			return await abortableRawFetchJson<T>(url);
+			return await politeFetchJson<T>(url);
 		} catch (err) {
 			lastError = err;
 			throw err;
 		}
 	};
 
-	const trackedFetchText: FetchTextFn = async (
+	const fetchText: FetchTextFn = async (
 		url: string,
 		accept?: string,
 	): Promise<string> => {
 		throwIfAborted(options?.signal);
 		requestCount += 1;
 		try {
-			return await abortableRawFetchText(url, accept);
+			return await politeFetchText(url, accept);
 		} catch (err) {
 			lastError = err;
 			throw err;
 		}
 	};
-
-	const fetchJson = createPoliteFetchJson(trackedFetchJson);
-	const fetchText = createPoliteFetchText(trackedFetchText);
 	const spec = VENUE_SPEC_BY_ID.get(venue.id);
 	const maxPages = options?.maxPages ?? 25;
 	const existingLookup = buildExistingVenueLookup(
@@ -3811,7 +3960,10 @@ export async function fetchMultiChannelVenuePapers(
 							coolSupp.items,
 						);
 					}
-				} catch {
+				} catch (err) {
+					if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
+						throw err;
+					}
 					// Optional `papers.cool` supplement; proceed with presentation subpages.
 				}
 			}
@@ -3907,7 +4059,11 @@ export async function fetchMultiChannelVenuePapers(
 				venue,
 				fetchJson,
 				existingLookup.completeItems,
-				options?.skipTitleSearch,
+				{
+					skipTitleSearch: options?.skipTitleSearch,
+					signal: options?.signal,
+					onProgress: options?.onProgress,
+				},
 			);
 		}
 
@@ -3965,7 +4121,11 @@ export async function fetchMultiChannelVenuePapers(
 							...arxivSupp.items,
 							...existingLookup.completeItems,
 						],
-						options?.skipTitleSearch,
+						{
+							skipTitleSearch: options?.skipTitleSearch,
+							signal: options?.signal,
+							onProgress: options?.onProgress,
+						},
 					);
 				}
 				primaryItems = dedupeVenueChannelItems([
@@ -4048,7 +4208,13 @@ export async function fetchMultiChannelVenuePapers(
 				arxivRes.items,
 				fetchJson,
 				arxivRes.items.length,
-				{ keywordLlmFetch: options?.keywordLlmFetch },
+				{
+					keywordLlmFetch: options?.keywordLlmFetch,
+					signal: options?.signal,
+					onProgress: options?.onProgress
+						? (completed, total) => options.onProgress?.({ completed, total })
+						: undefined,
+				},
 			);
 		}
 	}
@@ -4076,10 +4242,11 @@ export async function fetchMultiChannelVenuePapers(
 	}
 
 	// Tier 5: Keyword LLM fallback for Venue papers still missing keywords after Author ∪ OpenAlex union
-	merged = await backfillMissingVenueKeywordsWithKeywordLlm(
-		merged,
-		options?.keywordLlmFetch,
-	);
+	merged = await backfillMissingVenueKeywordsWithKeywordLlm(merged, {
+		keywordLlmFetch: options?.keywordLlmFetch,
+		signal: options?.signal,
+		onProgress: options?.onProgress,
+	});
 
 	if (merged.length === 0 && requestCount > 0 && lastError) {
 		throw lastError;

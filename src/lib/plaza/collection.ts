@@ -21,7 +21,10 @@ import {
 	startBackgroundTask,
 } from "@/lib/core/background-tasks";
 import { commands } from "@/lib/core/bindings";
-import { getKeywordLlmConfigSignature } from "@/lib/keyword-llm";
+import {
+	getKeywordLlmConfigSignature,
+	getKeywordLlmExecutionConfig,
+} from "@/lib/keyword-llm";
 import {
 	ensureOpenAlexRuntimeKeyLoaded,
 	withOpenAlexApiKey,
@@ -31,6 +34,7 @@ import {
 	ARXIV_CATEGORY_SUBTITLES,
 	backfillSpringerAbstracts,
 	buildVenuePaperId,
+	type CollectionLinkedPeer,
 	type CollectionPaperItem,
 	type CollectionSourceType,
 	derivePaperKeywords,
@@ -43,6 +47,8 @@ import {
 	type FetchJsonFn,
 	type FetchTextFn,
 	fetchVenueStructuredPapers,
+	formatArxivCategoriesLabel,
+	formatArxivCategoryList,
 	formatPaperBibtex,
 	formatPaperCitationText,
 	inferVenueKind,
@@ -54,6 +60,7 @@ import {
 	isWorkshopOrCompanionVenue,
 	type KeywordSource,
 	normalizePaperKeywords,
+	raceWithAbort,
 	reconstructOpenAlexAbstract,
 	sleepWithAbort,
 	throwIfAborted,
@@ -70,7 +77,10 @@ import {
 import {
 	type ArxivCategoryWatermark,
 	type ArxivLatestRecord,
+	backfillCollectionMissingRefs,
 	bumpCollectionRevision,
+	type CollectionBackfillRefsInput,
+	type CollectionBackfillRefsResult,
 	type CollectionCitationEdge,
 	type CollectionClearScope,
 	type CollectionConfigUpdateInput,
@@ -136,9 +146,12 @@ import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
 export type {
 	ArxivCategoryWatermark,
 	ArxivLatestRecord,
+	CollectionBackfillRefsInput,
+	CollectionBackfillRefsResult,
 	CollectionCitationEdge,
 	CollectionClearScope,
 	CollectionConfigUpdateInput,
+	CollectionLinkedPeer,
 	CollectionListPapersQuery,
 	CollectionOverviewOut,
 	CollectionPaperDetailResult,
@@ -168,6 +181,7 @@ export type {
 };
 export {
 	ARXIV_CATEGORY_SUBTITLES,
+	backfillCollectionMissingRefs,
 	backfillSpringerAbstracts,
 	bumpCollectionRevision,
 	clearCollection,
@@ -190,6 +204,8 @@ export {
 	fetchOfficialTrackRoster,
 	fetchOfficialVenueProgramPapers,
 	fetchVenueStructuredPapers,
+	formatArxivCategoriesLabel,
+	formatArxivCategoryList,
 	formatPaperBibtex,
 	formatPaperCitationText,
 	getCollectionPaperDetail,
@@ -273,20 +289,23 @@ function runDedupedSeedSync(
 export async function syncCollectionSeedInBackground(
 	args?: CollectionSeedSyncInput,
 ): Promise<CollectionSeedSyncResult | null> {
-	let cancelled = false;
+	const controller = new AbortController();
 	const taskId = startBackgroundTask({
 		kind: "downloadAssets",
 		icon: "download",
 		title: i18n.t("app:tasks.plazaSeedSync"),
 	});
 	registerBackgroundTaskCancelHandler(taskId, () => {
-		cancelled = true;
+		controller.abort();
 	});
 	activeSeedSyncDepth += 1;
 	syncPreloadingFlag();
 	try {
-		const res = await runDedupedSeedSync(args);
-		if (cancelled) return null;
+		const res = await raceWithAbort(
+			runDedupedSeedSync(args),
+			controller.signal,
+		);
+		if (controller.signal.aborted) return null;
 		if (!res || res.skipped) {
 			dismissSilentSeedTask(taskId);
 			return res;
@@ -300,6 +319,11 @@ export async function syncCollectionSeedInBackground(
 				: undefined,
 		);
 		return res;
+	} catch (err) {
+		if (controller.signal.aborted || isBackgroundTaskCancelledError(err)) {
+			return null;
+		}
+		throw err;
 	} finally {
 		releaseBackgroundTaskCancelHandler(taskId);
 		activeSeedSyncDepth = Math.max(0, activeSeedSyncDepth - 1);
@@ -350,7 +374,7 @@ async function trySyncSeedBeforeManualRefresh(
 	signal?: AbortSignal,
 ): Promise<void> {
 	throwIfAborted(signal);
-	await runDedupedSeedSync();
+	await raceWithAbort(runDedupedSeedSync(), signal);
 	throwIfAborted(signal);
 }
 
@@ -479,14 +503,18 @@ const allowedWebProxyHosts = new Set<string>();
 async function ensureWebProxyAllowed(hostname: string): Promise<void> {
 	if (!hostname) return;
 	const companions =
-		hostname === "link.springer.com"
-			? ["link.springer.com", "idp.springer.com", "www.nature.com"]
-			: hostname === "sigsac.org" || hostname === "www.sigsac.org"
-				? ["sigsac.org", "www.sigsac.org"]
-				: hostname === "cyprusconferences.org" ||
-						hostname === "www.cyprusconferences.org"
-					? ["cyprusconferences.org", "www.cyprusconferences.org"]
-					: [hostname];
+		hostname === "export.arxiv.org" ||
+		hostname === "rss.arxiv.org" ||
+		hostname === "arxiv.org"
+			? ["export.arxiv.org", "rss.arxiv.org", "arxiv.org"]
+			: hostname === "link.springer.com"
+				? ["link.springer.com", "idp.springer.com", "www.nature.com"]
+				: hostname === "sigsac.org" || hostname === "www.sigsac.org"
+					? ["sigsac.org", "www.sigsac.org"]
+					: hostname === "cyprusconferences.org" ||
+							hostname === "www.cyprusconferences.org"
+						? ["cyprusconferences.org", "www.cyprusconferences.org"]
+						: [hostname];
 	for (const h of companions) {
 		if (allowedWebProxyHosts.has(h)) continue;
 		await commands.webProxyAllowHost({ host: h });
@@ -510,6 +538,19 @@ function combineAbortSignals(
 	}
 	return active[0];
 }
+
+function makeTimedAbortSignal(
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
+): AbortSignal | undefined {
+	const timeoutSignal =
+		typeof AbortSignal?.timeout === "function"
+			? AbortSignal.timeout(timeoutMs)
+			: undefined;
+	return combineAbortSignals(signal, timeoutSignal);
+}
+
+const PLAZA_FETCH_TIMEOUT_MS = 45_000;
 
 export async function plazaFetchText(
 	url: string,
@@ -541,11 +582,10 @@ export async function plazaFetchText(
 	// Fast path: OpenAlex / Crossref / DataCite / Semantic Scholar / CSDL / arxiv.org send `Access-Control-Allow-Origin: *`
 	if (CORS_OPEN_HOSTS.has(hostname)) {
 		try {
-			const htmlSignal =
-				isArxivHtmlHead && typeof AbortSignal?.timeout === "function"
-					? AbortSignal.timeout(10_000)
-					: undefined;
-			const reqSignal = combineAbortSignals(signal, htmlSignal);
+			const reqSignal = makeTimedAbortSignal(
+				signal,
+				isArxivHtmlHead ? 10_000 : PLAZA_FETCH_TIMEOUT_MS,
+			);
 			let direct = await fetch(cleanUrl, {
 				headers: { Accept: accept },
 				...(reqSignal ? { signal: reqSignal } : {}),
@@ -553,9 +593,13 @@ export async function plazaFetchText(
 			if (direct.status === 401 && hostname === "api.openalex.org") {
 				const unauthUrl = stripOpenAlexApiKeyParam(cleanUrl);
 				if (unauthUrl !== cleanUrl) {
+					const retrySignal = makeTimedAbortSignal(
+						signal,
+						PLAZA_FETCH_TIMEOUT_MS,
+					);
 					direct = await fetch(unauthUrl, {
 						headers: { Accept: accept },
-						...(signal ? { signal } : {}),
+						...(retrySignal ? { signal: retrySignal } : {}),
 					});
 				}
 			}
@@ -584,12 +628,13 @@ export async function plazaFetchText(
 
 	if (hasTauriRuntime()) {
 		try {
-			await ensureWebProxyAllowed(hostname);
+			await raceWithAbort(ensureWebProxyAllowed(hostname), signal);
 			throwIfAborted(signal);
 			const proxied = webViewProxyUrl(cleanUrl);
+			const reqSignal = makeTimedAbortSignal(signal, PLAZA_FETCH_TIMEOUT_MS);
 			const res = await fetch(proxied, {
 				headers: { Accept: accept },
-				...(signal ? { signal } : {}),
+				...(reqSignal ? { signal: reqSignal } : {}),
 			});
 			if (res.status === 202) {
 				throw new Error(`Upstream anti-bot gate (HTTP 202) for ${cleanUrl}`);
@@ -597,11 +642,19 @@ export async function plazaFetchText(
 			if (res.ok) {
 				return await res.text();
 			}
+			if (!CORS_OPEN_HOSTS.has(hostname)) {
+				throw new Error(`HTTP ${res.status} fetching ${cleanUrl}`);
+			}
 		} catch (err) {
 			if (signal?.aborted || isBackgroundTaskCancelledError(err)) {
 				throw new BackgroundTaskCancelledError();
 			}
-			if (err instanceof Error && err.message.includes("HTTP 202")) {
+			if (
+				err instanceof Error &&
+				(err.message.includes("HTTP 202") ||
+					(!CORS_OPEN_HOSTS.has(hostname) &&
+						/\bHTTP \d{3}\b/.test(err.message)))
+			) {
 				throw err;
 			}
 			// Fall through to direct fetch below.
@@ -609,9 +662,10 @@ export async function plazaFetchText(
 	} else if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
 		try {
 			const proxied = `/__plaza_proxy?url=${encodeURIComponent(cleanUrl)}`;
+			const reqSignal = makeTimedAbortSignal(signal, PLAZA_FETCH_TIMEOUT_MS);
 			const res = await fetch(proxied, {
 				headers: { Accept: accept },
-				...(signal ? { signal } : {}),
+				...(reqSignal ? { signal: reqSignal } : {}),
 			});
 			if (res.status === 202) {
 				throw new Error(`Upstream anti-bot gate (HTTP 202) for ${cleanUrl}`);
@@ -619,11 +673,19 @@ export async function plazaFetchText(
 			if (res.ok) {
 				return await res.text();
 			}
+			if (!CORS_OPEN_HOSTS.has(hostname)) {
+				throw new Error(`HTTP ${res.status} fetching ${cleanUrl}`);
+			}
 		} catch (err) {
 			if (signal?.aborted || isBackgroundTaskCancelledError(err)) {
 				throw new BackgroundTaskCancelledError();
 			}
-			if (err instanceof Error && err.message.includes("HTTP 202")) {
+			if (
+				err instanceof Error &&
+				(err.message.includes("HTTP 202") ||
+					(!CORS_OPEN_HOSTS.has(hostname) &&
+						/\bHTTP \d{3}\b/.test(err.message)))
+			) {
 				throw err;
 			}
 			// Fall through to direct fetch below.
@@ -631,9 +693,10 @@ export async function plazaFetchText(
 	}
 
 	throwIfAborted(signal);
+	const directSignal = makeTimedAbortSignal(signal, PLAZA_FETCH_TIMEOUT_MS);
 	const direct = await fetch(cleanUrl, {
 		headers: { Accept: accept },
-		...(signal ? { signal } : {}),
+		...(directSignal ? { signal: directSignal } : {}),
 	});
 	if (direct.status === 202 || !direct.ok) {
 		throw new Error(`HTTP ${direct.status} fetching ${cleanUrl}`);
@@ -661,24 +724,24 @@ function resolveTransportFetchers(transport?: {
 	fetchJson?: FetchJsonFn;
 	signal?: AbortSignal;
 }) {
-	const baseText =
-		transport?.fetchText ??
-		(transport?.signal
-			? createPoliteFetchText((url, accept) =>
-					plazaFetchText(url, accept, transport.signal),
+	const fetchTextFn = transport?.fetchText
+		? wrapFetchTextWithAbort(transport.fetchText, transport.signal)
+		: transport?.signal
+			? createPoliteFetchText(
+					(url, accept) => plazaFetchText(url, accept, transport.signal),
+					transport.signal,
 				)
-			: politePlazaFetchText);
-	const baseJson =
-		transport?.fetchJson ??
-		(transport?.signal
-			? createPoliteFetchJson(<T = unknown>(url: string) =>
-					plazaFetchJson<T>(url, transport.signal),
+			: politePlazaFetchText;
+	const fetchJsonFn = transport?.fetchJson
+		? wrapFetchJsonWithAbort(transport.fetchJson, transport.signal)
+		: transport?.signal
+			? createPoliteFetchJson(
+					<T = unknown>(url: string) =>
+						plazaFetchJson<T>(url, transport.signal),
+					transport.signal,
 				)
-			: politePlazaFetchJson);
-	return {
-		fetchTextFn: wrapFetchTextWithAbort(baseText, transport?.signal),
-		fetchJsonFn: wrapFetchJsonWithAbort(baseJson, transport?.signal),
-	};
+			: politePlazaFetchJson;
+	return { fetchTextFn, fetchJsonFn };
 }
 
 function normalizeCategoriesKey(categories: readonly string[]): string {
@@ -1276,8 +1339,14 @@ export async function syncArxivCategoriesIncremental(
 			fraction: number,
 			subCompleted?: number,
 			subTotal?: number,
+			meta?: {
+				stage?: "preparing" | "collecting";
+				preparingIndex?: number;
+				categories?: readonly string[];
+			},
 		) => void;
 		onPhaseDone?: (category: string) => void;
+		onDeltaBatchReady?: (items: CollectionPaperItem[]) => Promise<void> | void;
 		onCategoryStatus?: (
 			category: string,
 			status: "refreshing" | "done" | "error",
@@ -1342,128 +1411,278 @@ export async function syncArxivCategoriesIncremental(
 	const nowIso = new Date().toISOString();
 
 	if (warmCategories.length > 0) {
-		await Promise.allSettled(
-			warmCategories.map(async (cat) => {
-				throwIfAborted(transport?.signal);
-				const wm = existingWatermarks[cat];
-				if (!wm) return;
-				onCategoryStatus?.(cat, "refreshing");
-				transport?.onPhaseProgress?.(cat, 0.15);
-				try {
-					const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}+AND+submittedDate:[${TARGET_YEAR}01010000+TO+209912312359]&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
-					const probeXml = await fetchTextFn(
-						probeUrl,
-						"application/atom+xml,text/xml,*/*",
-					);
-					const probeMeta = parseArxivAtomFeedMeta(probeXml);
-					const probeParsed = parseArxivAtomXml(probeXml, TARGET_YEAR, {
-						preferredCategories: cleanCats,
-						defaultCategory: cat,
-					});
-					const top = probeParsed[0];
-					if (
-						top &&
-						stripVersion(top.arxivId ?? "") ===
-							stripVersion(wm.latestArxivId) &&
-						top.publishedAt <= wm.latestPublishedAt
-					) {
-						nextWatermarks[cat] = {
-							...wm,
-							remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
-							lastSyncedAt: nowIso,
-						};
-						emitDoneIfComplete(cat);
-						transport?.onPhaseDone?.(cat);
-						return;
-					}
+		const warmFailures: unknown[] = [];
+		for (const cat of warmCategories) {
+			throwIfAborted(transport?.signal);
+			const wm = existingWatermarks[cat];
+			if (!wm) continue;
+			const preparingIndex = Math.max(1, cleanCats.indexOf(cat) + 1);
+			onCategoryStatus?.(cat, "refreshing");
+			transport?.onPhaseProgress?.(cat, 0.15, undefined, undefined, {
+				stage: "preparing",
+				preparingIndex,
+				categories: [cat],
+			});
+			try {
+				const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}+AND+submittedDate:[${TARGET_YEAR}01010000+TO+209912312359]&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
+				const probeXml = await fetchTextFn(
+					probeUrl,
+					"application/atom+xml,text/xml,*/*",
+				);
+				const probeMeta = parseArxivAtomFeedMeta(probeXml);
+				const probeParsed = parseArxivAtomXml(probeXml, TARGET_YEAR, {
+					preferredCategories: cleanCats,
+					defaultCategory: cat,
+				});
+				const top = probeParsed[0];
+				if (
+					top &&
+					stripVersion(top.arxivId ?? "") === stripVersion(wm.latestArxivId) &&
+					top.publishedAt <= wm.latestPublishedAt
+				) {
+					nextWatermarks[cat] = {
+						...wm,
+						remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
+						lastSyncedAt: nowIso,
+					};
+					emitDoneIfComplete(cat);
+					transport?.onPhaseDone?.(cat);
+					continue;
+				}
 
-					transport?.onPhaseProgress?.(cat, 0.35);
+				transport?.onPhaseProgress?.(cat, 0.35, undefined, undefined, {
+					stage: "preparing",
+					preparingIndex,
+					categories: [cat],
+				});
 
-					// Newer timestamp detected -> pull ONLY incremental window since watermark
-					const fromStamp = toArxivSubmittedDateStamp(wm.latestPublishedAt, 12);
-					const [rssItems, deltaPage] = await Promise.all([
-						fetchArxivRssFast(cat, cleanCats, fetchTextFn),
-						fetchArxivCategoryPageWithRetry(cat, cleanCats, 300, {
-							startOffset: 0,
+				// Newer timestamp detected -> pull complete incremental window since watermark
+				// using sliding `toSubmittedStamp` pagination so high-volume categories (e.g. cs.AI)
+				// or long offline gaps never truncate papers. A 48h overlap covers weekend /
+				// moderation-held submissions, while SQLite deduplication skips already-indexed IDs.
+				const DELTA_PER_PAGE = 300;
+				const MAX_DELTA_PAGES = 40;
+				const fromStamp = toArxivSubmittedDateStamp(wm.latestPublishedAt, 48);
+				const rssPromise = fetchArxivRssFast(cat, cleanCats, fetchTextFn);
+				const deltaGroups: CollectionPaperItem[][] = [];
+				let newestAtomFromDelta: CollectionPaperItem | undefined;
+				let toStamp = "209912312359";
+				let deltaStartOffset = 0;
+				let fetchedRawCount = 0;
+				let estimatedWindowTotal: number | undefined;
+
+				for (
+					let deltaPageIdx = 0;
+					deltaPageIdx < MAX_DELTA_PAGES;
+					deltaPageIdx++
+				) {
+					throwIfAborted(transport?.signal);
+					const deltaPage = await fetchArxivCategoryPageWithRetry(
+						cat,
+						cleanCats,
+						DELTA_PER_PAGE,
+						{
+							startOffset: deltaStartOffset,
 							fromSubmittedStamp: fromStamp,
+							toSubmittedStamp: toStamp,
 							fetchTextFn,
 							signal: transport?.signal,
-						}),
-					]);
-					const combinedCat = mergeCollectionItems([rssItems, deltaPage.items]);
-					const newestCat = combinedCat[0] ?? top;
-					if (newestCat) {
-						nextWatermarks[cat] = {
-							...wm,
-							latestArxivId: stripVersion(newestCat.arxivId ?? newestCat.id),
-							latestPublishedAt:
-								newestCat.publishedAt > wm.latestPublishedAt
-									? newestCat.publishedAt
-									: wm.latestPublishedAt,
-							remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
-							lastSyncedAt: nowIso,
-						};
+						},
+					);
+					if (
+						deltaPageIdx === 0 &&
+						typeof deltaPage.totalResults === "number" &&
+						deltaPage.totalResults > 0
+					) {
+						estimatedWindowTotal = deltaPage.totalResults;
 					}
-					const unseen =
-						knownArxivIds.size > 0
-							? combinedCat.filter((item) => !knownArxivIds.has(item.id))
+					if (deltaPage.items.length > 0) {
+						if (!newestAtomFromDelta) {
+							newestAtomFromDelta = deltaPage.items[0];
+						}
+						deltaGroups.push(deltaPage.items);
+						fetchedRawCount += deltaPage.items.length;
+						const displayTotal = Math.max(
+							fetchedRawCount,
+							estimatedWindowTotal ?? fetchedRawCount,
+						);
+						transport?.onPhaseProgress?.(
+							cat,
+							0.35 +
+								0.18 * Math.min(1, fetchedRawCount / Math.max(1, displayTotal)),
+							Math.min(fetchedRawCount, displayTotal),
+							displayTotal,
+							{
+								stage: "preparing",
+								preparingIndex,
+								categories: [cat],
+							},
+						);
+					}
+					if (deltaPage.rawEntryCount < DELTA_PER_PAGE) {
+						break;
+					}
+					const oldest =
+						deltaPage.oldestPublishedAt ??
+						deltaPage.items[deltaPage.items.length - 1]?.publishedAt;
+					if (!oldest) {
+						break;
+					}
+					const candidateStamp = toArxivUpperDateStamp(oldest);
+					if (candidateStamp < toStamp) {
+						toStamp = candidateStamp;
+						deltaStartOffset = 0;
+					} else if (deltaStartOffset + DELTA_PER_PAGE < 3000) {
+						deltaStartOffset += DELTA_PER_PAGE;
+					} else {
+						toStamp = toArxivUpperDateStamp(oldest, 2);
+						deltaStartOffset = 0;
+					}
+					if (toStamp <= fromStamp) {
+						break;
+					}
+				}
+				const rssItems = await rssPromise;
+				const combinedCat = mergeCollectionItems([rssItems, ...deltaGroups]);
+				// Track watermark from the Atom `submittedDate` feed (`newestAtomFromDelta ?? top`)
+				// so the next `probeUrl` (`sortBy=submittedDate&max_results=1`) matches reliably
+				// and heals any previously RSS-skewed `latestPublishedAt`.
+				const newestAtom = newestAtomFromDelta ?? top ?? combinedCat[0];
+				if (newestAtom) {
+					nextWatermarks[cat] = {
+						...wm,
+						latestArxivId: stripVersion(newestAtom.arxivId ?? newestAtom.id),
+						latestPublishedAt: newestAtom.publishedAt,
+						remoteTotal: probeMeta.totalResults ?? wm.remoteTotal,
+						lastSyncedAt: nowIso,
+					};
+				}
+				let dbExistingById: Map<string, CollectionPaperItem> | null = null;
+				if (knownArxivIds.size === 0 && combinedCat.length > 0) {
+					try {
+						const existingRows = await getCollectionPapersByIds(
+							combinedCat.map((item) => item.id),
+						);
+						dbExistingById = new Map(existingRows.map((row) => [row.id, row]));
+					} catch {
+						dbExistingById = null;
+					}
+				}
+				const unseen: CollectionPaperItem[] =
+					knownArxivIds.size > 0
+						? combinedCat.filter((item) => !knownArxivIds.has(item.id))
+						: dbExistingById !== null
+							? combinedCat.flatMap((item) => {
+									const prev = dbExistingById?.get(item.id);
+									if (!prev) return [item];
+									const hasCat =
+										prev.sourceLabel.toLowerCase() === cat.toLowerCase() ||
+										prev.categories.some(
+											(c) => c.toLowerCase() === cat.toLowerCase(),
+										);
+									if (hasCat) return [];
+									// Existing paper gained a cross-listed category -> merge preserving
+									// existing abstract/keywords so upsert attaches the new category cleanly.
+									return [mergeCollectionItems([[item], [prev]])[0] ?? item];
+								})
 							: combinedCat.filter(
 									(item) =>
 										stripVersion(item.arxivId ?? item.id) !==
 											stripVersion(wm.latestArxivId) &&
 										item.publishedAt >= wm.latestPublishedAt,
 								);
-					if (unseen.length > 0) {
-						rawDeltaGroups.push(unseen);
-						warmCatsWithDelta.push(cat);
-						transport?.onPhaseProgress?.(cat, 0.55, 0, unseen.length);
-					} else {
-						emitDoneIfComplete(cat);
-						transport?.onPhaseDone?.(cat);
-					}
-				} catch (err) {
-					if (
-						transport?.signal?.aborted ||
-						isBackgroundTaskCancelledError(err)
-					) {
-						throw err;
-					}
-					onCategoryStatus?.(cat, "error");
+				if (unseen.length > 0) {
+					rawDeltaGroups.push(unseen);
+					warmCatsWithDelta.push(cat);
+					transport?.onPhaseProgress?.(
+						cat,
+						0.55,
+						unseen.length,
+						unseen.length,
+						{
+							stage: "preparing",
+							preparingIndex,
+							categories: [cat],
+						},
+					);
+				} else {
+					emitDoneIfComplete(cat);
+					transport?.onPhaseDone?.(cat);
+				}
+			} catch (err) {
+				if (transport?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
 					throw err;
 				}
-			}),
-		);
+				onCategoryStatus?.(cat, "error");
+				warmFailures.push(err);
+			}
+		}
 		throwIfAborted(transport?.signal);
+		if (
+			coldStartCategories.length === 0 &&
+			warmFailures.length === warmCategories.length &&
+			warmFailures[0]
+		) {
+			throw warmFailures[0];
+		}
 	}
 
-	let enrichedDelta: CollectionPaperItem[] = [];
+	const enrichedDelta: CollectionPaperItem[] = [];
 	if (rawDeltaGroups.length > 0) {
 		throwIfAborted(transport?.signal);
 		const mergedWarmDelta = mergeCollectionItems(rawDeltaGroups);
-		const displayCat = warmCatsWithDelta[0] ?? warmCategories[0] ?? "";
-		enrichedDelta = await enrichArxivItemsBatch(
-			mergedWarmDelta,
-			fetchJsonFn,
-			mergedWarmDelta.length,
-			{
-				keywordLlmFetch: transport?.keywordLlmFetch,
-				signal: transport?.signal,
-				onProgress: (completed, total) => {
-					const frac = 0.55 + 0.45 * (completed / Math.max(1, total));
-					for (const cat of warmCatsWithDelta) {
-						transport?.onPhaseProgress?.(
-							cat,
-							frac,
-							cat === displayCat ? completed : undefined,
-							cat === displayCat ? total : undefined,
-						);
-					}
+		const batchCats =
+			warmCatsWithDelta.length > 0 ? warmCatsWithDelta : warmCategories;
+		const batchLabel = formatArxivCategoryList(batchCats);
+		const totalDelta = mergedWarmDelta.length;
+		if (batchLabel) {
+			transport?.onPhaseProgress?.(batchLabel, 0.55, 0, totalDelta, {
+				stage: "collecting",
+				categories: batchCats,
+			});
+		}
+		// Flush enriched papers in chunks aligned to the configured LLM batch size so SQLite +
+		// UI counts & lists update live during large refreshes (and survive cancellation/restart).
+		const { batchSize: llmBatchSize, concurrency: llmConcurrency } =
+			getKeywordLlmExecutionConfig();
+		const STREAM_FLUSH_SIZE = transport?.onDeltaBatchReady
+			? Math.max(llmBatchSize, Math.min(60, llmBatchSize * llmConcurrency))
+			: totalDelta;
+		for (let start = 0; start < totalDelta; start += STREAM_FLUSH_SIZE) {
+			throwIfAborted(transport?.signal);
+			const slice = mergedWarmDelta.slice(start, start + STREAM_FLUSH_SIZE);
+			const enrichedSlice = await enrichArxivItemsBatch(
+				slice,
+				fetchJsonFn,
+				slice.length,
+				{
+					keywordLlmFetch: transport?.keywordLlmFetch,
+					signal: transport?.signal,
+					onProgress: (chunkDone) => {
+						const overallDone = Math.min(totalDelta, start + chunkDone);
+						const frac = 0.55 + 0.45 * (overallDone / Math.max(1, totalDelta));
+						if (batchLabel) {
+							transport?.onPhaseProgress?.(
+								batchLabel,
+								frac,
+								overallDone,
+								totalDelta,
+								{
+									stage: "collecting",
+									categories: batchCats,
+								},
+							);
+						}
+					},
 				},
-			},
-		);
-		recordArxivEnrichAttempt(enrichedDelta);
+			);
+			recordArxivEnrichAttempt(enrichedSlice);
+			enrichedDelta.push(...enrichedSlice);
+			if (transport?.onDeltaBatchReady && enrichedSlice.length > 0) {
+				await transport.onDeltaBatchReady(enrichedSlice);
+			}
+		}
 		for (const cat of warmCatsWithDelta) {
-			emitDoneIfComplete(cat);
 			transport?.onPhaseDone?.(cat);
 		}
 	}
@@ -1473,9 +1692,14 @@ export async function syncArxivCategoriesIncremental(
 		throwIfAborted(transport?.signal);
 		for (const cat of coldStartCategories) {
 			onCategoryStatus?.(cat, "refreshing");
-			transport?.onPhaseProgress?.(cat, 0.12);
+			const preparingIndex = Math.max(1, cleanCats.indexOf(cat) + 1);
+			transport?.onPhaseProgress?.(cat, 0.12, undefined, undefined, {
+				stage: "preparing",
+				preparingIndex,
+				categories: [cat],
+			});
 		}
-		const coldDisplayCat = coldStartCategories[0] ?? "";
+		const coldBatchLabel = formatArxivCategoryList(coldStartCategories);
 		try {
 			const coldRes = await fetchArxivCollection(coldStartCategories, 300, 0, {
 				...transport,
@@ -1485,18 +1709,38 @@ export async function syncArxivCategoriesIncremental(
 					if (info.stage === "fetch") {
 						const frac =
 							0.12 + 0.23 * (info.completed / Math.max(1, info.total));
-						for (const cat of coldStartCategories) {
-							transport?.onPhaseProgress?.(cat, frac);
-						}
+						const currentCat =
+							coldStartCategories[
+								Math.min(coldStartCategories.length - 1, info.completed)
+							] ?? coldBatchLabel;
+						const preparingIndex = Math.max(
+							1,
+							cleanCats.indexOf(currentCat) + 1,
+						);
+						transport?.onPhaseProgress?.(
+							currentCat,
+							frac,
+							undefined,
+							undefined,
+							{
+								stage: "preparing",
+								preparingIndex,
+								categories: coldStartCategories,
+							},
+						);
 						return;
 					}
 					const frac = 0.35 + 0.65 * (info.completed / Math.max(1, info.total));
-					for (const cat of coldStartCategories) {
+					if (coldBatchLabel) {
 						transport?.onPhaseProgress?.(
-							cat,
+							coldBatchLabel,
 							frac,
-							cat === coldDisplayCat ? info.completed : undefined,
-							cat === coldDisplayCat ? info.total : undefined,
+							info.completed,
+							info.total,
+							{
+								stage: "collecting",
+								categories: coldStartCategories,
+							},
 						);
 					}
 				},
@@ -2429,24 +2673,16 @@ async function fetchSingleVenueBundle(
 ): Promise<VenueFetchBundle> {
 	throwIfAborted(options?.signal);
 	const hasBuiltInSpec = VENUE_SPEC_BY_ID.has(venue.id);
-	const { fetchTextFn, fetchJsonFn } = resolveTransportFetchers({
-		fetchJson: options?.fetchJson,
-		fetchText:
-			options?.fetchText ??
-			(options?.signal
-				? (url, accept) => plazaFetchText(url, accept, options.signal)
-				: plazaFetchText),
-		signal: options?.signal,
-	});
-	const nextOptions: VenueSyncOptions = {
-		...options,
-		fetchJson: fetchJsonFn,
-		fetchText: fetchTextFn,
-	};
 
 	if (!forceAgent && venue.mode !== "agent" && hasBuiltInSpec) {
-		return await fetchStructuredVenueBundle(venue, nextOptions);
+		return await fetchStructuredVenueBundle(venue, options);
 	}
+
+	const { fetchTextFn, fetchJsonFn } = resolveTransportFetchers({
+		fetchJson: options?.fetchJson,
+		fetchText: options?.fetchText,
+		signal: options?.signal,
+	});
 
 	if (forceAgent || venue.mode === "agent") {
 		try {
@@ -2459,6 +2695,8 @@ async function fetchSingleVenueBundle(
 					{
 						existingItems: options?.existingItems,
 						keywordLlmFetch: options?.keywordLlmFetch,
+						signal: options?.signal,
+						onProgress: options?.onProgress,
 					},
 				);
 				return {
@@ -2520,6 +2758,8 @@ async function fetchSingleVenueBundle(
 			{
 				existingItems: options?.existingItems,
 				keywordLlmFetch: options?.keywordLlmFetch,
+				signal: options?.signal,
+				onProgress: options?.onProgress,
 			},
 		);
 		return {
@@ -2543,6 +2783,8 @@ async function fetchSingleVenueBundle(
 				{
 					existingItems: options?.existingItems,
 					keywordLlmFetch: options?.keywordLlmFetch,
+					signal: options?.signal,
+					onProgress: options?.onProgress,
 				},
 			);
 			return {
@@ -3215,6 +3457,8 @@ export type ArxivRefreshProgress = {
 	category: string;
 	completed: number;
 	total: number;
+	stage?: "preparing" | "collecting";
+	preparingIndex?: number;
 	subCompleted?: number;
 	subTotal?: number;
 	overallProgress: number;
@@ -3282,6 +3526,8 @@ export async function refreshArxivCollection(options?: {
 		activeCat: string,
 		subCompleted?: number,
 		subTotal?: number,
+		stage?: "preparing" | "collecting",
+		preparingIndex?: number,
 	) => {
 		if (!options?.onProgress) return;
 		let sum = 0;
@@ -3298,6 +3544,8 @@ export async function refreshArxivCollection(options?: {
 			category: activeCat,
 			completed: completedCatSet.size,
 			total: totalCats,
+			stage,
+			preparingIndex,
 			subCompleted,
 			subTotal,
 			overallProgress: maxReportedProgress,
@@ -3307,10 +3555,33 @@ export async function refreshArxivCollection(options?: {
 	if (totalCats === 0) {
 		emitArxivProgress("");
 	} else {
-		emitArxivProgress(cleanTargetCats[0] ?? "");
+		emitArxivProgress(
+			cleanTargetCats[0] ?? "",
+			undefined,
+			undefined,
+			"preparing",
+			1,
+		);
 	}
 
 	const erroredCats = new Set<string>();
+	const syncStatusHandler = options?.onCategoryStatus
+		? (cat: string, status: "refreshing" | "done" | "error") => {
+				if (status === "error") {
+					erroredCats.add(cat);
+					options.onCategoryStatus?.(cat, "error");
+					return;
+				}
+				if (status === "refreshing") {
+					options.onCategoryStatus?.(cat, "refreshing");
+					return;
+				}
+				// Up-to-date categories (0 delta & historyComplete) check off immediately.
+				if (!needsBackfill.has(cat)) {
+					options.onCategoryStatus?.(cat, "done");
+				}
+			}
+		: undefined;
 	const holdDoneStatus = options?.onCategoryStatus
 		? (cat: string, status: "refreshing" | "done" | "error") => {
 				if (status === "error") {
@@ -3324,6 +3595,7 @@ export async function refreshArxivCollection(options?: {
 			}
 		: undefined;
 
+	const streamedDeltaIds = new Set<string>();
 	const arxivSync = await syncArxivCategoriesIncremental(
 		targetCategories,
 		[],
@@ -3334,14 +3606,26 @@ export async function refreshArxivCollection(options?: {
 			signal: options?.signal,
 			categoryCounts: existingSummary.categoryCounts,
 			deferIncompleteDoneStatus: true,
-			onPhaseProgress: (cat, fraction, subCompleted, subTotal) => {
-				const syncWeight = needsBackfill.has(cat) ? 0.15 : 0.6;
+			onPhaseProgress: (cat, fraction, subCompleted, subTotal, meta) => {
 				const clampedFrac = Math.max(0, Math.min(1, fraction));
-				perCatFraction.set(
+				const targetList =
+					meta?.categories && meta.categories.length > 0
+						? meta.categories
+						: [cat];
+				for (const c of targetList) {
+					const syncWeight = needsBackfill.has(c) ? 0.15 : 0.6;
+					perCatFraction.set(
+						c,
+						Math.max(perCatFraction.get(c) ?? 0, syncWeight * clampedFrac),
+					);
+				}
+				emitArxivProgress(
 					cat,
-					Math.max(perCatFraction.get(cat) ?? 0, syncWeight * clampedFrac),
+					subCompleted,
+					subTotal,
+					meta?.stage ?? "collecting",
+					meta?.preparingIndex,
 				);
-				emitArxivProgress(cat, subCompleted, subTotal);
 			},
 			onPhaseDone: (cat) => {
 				const syncWeight = needsBackfill.has(cat) ? 0.15 : 0.6;
@@ -3351,7 +3635,18 @@ export async function refreshArxivCollection(options?: {
 				);
 				emitArxivProgress(cat);
 			},
-			onCategoryStatus: holdDoneStatus,
+			onDeltaBatchReady: async (batchItems) => {
+				if (batchItems.length === 0) return;
+				throwIfAborted(options?.signal);
+				await upsertCollectionPapers({
+					items: batchItems,
+					lastRefreshedAt: new Date().toISOString(),
+				});
+				for (const item of batchItems) {
+					streamedDeltaIds.add(item.id);
+				}
+			},
+			onCategoryStatus: syncStatusHandler,
 		},
 	);
 	throwIfAborted(options?.signal);
@@ -3365,10 +3660,15 @@ export async function refreshArxivCollection(options?: {
 	const nowIso = new Date().toISOString();
 	const latestArxiv = arxivSync.latest ?? latestSnap.latestArxiv;
 
+	const remainingUnstreamedDelta =
+		streamedDeltaIds.size > 0
+			? arxivSync.deltaItems.filter((item) => !streamedDeltaIds.has(item.id))
+			: arxivSync.deltaItems;
+
 	let nextSummary =
-		arxivSync.deltaItems.length > 0
+		remainingUnstreamedDelta.length > 0
 			? await upsertCollectionPapers({
-					items: arxivSync.deltaItems,
+					items: remainingUnstreamedDelta,
 					arxivWatermarks: mergedWatermarks,
 					lastRefreshedAt: nowIso,
 					latestArxiv,
@@ -3435,12 +3735,38 @@ export async function refreshArxivCollection(options?: {
 		onCategoryDone: (cat) => {
 			completedCatSet.add(cat);
 			perCatFraction.set(cat, 1);
+			if (!erroredCats.has(cat)) {
+				options?.onCategoryStatus?.(cat, "done");
+			}
 			emitArxivProgress(cat);
 		},
 		onCategoryStatus: holdDoneStatus,
 	});
 	if (patchedCount > 0) {
 		mutatedAfterInitialSync = true;
+	}
+
+	// Best-effort zero-credit OpenAlex `raw_refs` backfill (arXiv-only: 7d TTL, <=60d old)
+	// so recently published arXiv papers pick up citations once indexed by OpenAlex.
+	if (cleanTargetCats.length > 0 && !options?.signal?.aborted) {
+		try {
+			const refsRes = await raceWithAbort(
+				backfillCollectionMissingRefs({
+					sourceType: "arxiv",
+					categories: cleanTargetCats,
+				}),
+				options?.signal,
+			);
+			if (refsRes.enrichedWorks > 0) {
+				nextSummary = refsRes.state;
+				mutatedAfterInitialSync = false;
+			}
+		} catch (err) {
+			if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
+				throw err;
+			}
+			// Best-effort: OpenAlex network errors should not fail an arXiv refresh.
+		}
 	}
 
 	if (options?.onCategoryStatus) {
@@ -3630,6 +3956,24 @@ export async function refreshVenueCollection(options?: {
 		),
 	);
 	throwIfAborted(options?.signal);
+
+	// Best-effort zero-credit OpenAlex `raw_refs` backfill (Venue: 14d TTL, no age cap)
+	// so venue papers missing references pick them up once indexed by OpenAlex.
+	if (targets.length > 0 && !options?.signal?.aborted) {
+		try {
+			await raceWithAbort(
+				backfillCollectionMissingRefs({
+					sourceType: "venue",
+					venueIds: targets.map((v) => v.id),
+				}),
+				options?.signal,
+			);
+		} catch (err) {
+			if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
+				throw err;
+			}
+		}
+	}
 
 	return updateCollectionConfig({
 		lastRefreshedAt: new Date().toISOString(),

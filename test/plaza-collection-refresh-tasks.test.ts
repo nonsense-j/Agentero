@@ -4,6 +4,7 @@ import {
 	backgroundTasksStore,
 	cancelBackgroundTask,
 } from "@/lib/core/background-tasks";
+import { commands } from "@/lib/core/bindings";
 import { notifyError } from "@/lib/core/notify";
 import {
 	extractKeywordsWithKeywordLlmBatch,
@@ -13,10 +14,13 @@ import * as collectionMod from "@/lib/plaza/collection";
 import { enrichSinglePaperOnDemand } from "@/lib/plaza/collection-enrichment";
 import {
 	collectionRefreshStore,
+	computeCollectionTaskProgress,
 	formatArxivInlineLabel,
 	formatArxivTaskDetail,
+	formatArxivTaskTitle,
 	formatVenueInlineLabel,
 	formatVenueTaskDetail,
+	formatVenueTaskTitle,
 	refreshAllInBackground,
 	refreshArxivInBackground,
 	refreshVenueInBackground,
@@ -82,16 +86,138 @@ describe("Plaza Paper Collection background task integration", () => {
 		backgroundTasksStore.setState({ tasks: [], expanded: false });
 	});
 
-	it("formats Venue and arXiv counters with completed/total labels and optional sub-progress", () => {
+	it("formats Venue and arXiv titles, preparing stages, per-item collected percentages, and collecting details", () => {
 		expect(
-			formatVenueTaskDetail({
+			formatArxivTaskTitle({
+				category: "cs.PL",
+				completed: 0,
+				total: 1,
+				subCompleted: 6,
+				subTotal: 51,
+				overallProgress: 0,
+			}),
+		).toBe("Refresh arXiv");
+
+		expect(
+			formatArxivTaskDetail({
+				category: "cs.SE",
+				completed: 0,
+				total: 3,
+				stage: "preparing",
+				preparingIndex: 1,
+				overallProgress: 5,
+			}),
+		).toBe("1/3 Preparing cs.SE");
+
+		expect(
+			formatArxivTaskDetail({
+				category: "cs.CR",
+				completed: 0,
+				total: 3,
+				stage: "preparing",
+				preparingIndex: 2,
+				subCompleted: 120,
+				subTotal: 200,
+				overallProgress: 20,
+			}),
+		).toBe("2/3 Preparing cs.CR (120/200)");
+
+		expect(
+			formatArxivTaskDetail({
+				category: "cs.SE, cs.CR, cs.PL",
+				completed: 0,
+				total: 3,
+				stage: "collecting",
+				subCompleted: 36,
+				subTotal: 401,
+				overallProgress: 60,
+			}),
+		).toBe("Collecting cs.SE/CR/PL (36/401)");
+
+		expect(
+			computeCollectionTaskProgress({
+				completed: 0,
+				total: 3,
+				subCompleted: 36,
+				subTotal: 401,
+			}),
+		).toBe(9);
+
+		expect(
+			computeCollectionTaskProgress({
+				completed: 0,
+				total: 1,
+				subCompleted: 6,
+				subTotal: 51,
+			}),
+		).toBe(12);
+
+		expect(
+			formatArxivTaskDetail({
+				category: "cs.PL",
+				completed: 0,
+				total: 1,
+				subCompleted: 6,
+				subTotal: 51,
+				overallProgress: 0,
+			}),
+		).toBe("Collecting cs.PL (6/51)");
+
+		expect(
+			formatArxivTaskDetail({
+				category: "cs.SE",
+				completed: 1,
+				total: 3,
+				overallProgress: 42,
+			}),
+		).toBe("Collecting cs.SE…");
+
+		expect(
+			formatArxivTaskDetail(
+				{
+					category: "cs.SE",
+					completed: 1,
+					total: 1,
+					overallProgress: 100,
+				},
+				["cs.SE"],
+			),
+		).toBe("arXiv cs.SE finished");
+
+		expect(
+			formatArxivTaskDetail(
+				{
+					category: "cs.PL",
+					completed: 3,
+					total: 3,
+					overallProgress: 100,
+				},
+				["cs.SE", "cs.CR", "cs.PL"],
+			),
+		).toBe("arXiv cs.SE, cs.CR, cs.PL finished");
+
+		expect(
+			formatVenueTaskDetail(
+				{
+					venueId: "ase-2026",
+					venueName: "ASE 2026",
+					completed: 1,
+					total: 1,
+					overallProgress: 100,
+				},
+				["ASE 2026"],
+			),
+		).toBe("Venue ASE 2026 finished");
+
+		expect(
+			formatVenueTaskTitle({
 				venueId: "neurips-2026",
 				venueName: "NeurIPS 2026",
 				completed: 25,
 				total: 28,
 				overallProgress: 89,
 			}),
-		).toBe("NeurIPS 2026 · Venue 25/28");
+		).toBe("Refresh Venue 26/28");
 
 		expect(
 			formatVenueTaskDetail({
@@ -103,7 +229,16 @@ describe("Plaza Paper Collection background task integration", () => {
 				subTotal: 5,
 				overallProgress: 91,
 			}),
-		).toBe("NeurIPS 2026 (2/5) · Venue 25/28");
+		).toBe("Collecting NeurIPS 2026 (2/5)");
+
+		expect(
+			computeCollectionTaskProgress({
+				completed: 25,
+				total: 28,
+				subCompleted: 2,
+				subTotal: 5,
+			}),
+		).toBe(40);
 
 		expect(
 			formatVenueInlineLabel({
@@ -113,18 +248,7 @@ describe("Plaza Paper Collection background task integration", () => {
 				total: 28,
 				overallProgress: 89,
 			}),
-		).toBe("NeurIPS 2026 · Venue 25/28");
-
-		expect(
-			formatArxivTaskDetail({
-				category: "cs.SE",
-				completed: 1,
-				total: 3,
-				subCompleted: 1000,
-				subTotal: 3850,
-				overallProgress: 42,
-			}),
-		).toBe("cs.SE (1000/3850) · arXiv 1/3");
+		).toBe("Collecting NeurIPS 2026…");
 
 		expect(
 			formatArxivInlineLabel({
@@ -135,24 +259,17 @@ describe("Plaza Paper Collection background task integration", () => {
 				subTotal: 150,
 				overallProgress: 42,
 			}),
-		).toBe("cs.SE (12/150) · arXiv 1/3");
-
-		expect(
-			formatArxivInlineLabel({
-				category: "cs.SE",
-				completed: 1,
-				total: 3,
-				overallProgress: 42,
-			}),
-		).toBe("cs.SE · arXiv 1/3");
+		).toBe("Collecting cs.SE (12/150)");
 	});
 
-	it("creates two independent background tasks for refreshAllInBackground and tracks monotonic progress", async () => {
+	it("creates two independent background tasks for refreshAllInBackground and tracks per-item progress", async () => {
 		const seenVenueProgress: Array<{
+			title: string;
 			progress: number | null;
 			detail?: string;
 		}> = [];
 		const seenArxivProgress: Array<{
+			title: string;
 			progress: number | null;
 			detail?: string;
 		}> = [];
@@ -163,24 +280,28 @@ describe("Plaza Paper Collection background task integration", () => {
 					category: "cs.SE",
 					completed: 0,
 					total: 3,
-					subCompleted: 500,
-					subTotal: 1000,
-					overallProgress: 16,
+					stage: "preparing",
+					preparingIndex: 1,
+					overallProgress: 5,
 				});
 				let task = backgroundTasksStore
 					.getState()
 					.tasks.find((t) => t.kind === "plazaArxivRefresh");
 				if (task) {
 					seenArxivProgress.push({
+						title: task.title,
 						progress: task.progress,
 						detail: task.detail,
 					});
 				}
 				opts?.onCategoryStatus?.("cs.SE", "done");
 				opts?.onProgress?.({
-					category: "cs.CR",
+					category: "cs.CR, cs.PL",
 					completed: 1,
 					total: 3,
+					stage: "collecting",
+					subCompleted: 36,
+					subTotal: 401,
 					overallProgress: 35,
 				});
 				task = backgroundTasksStore
@@ -188,6 +309,7 @@ describe("Plaza Paper Collection background task integration", () => {
 					.tasks.find((t) => t.kind === "plazaArxivRefresh");
 				if (task) {
 					seenArxivProgress.push({
+						title: task.title,
 						progress: task.progress,
 						detail: task.detail,
 					});
@@ -218,6 +340,7 @@ describe("Plaza Paper Collection background task integration", () => {
 					.tasks.find((t) => t.kind === "plazaVenueRefresh");
 				if (task) {
 					seenVenueProgress.push({
+						title: task.title,
 						progress: task.progress,
 						detail: task.detail,
 					});
@@ -240,6 +363,7 @@ describe("Plaza Paper Collection background task integration", () => {
 					.tasks.find((t) => t.kind === "plazaVenueRefresh");
 				if (task) {
 					seenVenueProgress.push({
+						title: task.title,
 						progress: task.progress,
 						detail: task.detail,
 					});
@@ -261,20 +385,38 @@ describe("Plaza Paper Collection background task integration", () => {
 		const arxivTask = tasks.find((t) => t.kind === "plazaArxivRefresh");
 		const venueTask = tasks.find((t) => t.kind === "plazaVenueRefresh");
 		expect(arxivTask?.status).toBe("completed");
+		expect(arxivTask?.title).toBe("Refresh arXiv");
 		expect(arxivTask?.progress).toBe(100);
-		expect(arxivTask?.detail).toBe("arXiv 3/3");
+		expect(arxivTask?.detail).toBe("arXiv cs.SE, cs.CR, cs.PL finished");
 
 		expect(venueTask?.status).toBe("completed");
+		expect(venueTask?.title).toBe("Refresh Venue 2/2");
 		expect(venueTask?.progress).toBe(100);
-		expect(venueTask?.detail).toBe("Venue 2/2");
+		expect(venueTask?.detail).toBe("Venue 2/2 finished");
 
 		expect(seenArxivProgress).toEqual([
-			{ progress: 16, detail: "cs.SE (500/1000) · arXiv 0/3" },
-			{ progress: 35, detail: "cs.CR · arXiv 1/3" },
+			{
+				title: "Refresh arXiv",
+				progress: null,
+				detail: "1/3 Preparing cs.SE",
+			},
+			{
+				title: "Refresh arXiv",
+				progress: 9,
+				detail: "Collecting cs.CR/PL (36/401)",
+			},
 		]);
 		expect(seenVenueProgress).toEqual([
-			{ progress: 12, detail: "ASE 2026 (1/4) · Venue 0/2" },
-			{ progress: 52, detail: "NeurIPS 2026 · Venue 1/2" },
+			{
+				title: "Refresh Venue 1/2",
+				progress: 25,
+				detail: "Collecting ASE 2026 (1/4)",
+			},
+			{
+				title: "Refresh Venue 2/2",
+				progress: null,
+				detail: "Collecting NeurIPS 2026…",
+			},
 		]);
 		expect(
 			collectionRefreshStore.getState().refreshedCategories.has("cs.SE"),
@@ -327,6 +469,105 @@ describe("Plaza Paper Collection background task integration", () => {
 		expect(collectionRefreshStore.getState().venueRefreshLabel).toBeNull();
 		expect(vi.mocked(notifyError)).not.toHaveBeenCalled();
 		void rejectRun;
+	});
+
+	it("immediately clears arXiv refreshing state when cancelled while seed sync is hung", async () => {
+		const neverResolvingSeed = new Promise<never>(() => {});
+		vi.spyOn(commands, "plazaCollectionSeedSync").mockReturnValueOnce(
+			neverResolvingSeed,
+		);
+
+		const runPromise = refreshArxivInBackground({ categories: ["cs.SE"] });
+		await Promise.resolve();
+
+		const runningTask = backgroundTasksStore
+			.getState()
+			.tasks.find((t) => t.kind === "plazaArxivRefresh");
+		expect(runningTask?.status).toBe("running");
+		expect(collectionRefreshStore.getState().refreshingArxiv).toBe(true);
+		expect(
+			collectionRefreshStore.getState().refreshingCategories.has("cs.SE"),
+		).toBe(true);
+		if (!runningTask) {
+			throw new Error("Expected plazaArxivRefresh task to be registered");
+		}
+
+		cancelBackgroundTask(runningTask.id);
+		await runPromise;
+
+		expect(
+			backgroundTasksStore.getState().tasks.find((t) => t.id === runningTask.id)
+				?.status,
+		).toBe("cancelled");
+		expect(collectionRefreshStore.getState().refreshingArxiv).toBe(false);
+		expect(collectionRefreshStore.getState().arxivRefreshLabel).toBeNull();
+		expect(collectionRefreshStore.getState().refreshingCategories.size).toBe(0);
+		expect(vi.mocked(notifyError)).not.toHaveBeenCalled();
+	});
+
+	it("paginates warm incremental arXiv delta across sliding windows without dropping papers over 300", async () => {
+		const makeAtomEntries = (
+			startIdx: number,
+			count: number,
+			day: string,
+			baseHour: number,
+		) => {
+			const entries = Array.from({ length: count }, (_, i) => {
+				const num = String(startIdx + i).padStart(5, "0");
+				const mins = count - i;
+				const hh = String(baseHour + Math.floor(mins / 60)).padStart(2, "0");
+				const mm = String(mins % 60).padStart(2, "0");
+				return `<entry>
+					<id>http://arxiv.org/abs/2611.${num}v1</id>
+					<published>2026-11-${day}T${hh}:${mm}:00Z</published>
+					<title>Incremental Delta Paper ${num}</title>
+					<summary>Detailed study of incremental arXiv delta pagination number ${num} with full abstract.</summary>
+					<author><name>Author ${num}</name></author>
+				</entry>`;
+			}).join("\n");
+			return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+				<opensearch:totalResults>350</opensearch:totalResults>
+				${entries}
+			</feed>`;
+		};
+
+		const queriedUrls: string[] = [];
+		const res = await collectionMod.syncArxivCategoriesIncremental(
+			["cs.AI"],
+			[],
+			{
+				"cs.AI": {
+					latestArxivId: "2611.00001",
+					latestPublishedAt: "2026-11-10T00:00:00Z",
+					lastSyncedAt: "2026-11-10T01:00:00Z",
+					historyComplete: true,
+				},
+			},
+			true,
+			{
+				categoryCounts: { "cs.AI": 100 },
+				fetchText: async (url) => {
+					queriedUrls.push(url);
+					if (url.includes("rss.arxiv.org")) return "<rss></rss>";
+					if (url.includes("max_results=1")) {
+						return makeAtomEntries(1000, 1, "19", 10);
+					}
+					if (url.includes("TO+209912312359]")) {
+						// Full page of 300 entries -> forces sliding-window second page
+						return makeAtomEntries(1000, 300, "18", 10);
+					}
+					// Second sliding page returns remaining 50 entries
+					return makeAtomEntries(2000, 50, "15", 10);
+				},
+				fetchJson: async <T>() => ({ results: [] }) as T,
+			},
+		);
+
+		expect(res.deltaItems).toHaveLength(350);
+		expect(
+			queriedUrls.filter((u) => u.includes("max_results=300")),
+		).toHaveLength(2);
+		expect(res.nextWatermarks["cs.AI"]?.latestArxivId).toBe("2611.01000");
 	});
 
 	it("deduplicates concurrent arXiv refreshes to a single background task", async () => {
@@ -517,6 +758,7 @@ describe("Plaza Paper Collection background task integration", () => {
 
 		await expect(
 			extractKeywordsWithKeywordLlmBatch(inputs, {
+				batchSize: 6,
 				concurrency: 1,
 				fetchFn: mockFetch,
 				signal: abortController.signal,

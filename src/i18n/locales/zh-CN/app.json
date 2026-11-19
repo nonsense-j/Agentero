@@ -254,7 +254,13 @@
 		"plazaVenueRefresh": "刷新 Venue",
 		"plazaSeedSync": "同步预置论文包",
 		"plazaArxivProgress": "arXiv {{completed}}/{{total}}",
-		"plazaVenueProgress": "Venue {{completed}}/{{total}}"
+		"plazaVenueProgress": "Venue {{completed}}/{{total}}",
+		"plazaArxivFinished": "arXiv {{targets}} 已完成",
+		"plazaVenueFinished": "Venue {{targets}} 已完成",
+		"plazaPreparingPapers": "{{current}}/{{total}} 正在准备 {{target}}",
+		"plazaPreparingPapersCount": "{{current}}/{{total}} 正在准备 {{target}} ({{completed}}/{{totalPapers}})",
+		"plazaCollectingPapers": "正在收集 {{target}} ({{completed}}/{{total}})",
+		"plazaCollectingPapersPending": "正在收集 {{target}}…"
 	},
 	"reminders": {
 		"dismiss": "不再提醒",

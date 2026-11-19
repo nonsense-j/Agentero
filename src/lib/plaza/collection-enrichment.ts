@@ -45,6 +45,16 @@ export type VenueConfig = {
 	paperCount?: number;
 };
 
+export type CollectionLinkedPeer = {
+	id: string;
+	sourceType: CollectionSourceType;
+	sourceLabel: string;
+	categories: string[];
+	venueId?: string;
+	venueKind?: VenueKind;
+	ccfRank?: VenueCcfRank;
+};
+
 export type CollectionPaperItem = {
 	/** Canonical deduplication id (`arxiv:<id>`, `doi:<doi>`, or `venue:<slug>`). */
 	id: string;
@@ -80,7 +90,67 @@ export type CollectionPaperItem = {
 	coolPapersId?: string;
 	/** ISO timestamp recorded when this paper was surfaced in Paper Recommend. */
 	recommendedAt?: string;
+	/** Cross-portal twin of the same canonical work (`arXiv` <-> `Venue`). */
+	linkedPeer?: CollectionLinkedPeer;
 };
+
+/**
+ * Compact an ordered list of arXiv categories by factoring a shared dot prefix
+ * (`["cs.SE", "cs.CR", "cs.PL"]` -> `"cs.SE/CR/PL"`).
+ */
+export function formatArxivCategoryList(categories: readonly string[]): string {
+	const cleaned: string[] = [];
+	const seen = new Set<string>();
+	for (const raw of categories) {
+		const trimmed = raw.trim();
+		if (!trimmed) continue;
+		const key = trimmed.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		cleaned.push(trimmed);
+	}
+	const first = cleaned[0];
+	if (!first) return "";
+	if (cleaned.length === 1) return first;
+	const dotIdx = first.indexOf(".");
+	const prefix = dotIdx > 0 ? first.slice(0, dotIdx + 1).toLowerCase() : "";
+	const rest = cleaned.slice(1).map((cat) => {
+		if (prefix && cat.toLowerCase().startsWith(prefix)) {
+			return cat.slice(prefix.length);
+		}
+		return cat;
+	});
+	return [first, ...rest].join("/");
+}
+
+/**
+ * Format an arXiv paper's categories in Collection display order (e.g. `cs.SE`, `cs.CR`, `cs.PL`),
+ * compacting shared prefix segments (`["cs.SE", "cs.PL"]` -> `"cs.SE/PL"`).
+ */
+export function formatArxivCategoriesLabel(
+	paper: { sourceLabel: string; categories?: readonly string[] },
+	orderedCategories: readonly string[],
+): string {
+	const rawSet = new Set<string>();
+	if (paper.sourceLabel?.trim()) {
+		rawSet.add(paper.sourceLabel.trim().toLowerCase());
+	}
+	for (const cat of paper.categories ?? []) {
+		const trimmed = cat.trim();
+		if (trimmed) rawSet.add(trimmed.toLowerCase());
+	}
+	const matched: string[] = [];
+	for (const cat of orderedCategories) {
+		const trimmed = cat.trim();
+		if (trimmed && rawSet.has(trimmed.toLowerCase())) {
+			matched.push(trimmed);
+		}
+	}
+	if (matched.length === 0) {
+		return paper.sourceLabel;
+	}
+	return formatArxivCategoryList(matched) || paper.sourceLabel;
+}
 
 export type FetchTextFn = (url: string, accept?: string) => Promise<string>;
 export type FetchJsonFn = <T = unknown>(url: string) => Promise<T>;
@@ -110,7 +180,7 @@ export async function sleepWithAbort(
 	});
 }
 
-function raceWithAbort<T>(
+export function raceWithAbort<T>(
 	promise: Promise<T>,
 	signal?: AbortSignal,
 ): Promise<T> {
@@ -2020,6 +2090,9 @@ export function semanticScholarWorkToVenueItem(
  * with optional `sinceDate` incremental watermark filtering. Valid proceedings/journal papers
  * without public abstracts are retained with `abstract: ""` rather than discarded.
  */
+const CROSSREF_SELECT =
+	"DOI,title,type,author,abstract,container-title,published,published-online,published-print,volume,issue,page,reference";
+
 export async function fetchVenueStructuredPapers(
 	venue: VenueConfig,
 	year: number,
@@ -2029,7 +2102,7 @@ export async function fetchVenueStructuredPapers(
 		maxPages?: number;
 		preloadedItems?: readonly CollectionPaperItem[];
 		signal?: AbortSignal;
-		onProgress?: (progress: { completed: number; total: number }) => void;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
 	},
 ): Promise<{
 	items: CollectionPaperItem[];
@@ -2180,6 +2253,7 @@ export async function fetchVenueStructuredPapers(
 
 	if (crossrefFilters.length > 0) {
 		const crMaxPages = Math.min(maxPages, 12);
+		options?.onProgress?.({});
 
 		for (const crFilter of crossrefFilters) {
 			let crCursor: string | null = "*";
@@ -2189,7 +2263,7 @@ export async function fetchVenueStructuredPapers(
 				attemptedRequests += 1;
 				try {
 					// Note: Crossref rejects `sort=published` when combined with `cursor=` (HTTP 400).
-					const crUrl: string = `https://api.crossref.org/works?filter=${crFilter}&rows=100&cursor=${encodeURIComponent(crCursor)}&mailto=${MAILTO}`;
+					const crUrl: string = `https://api.crossref.org/works?filter=${crFilter}&rows=100&cursor=${encodeURIComponent(crCursor)}&select=${CROSSREF_SELECT}&mailto=${MAILTO}`;
 					const crData = await effectiveFetchJson<{
 						message?: {
 							"total-results"?: number;
@@ -2259,11 +2333,12 @@ export async function fetchVenueStructuredPapers(
 			const pageSize = 250;
 			const maxOffsetPages = Math.min(maxPages, 6);
 			for (let page = 0; page < maxOffsetPages; page++) {
+				throwIfAborted(options?.signal);
 				const offset = page * pageSize;
 				attemptedRequests += 1;
 				try {
-					const crUrl = `https://api.crossref.org/works?filter=${procFilter}&query.container-title=${encodeURIComponent(spec.crossrefProceedingsQuery)}&rows=${pageSize}&offset=${offset}&mailto=${MAILTO}`;
-					const crData = await fetchJson<{
+					const crUrl = `https://api.crossref.org/works?filter=${procFilter}&query.container-title=${encodeURIComponent(spec.crossrefProceedingsQuery)}&rows=${pageSize}&offset=${offset}&select=${CROSSREF_SELECT}&mailto=${MAILTO}`;
+					const crData = await effectiveFetchJson<{
 						message?: {
 							items?: CrossrefWorkRow[];
 						};
@@ -2284,7 +2359,10 @@ export async function fetchVenueStructuredPapers(
 					if (matchedOnPage === 0 || rows.length < pageSize) {
 						break;
 					}
-				} catch {
+				} catch (err) {
+					if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
+						throw err;
+					}
 					break;
 				}
 			}
@@ -2299,7 +2377,11 @@ export async function fetchVenueStructuredPapers(
 			options?.preloadedItems?.length
 				? [...out, ...options.preloadedItems]
 				: out,
-			{ skipOpenAlexFilter: openAlexFailed },
+			{
+				skipOpenAlexFilter: openAlexFailed,
+				signal: options?.signal,
+				onProgress: options?.onProgress,
+			},
 		);
 		for (const item of finalizedCr) {
 			pushUnique(item);
@@ -2448,6 +2530,7 @@ export async function enrichVenueItemsBatch(
 		skipTitleSearch?: boolean;
 		maxDoiLessLookups?: number;
 		signal?: AbortSignal;
+		onProgress?: (progress: { completed?: number; total?: number }) => void;
 	},
 ): Promise<CollectionPaperItem[]> {
 	throwIfAborted(options?.signal);
@@ -2512,6 +2595,7 @@ export async function enrichVenueItemsBatch(
 	let openAlexFilterFailed = Boolean(options?.skipOpenAlexFilter);
 	if (!openAlexFilterFailed && unmatchedDois.length > 0) {
 		const CHUNK = 50;
+		options?.onProgress?.({ completed: 0, total: unmatchedDois.length });
 		for (let i = 0; i < unmatchedDois.length; i += CHUNK) {
 			throwIfAborted(options?.signal);
 			const batch = unmatchedDois.slice(i, i + CHUNK);
@@ -2540,6 +2624,10 @@ export async function enrichVenueItemsBatch(
 						mergeOpenAlexRowIntoMap(byDoi, `10.48550/arxiv.${aid}`, row);
 					}
 				}
+				options?.onProgress?.({
+					completed: Math.min(unmatchedDois.length, i + batch.length),
+					total: unmatchedDois.length,
+				});
 			} catch (err) {
 				if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
 					throw err;
@@ -2560,6 +2648,8 @@ export async function enrichVenueItemsBatch(
 			260,
 			{
 				signal: options?.signal,
+				onProgress: (completed, total) =>
+					options?.onProgress?.({ completed, total }),
 			},
 		);
 	}
@@ -2590,7 +2680,9 @@ export async function enrichVenueItemsBatch(
 		if (batches.length > 0) {
 			const CONCURRENCY = 4;
 			let batchCursor = 0;
+			let completedBatches = 0;
 			let aborted = false;
+			options?.onProgress?.({ completed: 0, total: batches.length });
 
 			const worker = async () => {
 				while (!aborted && batchCursor < batches.length) {
@@ -2600,7 +2692,14 @@ export async function enrichVenueItemsBatch(
 					const clauses = batch
 						.map((item) => formatTitleSearchClause(item.title))
 						.filter((t) => t.length > 8);
-					if (clauses.length === 0) continue;
+					if (clauses.length === 0) {
+						completedBatches += 1;
+						options?.onProgress?.({
+							completed: completedBatches,
+							total: batches.length,
+						});
+						continue;
+					}
 					const filter = `title.search:${clauses.map((t) => `"${t}"`).join("|")},from_publication_date:2023-01-01`;
 					try {
 						const url = withOpenAlexApiKey(
@@ -2633,6 +2732,12 @@ export async function enrichVenueItemsBatch(
 						}
 						aborted = true;
 						break;
+					} finally {
+						completedBatches += 1;
+						options?.onProgress?.({
+							completed: completedBatches,
+							total: batches.length,
+						});
 					}
 				}
 			};

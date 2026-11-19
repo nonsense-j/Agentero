@@ -120,7 +120,7 @@
 		"useDefaultDesc": "Works out of the box on the public polite pool; you can add keys anytime in Settings.",
 		"primaryLabel": "OpenAlex",
 		"keywordLlmLabel": "Keyword extraction model (optional)",
-		"openDocsLabel": "Get free key",
+		"openDocsLabel": "Get a free OpenRouter API key (50 / day)",
 		"apiKeyPlaceholder": "OpenAlex API key",
 		"baseUrlPlaceholder": "Base URL (e.g. https://api.openai.com/v1)",
 		"keywordKeyPlaceholder": "API key (optional)",

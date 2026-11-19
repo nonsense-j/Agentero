@@ -19,6 +19,10 @@ import {
 	refreshVenueCollection,
 	type VenueRefreshProgress,
 } from "@/lib/plaza/collection";
+import {
+	formatArxivCategoryList,
+	raceWithAbort,
+} from "@/lib/plaza/collection-enrichment";
 import { getCollectionSummarySnapshot } from "@/lib/plaza/collection-store";
 
 export type CollectionRefreshState = {
@@ -51,34 +55,126 @@ export function useCollectionRefreshStore<T>(
 	return useStore(collectionRefreshStore, selector);
 }
 
-export function formatArxivTaskDetail(p: ArxivRefreshProgress): string {
-	const counter = i18n.t("app:tasks.plazaArxivProgress", {
-		completed: p.completed,
-		total: p.total,
-	});
-	if (!p.category || p.completed >= p.total) {
-		return counter;
-	}
-	const subject =
-		p.subTotal != null && p.subTotal > 0 && p.subCompleted != null
-			? `${p.category} (${p.subCompleted}/${p.subTotal})`
-			: p.category;
-	return `${subject} · ${counter}`;
+export function formatArxivTaskTitle(_p?: ArxivRefreshProgress): string {
+	return i18n.t("app:tasks.plazaArxivRefresh");
 }
 
-export function formatVenueTaskDetail(p: VenueRefreshProgress): string {
-	const counter = i18n.t("app:tasks.plazaVenueProgress", {
-		completed: p.completed,
-		total: p.total,
-	});
-	if (!p.venueName || p.completed >= p.total) {
-		return counter;
+export function formatVenueTaskTitle(p: VenueRefreshProgress): string {
+	const base = i18n.t("app:tasks.plazaVenueRefresh");
+	if (p.total <= 0) return base;
+	const current = Math.min(p.total, p.completed + 1);
+	return `${base} ${current}/${p.total}`;
+}
+
+export function computeCollectionTaskProgress(p: {
+	completed: number;
+	total: number;
+	subCompleted?: number;
+	subTotal?: number;
+}): number | null {
+	if (p.total <= 0 || p.completed >= p.total) return 100;
+	if (p.subTotal != null && p.subTotal > 0 && p.subCompleted != null) {
+		return Math.min(
+			100,
+			Math.max(0, Math.round((p.subCompleted / p.subTotal) * 100)),
+		);
 	}
-	const subject =
-		p.subTotal != null && p.subTotal > 0 && p.subCompleted != null
-			? `${p.venueName} (${p.subCompleted}/${p.subTotal})`
-			: p.venueName;
-	return `${subject} · ${counter}`;
+	return null;
+}
+
+export function formatArxivTaskDetail(
+	p: ArxivRefreshProgress,
+	targetCategories?: readonly string[],
+): string {
+	if (!p.category || p.completed >= p.total) {
+		const names =
+			targetCategories && targetCategories.length > 0
+				? targetCategories
+				: p.category
+					? [p.category]
+					: [];
+		if (names.length > 0) {
+			return i18n.t("app:tasks.plazaArxivFinished", {
+				targets: names.join(", "),
+			});
+		}
+		return i18n.t("app:tasks.plazaArxivProgress", {
+			completed: p.completed,
+			total: p.total,
+		});
+	}
+	if (p.stage === "preparing") {
+		const totalCats = Math.max(1, p.total);
+		const current = Math.min(
+			totalCats,
+			Math.max(1, p.preparingIndex ?? p.completed + 1),
+		);
+		if (p.subTotal != null && p.subTotal > 0 && p.subCompleted != null) {
+			return i18n.t("app:tasks.plazaPreparingPapersCount", {
+				current,
+				total: totalCats,
+				target: p.category,
+				completed: p.subCompleted,
+				totalPapers: p.subTotal,
+			});
+		}
+		return i18n.t("app:tasks.plazaPreparingPapers", {
+			current,
+			total: totalCats,
+			target: p.category,
+		});
+	}
+	const compactTarget = p.category.includes(",")
+		? formatArxivCategoryList(p.category.split(","))
+		: p.category;
+	if (p.subTotal != null && p.subTotal > 0 && p.subCompleted != null) {
+		return i18n.t("app:tasks.plazaCollectingPapers", {
+			target: compactTarget,
+			completed: p.subCompleted,
+			total: p.subTotal,
+		});
+	}
+	return i18n.t("app:tasks.plazaCollectingPapersPending", {
+		target: compactTarget,
+	});
+}
+
+export function formatVenueTaskDetail(
+	p: VenueRefreshProgress,
+	targetVenueNames?: readonly string[],
+): string {
+	if (!p.venueName || p.completed >= p.total) {
+		const names =
+			targetVenueNames && targetVenueNames.length > 0
+				? targetVenueNames
+				: p.venueName
+					? [p.venueName]
+					: [];
+		if (names.length > 0 && names.length <= 3) {
+			return i18n.t("app:tasks.plazaVenueFinished", {
+				targets: names.join(", "),
+			});
+		}
+		if (p.total > 0) {
+			return i18n.t("app:tasks.plazaVenueFinished", {
+				targets: `${p.completed}/${p.total}`,
+			});
+		}
+		return i18n.t("app:tasks.plazaVenueProgress", {
+			completed: p.completed,
+			total: p.total,
+		});
+	}
+	if (p.subTotal != null && p.subTotal > 0 && p.subCompleted != null) {
+		return i18n.t("app:tasks.plazaCollectingPapers", {
+			target: p.venueName,
+			completed: p.subCompleted,
+			total: p.subTotal,
+		});
+	}
+	return i18n.t("app:tasks.plazaCollectingPapersPending", {
+		target: p.venueName,
+	});
 }
 
 export function formatArxivInlineLabel(p: ArxivRefreshProgress): string {
@@ -91,6 +187,8 @@ export function formatVenueInlineLabel(p: VenueRefreshProgress): string {
 
 let inflightArxivRefresh: Promise<void> | null = null;
 let inflightVenueRefresh: Promise<void> | null = null;
+let arxivRefreshRunId = 0;
+let venueRefreshRunId = 0;
 
 /** Run `arXiv` collection refresh as an integrated bottom-left background task. */
 export async function refreshArxivInBackground(options?: {
@@ -105,6 +203,8 @@ export async function refreshArxivInBackground(options?: {
 		category: targetCats[0] ?? "",
 		completed: 0,
 		total: targetCats.length,
+		stage: "preparing",
+		preparingIndex: 1,
 		overallProgress: 0,
 	};
 
@@ -124,50 +224,55 @@ export async function refreshArxivInBackground(options?: {
 		};
 	});
 
+	const runId = ++arxivRefreshRunId;
 	const taskPromise = (async () => {
-		let maxProgress = 0;
 		try {
 			await runLocalActivity(
 				{
 					kind: "plazaArxivRefresh",
-					title: i18n.t("app:tasks.plazaArxivRefresh"),
-					detail: formatArxivTaskDetail(initialProgress),
+					title: formatArxivTaskTitle(initialProgress),
+					detail: formatArxivTaskDetail(initialProgress, targetCats),
 				},
-				async ({ signal, setProgress, setDetail }) => {
-					setProgress(0);
-					await refreshArxivCollection({
-						categories: options?.categories,
-						incremental: options?.incremental ?? true,
+				async ({ signal, setTitle, setProgress, setDetail }) => {
+					setProgress(computeCollectionTaskProgress(initialProgress));
+					await raceWithAbort(
+						refreshArxivCollection({
+							categories: options?.categories,
+							incremental: options?.incremental ?? true,
+							signal,
+							onProgress: (progress) => {
+								if (signal.aborted) return;
+								setTitle(formatArxivTaskTitle(progress));
+								setProgress(computeCollectionTaskProgress(progress));
+								setDetail(formatArxivTaskDetail(progress, targetCats));
+								collectionRefreshStore.setState({
+									arxivRefreshLabel: formatArxivInlineLabel(progress),
+								});
+							},
+							onCategoryStatus: (cat, status) => {
+								if (signal.aborted) return;
+								collectionRefreshStore.setState((s) => {
+									const nextRefreshing = new Set(s.refreshingCategories);
+									const nextRefreshed = new Set(s.refreshedCategories);
+									if (status === "refreshing") {
+										nextRefreshing.add(cat);
+										nextRefreshed.delete(cat);
+									} else if (status === "done") {
+										nextRefreshing.delete(cat);
+										nextRefreshed.add(cat);
+									} else {
+										nextRefreshing.delete(cat);
+									}
+									return {
+										...s,
+										refreshingCategories: nextRefreshing,
+										refreshedCategories: nextRefreshed,
+									};
+								});
+							},
+						}),
 						signal,
-						onProgress: (progress) => {
-							maxProgress = Math.max(maxProgress, progress.overallProgress);
-							setProgress(maxProgress);
-							setDetail(formatArxivTaskDetail(progress));
-							collectionRefreshStore.setState({
-								arxivRefreshLabel: formatArxivInlineLabel(progress),
-							});
-						},
-						onCategoryStatus: (cat, status) => {
-							collectionRefreshStore.setState((s) => {
-								const nextRefreshing = new Set(s.refreshingCategories);
-								const nextRefreshed = new Set(s.refreshedCategories);
-								if (status === "refreshing") {
-									nextRefreshing.add(cat);
-									nextRefreshed.delete(cat);
-								} else if (status === "done") {
-									nextRefreshing.delete(cat);
-									nextRefreshed.add(cat);
-								} else {
-									nextRefreshing.delete(cat);
-								}
-								return {
-									...s,
-									refreshingCategories: nextRefreshing,
-									refreshedCategories: nextRefreshed,
-								};
-							});
-						},
-					});
+					);
 				},
 			);
 		} catch (err) {
@@ -175,12 +280,14 @@ export async function refreshArxivInBackground(options?: {
 				notifyError(errorText(err));
 			}
 		} finally {
-			inflightArxivRefresh = null;
-			collectionRefreshStore.setState({
-				refreshingArxiv: false,
-				arxivRefreshLabel: null,
-				refreshingCategories: new Set<string>(),
-			});
+			if (arxivRefreshRunId === runId) {
+				inflightArxivRefresh = null;
+				collectionRefreshStore.setState({
+					refreshingArxiv: false,
+					arxivRefreshLabel: null,
+					refreshingCategories: new Set<string>(),
+				});
+			}
 		}
 	})();
 
@@ -203,6 +310,7 @@ export async function refreshVenueInBackground(options?: {
 	const targetVenues = idSet
 		? summary.venues.filter((v) => idSet.has(v.id))
 		: summary.venues;
+	const targetVenueNames = targetVenues.map((v) => v.name);
 	const firstVenue = targetVenues[0];
 	const initialProgress: VenueRefreshProgress = {
 		venueId: firstVenue?.id ?? "",
@@ -228,50 +336,55 @@ export async function refreshVenueInBackground(options?: {
 		};
 	});
 
+	const runId = ++venueRefreshRunId;
 	const taskPromise = (async () => {
-		let maxProgress = 0;
 		try {
 			await runLocalActivity(
 				{
 					kind: "plazaVenueRefresh",
-					title: i18n.t("app:tasks.plazaVenueRefresh"),
-					detail: formatVenueTaskDetail(initialProgress),
+					title: formatVenueTaskTitle(initialProgress),
+					detail: formatVenueTaskDetail(initialProgress, targetVenueNames),
 				},
-				async ({ signal, setProgress, setDetail }) => {
-					setProgress(0);
-					await refreshVenueCollection({
-						venueIds: options?.venueIds,
-						skipLoaded: options?.skipLoaded,
+				async ({ signal, setTitle, setProgress, setDetail }) => {
+					setProgress(computeCollectionTaskProgress(initialProgress));
+					await raceWithAbort(
+						refreshVenueCollection({
+							venueIds: options?.venueIds,
+							skipLoaded: options?.skipLoaded,
+							signal,
+							onProgress: (progress) => {
+								if (signal.aborted) return;
+								setTitle(formatVenueTaskTitle(progress));
+								setProgress(computeCollectionTaskProgress(progress));
+								setDetail(formatVenueTaskDetail(progress, targetVenueNames));
+								collectionRefreshStore.setState({
+									venueRefreshLabel: formatVenueInlineLabel(progress),
+								});
+							},
+							onVenueStatus: (venue, status) => {
+								if (signal.aborted) return;
+								collectionRefreshStore.setState((s) => {
+									const nextRefreshing = new Set(s.refreshingVenueIds);
+									const nextRefreshed = new Set(s.refreshedVenueIds);
+									if (status === "refreshing") {
+										nextRefreshing.add(venue.id);
+										nextRefreshed.delete(venue.id);
+									} else if (status === "done") {
+										nextRefreshing.delete(venue.id);
+										nextRefreshed.add(venue.id);
+									} else {
+										nextRefreshing.delete(venue.id);
+									}
+									return {
+										...s,
+										refreshingVenueIds: nextRefreshing,
+										refreshedVenueIds: nextRefreshed,
+									};
+								});
+							},
+						}),
 						signal,
-						onProgress: (progress) => {
-							maxProgress = Math.max(maxProgress, progress.overallProgress);
-							setProgress(maxProgress);
-							setDetail(formatVenueTaskDetail(progress));
-							collectionRefreshStore.setState({
-								venueRefreshLabel: formatVenueInlineLabel(progress),
-							});
-						},
-						onVenueStatus: (venue, status) => {
-							collectionRefreshStore.setState((s) => {
-								const nextRefreshing = new Set(s.refreshingVenueIds);
-								const nextRefreshed = new Set(s.refreshedVenueIds);
-								if (status === "refreshing") {
-									nextRefreshing.add(venue.id);
-									nextRefreshed.delete(venue.id);
-								} else if (status === "done") {
-									nextRefreshing.delete(venue.id);
-									nextRefreshed.add(venue.id);
-								} else {
-									nextRefreshing.delete(venue.id);
-								}
-								return {
-									...s,
-									refreshingVenueIds: nextRefreshing,
-									refreshedVenueIds: nextRefreshed,
-								};
-							});
-						},
-					});
+					);
 				},
 			);
 		} catch (err) {
@@ -279,12 +392,14 @@ export async function refreshVenueInBackground(options?: {
 				notifyError(errorText(err));
 			}
 		} finally {
-			inflightVenueRefresh = null;
-			collectionRefreshStore.setState({
-				refreshingVenue: false,
-				venueRefreshLabel: null,
-				refreshingVenueIds: new Set<string>(),
-			});
+			if (venueRefreshRunId === runId) {
+				inflightVenueRefresh = null;
+				collectionRefreshStore.setState({
+					refreshingVenue: false,
+					venueRefreshLabel: null,
+					refreshingVenueIds: new Set<string>(),
+				});
+			}
 		}
 	})();
 

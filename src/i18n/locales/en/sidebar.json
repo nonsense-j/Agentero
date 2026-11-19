@@ -253,7 +253,8 @@
 				"sharedRefs": "Shared Refs",
 				"inVault": "In Library",
 				"citesVault": "Cites Library",
-				"back": "Back: {{title}}"
+				"back": "Back: {{title}}",
+				"searchTitlePlaceholder": "Filter by title…"
 			},
 			"citationInfo": "Citation",
 			"copyCitation": "Copy Citation",
