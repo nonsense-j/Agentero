@@ -492,7 +492,8 @@ function buildAgenteroCliBinary() {
 		);
 	}
 
-	const exeName = process.platform === "win32" ? "agentero.exe" : "agentero";
+	const exeName =
+		process.platform === "win32" ? "agentero-cli.exe" : "agentero-cli";
 	const targetDir = process.env.CARGO_TARGET_DIR
 		? path.resolve(REPO_ROOT, process.env.CARGO_TARGET_DIR)
 		: path.join(REPO_ROOT, "target");
@@ -520,29 +521,84 @@ function runAgenteroCli(cliRunner, subArgs) {
 	}
 }
 
+function formatAgenteroCliError(parsed) {
+	const errObj =
+		parsed &&
+		typeof parsed === "object" &&
+		parsed.error &&
+		typeof parsed.error === "object"
+			? parsed.error
+			: null;
+	if (!errObj) return null;
+	const code = typeof errObj.code === "string" ? errObj.code.trim() : "";
+	const message =
+		typeof errObj.message === "string" ? errObj.message.trim() : "";
+	if (code && message) return `${code}: ${message}`;
+	return message || code || null;
+}
+
+function unwrapAgenteroCliJsonEnvelope(parsed, cmdLabel) {
+	if (
+		parsed &&
+		typeof parsed === "object" &&
+		!Array.isArray(parsed) &&
+		typeof parsed.ok === "boolean"
+	) {
+		if (!parsed.ok) {
+			const detail = formatAgenteroCliError(parsed) ?? "unknown error";
+			throw new Error(`agentero-cli reported error (${cmdLabel}): ${detail}`);
+		}
+		if (!Object.hasOwn(parsed, "data")) {
+			throw new Error(
+				`agentero-cli JSON envelope missing 'data' (${cmdLabel})`,
+			);
+		}
+		return parsed.data;
+	}
+	return parsed;
+}
+
 function runAgenteroCliJson(cliRunner, subArgs, { allowFailure = false } = {}) {
 	const fullArgs = [...cliRunner.prefixArgs, ...subArgs, "--json"];
+	const cmdLabel = `${cliRunner.cmd} ${fullArgs.join(" ")}`;
 	const res = spawnSync(cliRunner.cmd, fullArgs, {
 		cwd: REPO_ROOT,
 		stdio: ["ignore", "pipe", "inherit"],
 		encoding: "utf8",
 		windowsHide: true,
 	});
+	const raw = String(res.stdout ?? "").trim();
 	if (res.status !== 0) {
 		if (allowFailure) return null;
+		let detail = "";
+		if (raw) {
+			try {
+				const parsedErr = JSON.parse(raw);
+				const formatted = formatAgenteroCliError(parsedErr);
+				if (formatted) detail = ` (${formatted})`;
+			} catch {
+				// Ignore non-JSON stdout on process failure.
+			}
+		}
 		throw new Error(
-			`agentero-cli command failed (exit ${res.status}): ${cliRunner.cmd} ${fullArgs.join(" ")}`,
+			`agentero-cli command failed (exit ${res.status})${detail}: ${cmdLabel}`,
 		);
 	}
-	const raw = String(res.stdout ?? "").trim();
 	if (!raw) return null;
+	let parsed;
 	try {
-		return JSON.parse(raw);
+		parsed = JSON.parse(raw);
 	} catch (err) {
 		if (allowFailure) return null;
 		throw new Error(
 			`Failed parsing JSON output from agentero-cli: ${err instanceof Error ? err.message : err}`,
 		);
+	}
+	try {
+		return unwrapAgenteroCliJsonEnvelope(parsed, cmdLabel);
+	} catch (err) {
+		if (allowFailure) return null;
+		throw err;
 	}
 }
 
