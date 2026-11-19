@@ -25,6 +25,7 @@ import {
 	type AgentStreamEvent,
 	type AgentToolEvent,
 	type AgentTurnPhase,
+	CODEX_INSTRUCTION_BUDGET_PHASE,
 	displayHistoryTitle,
 	listenAgentCollaboration,
 	listenAgentCommands,
@@ -68,6 +69,7 @@ import {
 	type StreamSlice,
 	ThinkTagParser,
 } from "@/lib/agent/stream-parse";
+import { notifyWarning } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import {
 	completeTrace,
@@ -163,6 +165,8 @@ export function useAgentSessionRuntime({
 	setAcpCommandsByAgent,
 	setAgentListenersReady,
 }: UseAgentSessionRuntimeOptions): AgentSessionRuntime {
+	const tRef = useRef(t);
+	tRef.current = t;
 	const updateSessionLines = useCallback(
 		(sessionId: string, update: (lines: ChatLine[]) => ChatLine[]) => {
 			// Shared store: modal pin + sidebar both observe the same lines.
@@ -744,6 +748,14 @@ export function useAgentSessionRuntime({
 			});
 			const uStatus = await listenAgentStatus((ev) => {
 				if (!isChatOwnedSession(ev.sessionId)) return;
+				if ((ev.phase as string) === CODEX_INSTRUCTION_BUDGET_PHASE) {
+					notifyWarning(tRef.current("codexInstructionBudget.title"), {
+						description: tRef.current("codexInstructionBudget.description"),
+						id: CODEX_INSTRUCTION_BUDGET_PHASE,
+						duration: Number.POSITIVE_INFINITY,
+					});
+					return;
+				}
 				const phase = ev.phase as AgentTurnPhase;
 				if (
 					phase !== "starting" &&
