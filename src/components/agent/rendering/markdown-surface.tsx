@@ -8,9 +8,11 @@ import { memo } from "react";
 import {
 	type AllowedTags,
 	defaultRemarkPlugins,
+	type ExtraProps,
 	type PluginConfig,
 	Streamdown,
 } from "streamdown";
+import { MathCopy } from "@/components/markdown/math-copy";
 import { cn } from "@/lib/core/utils";
 import { remarkHighlightToHtml } from "@/lib/markdown/highlight-to-html";
 import { AgentCitationLink } from "./agent-citation-link";
@@ -28,6 +30,18 @@ const streamdownPlugins: PluginConfig = {
 	code,
 	math: streamdownMath,
 };
+
+function MathSpan({
+	node: _node,
+	...props
+}: ComponentProps<"span"> & ExtraProps) {
+	const span = <span {...props} />;
+	return props.className?.split(/\s+/).includes("katex") ? (
+		<MathCopy>{span}</MathCopy>
+	) : (
+		span
+	);
+}
 
 /**
  * Passing `remarkPlugins` replaces Streamdown's defaults, so keep gfm and
@@ -72,6 +86,7 @@ export const MarkdownSurface = memo(
 					className,
 				)}
 				components={{
+					span: MathSpan,
 					a: (linkProps) => (
 						<AgentCitationLink {...linkProps} onOpenSource={onOpenSource} />
 					),
