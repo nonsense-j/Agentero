@@ -620,12 +620,23 @@ export function useAgentHistory({
 		const hydrationGeneration = ++historyHydrationGenRef.current;
 		setHistoryOpen(false);
 		clearMessageQueue();
-		if (!supportsResume || item.lines.length > 0) {
+		if (item.lines.length > 0 || item.resumeable === false) {
 			const localLines = sanitizeChatLines(item.lines);
 			setHydratingSessionId(null);
 			activateComposerSession(item.id);
 			activeTabRef.current = item.id;
-			hydrateAndActivateSession(item, localLines);
+			hydrateAndActivateSession(
+				item,
+				localLines.length > 0
+					? localLines
+					: [
+							{
+								id: nextLineId("sys"),
+								kind: "system",
+								text: t("messages.sessionEmpty"),
+							},
+						],
+			);
 			// Visual-trace (and other non-resumeable) sessions keep multi-turn
 			// context in local lines; never set an ACP resume id for them.
 			if (supportsResume && item.resumeable !== false) {
@@ -635,6 +646,9 @@ export function useAgentHistory({
 			}
 			return;
 		}
+		// No local transcript: always ask the agent, even before the history
+		// probe settles. Gating this on `supportsResume` turned a failed probe
+		// into an empty conversation instead of loading the session.
 		const requestAgentId = selectedAgentId;
 		const requestVaultPath = vaultPath;
 		if (!requestAgentId) return;
