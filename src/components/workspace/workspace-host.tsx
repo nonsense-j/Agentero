@@ -65,6 +65,7 @@ import {
 import {
 	applyMarkdownConflictChoice,
 	savePersistedTabs,
+	shouldWritePersistedLayout,
 } from "@/lib/workspace/tabs";
 import { viewerModeSpec } from "@/lib/workspace/viewer";
 
@@ -272,6 +273,7 @@ export function WorkspaceHost() {
 
 	// Layout alone is persisted (panels + order + active + path/mode in params).
 	useEffect(() => {
+		if (!shouldWritePersistedLayout(dockLayout)) return;
 		savePersistedTabs(dockLayout);
 	}, [dockLayout]);
 
