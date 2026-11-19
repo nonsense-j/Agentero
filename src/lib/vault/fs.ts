@@ -1,5 +1,6 @@
 import { readFile, readTextFile } from "@tauri-apps/plugin-fs";
 import i18n from "@/i18n";
+import { normalizeLocalPath } from "@/lib/core/path";
 import { isTauri } from "@/lib/core/tauri";
 
 export { isMarkdownPath, isTextOpenable } from "./path-kinds";
@@ -9,7 +10,7 @@ export async function readVaultFile(path: string): Promise<string> {
 		throw new Error(i18n.t("app:vault.readDesktopOnly"));
 	}
 
-	return readTextFile(path);
+	return readTextFile(normalizeLocalPath(path));
 }
 
 /**
@@ -25,7 +26,7 @@ export async function readVaultBytes(path: string): Promise<Uint8Array> {
 		throw new Error(i18n.t("app:vault.readDesktopOnly"));
 	}
 
-	return readFile(path);
+	return readFile(normalizeLocalPath(path));
 }
 
 /** Write text file (creates parent dirs when possible). */
@@ -38,6 +39,7 @@ export async function writeVaultFile(
 	}
 
 	const { mkdir, writeTextFile } = await import("@tauri-apps/plugin-fs");
+	path = normalizeLocalPath(path);
 	const parent = path.replace(/[\\/][^\\/]+$/, "");
 	if (parent && parent !== path) {
 		try {
@@ -59,6 +61,7 @@ export async function writeVaultBytes(
 	}
 
 	const { mkdir, writeFile } = await import("@tauri-apps/plugin-fs");
+	path = normalizeLocalPath(path);
 	const parent = path.replace(/[\\/][^\\/]+$/, "");
 	if (parent && parent !== path) {
 		try {
@@ -94,7 +97,7 @@ export async function vaultPathExists(path: string): Promise<boolean> {
 	}
 
 	const { exists } = await import("@tauri-apps/plugin-fs");
-	return exists(path);
+	return exists(normalizeLocalPath(path));
 }
 
 /** Create a directory (and parents) under the vault. */
@@ -104,7 +107,7 @@ export async function createVaultDirectory(path: string): Promise<void> {
 	}
 
 	const { mkdir } = await import("@tauri-apps/plugin-fs");
-	await mkdir(path, { recursive: true });
+	await mkdir(normalizeLocalPath(path), { recursive: true });
 }
 
 /**
@@ -120,5 +123,5 @@ export async function removeVaultPath(path: string): Promise<void> {
 		throw new Error(i18n.t("sidebar:fileTree.deleteInvalid"));
 	}
 	const { remove } = await import("@tauri-apps/plugin-fs");
-	await remove(trimmed, { recursive: true });
+	await remove(normalizeLocalPath(trimmed), { recursive: true });
 }
