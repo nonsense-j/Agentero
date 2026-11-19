@@ -20,6 +20,7 @@ import {
 	paperDirFromPath,
 	type RemotePaperItem,
 	remoteArxivPath,
+	retainViewerSource,
 	stageRemoteArxivPaper,
 } from "@/lib/paper";
 import {
@@ -611,6 +612,10 @@ export function cycleActiveTab(delta: number): void {
 }
 
 export function cloneTabForSplit(tab: DocTab, tabs: DocTab[]): DocTab {
+	// Shallow copy shares pdfBytes; each viewer slices before the worker
+	// transfer. Blob URLs are not created again, so this pane takes its own lease.
+	retainViewerSource(tab.pdfUrl);
+	retainViewerSource(tab.imageUrl);
 	return {
 		...tab,
 		id: splitPaneIdForPath(
