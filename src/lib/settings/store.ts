@@ -729,6 +729,9 @@ function normalizeTranslateSettings(
 	if (typeof raw.autoTranslateSelection === "boolean") {
 		base.autoTranslateSelection = raw.autoTranslateSelection;
 	}
+	if (typeof raw.dismissSelectionOnOutsideClick === "boolean") {
+		base.dismissSelectionOnOutsideClick = raw.dismissSelectionOnOutsideClick;
+	}
 	// Migrate legacy dualPaneTranslate boolean to the new displayMode pair.
 	const legacyDualPane = (raw as { dualPaneTranslate?: boolean })
 		.dualPaneTranslate;

@@ -485,6 +485,10 @@
 		"autoSelection": {
 			"label": "PDF 划词后自动翻译"
 		},
+		"dismissOnOutsideClick": {
+			"label": "点击其他位置时关闭翻译结果",
+			"description": "点击翻译卡以外的位置即关闭。滚动、翻页和阅读器控件不会关闭。"
+		},
 		"displayMode": {
 			"label": "翻译显示模式",
 			"overlay": "在原 PDF 上覆盖",

@@ -5545,6 +5545,12 @@ export type TranslateSettings = {
 	customSystem?: string,
 	/**  Custom user template. Applied only when it contains `{{text}}`. */
 	customUser?: string,
+	/**
+	 *  Close the selection translation result on a click elsewhere on the page
+	 *  (default off, matching the long-standing "card stays open" behavior).
+	 *  Scrolling, page turns and viewer toolbars never close it.
+	 */
+	dismissSelectionOnOutsideClick?: boolean,
 };
 
 export type TranslateTextArgs = {

@@ -386,6 +386,11 @@ pub struct TranslateSettings {
     /// Custom user template. Applied only when it contains `{{text}}`.
     #[serde(default)]
     pub custom_user: String,
+    /// Close the selection translation result on a click elsewhere on the page
+    /// (default off, matching the long-standing "card stays open" behavior).
+    /// Scrolling, page turns and viewer toolbars never close it.
+    #[serde(default)]
+    pub dismiss_selection_on_outside_click: bool,
 }
 
 impl Default for TranslateSettings {
@@ -404,6 +409,7 @@ impl Default for TranslateSettings {
             custom_prompt: String::new(),
             custom_system: String::new(),
             custom_user: String::new(),
+            dismiss_selection_on_outside_click: false,
         }
     }
 }

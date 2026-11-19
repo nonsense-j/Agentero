@@ -18,6 +18,7 @@ export const DEFAULT_TRANSLATE_SETTINGS: TranslateSettings = {
 	customPrompt: "",
 	customSystem: "",
 	customUser: "",
+	dismissSelectionOnOutsideClick: false,
 };
 
 /**

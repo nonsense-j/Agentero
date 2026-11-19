@@ -471,6 +471,19 @@ export function TranslatePane({
 						}
 					/>
 				</SettingsRow>
+				<SettingsRow
+					label={t("translate.dismissOnOutsideClick.label")}
+					description={t("translate.dismissOnOutsideClick.description")}
+					htmlFor="translate-dismiss-outside"
+				>
+					<Switch
+						id="translate-dismiss-outside"
+						checked={tr.dismissSelectionOnOutsideClick}
+						onCheckedChange={(v) =>
+							patchTranslate({ dismissSelectionOnOutsideClick: v })
+						}
+					/>
+				</SettingsRow>
 				<SettingsRow label={t("translate.displayMode.label")}>
 					<Select
 						value={tr.displayMode}

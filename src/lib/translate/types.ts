@@ -91,6 +91,12 @@ export type TranslateSettings = {
 	 * otherwise the source is still quoted. Max 8000 chars.
 	 */
 	customUser: string;
+	/**
+	 * Close the selection translation result card when the reader clicks
+	 * elsewhere on the page (default off: cards stay open while the reader
+	 * works). Scrolling, page turns and viewer toolbars never close it.
+	 */
+	dismissSelectionOnOutsideClick: boolean;
 };
 
 export type TranslateProviderConfig = {

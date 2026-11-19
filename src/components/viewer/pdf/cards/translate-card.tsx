@@ -7,6 +7,7 @@ import { Shimmer } from "@/components/ui/shimmer";
 import { SelectionCard } from "@/components/viewer/pdf/cards/selection-card";
 import { isEditableClipboardTarget } from "@/components/viewer/pdf/host-dom";
 import type { CardScreenPoint } from "@/components/viewer/pdf/types";
+import { useSettings } from "@/hooks/use-app-stores";
 import { copyTextToClipboard } from "@/lib/core/clipboard";
 
 const TRANSLATE_CARD_WIDTH = 340;
@@ -59,6 +60,11 @@ export function TranslateCard({
 	onPointerLeave,
 }: TranslateCardProps) {
 	const { t } = useTranslation("viewer");
+	// Optional: close the result when the reader clicks elsewhere on the page.
+	// Scrolling and page turns keep it open (see SelectionCard's outside click).
+	const dismissOnOutsideClick = useSettings(
+		(s) => s.translate.dismissSelectionOnOutsideClick,
+	);
 	const showResult = result.trim().length > 0;
 	const showLoading = streaming && !showResult;
 	const scrollPortRef = useRef<HTMLDivElement>(null);
@@ -180,6 +186,7 @@ export function TranslateCard({
 			ariaLive="polite"
 			onPointerEnter={onPointerEnter}
 			onPointerLeave={onPointerLeave}
+			onOutsideClick={dismissOnOutsideClick ? onHide : undefined}
 			actions={[
 				...(showResult
 					? [
