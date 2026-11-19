@@ -15,7 +15,7 @@
 use crate::features::paper::discovery::proxy::SiteProxy;
 
 const ORIGIN: &str = "https://modelscope.cn";
-const USER_AGENT: &str = "agentero/0.6 (+https://github.com/poco-ai/agentero)";
+const USER_AGENT: &str = "agentero/0.6 (+https://github.com/nonsense-j/Agentero)";
 
 /// Hides the site chrome, reports navigations, hands off everything that leaves
 /// the paper feed, and adds an `[入库]` action to every paper.

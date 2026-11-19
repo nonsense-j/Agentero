@@ -87,9 +87,9 @@ function saveOpts(o: SavedOpts) {
 	writeJsonStorage(OPTS_KEY, o);
 }
 
-/** "View import tutorial" target: the "Migrate from Zotero" section of the docs site. */
+/** "View import tutorial" target: the "Migrate from Zotero" section in repo docs. */
 const IMPORT_TUTORIAL_URL =
-	"https://agentero-docs.poco-ai.com/usage/import-papers/#zotero";
+	"https://github.com/nonsense-j/Agentero/blob/main/docs/usage/import-papers.md#%E4%BB%8E-zotero-%E8%BF%81%E7%A7%BB";
 function openTutorial() {
 	void openUrl(IMPORT_TUTORIAL_URL).catch(() => {
 		window.open(IMPORT_TUTORIAL_URL, "_blank");

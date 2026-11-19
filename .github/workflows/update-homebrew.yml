@@ -16,7 +16,7 @@ jobs:
       - name: Checkout tap repository
         uses: actions/checkout@v5
         with:
-          repository: poco-ai/homebrew-agentero
+          repository: nonsense-j/homebrew-agentero
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Fetch release assets

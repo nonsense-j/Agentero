@@ -23,7 +23,7 @@ Headless Vault / Catalog / Wiki 接口；**不含** BYOA / paper-reader。
 | `paper` | list/get、tag list/set/add/rm、move、open、download/parse、notes fetch… |
 | `import` | 标识符入库 |
 | `discover` | 查询式发现：按关键词/分类/提交日期窗口抓 arXiv 候选，确定性词法排序（headless、无 embedding key） |
-| `collection` | 广场论文池与预置包维护：`upsert-file` / `seed-bake` / `seed-import`（与桌面端共用 XDG `collection.sqlite` Schema V3） |
+| `collection` | 广场论文池与预置包维护：`state` / `clear` / `upsert-file` / `seed-bake` / `seed-import`（与桌面端共用 XDG `collection.sqlite`） |
 | `feed` | 广场订阅源（RSS / Atom / JSON Feed）：`list` / `add` / `remove` / `refresh` / `items` / `read`；与桌面端共用 `$XDG_DATA_HOME/agentero/feeds.sqlite`，无 Vault 概念 |
 | `export` | 导出 |
 | `doctor` | Vault 结构与 Catalog 诊断；含 wikilink 检查与 aliases / 视觉批注 / catalog 去重修复 |
@@ -250,27 +250,32 @@ agentero feed remove <sub-id> -y --json
 
 ## 广场论文池与预置包（`collection`）
 
-`collection *` 是广场 `Paper Collection`（`$XDG_DATA_HOME/agentero/collection.sqlite` Schema V3）的无头写入、图谱烘焙与分片预置包导入/导出接口，供维护者发布 `collection-seed-2026` 预置包以及离线导入使用（不依赖 Vault）。CLI 与发布脚本均会自动读取桌面端 `settings.json` 中的 `networkProxyEnabled` + `networkProxyUrl`（自动附带 `127.0.0.1,localhost` 直连绕过）及 `openAlexKey`。
+`collection *` 是广场 `Paper Collection`（`$XDG_DATA_HOME/agentero/collection.sqlite`）的无头状态查询、清理、批量写入、图谱烘焙与分片预置包导入/导出接口，供维护者发布 `collection-seed-2026` 预置包以及离线导入使用（不依赖 Vault）。CLI 与发布脚本均会自动读取桌面端 `settings.json` 中的 `networkProxyEnabled` + `networkProxyUrl`（自动附带 `127.0.0.1,localhost` 直连绕过）及 `openAlexKey`。
 
 ```bash
-# 1. 一键抓取 28 个 2026 Venue + arXiv 分区、烘焙引用出边与 LLM 关键词并生成 dist/seed/ 预置包
+# 1. 一键增量更新并发布到 GitHub Release（默认增量 + 自动清理本地与远端旧哈希分片 + 默认上传）
+pnpm collection:seed-publish
 pnpm collection:seed-publish --dry-run
-pnpm collection:seed-publish --categories cs.SE,cs.CR,cs.PL,cs.AI
-pnpm collection:seed-publish --skip-fetch --out-dir dist/seed --upload
+pnpm collection:seed-publish --no-upload     # 仅本地增量打包，不上传
+pnpm collection:seed-publish --force-clean   # 清空重抓 + 忽略 TTL/已烘焙词全量重跑并发布
 
 # 2. 直接调用 CLI 子命令（支持自定义 --db 路径与 --json 输出）
-agentero collection upsert-file --input batch.json --json
+agentero collection state --json
+agentero collection clear --scope all -y --json
+agentero collection upsert-file --file batch.json --json
 agentero collection seed-bake --out-dir dist/seed \
   --llm-base-url https://x666.me/v1 --llm-model ernie-5.5-flash-preview --llm-concurrency 1 --llm-batch-size 8 --json
 agentero collection seed-import --manifest dist/seed/manifest.json --json
-agentero collection seed-import --url https://github.com/poco-ai/Agentero/releases/download/collection-seed-2026/manifest.json --force --json
+agentero collection seed-import --manifest https://github.com/nonsense-j/Agentero/releases/download/collection-seed-2026/manifest.json --force --json
 ```
 
 | 子命令 | 说明 |
 |---|---|
+| `collection state` | 读取 `collection.sqlite` 摘要、Venue 计数及各分类 `arxiv_watermarks`（供一键脚本增量判定） |
+| `collection clear` | 按 `--scope <all\|papers\|venue\|recommended\|citations>`（配合 `-y`）清理论文池与水位线 |
 | `collection upsert-file` | 从 JSON 文件读取 `CollectionUpsertPapersArgs`（含 `items`、可选 `replaceVenueId`、`venueUpdate`、`arxivWatermarks`）批量写入 `collection.sqlite` 并同步解析池内引用图谱 |
-| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex `filter=doi:` / `ids.openalex:` 50 篇一批 + Crossref references 兜底）、使用 OpenAI 兼容端点（默认 `https://x666.me/v1` + `ernie-5.5-flash-preview`、`--llm-rpm` 默认 `5`、`--llm-api-key` 或 `AGENTERO_KEYWORD_LLM_API_KEY`；默认附带 `reasoning: { effort: "low", exclude: true }`、不设 `max_tokens` 上限并在 `400`/`422` 时自动退回）烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（`core`、`addon-cs-ai` 及可选 `--delta-since` 增量包，附 SHA-256 校验） |
-| `collection seed-import` | 从本地 `--manifest <path>` 或远端 `--url <manifest-url>` 校验 SHA-256 并流式导入未应用的分片，自动合并 `arxiv_watermarks` 与 Venue `lastFetchedAt` 水位线（传 `--force` 可重置 `seed_cleared` 标记强制重导） |
+| `collection seed-bake` | 对库内论文批量补齐 `rawRefs` 引用出边（OpenAlex + Semantic Scholar，默认 14 天 TTL 增量跳过）、使用 OpenAI 兼容端点烘焙缺失关键词（写入 `keyword_source = "maintainer_llm"`，绝不覆盖 `'author'` 原生词；传 `--force-clean` 时绕过 14 天 TTL 并重烘非作者词）、重算全库纯池内 `citation_count`，并在 `--out-dir` 导出 `manifest.json` + `.jsonl.gz` 分片（自动清理 `--out-dir` 中旧哈希残留 `.jsonl.gz`） |
+| `collection seed-import` | 从本地路径或远端 HTTPS URL（`--manifest <path-or-url>`）校验 SHA-256 并流式导入未应用的分片，自动合并 `arxiv_watermarks` 与 Venue `lastFetchedAt` 水位线（传 `--force` 可重置 `seed_cleared` 标记强制重导） |
 
 ## 论文导入
 

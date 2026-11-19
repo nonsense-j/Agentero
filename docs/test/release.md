@@ -92,7 +92,7 @@ GitHub Actions 可配置以下 repository secrets 用于自动更新签名：
 | `TAURI_SIGNING_PRIVATE_KEY` | `tauri signer generate` 产生的完整 minisign 私钥内容 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成该私钥时使用的密码 |
 
-发布工作流设置 `createUpdaterArtifacts`，由 `tauri-apps/tauri-action@v1` 上传签名更新包、`.sig` 和聚合后的 `latest.json`。客户端请求 `https://github.com/poco-ai/Agentero/releases/latest/download/latest.json`，因此：
+发布工作流设置 `createUpdaterArtifacts`，由 `tauri-apps/tauri-action@v1` 上传签名更新包、`.sig` 和聚合后的 `latest.json`。客户端请求 `https://github.com/nonsense-j/Agentero/releases/latest/download/latest.json`，因此：
 
 - Draft Release 用于验收，发布前不会被客户端读取；
 - 只有完整、已发布的稳定版 Release 才会成为更新源；

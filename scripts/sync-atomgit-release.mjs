@@ -356,7 +356,7 @@ async function main() {
 	if (!ATOMGIT_TOKEN || !RELEASE_TAG || !GITHUB_REPOSITORY) {
 		throw new Error("Set ATOMGIT_TOKEN, RELEASE_TAG and GITHUB_REPOSITORY");
 	}
-	const destination = ATOMGIT_REPOSITORY || "poco-ai/Agentero";
+	const destination = ATOMGIT_REPOSITORY || "nonsense-j/Agentero";
 	if (!/^[\w.-]+\/[\w.-]+$/.test(destination))
 		throw new Error("Invalid ATOMGIT_REPOSITORY");
 	const repo = `repos/${GITHUB_REPOSITORY}`;

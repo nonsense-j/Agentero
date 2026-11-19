@@ -18,7 +18,7 @@
 use super::SiteProxy;
 
 const ORIGIN: &str = "https://paperswithcode.co";
-const USER_AGENT: &str = "agentero/0.6 (+https://github.com/poco-ai/agentero)";
+const USER_AGENT: &str = "agentero/0.6 (+https://github.com/nonsense-j/Agentero)";
 
 /// Reports in-site navigation, keeps clicks in the frame, hands every
 /// third-party link (GitHub, Hugging Face, arXiv, …) to the system browser,

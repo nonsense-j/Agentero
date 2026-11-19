@@ -253,7 +253,7 @@ pub async fn recognize_pdf(
         .user_agent(concat!(
             "Agentero/",
             env!("CARGO_PKG_VERSION"),
-            " (paper metadata recognition; +https://github.com/poco-ai/agentero)"
+            " (paper metadata recognition; +https://github.com/nonsense-j/Agentero)"
         ))
         .build()
         .map_err(|e| AppError::message(format!("recognizer http client: {e}")))?;

@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const ORIGIN: &str = "https://papers.cool";
-pub const USER_AGENT: &str = "agentero/0.6 (+https://github.com/poco-ai/agentero)";
+pub const USER_AGENT: &str = "agentero/0.6 (+https://github.com/nonsense-j/Agentero)";
 /// Branches searched when resolving by title, in preference order.
 const BRANCHES: [&str; 2] = ["arxiv", "venue"];
 /// A cold paper triggers real LLM generation upstream, which can take a while.

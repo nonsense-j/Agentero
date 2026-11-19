@@ -50,9 +50,9 @@ import {
 
 /** Same as README / homebrew-agentero Formula (headless CLI, not the desktop cask). */
 const CLI_BREW_INSTALL_COMMAND =
-	"brew tap poco-ai/agentero\nbrew install agentero";
+	"brew tap nonsense-j/agentero\nbrew install agentero";
 
-const GITHUB_REPO_URL = "https://github.com/poco-ai/Agentero";
+const GITHUB_REPO_URL = "https://github.com/nonsense-j/Agentero";
 
 export function AboutPane() {
 	const { t } = useTranslation("settings");

@@ -1511,7 +1511,7 @@ impl ServerHandler for AgenteroMcp {
         .with_server_info(
             Implementation::new("agentero", env!("CARGO_PKG_VERSION"))
                 .with_title("Agentero")
-                .with_website_url("https://agentero.poco-ai.com")
+                .with_website_url("https://github.com/nonsense-j/Agentero")
                 .with_icons(icons::server_icons()),
         )
     }
