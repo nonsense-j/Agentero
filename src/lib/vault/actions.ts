@@ -92,7 +92,6 @@ import {
 	setTabs,
 } from "@/lib/workspace/store";
 import { basenameOf } from "@/lib/workspace/tabs";
-import { isExcalidrawPath } from "@/lib/workspace/viewer";
 
 export async function activateVault(path: string): Promise<void> {
 	// Do not vaultHold here. The main window holds from `vault:opened` and
@@ -1017,17 +1016,7 @@ export async function confirmCreate(name: string): Promise<void> {
 				? createResearchTable(researchTableStem(trimmed))
 				: null;
 			if (table) table.fields[0].name = i18n.t("editor:researchTable.name");
-			const initialContent = table
-				? `${JSON.stringify(table, null, 2)}\n`
-				: isExcalidrawPath(trimmed)
-					? JSON.stringify({
-							type: "excalidraw",
-							version: 2,
-							source: "https://excalidraw.com",
-							elements: [],
-							appState: { collaborators: [] },
-						})
-					: "";
+			const initialContent = table ? `${JSON.stringify(table, null, 2)}\n` : "";
 			await writeVaultFile(full, initialContent);
 			await refreshTree(vaultPath);
 			openPath(full);
