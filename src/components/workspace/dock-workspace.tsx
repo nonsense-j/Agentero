@@ -89,7 +89,6 @@ import {
 	isExternalPathDrag,
 	isInternalDockDrag,
 	readingColumnAnchors,
-	rebalanceGridGroupWidths,
 	reconcileAfterLayoutRestore,
 	reconcilePanelMembership,
 	resolveDropOverlayModel,
@@ -547,16 +546,16 @@ export const DockWorkspace = memo(
 					const existing = api.getPanel(tab.id);
 					if (existing) {
 						existing.api.setActive();
-						rebalanceGridGroupWidths(api);
 						return;
 					}
 					syncingRef.current = true;
 					try {
+						// Only split the reference group; leave every other column's
+						// user-adjusted width untouched.
 						addPanelWithPlacement(api, tab, {
 							direction: "right",
 							referencePanelId,
 						});
-						rebalanceGridGroupWidths(api);
 					} finally {
 						endSync(api);
 					}
@@ -648,9 +647,12 @@ export const DockWorkspace = memo(
 					const resolved = readingColumnAnchors(
 						api,
 						cachedReadingColumnsRef.current,
+						tabsRef.current,
 					);
 					if (resolved && !api.hasMaximizedGroup()) {
 						cachedReadingColumnsRef.current = resolved;
+					} else if (!resolved) {
+						cachedReadingColumnsRef.current = null;
 					}
 					return resolved;
 				},
