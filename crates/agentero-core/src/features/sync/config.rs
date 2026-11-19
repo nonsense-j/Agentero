@@ -167,11 +167,6 @@ impl SyncBackendConfig {
         if self.git_branch.is_empty() {
             self.git_branch = default_git_branch();
         }
-        if self.backend == SyncBackendKind::Git {
-            // Git is a full-vault mirror; the partial scope filter has no
-            // meaning there (and is hidden in the settings UI).
-            self.scope = SyncScope::all();
-        }
         if !INTERVAL_CHOICES.contains(&self.interval_minutes) {
             self.interval_minutes = default_interval_minutes();
         }
@@ -726,13 +721,14 @@ mod tests {
     }
 
     #[test]
-    fn git_config_forces_full_scope() {
+    fn git_config_preserves_partial_scope() {
         let mut cfg = git_config("https://example.com/r.git", "main");
         cfg.scope = SyncScope {
             pdf: false,
-            source: false,
+            source: true,
             attachments: false,
         };
-        assert!(cfg.normalized().scope.is_all());
+        let scope = cfg.scope;
+        assert_eq!(cfg.normalized().scope, scope);
     }
 }

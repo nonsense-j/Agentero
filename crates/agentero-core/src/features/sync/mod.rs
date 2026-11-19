@@ -16,6 +16,7 @@ pub mod git;
 pub mod local;
 mod lock;
 mod s3;
+mod scope;
 pub mod snapshot;
 mod store;
 mod webdav;
