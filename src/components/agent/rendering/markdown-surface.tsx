@@ -5,8 +5,14 @@ import { code } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 import type { ComponentProps } from "react";
 import { memo } from "react";
-import { type PluginConfig, Streamdown } from "streamdown";
+import {
+	type AllowedTags,
+	defaultRemarkPlugins,
+	type PluginConfig,
+	Streamdown,
+} from "streamdown";
 import { cn } from "@/lib/core/utils";
+import { remarkHighlightToHtml } from "@/lib/markdown/highlight-to-html";
 import { AgentCitationLink } from "./agent-citation-link";
 import { PlainCodeBlock } from "./plain-code-block";
 import { PlainTable } from "./plain-table";
@@ -22,6 +28,26 @@ const streamdownPlugins: PluginConfig = {
 	code,
 	math: streamdownMath,
 };
+
+/**
+ * Passing `remarkPlugins` replaces Streamdown's defaults, so keep gfm and
+ * codeMeta ahead of the highlight transformer. Streamdown still appends the
+ * CJK/math remark plugins from `streamdownPlugins` afterwards.
+ */
+const streamdownRemarkPlugins = [
+	...Object.values(defaultRemarkPlugins),
+	remarkHighlightToHtml,
+];
+
+/**
+ * Models write `<u>` / `<mark>` inline HTML, but Streamdown's sanitize schema
+ * has neither tag, so the default pipeline strips the tags and leaves bare text
+ * (#1168). A non-empty `allowedTags` widens that schema and keeps the
+ * raw -> sanitize -> harden pipeline, so allow the two presentational tags (the
+ * default schema already covers sub/sup/kbd) and keep everything else
+ * sanitized.
+ */
+const streamdownAllowedTags: AllowedTags = { u: [], mark: [] };
 
 /**
  * Shared Streamdown surface for chat replies and Markdown inside OpenUI Text.
@@ -55,6 +81,8 @@ export const MarkdownSurface = memo(
 				}}
 				linkSafety={{ enabled: false }}
 				plugins={streamdownPlugins}
+				allowedTags={streamdownAllowedTags}
+				remarkPlugins={streamdownRemarkPlugins}
 				{...props}
 			>
 				{children}
