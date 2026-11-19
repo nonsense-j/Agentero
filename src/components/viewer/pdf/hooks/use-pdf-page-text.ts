@@ -31,6 +31,7 @@ import type { PdfVisualSessionTrace } from "@/lib/pdf/agent-trace";
 import { threadHasUserQuestion } from "@/lib/pdf/ask/schema";
 import type { PdfAskThread } from "@/lib/pdf/ask/types";
 import type { PdfHighlight } from "@/lib/pdf/highlight/types";
+import type { PageTextRect } from "@/lib/pdf/link-text";
 import {
 	type NormalizedRect,
 	normalizePageTextRects,
@@ -57,6 +58,7 @@ export type UsePdfPageTextOptions = {
 };
 
 export type PdfPageText = {
+	pageTextRects: ReadonlyMap<number, readonly PageTextRect[]>;
 	/** 0-based page index → normalized text rects (missing while unloaded). */
 	pageTextMap: Map<number, NormalizedRect[]>;
 	/** 0-based page index → external links detected from plain PDF text. */
@@ -96,6 +98,9 @@ export function usePdfPageText({
 	highlights,
 	visualTraces,
 }: UsePdfPageTextOptions): PdfPageText {
+	const [pageTextRects, setPageTextRects] = useState<
+		ReadonlyMap<number, readonly PageTextRect[]>
+	>(() => new Map());
 	const [pageTextMap, setPageTextMap] = useState(
 		() => new Map<number, NormalizedRect[]>(),
 	);
@@ -171,6 +176,7 @@ export function usePdfPageText({
 				.getPageTextRects(doc, page)
 				.toPromise()
 				.then((rects) => {
+					setPageTextRects((prev) => new Map(prev).set(pageIndex, rects));
 					const norm = normalizePageTextRects(rects, page.size);
 					const textLinks = detectPdfTextLinks(rects);
 					setPageTextMap((prev) => {
@@ -195,5 +201,5 @@ export function usePdfPageText({
 		}
 	}, [engine, docCap, docId, totalPages, settledPage, markPagesKey]);
 
-	return { pageTextMap, pageTextLinkMap, pageTextMapRef };
+	return { pageTextRects, pageTextMap, pageTextLinkMap, pageTextMapRef };
 }

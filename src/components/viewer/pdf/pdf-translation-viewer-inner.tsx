@@ -330,6 +330,8 @@ export function PdfTranslationViewerInner({
 		hasCitationMatch,
 		citationImport,
 	} = usePdfCitations({
+		engineRef,
+		docCapRef,
 		docId,
 		annotationCap: null,
 		hostRef,

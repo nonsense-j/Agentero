@@ -644,7 +644,7 @@ function PdfViewerInner({
 		highlights,
 		highlightsRef,
 		highlightAnchors,
-		citationLinks,
+		citationLinks: nativeCitationLinks,
 		createHighlights,
 		updateHighlightComment,
 		updateHighlightColor,
@@ -697,17 +697,18 @@ function PdfViewerInner({
 	 * Per-page 0–1 text rects from PDFium `getPageTextRects` — used to decide
 	 * whether a gutter pin sits on real glyphs (translucent) vs in a free gutter.
 	 */
-	const { pageTextMap, pageTextLinkMap, pageTextMapRef } = usePdfPageText({
-		engine,
-		docCap,
-		docId,
-		totalPages,
-		currentPage,
-		translates,
-		threads,
-		highlights,
-		visualTraces,
-	});
+	const { pageTextMap, pageTextRects, pageTextLinkMap, pageTextMapRef } =
+		usePdfPageText({
+			engine,
+			docCap,
+			docId,
+			totalPages,
+			currentPage,
+			translates,
+			threads,
+			highlights,
+			visualTraces,
+		});
 	/**
 	 * Text links per page with native-link overlap excluded. Array identities
 	 * are reused per page when that page's set did not change (the source maps
@@ -722,7 +723,7 @@ function PdfViewerInner({
 		for (const [pageIndex, links] of pageTextLinkMap) {
 			const filtered = excludeOverlappingPdfTextLinks(
 				links,
-				citationLinks.get(pageIndex) ?? [],
+				nativeCitationLinks.get(pageIndex) ?? [],
 			);
 			const prevLinks = prev?.get(pageIndex);
 			if (
@@ -739,7 +740,7 @@ function PdfViewerInner({
 		if (!changed && prev) return prev;
 		textLinksRef.current = next;
 		return next;
-	}, [pageTextLinkMap, citationLinks]);
+	}, [pageTextLinkMap, nativeCitationLinks]);
 
 	const hostRef = useRef<HTMLDivElement>(null);
 	const selectionCommentEngagedRef = useRef(false);
@@ -1042,6 +1043,7 @@ function PdfViewerInner({
 
 	const {
 		citationPreview,
+		citationLinks,
 		scheduleCitationHide,
 		markCitationHoverEnter,
 		clearCitationPreview,
@@ -1051,6 +1053,10 @@ function PdfViewerInner({
 		citationImport,
 		pageOrigins,
 	} = usePdfCitations({
+		pageTextRects,
+		nativeCitationLinks,
+		engineRef,
+		docCapRef,
 		docId,
 		annotationCap,
 		hostRef,
