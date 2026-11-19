@@ -168,28 +168,64 @@ fn target_from_uri(uri: &tauri::http::Uri) -> Option<Target> {
     }
 }
 
-/// The proxy client: shared proxy config, but every redirect hop must itself
-/// be allowlisted — reqwest's default follow would happily relay a hop into
-/// hosts the frontend never allowed.
-fn proxy_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        crate::core::http::client_builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= crate::core::http::DEFAULT_REDIRECT_LIMIT {
-                    return attempt.error("too many redirects");
-                }
-                match attempt.url().host_str() {
-                    Some(host) if allowlist::is_allowed(host) => attempt.follow(),
-                    // Error rather than `stop()`: a passed-through 3xx would
-                    // navigate the frame to a real origin and silently drop
-                    // the bridge.
-                    _ => attempt.error("agentero-web: redirect target not allowed"),
-                }
-            }))
-            .build()
-            .expect("agentero-web proxy client builds")
-    })
+/// The proxy client: shared proxy config (rebuilt when the effective proxy
+/// changes, matching `http::shared_client`), bounded timeouts so stalled
+/// upstreams cannot wedge callers indefinitely, and an allowlist-checked
+/// redirect policy so reqwest's default follow cannot relay into hosts the
+/// frontend never allowed.
+fn proxy_client() -> Result<reqwest::Client, String> {
+    use std::sync::{OnceLock, RwLock};
+    use std::time::Duration;
+
+    struct CachedProxyClient {
+        proxy: Option<String>,
+        client: reqwest::Client,
+    }
+
+    static CLIENT: OnceLock<RwLock<Option<CachedProxyClient>>> = OnceLock::new();
+    let slot = CLIENT.get_or_init(|| RwLock::new(None));
+    let proxy = crate::core::http::effective_proxy_url();
+
+    if let Ok(guard) = slot.read() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.proxy == proxy {
+                return Ok(cached.client.clone());
+            }
+        }
+    }
+
+    let client = crate::core::http::client_builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(45))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(8)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= crate::core::http::DEFAULT_REDIRECT_LIMIT {
+                return attempt.error("too many redirects");
+            }
+            match attempt.url().host_str() {
+                Some(host) if allowlist::is_allowed(host) => attempt.follow(),
+                // Error rather than `stop()`: a passed-through 3xx would
+                // navigate the frame to a real origin and silently drop
+                // the bridge.
+                _ => attempt.error("agentero-web: redirect target not allowed"),
+            }
+        }))
+        .build()
+        .map_err(|e| format!("agentero-web client build failed: {e}"))?;
+
+    if let Ok(mut guard) = slot.write() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.proxy == proxy {
+                return Ok(cached.client.clone());
+            }
+        }
+        *guard = Some(CachedProxyClient {
+            proxy,
+            client: client.clone(),
+        });
+    }
+    Ok(client)
 }
 
 fn response(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -355,7 +391,7 @@ pub fn handle(request: tauri::http::Request<Vec<u8>>, responder: tauri::UriSchem
 
     tauri::async_runtime::spawn(async move {
         let result = async {
-            let client = proxy_client();
+            let client = proxy_client()?;
             let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
                 .unwrap_or(reqwest::Method::GET);
             let mut outgoing = client.request(method, url).header(
