@@ -2,10 +2,10 @@
   <img src="docs/assets/hero.png" alt="Agentero" width="100%" />
 </p>
 
-<h3 align="center">An All-in-One Research Workbench Built for Human–Agent Collaboration</h3>
+<h3 align="center">A Focused, Local-First Desktop Research Workbench for Reading, Discovery & Agent Collaboration</h3>
 
 <p align="center">
-  Keep the PDF reading experience humans love, while giving models clean, structured context; papers, notes, and interaction records all stay on your local machine.
+  A streamlined, locally redesigned fork of <a href="https://github.com/poco-ai/Agentero"><b>poco-ai/Agentero</b></a>: preserving comfortable PDF reading and bi-directional Markdown notes while expanding local Paper Collection discovery, citation lineage, survey generation, and CARSI institutional access — lean, zero-account, and 100% local-first.
 </p>
 
 <p align="center">
@@ -13,199 +13,105 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/poco-ai/agentero/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/poco-ai/agentero?style=for-the-badge&logo=github&color=E3B341&labelColor=20242D"></a>
-  <a href="https://github.com/poco-ai/agentero/releases"><img alt="release" src="https://img.shields.io/github/v/release/poco-ai/agentero?include_prereleases&style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
-  <a href="https://github.com/poco-ai/agentero/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/poco-ai/agentero?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
-  <a href="https://agentero.app/"><img alt="website" src="https://img.shields.io/badge/website-agentero.app-5319E7?style=for-the-badge&labelColor=20242D"></a>
-  <a href="https://agentero-docs.poco-ai.com"><img alt="docs" src="https://img.shields.io/badge/docs-online-5319E7?style=for-the-badge&logo=mkdocs&logoColor=white&labelColor=20242D"></a>
+  <a href="https://github.com/nonsense-j/Agentero/releases"><img alt="release" src="https://img.shields.io/github/v/release/nonsense-j/Agentero?include_prereleases&style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
+  <a href="https://github.com/nonsense-j/Agentero/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/nonsense-j/Agentero?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
+  <a href="https://github.com/poco-ai/Agentero"><img alt="upstream" src="https://img.shields.io/badge/Upstream-poco--ai%2FAgentero-5319E7?style=for-the-badge&logo=github&logoColor=white&labelColor=20242D"></a>
 </p>
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/119836?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-119836" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/119836" alt="poco-ai%2FAgentero | Trendshift" width="250" height="55"/></a>
-  <a href="https://trendshift.io/repositories/119836?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-119836" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/119836/daily?language=TypeScript" alt="poco-ai%2FAgentero | Trendshift" width="250" height="55"/></a>
-</p>
-
-If this project helps you, please **give it a star** on GitHub!
-
-<p align="center">
-  <a href="https://github.com/poco-ai/agentero/stargazers"><img src="https://github.com/user-attachments/assets/1d49b049-89ae-4992-a92d-d2411c8053b6" alt="Give me a star" width="480" /></a>
-</p>
+> **Acknowledgements to Upstream**: This repository is a community fork of **[poco-ai/Agentero](https://github.com/poco-ai/Agentero)**. The foundational local-first Vault/Catalog architecture, EmbedPDF viewer and layout-analysis pipeline, Plate bi-directional Markdown editor, ACP local agent client, and built-in MCP server all originate from the upstream Agentero team. We selectively sync upstream bug fixes and curated improvements — our sincere thanks to the original authors and all upstream contributors!
 
 ---
 
-## Background & Motivation
+## Differences from Upstream Agentero
 
-Zotero is an excellent piece of software for academic reference management. It is mature, stable, and has helped many researchers build their first literature archives.
+This fork focuses on a **lean, local-first desktop scholarly reading and discovery workbench**, pruning non-core heavy subsystems while redesigning key discovery and institutional workflows:
 
-However, when it comes to daily research and deep use of large language models (LLMs) and agents, the traditional tool chain exposes a few breakpoints:
-
-* **Severely fragmented context**: papers live in Zotero, notes in Obsidian, and the reasoning and analysis done with models remain scattered across web chat windows. The three are isolated from each other; when you want an agent to reason deeply over a specific paper together with your past notes, you have to copy and paste back and forth by hand.
-* **Paper formats are unfriendly to models**: humans are used to reading well-typeset PDFs, but for models, parsing two-column layouts, multi-page tables, complex math, and cross-references is extremely costly and prone to recognition errors and hallucinations. Structured Markdown and LaTeX are far easier for models to understand accurately.
-* **High maintenance cost**: high-frequency needs such as AI-assisted reading, full-text translation, and note syncing usually require installing and tuning multiple community plugins — a high configuration barrier, with compatibility issues whenever versions change.
-* **Limited batch automation**: the large number of papers discovered via Deep Research or automated search tools still need to be saved manually, one by one in the browser, making them hard to fit into a smooth batch research workflow.
-
-**Agentero is not meant to replace Zotero. It explores a new way for humans and agents to handle research context together**:
-* **Humans** pose research questions, make scholarly judgments, read in depth, and derive core conclusions;
-* **Agents** handle batch retrieval and filtering, metadata fetching, figure/formula extraction, citation graph mapping, and basic summarization.
+| Area | Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero) | This Fork ([nonsense-j/Agentero](https://github.com/nonsense-j/Agentero)) |
+|---|---|---|
+| **Product Focus** | Broad all-in-one platform (reading, LaTeX writing/compiling, mobile apps, hosted cloud services, plugins, etc.) | Streamlined **desktop-only workbench** focused on scholarly reading, paper discovery, literature survey, and local Agent collaboration |
+| **Plaza & Paper Discovery** | External browsing feeds (Cool Papers, ModelScope, Papers with Code, RSS, arXiv recs) | Redesigned around a local `collection.sqlite` paper pool into five native panels: **Paper Collection** (28 official main-track venues + arXiv pool, pre-baked Seed sync, LLM keyword enrichment), **Paper Discover** (fast FTS5 search, in-pool citation lineage graph, Deep Search), **Paper Survey** (cited Related Work & HTML report generation), **Paper Recommend**, and **CCF Deadline** |
+| **Institutional Access** | Generic Institution Proxy Gateway auto-detection | Built-in university **CARSI SSO** login and WebView session probing for publisher access detection (IEEE, ACM, etc.) and authenticated PDF ingestion |
+| **Subsystem & Dependency Pruning** | Includes TeX/Writing compilation, iOS/Android mobile & Bridge, Remote Vault / SSH tunnels, Account & Cloud Credits, Word/Zhihu/Telemetry integrations, PDF Reflow, local layout model assets, and Tesseract OCR | Removes all non-core heavy subsystems listed on the left plus `@excalidraw/excalidraw` whiteboard support — zero accounts, zero telemetry, smaller bundle and maintenance surface |
+| **UI & Interaction Philosophy** | Rapidly evolving into Zen multi-session workspace, offline dictionary overhaul, click-to-select layout elements, fullscreen immersive mode, and rail-peek comment trays | Emphasizes restraint, typography, and reading stability: unified styling for PDF margin notes, selection cards, Markdown note typography, Streamdown and Deep Search reports; retains visual-region framing and fixed gutter layout while selectively adopting focused upstream wins (400% zoom, copy rendered formula as LaTeX, expanded local citation previews, optional outside-click dismissal for translation cards) |
+| **Translation & LLM Setup** | Drops Google Translate / DeepLX in favor of hosted/commercial flows | Keeps zero-key Google Translate / DeepLX options alongside enhanced **OpenAI-compatible** support (configurable 1–8 full-text concurrency, simplified 3-field OpenAI-compatible keyword LLM settings with model picker) |
+| **Build & Release Flow** | Full cross-platform desktop + standalone CLI + iOS TestFlight + Homebrew Tap | Split per-platform GitHub Actions desktop builds (Windows x64 NSIS, macOS Apple Silicon & Intel) supporting unsigned fork builds out of the box |
 
 ---
 
 ## Core Features
 
-### 1. Structured Reading & Notes
-* **PDF reading and annotation**: outline navigation, fit-page and fit-width modes, smooth text selection, highlights and annotations, and full-text search.
-* **Figure & formula extraction**: automatically parses math formulas, algorithm pseudocode, and tables into structured Markdown and LaTeX content, ensuring agents receive accurate context when invoked.
-* **Bi-directional linked notes**: a built-in WYSIWYG Markdown editor with `[[wikilinks]]`, `/` slash commands, and live LaTeX rendering, natively linking notes to papers.
-* **Multi-mode translation**: selection-based, side-by-side page-level, and full-text translation, with built-in available channels and support for custom API keys (BYOK).
+### 1. Redesigned Plaza: Paper Collection, Discovery & Survey
+- **Paper Collection**: Local `collection.sqlite` pool covering 28 official main-track venues and arXiv feeds, with one-click GitHub Release Seed sync, cancellable background refreshes, synonym-canonicalized search, and OpenAlex / Semantic Scholar / LLM keyword enrichment.
+- **Paper Discover**: Instant local FTS5 Fast Search, interactive in-pool **Citation Lineage Graph** view, and multi-step **Deep Search** research synthesis.
+- **Paper Survey**: Combines your local Vault, paper pool, and the `plaza_survey` MCP workflow (with TeX Introduction extraction) to produce cited Related Work drafts and exportable HTML survey reports.
+- **Paper Recommend & CCF Deadline**: Local-library-based paper recommendations and upcoming CCF conference deadline tracking.
+
+### 2. Structured PDF Reading, Annotations & Bi-Directional Notes
+- **PDF Reading & Annotation**: True-scale EmbedPDF rendering up to **400% zoom**, outline navigation, full-text search, smooth text selection, multi-color highlights, margin comment cards, and **visual region framing** (annotate figures, tables, algorithms, and equations or ask your Agent directly).
+- **Layout Analysis & Citation Previews**: Connects to remote or self-hosted layout providers (Paddle, MinerU 4.1, OpenAI-compatible) for structured figure/table/formula indexing; parses grouped text citations and local references with expandable local-paper preview cards, plus one-click arXiv and DOI links in the sidebar.
+- **Multi-Mode Translation**: Selection translation (with optional outside-click dismissal), single-page/dual-pane and full-document layout translation across free zero-key engines, DeepL, Azure, Google Cloud, OpenAI-compatible endpoints (configurable 1–8 concurrency), and Agent translation.
+- **Bi-Directional Markdown Notes**: Built-in Plate WYSIWYG editor paired side-by-side with PDFs (`⌘\` / `Ctrl+\` toggles the split and remembers width), supporting `[[wikilinks]]`, Obsidian Callouts, interactive pan/zoom Mermaid diagrams, `==highlight==` (including CJK-adjacent input) and `<u>underline</u>`, single-line `$$`/`\[`/`\(` and `\tag` block math normalization, and **one-click / context-menu LaTeX source copy** on rendered formulas.
 
 <p align="center">
   <img src="docs/assets/agent.png" alt="PDF reading with agent assistance" width="90%" />
   <br/>
-  <sub>Split-view reading and analysis: highlights and annotations on the left, a local agent answering and reasoning over accurate structured context on the right</sub>
+  <sub>Split-view reading and analysis: PDF highlights and annotations on the left, local Agent reasoning over structured context on the right</sub>
 </p>
 
 <p align="center">
   <img src="docs/assets/translate.png" alt="Selection translation linked to notes" width="90%" />
   <br/>
-  <sub>Selection translation with live capture: points extracted while reading flow straight into local Markdown notes</sub>
+  <sub>Selection translation and note capture: key insights flow straight into local Markdown notes</sub>
 </p>
 
----
+### 3. Open Agent Protocol (ACP) & Local MCP Server
+- **BYOA Local Agents (ACP)**: Built on the Agent Client Protocol to connect local agents such as Claude Code, Codex, OpenCode, and Antigravity CLI (`agy` with official installer lifecycle), supporting inline selection chips, in-page Quick Chat, structured ask-user cards, queued turns, and granular permissions — all with local context.
+- **Built-in MCP Server**: Optional loopback Streamable HTTP MCP server (`127.0.0.1:8765/mcp`) letting external AI clients query your Vault, read notes, and import papers.
+- **Headless CLI (`agentero-cli`)**: Command-line interface for headless Vault/Catalog operations, paper tag management, BibTeX import/export, and collection seed baking/importing.
 
-### 2. Open Agent Protocols & Automation Interfaces
-* **Local agents via ACP**: built on the Agent Client Protocol, supports connecting various locally running agents (e.g., Claude Code, OpenCode, Codex, or local models) — no vendor lock-in, with all context kept fully local.
-* **Built-in MCP (Model Context Protocol)**: runs as an MCP server, letting external clients such as ChatGPT Web and Claude Desktop query your local library as context.
-* **CLI for hackers**: a built-in headless CLI for scripted workflows such as batch paper import, metadata extraction, and note writing.
-
-<p align="center">
-  <img src="docs/assets/image.png" alt="Built-in MCP" width="90%" />
-  <br/>
-  <sub>Built-in MCP server connects your local library seamlessly to external AI clients</sub>
-</p>
-
----
-
-### 3. Academic Radar & Paper Discovery
-* **Multi-source ingestion**: built-in integration with [Cool Papers](https://papers.cool/) and the ModelScope community — browse and archive papers in one click inside the app; academic RSS subscriptions supported.
-* **Personalized recommendations**: daily arXiv recommendations based on the content of your local library.
-* **Automatic citation mapping**: parses reference lists automatically with one-click batch import; fetches publisher metadata and tracks citations forward.
-
-<p align="center">
-  <img src="docs/assets/coolpaper.png" alt="Cool Papers integration" width="90%" />
-  <br/>
-  <sub>Browse trending Cool Papers inside the app and import them into your local knowledge base in one click</sub>
-</p>
-
----
-
-### 4. Zotero Compatibility & Transparent Local Storage
-* **Seamless Zotero migration**: import an entire Zotero database in one click, keeping tags, notes, and attachments; works with the Zotero browser extension to save papers from the web; export to BibTeX / BibLaTeX.
-* **Transparent local folders**: no proprietary database or obfuscated directory layout — papers and notes are stored as plain files (PDF, Markdown) in a regular folder structure that any external editor can read.
-* **Multi-device sync & remote access**: sync with any S3-compatible cloud storage; access a library deployed on a remote server over an SSH tunnel.
-
----
-
-## UI & Feature Preview
-
-<details>
-<summary><b>Click to expand: more screenshots (RSS subscriptions, Skill extensions, agent settings, S3 sync, themes)</b></summary>
-<br/>
-
-#### 1. Academic RSS subscriptions
-Track academic blogs, lab homepages, and frontier updates:
-<p align="center">
-  <img src="docs/assets/rss.png" alt="RSS subscriptions" width="85%" />
-</p>
-
-#### 2. Agent Skill extensions
-Browse and install community research skills to extend close-reading and writing analysis:
-<p align="center">
-  <img src="docs/assets/skill-import.png" alt="Skill extensions" width="85%" />
-</p>
-
-#### 3. Agent & connection settings
-Manage, upgrade, and switch local agents via ACP:
-<p align="center">
-  <img src="docs/assets/agent-setting.png" alt="Agent settings" width="85%" />
-</p>
-
-#### 4. S3-compatible cloud sync
-Configure private or commercial S3 storage to sync your knowledge base across devices:
-<p align="center">
-  <img src="docs/assets/s3-sync.png" alt="S3 sync settings" width="85%" />
-</p>
-
-#### 5. Multiple themes
-Light/dark and multiple color schemes, following your system appearance:
-<p align="center">
-  <img src="docs/assets/theme.png" alt="Theme settings" width="85%" />
-</p>
-
-</details>
+### 4. Institutional Access, Zotero Compatibility & Transparent Local Storage
+- **CARSI SSO & Flexible Ingestion**: Import papers via DOI / arXiv / title magic wand, PDF drag-and-drop, university CARSI SSO session support, or the local `127.0.0.1:23119` Zotero Connector browser extension.
+- **Zotero Migration & BibTeX**: Import existing local Zotero libraries and export BibTeX / BibLaTeX.
+- **Plain-File Local Storage & Self-Hosted Sync**: PDFs, Markdown notes, marks (`marks/`), and layout sidecars (`source/`) live as standard files in your Vault alongside `.agentero/catalog.sqlite`, readable by any external tool. Sync across devices using your own **S3-compatible storage, WebDAV, or Git** with nested paper-scope controls.
 
 ---
 
 ## Quick Start
 
-### Desktop app (macOS / Windows / Linux)
+### 1. Download Desktop Installers (Windows / macOS)
 
-Download prebuilt installers for each platform from the **[official website](https://agentero.app/)** or **[GitHub Releases](https://github.com/poco-ai/agentero/releases)**.
+Download prebuilt installers from **[GitHub Releases](https://github.com/nonsense-j/Agentero/releases)**:
+- **Windows (x64)**: `*-setup.exe` (NSIS installer)
+- **macOS (Apple Silicon)**: `*_aarch64.dmg`
+- **macOS (Intel)**: `*_x64.dmg`
 
-#### macOS (Homebrew)
-```bash
-brew tap poco-ai/agentero
-brew install --cask agentero
+### 2. Run & Build from Source
 
-```
-
-> **Note for Linux users**: Ubuntu 22.04+ is required (`webkit2gtk 4.1`). See the [installation docs](docs/usage/getting-started.md) for details.
-
----
-
-### Command-line tool (CLI)
-
-To manage your library from the terminal or scripted workflows:
+Prerequisites: Node.js 24+, pnpm, and the Rust stable toolchain (MSVC Build Tools on Windows).
 
 ```bash
-brew tap poco-ai/agentero
-brew install agentero
+# Install frontend dependencies
+pnpm install
 
-# List commands and options
-agentero --help
+# Launch desktop app in dev mode (Frontend + Rust Host)
+pnpm tauri dev
 
+# Build desktop installer bundle
+pnpm tauri build
+
+# Optional: build headless CLI
+cargo build -p agentero-cli --release
 ```
 
----
-
-### Use Agentero in more places
-
-- **DeepSeek Harness (dsh) plugin**: use the Agentero library, notes, and PDF reader directly inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Install with `dsh plugin --profile web add @poco-ai/agentero-dsh`; see [agentero-dsh-plugin](https://github.com/poco-ai/agentero-dsh-plugin).
+For architecture and developer documentation, see [docs/architecture.md](docs/architecture.md), [docs/frontend/](docs/frontend/index.md), and [docs/backend/](docs/backend/index.md).
 
 ---
 
-## Acknowledgements & Community
+## Acknowledgements
 
-* Thanks to the [LinuxDo](https://linux.do/) and [ModelScope](https://modelscope.cn/) communities for their suggestions and feedback during early testing.
-* Thanks to [AtomGit](https://gitcode.com/poco-ai/Agentero) for hosting the domestic mirror.
-
-### Community chat
-
-<p align="center">
-  <img src="docs/assets/community-qr.png" alt="Agentero WeChat group QR code" width="240" />
-  <br/>
-  <sub>Scan to join the WeChat user group (Chinese-speaking) for tips, feedback, and release news. The QR code is valid for 7 days; if it has expired, leave a note in the <a href="https://github.com/poco-ai/Agentero/issues">Issues</a>.</sub>
-</p>
-
-If Agentero helps your daily research, please consider giving the project a **⭐ Star** on GitHub.
-
-Thanks to all contributors!
-
-![contributors img Made with contrib.rocks](https://contrib.rocks/image?repo=poco-ai/Agentero)
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=poco-ai/agentero&type=date&legend=top-left&sealed_token=dKsoXrNYkG3u-nEL3OLp0_aTrlN-GjDpvVEVJvC3xjH13q3viEwwkkB5m6LYT3iKu6LZXtZpQAXalvBwaFQdYgVTjTA1Dzp6NGe_BUQXA1cMt57wNdrYvA)](https://www.star-history.com/?type=date&repos=poco-ai%2Fagentero)
+- **Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero)**: Deepest thanks to the original Agentero team and all upstream contributors for designing and open-sourcing the local-first research workbench architecture and open protocol stack. This fork builds upon their work with streamlined scope and local redesigns while honoring upstream licensing and attribution.
+- Thanks to the open-source projects and scholarly data services powering this workbench, including Tauri, React, EmbedPDF, Plate, Dockview, shadcn/ui, Streamdown, OpenAlex, Semantic Scholar, and CCF Deadlines.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). Third-party components and their licenses are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
+Licensed under the [MIT License](LICENSE). Third-party components and licenses are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
