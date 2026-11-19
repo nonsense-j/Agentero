@@ -1000,6 +1000,8 @@ fn classify_git_error(stderr: &str) -> &'static str {
         || lower.contains("host key verification failed")
     {
         "git_auth_failed"
+    } else if lower.contains("ssl") || lower.contains("certificate") || lower.contains("tls") {
+        "git_tls_failed"
     } else {
         "git_failed"
     }
@@ -1061,6 +1063,25 @@ fn now() -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn classifies_auth_and_tls_failures() {
+        assert_eq!(
+            classify_git_error("fatal: Authentication failed for 'https://example.com/'"),
+            "git_auth_failed"
+        );
+        assert_eq!(
+            classify_git_error(
+                "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+            ),
+            "git_auth_failed"
+        );
+        assert_eq!(
+            classify_git_error("SSL certificate problem: self-signed certificate"),
+            "git_tls_failed"
+        );
+        assert_eq!(classify_git_error("nothing to commit"), "git_failed");
+    }
 
     fn git_exe() -> Option<PathBuf> {
         crate::process::resolve_command("git")

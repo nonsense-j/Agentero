@@ -43,6 +43,7 @@ import {
 import { formatLocaleTimestamp } from "@/i18n";
 import { formatBytes } from "@/lib/core/background-tasks";
 import { events } from "@/lib/core/bindings";
+import type { ApiError } from "@/lib/core/ipc";
 import { errorMessage, notifyError, notifySuccess } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { isTauri } from "@/lib/core/tauri";
@@ -264,6 +265,19 @@ export function SyncPane({ vaultPath }: { vaultPath: string | null }) {
 			? WEBDAV_PROVIDER_LINKS
 			: SYNC_PROVIDER_LINKS;
 
+	const reportSyncError = (error: unknown) => {
+		const detail = errorMessage(error);
+		const code = error instanceof Error ? (error as ApiError).code : undefined;
+		const message =
+			code === "git_auth_failed"
+				? t("sync.gitAuthFailed", { detail })
+				: code === "git_tls_failed"
+					? t("sync.gitTlsFailed", { detail })
+					: detail;
+		setSyncError(message);
+		notifyError(message);
+	};
+
 	const save = async () => {
 		setSaving(true);
 		try {
@@ -273,9 +287,7 @@ export function SyncPane({ vaultPath }: { vaultPath: string | null }) {
 			setSyncError(null);
 			notifySuccess(t("sync.saved"));
 		} catch (error) {
-			const message = errorMessage(error);
-			setSyncError(message);
-			notifyError(message);
+			reportSyncError(error);
 		} finally {
 			setSaving(false);
 		}
@@ -298,9 +310,7 @@ export function SyncPane({ vaultPath }: { vaultPath: string | null }) {
 				);
 			}
 		} catch (error) {
-			const message = errorMessage(error);
-			setSyncError(message);
-			notifyError(message);
+			reportSyncError(error);
 		} finally {
 			setSyncing(false);
 			setProgress(null);
@@ -316,9 +326,7 @@ export function SyncPane({ vaultPath }: { vaultPath: string | null }) {
 			setSyncError(null);
 			void refresh().catch(() => undefined);
 		} catch (error) {
-			const message = errorMessage(error);
-			setSyncError(message);
-			notifyError(message);
+			reportSyncError(error);
 		}
 	};
 
