@@ -49,6 +49,7 @@ export type SelectionActionMenuProps = {
 	anchorRef?: RefObject<HTMLElement | null>;
 	expandingRef?: RefObject<HTMLElement | null>;
 	expandedWidth?: number;
+	collapsedWidth?: number;
 };
 
 const EDGE = 12;
@@ -114,6 +115,7 @@ export function SelectionActionMenu({
 	anchorRef,
 	expandingRef,
 	expandedWidth = 0,
+	collapsedWidth = 0,
 }: SelectionActionMenuProps) {
 	const { t } = useTranslation("viewer");
 	// Suspend dockview drag-and-drop while this toolbar floats over the tab
@@ -132,29 +134,35 @@ export function SelectionActionMenu({
 	useLayoutEffect(() => {
 		const menu = menuRef.current;
 		if (!menu) return;
+		let leadingWidth: number | null = null;
 		const place = () => {
 			const rect = menu.getBoundingClientRect();
 			const divider = anchorRef?.current?.getBoundingClientRect();
-			// With a cursor endpoint, center the whole bar on it. Legacy
-			// selection-center anchors keep the palette/action divider fixed so
-			// expanding the color stack never moves the actions.
-			const anchor =
-				screen.cursorX != null
-					? rect.left + rect.width / 2
-					: divider
-						? divider.left + divider.width / 2
-						: rect.left + rect.width / 2;
-			// Measure the action side, so labels and plugin actions need no estimates.
-			// Keep `right` fixed while the color stack expands to the left.
+			const palette = expandingRef?.current?.getBoundingClientRect();
+			// Measure from the palette's right edge, which stays fixed as it fans
+			// left. Subtracting its animated width from the toolbar width combines
+			// two independently rounded measurements and moves the action buttons.
+			const trailingWidth = palette ? rect.right - palette.right : rect.width;
+			leadingWidth ??= palette ? palette.left - rect.left : 0;
 			const reservedWidth =
-				rect.width +
-				(expandingRef?.current
-					? expandedWidth - expandingRef.current.getBoundingClientRect().width
-					: 0);
-			// Center the bar on the gesture endpoint, not the selection center.
+				leadingWidth + trailingWidth + (palette ? expandedWidth : 0);
+			// Anchor to the collapsed bar so a palette that fans out left does not
+			// also push the actions right: the right edge stays put while the
+			// palette fieldset grows. Only the initial (collapsed) center follows
+			// the cursor endpoint.
+			const collapsedTotalWidth =
+				leadingWidth + trailingWidth + (palette ? collapsedWidth : 0);
+			// Center the collapsed bar on the gesture endpoint, not the selection
+			// center; legacy anchors keep the palette/action divider fixed.
 			const anchorX = screen.cursorX ?? screen.x;
 			const right = clamp(
-				window.innerWidth - anchorX - (rect.right - anchor),
+				window.innerWidth -
+					anchorX -
+					(screen.cursorX != null
+						? collapsedTotalWidth / 2
+						: divider
+							? rect.right - (divider.left + divider.width / 2)
+							: rect.width / 2),
 				EDGE,
 				Math.max(EDGE, window.innerWidth - reservedWidth - EDGE),
 			);
@@ -215,6 +223,7 @@ export function SelectionActionMenu({
 		anchorRef,
 		expandingRef,
 		expandedWidth,
+		collapsedWidth,
 	]);
 
 	return (
