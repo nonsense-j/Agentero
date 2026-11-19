@@ -241,9 +241,11 @@ function installMathClickCopy(doc: Document): void {
 		const wrapper = target?.closest<HTMLElement>("[data-math-copy]");
 		if (!target || !wrapper) return;
 		const button = target.closest("[data-math-copy-button]");
+		const formula = wrapper.hasAttribute("data-math-copy-formula");
 		if (
 			!button &&
-			(!doc.getSelection()?.isCollapsed || !target.closest(KATEX_SELECTOR))
+			(!doc.getSelection()?.isCollapsed ||
+				(!formula && !target.closest(RENDERED_MATH_SELECTOR)))
 		)
 			return;
 		const tex = wrapper.dataset.mathCopyTex ?? katexTexFromNode(wrapper);
