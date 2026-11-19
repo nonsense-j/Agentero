@@ -20,7 +20,6 @@ use super::store::{
     same_work_by_title_and_authors, PAPER_SUMMARY_COL_COUNT, PAPER_SUMMARY_SELECT_COLS,
 };
 
-const MAX_LINEAGE_NEIGHBORS: usize = 40;
 const MAX_SHARED_REF_PEERS: usize = 20;
 const MIN_SHARED_REF_COUNT: i64 = 3;
 const MAX_SUBGRAPH_SHARED_DEGREE: usize = 6;
@@ -242,14 +241,19 @@ pub(crate) fn paper_lineage_conn(
     conn: &Connection,
     args: &CollectionPaperLineageArgs,
 ) -> Result<CollectionPaperLineageOut, AppError> {
+    let empty_lineage = || CollectionPaperLineageOut {
+        cited_by_count: 0,
+        references_count: 0,
+        shared_ref_count: 0,
+        cited_by_in_pool: Vec::new(),
+        references_in_pool: Vec::new(),
+        shared_ref_peers: Vec::new(),
+        vault_matches: Vec::new(),
+    };
+
     let target_id = args.id.trim();
     if target_id.is_empty() {
-        return Ok(CollectionPaperLineageOut {
-            cited_by_in_pool: Vec::new(),
-            references_in_pool: Vec::new(),
-            shared_ref_peers: Vec::new(),
-            vault_matches: Vec::new(),
-        });
+        return Ok(empty_lineage());
     }
 
     struct TargetLineageSeed {
@@ -284,21 +288,11 @@ pub(crate) fn paper_lineage_conn(
         arxiv_id: target_arxiv,
     }) = target_row
     else {
-        return Ok(CollectionPaperLineageOut {
-            cited_by_in_pool: Vec::new(),
-            references_in_pool: Vec::new(),
-            shared_ref_peers: Vec::new(),
-            vault_matches: Vec::new(),
-        });
+        return Ok(empty_lineage());
     };
 
     if target_work_id <= 0 {
-        return Ok(CollectionPaperLineageOut {
-            cited_by_in_pool: Vec::new(),
-            references_in_pool: Vec::new(),
-            shared_ref_peers: Vec::new(),
-            vault_matches: Vec::new(),
-        });
+        return Ok(empty_lineage());
     }
 
     // 1. In-pool incoming citations (`cited_by_in_pool`)
@@ -349,6 +343,29 @@ pub(crate) fn paper_lineage_conn(
         rows.collect::<Result<Vec<_>, _>>()?
     };
 
+    // 4. Personal Vault cross-matches (`"self"` + `"referenced"`)
+    let vault_matches = compute_vault_matches_for_work(
+        conn,
+        target_work_id,
+        &target_title,
+        &serde_json::from_str::<Vec<String>>(&target_authors_json).unwrap_or_default(),
+        target_doi.as_deref(),
+        target_arxiv.as_deref(),
+        args.vault_path.as_deref(),
+    )?;
+
+    if args.counts_only.unwrap_or(false) {
+        return Ok(CollectionPaperLineageOut {
+            cited_by_count: citing_work_ids.len(),
+            references_count: cited_work_ids.len(),
+            shared_ref_count: coupled_pairs.len(),
+            cited_by_in_pool: Vec::new(),
+            references_in_pool: Vec::new(),
+            shared_ref_peers: Vec::new(),
+            vault_matches,
+        });
+    }
+
     let mut all_needed_wids: Vec<i64> =
         Vec::with_capacity(citing_work_ids.len() + cited_work_ids.len() + coupled_pairs.len());
     all_needed_wids.extend_from_slice(&citing_work_ids);
@@ -364,14 +381,12 @@ pub(crate) fn paper_lineage_conn(
         .filter_map(|wid| summary_by_wid.get(wid).cloned())
         .collect();
     sort_lineage_summaries(&mut cited_by_in_pool);
-    cited_by_in_pool.truncate(MAX_LINEAGE_NEIGHBORS);
 
     let mut references_in_pool: Vec<CollectionPaperSummary> = cited_work_ids
         .iter()
         .filter_map(|wid| summary_by_wid.get(wid).cloned())
         .collect();
     sort_lineage_summaries(&mut references_in_pool);
-    references_in_pool.truncate(MAX_LINEAGE_NEIGHBORS);
 
     let mut shared_ref_peers: Vec<CollectionSharedRefPeer> = coupled_pairs
         .into_iter()
@@ -394,18 +409,10 @@ pub(crate) fn paper_lineage_conn(
     });
     shared_ref_peers.truncate(MAX_SHARED_REF_PEERS);
 
-    // 4. Personal Vault cross-matches (`"self"` + `"referenced"`)
-    let vault_matches = compute_vault_matches_for_work(
-        conn,
-        target_work_id,
-        &target_title,
-        &serde_json::from_str::<Vec<String>>(&target_authors_json).unwrap_or_default(),
-        target_doi.as_deref(),
-        target_arxiv.as_deref(),
-        args.vault_path.as_deref(),
-    )?;
-
     Ok(CollectionPaperLineageOut {
+        cited_by_count: cited_by_in_pool.len(),
+        references_count: references_in_pool.len(),
+        shared_ref_count: shared_ref_peers.len(),
         cited_by_in_pool,
         references_in_pool,
         shared_ref_peers,

@@ -1,8 +1,9 @@
 //! Tauri IPC commands for the unified `collection.sqlite` Paper Collection & Recommend store.
 
 use agentero_core::features::paper::discovery::collection::{
-    self, CollectionClearArgs, CollectionConfigUpdateArgs, CollectionListPapersArgs,
-    CollectionOverviewOut, CollectionPaperDetail, CollectionPaperIdArgs, CollectionPaperIdsArgs,
+    self, CollectionBackfillRefsArgs, CollectionBackfillRefsOut, CollectionClearArgs,
+    CollectionConfigUpdateArgs, CollectionListPapersArgs, CollectionOverviewOut,
+    CollectionPaperDetail, CollectionPaperIdArgs, CollectionPaperIdsArgs,
     CollectionPaperLineageArgs, CollectionPaperLineageOut, CollectionPaperSummary,
     CollectionPapersPage, CollectionPatchPapersArgs, CollectionSearchArgs, CollectionSearchResult,
     CollectionSeedSyncArgs, CollectionSeedSyncOut, CollectionStateSummary, CollectionSubgraphArgs,
@@ -10,8 +11,10 @@ use agentero_core::features::paper::discovery::collection::{
     RecommendNextOut, RecommendPoolStateDto, RecommendPoolStateInput, WordCloudOut,
 };
 use serde::Serialize;
+use tauri::{AppHandle, Manager};
 
 use crate::core::error::{map_err, ApiResult, AppError};
+use crate::features::system::settings::AppSettingsStore;
 
 async fn run_collection_blocking<T, F>(label: &'static str, f: F) -> ApiResult<T>
 where
@@ -213,6 +216,21 @@ pub async fn plaza_collection_seed_sync(
     args: CollectionSeedSyncArgs,
 ) -> ApiResult<CollectionSeedSyncOut> {
     match collection::seed_sync(args).await {
+        Ok(value) => ApiResult::ok(value),
+        Err(err) => map_err(err),
+    }
+}
+
+/// Backfill missing OpenAlex `raw_refs` locally using the unified TTL/age policy
+/// (arXiv-only: 7d TTL & <=60d old; Venue: 14d TTL, no age cutoff) and recompute citations.
+#[tauri::command]
+#[specta::specta]
+pub async fn plaza_collection_backfill_refs(
+    app: AppHandle,
+    args: CollectionBackfillRefsArgs,
+) -> ApiResult<CollectionBackfillRefsOut> {
+    let oa_key = app.state::<AppSettingsStore>().open_alex_key();
+    match collection::backfill_missing_refs(args, oa_key.as_deref()).await {
         Ok(value) => ApiResult::ok(value),
         Err(err) => map_err(err),
     }

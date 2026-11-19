@@ -127,6 +127,20 @@ pub struct CollectionConfigUpdateArgs {
 // ─── Paper Summary, Detail, Upsert & Patch DTOs (IPC) ───
 
 /// Lightweight paper record returned in paginated lists, search hits, and recommend batches.
+/// Cross-portal twin of the same canonical work (`arXiv` <-> `Venue`) so the UI
+/// can render a direct jump button to the sibling venue or arXiv card.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionLinkedPeer {
+    pub id: String,
+    pub source_type: String,
+    pub source_label: String,
+    pub categories: Vec<String>,
+    pub venue_id: Option<String>,
+    pub venue_kind: Option<String>,
+    pub ccf_rank: Option<String>,
+}
+
 /// Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory.
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +172,8 @@ pub struct CollectionPaperSummary {
     pub pages: Option<String>,
     pub cool_papers_id: Option<String>,
     pub recommended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_peer: Option<CollectionLinkedPeer>,
 }
 
 /// Complete paper record for the detail dialog and BibTeX / academic citation copy actions.
@@ -191,6 +207,8 @@ pub struct CollectionPaperDetail {
     pub pages: Option<String>,
     pub cool_papers_id: Option<String>,
     pub recommended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_peer: Option<CollectionLinkedPeer>,
     pub bibtex: Option<String>,
     pub citation_text: String,
 }
@@ -556,6 +574,11 @@ pub struct CollectionPaperLineageArgs {
     pub id: String,
     #[serde(default)]
     pub vault_path: Option<String>,
+    /// When `true`, compute only the three lineage counts and `vault_matches`,
+    /// returning empty paper lists so the detail dialog opens without loading
+    /// hundreds of paper rows until the user expands the Lineage section.
+    #[serde(default)]
+    pub counts_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -578,6 +601,9 @@ pub struct CollectionVaultPaperMatch {
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionPaperLineageOut {
+    pub cited_by_count: usize,
+    pub references_count: usize,
+    pub shared_ref_count: usize,
     pub cited_by_in_pool: Vec<CollectionPaperSummary>,
     pub references_in_pool: Vec<CollectionPaperSummary>,
     pub shared_ref_peers: Vec<CollectionSharedRefPeer>,
@@ -867,4 +893,28 @@ pub struct CollectionCitationsOut {
     pub unresolved_seeds: Vec<String>,
     pub returned_count: usize,
     pub items: Vec<SnowballPaperHit>,
+}
+
+/// Request payload for client-side OpenAlex `raw_refs` backfill during manual refresh.
+#[derive(Debug, Clone, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionBackfillRefsArgs {
+    /// `"arxiv"`, `"venue"`, or `"all"` (defaults to `"all"`).
+    #[serde(default)]
+    pub source_type: Option<String>,
+    /// Optional arXiv categories to scope arXiv-only backfill.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Optional venue IDs to scope Venue backfill.
+    #[serde(default)]
+    pub venue_ids: Vec<String>,
+}
+
+/// Summary returned after client-side OpenAlex `raw_refs` backfill completes.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionBackfillRefsOut {
+    pub checked_works: usize,
+    pub enriched_works: usize,
+    pub state: CollectionStateSummary,
 }

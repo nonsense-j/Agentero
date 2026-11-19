@@ -36,10 +36,11 @@ pub use search::{
     curate_collection_at, overview, overview_at, search_collection_at, search_fast, search_fast_at,
 };
 pub use seed::{
-    seed_bake_at, seed_sync, seed_sync_at, SeedBakeOptions, SeedBakeReport, SeedManifest,
-    SeedPaperRecord, SeedShardEntry, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE,
-    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL, DEFAULT_BAKE_LLM_RPM,
-    DEFAULT_SEED_MANIFEST_URL,
+    backfill_missing_refs, backfill_missing_refs_at, seed_bake_at, seed_sync, seed_sync_at,
+    SeedBakeOptions, SeedBakeReport, SeedManifest, SeedPaperRecord, SeedShardEntry,
+    ARXIV_OA_REFS_CHECK_TTL_DAYS, ARXIV_OA_REFS_MAX_AGE_DAYS, DEFAULT_BAKE_LLM_BASE_URL,
+    DEFAULT_BAKE_LLM_BATCH_SIZE, DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL,
+    DEFAULT_BAKE_LLM_RPM, DEFAULT_SEED_MANIFEST_URL, VENUE_OA_REFS_CHECK_TTL_DAYS,
 };
 pub use store::{
     clear_collection, clear_collection_at, config_update, config_update_at,
@@ -1842,14 +1843,35 @@ mod tests {
         )
         .unwrap();
 
+        let counts_only = paper_lineage_at(
+            &db,
+            &CollectionPaperLineageArgs {
+                id: "venue:ccs-2026:target".into(),
+                vault_path: Some(vault_dir.to_string_lossy().to_string()),
+                counts_only: Some(true),
+            },
+        )
+        .unwrap();
+        assert_eq!(counts_only.cited_by_count, 1);
+        assert_eq!(counts_only.references_count, 1);
+        assert_eq!(counts_only.shared_ref_count, 1);
+        assert!(counts_only.cited_by_in_pool.is_empty());
+        assert!(counts_only.references_in_pool.is_empty());
+        assert!(counts_only.shared_ref_peers.is_empty());
+        assert_eq!(counts_only.vault_matches.len(), 2);
+
         let lineage = paper_lineage_at(
             &db,
             &CollectionPaperLineageArgs {
                 id: "venue:ccs-2026:target".into(),
                 vault_path: Some(vault_dir.to_string_lossy().to_string()),
+                counts_only: None,
             },
         )
         .unwrap();
+        assert_eq!(lineage.cited_by_count, 1);
+        assert_eq!(lineage.references_count, 1);
+        assert_eq!(lineage.shared_ref_count, 1);
         assert_eq!(lineage.cited_by_in_pool.len(), 1);
         assert_eq!(lineage.cited_by_in_pool[0].id, "arxiv:2606.00060");
         assert_eq!(lineage.references_in_pool.len(), 1);
@@ -2562,5 +2584,157 @@ mod tests {
         let p1 = paper_get_at(&db, "arxiv:2601.00010").unwrap().unwrap();
         assert_eq!(p1.citation_count, 2);
         assert_eq!(p2.citation_count, 0);
+    }
+
+    #[test]
+    fn paper_lineage_returns_all_citing_papers_without_40_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("collection.sqlite");
+
+        let mut items = Vec::with_capacity(46);
+        let mut target = make_arxiv_input(1, "cs.SE", "Target Foundation Paper", vec!["Testing"]);
+        target.id = "arxiv:2601.00001".into();
+        target.arxiv_id = Some("2601.00001".into());
+        target.doi = Some("10.48550/arxiv.2601.00001".into());
+        items.push(target);
+
+        for idx in 2..=46 {
+            let mut citer = make_arxiv_input(
+                idx,
+                "cs.SE",
+                &format!("Citing Study {idx}"),
+                vec!["Testing"],
+            );
+            citer.raw_refs = vec!["arxiv:2601.00001".into()];
+            items.push(citer);
+        }
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let detail = paper_get_at(&db, "arxiv:2601.00001").unwrap().unwrap();
+        let counts_only = paper_lineage_at(
+            &db,
+            &CollectionPaperLineageArgs {
+                id: "arxiv:2601.00001".into(),
+                vault_path: None,
+                counts_only: Some(true),
+            },
+        )
+        .unwrap();
+        assert_eq!(counts_only.cited_by_count, 45);
+        assert!(counts_only.cited_by_in_pool.is_empty());
+
+        let lineage = paper_lineage_at(
+            &db,
+            &CollectionPaperLineageArgs {
+                id: "arxiv:2601.00001".into(),
+                vault_path: None,
+                counts_only: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(detail.citation_count, 45);
+        assert_eq!(lineage.cited_by_count, 45);
+        assert_eq!(lineage.cited_by_in_pool.len(), 45);
+        assert_eq!(
+            lineage.cited_by_in_pool.len(),
+            detail.citation_count as usize
+        );
+    }
+
+    #[test]
+    fn linked_peer_cross_links_arxiv_and_venue_twins_bidirectionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("collection.sqlite");
+
+        let arxiv_twin = CollectionPaperUpsertInput {
+            id: "arxiv:2605.20001".into(),
+            title: "Sound Incremental Type Inference".into(),
+            authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+            abstract_text:
+                "We present a sound incremental type inference algorithm for large programs.".into(),
+            published_at: "2026-05-01T00:00:00Z".into(),
+            year: 2026,
+            source_type: "arxiv".into(),
+            source_label: "cs.PL".into(),
+            categories: vec!["cs.PL".into(), "cs.SE".into()],
+            url: "https://arxiv.org/abs/2605.20001".into(),
+            arxiv_id: Some("2605.20001".into()),
+            ..Default::default()
+        };
+
+        let venue_twin = CollectionPaperUpsertInput {
+            id: "doi:10.1145/icse2026.20001".into(),
+            title: "Sound Incremental Type Inference".into(),
+            authors: vec!["Alice Smith".into(), "Bob Chen".into()],
+            abstract_text:
+                "We present a sound incremental type inference algorithm for large programs.".into(),
+            published_at: "2026-05-15T00:00:00Z".into(),
+            year: 2026,
+            source_type: "venue".into(),
+            source_label: "ICSE 2026".into(),
+            categories: vec!["ICSE 2026".into()],
+            url: "https://doi.org/10.1145/icse2026.20001".into(),
+            arxiv_id: Some("2605.20001".into()),
+            doi: Some("10.1145/icse2026.20001".into()),
+            venue_id: Some("icse-2026".into()),
+            venue_kind: Some("conference".into()),
+            venue_domain: Some("PL/SE".into()),
+            ccf_rank: Some("CCF-A".into()),
+            ..Default::default()
+        };
+
+        upsert_papers_at(
+            &db,
+            CollectionUpsertPapersArgs {
+                items: vec![arxiv_twin, venue_twin],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let arxiv_detail = paper_get_at(&db, "arxiv:2605.20001").unwrap().unwrap();
+        let linked_venue = arxiv_detail
+            .linked_peer
+            .expect("arXiv twin should link to Venue");
+        assert_eq!(linked_venue.id, "doi:10.1145/icse2026.20001");
+        assert_eq!(linked_venue.source_type, "venue");
+        assert_eq!(linked_venue.source_label, "ICSE 2026");
+        assert_eq!(linked_venue.venue_id.as_deref(), Some("icse-2026"));
+
+        let venue_detail = paper_get_at(&db, "doi:10.1145/icse2026.20001")
+            .unwrap()
+            .unwrap();
+        let linked_arxiv = venue_detail
+            .linked_peer
+            .expect("Venue twin should link to arXiv");
+        assert_eq!(linked_arxiv.id, "arxiv:2605.20001");
+        assert_eq!(linked_arxiv.source_type, "arxiv");
+        assert!(linked_arxiv.categories.contains(&"cs.SE".to_string()));
+        assert!(linked_arxiv.categories.contains(&"cs.PL".to_string()));
+
+        let arxiv_page = list_papers_at(
+            &db,
+            &CollectionListPapersArgs {
+                source_type: Some("arxiv".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            arxiv_page.items[0]
+                .linked_peer
+                .as_ref()
+                .map(|p| p.source_label.as_str()),
+            Some("ICSE 2026")
+        );
     }
 }

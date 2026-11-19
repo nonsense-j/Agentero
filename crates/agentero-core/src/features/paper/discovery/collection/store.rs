@@ -12,11 +12,11 @@ use crate::features::paper::util::clean_arxiv_abstract;
 use super::keywords::{canonicalize_keywords, normalize_keyword_key, union_canonical_keywords};
 use super::models::{
     CollectionArxivLatest, CollectionArxivWatermark, CollectionArxivWatermarkInput,
-    CollectionClearArgs, CollectionConfigUpdateArgs, CollectionListPapersArgs,
-    CollectionPaperDetail, CollectionPaperSummary, CollectionPaperUpsertInput,
-    CollectionPapersPage, CollectionPatchPapersArgs, CollectionStateSummary,
-    CollectionUpsertPapersArgs, CollectionVenueInput, CollectionVenueRecord,
-    CollectionVenueWatermarkUpdate,
+    CollectionClearArgs, CollectionConfigUpdateArgs, CollectionLinkedPeer,
+    CollectionListPapersArgs, CollectionPaperDetail, CollectionPaperSummary,
+    CollectionPaperUpsertInput, CollectionPapersPage, CollectionPatchPapersArgs,
+    CollectionStateSummary, CollectionUpsertPapersArgs, CollectionVenueInput,
+    CollectionVenueRecord, CollectionVenueWatermarkUpdate,
 };
 use super::schema::{ensure_collection, ensure_collection_at};
 
@@ -677,6 +677,36 @@ pub(crate) fn max_published_at_in_scope(
     Ok(max_ts.filter(|s| !s.is_empty()))
 }
 
+pub(crate) fn needs_relative_date_anchor(
+    time_preset: Option<&str>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> bool {
+    let is_relative = |raw: Option<&str>| -> bool {
+        let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        if s.eq_ignore_ascii_case("all") {
+            return false;
+        }
+        s.strip_suffix('d')
+            .or_else(|| s.strip_suffix('D'))
+            .and_then(|n| n.parse::<i64>().ok())
+            .is_some()
+    };
+    let preset = time_preset.map(str::trim).unwrap_or("");
+    if preset.eq_ignore_ascii_case("all") {
+        return false;
+    }
+    if preset.eq_ignore_ascii_case("7d")
+        || preset.eq_ignore_ascii_case("30d")
+        || preset.eq_ignore_ascii_case("90d")
+    {
+        return true;
+    }
+    is_relative(date_from) || is_relative(date_to)
+}
+
 pub(crate) fn resolve_date_bounds(
     time_preset: Option<&str>,
     date_from: Option<&str>,
@@ -768,7 +798,131 @@ pub(crate) fn map_paper_summary_row(
         pages: row.get(22)?,
         cool_papers_id: row.get(23)?,
         recommended_at: row.get(24)?,
+        linked_peer: None,
     })
+}
+
+/// Populate `linked_peer` (`arXiv` <-> `Venue`) for a batch of summaries sharing
+/// a canonical `work_id` in `collection.sqlite`.
+pub(crate) fn attach_linked_peers(
+    conn: &Connection,
+    items: &mut [CollectionPaperSummary],
+) -> Result<(), AppError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let enabled_cats = load_enabled_categories(conn)?;
+
+    let mut id_to_wid: HashMap<String, i64> = HashMap::with_capacity(items.len());
+    let mut unique_wids: Vec<i64> = Vec::with_capacity(items.len());
+    let mut seen_wids: HashSet<i64> = HashSet::with_capacity(items.len());
+
+    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    for chunk in ids.chunks(400) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT id, work_id FROM papers WHERE id IN ({ph}) AND work_id > 0");
+        let binds: Vec<rusqlite::types::Value> = chunk.iter().cloned().map(Into::into).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(binds), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for entry in rows {
+            let (id, wid) = entry?;
+            id_to_wid.insert(id, wid);
+            if seen_wids.insert(wid) {
+                unique_wids.push(wid);
+            }
+        }
+    }
+
+    if unique_wids.is_empty() {
+        return Ok(());
+    }
+
+    let mut venues_by_wid: HashMap<i64, Vec<CollectionLinkedPeer>> = HashMap::new();
+    let mut arxivs_by_wid: HashMap<i64, Vec<CollectionLinkedPeer>> = HashMap::new();
+
+    for chunk in unique_wids.chunks(400) {
+        let ph = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT work_id, id, source_type, source_label, categories_json, venue_id, venue_kind, ccf_rank
+             FROM papers
+             WHERE work_id IN ({ph})"
+        );
+        let binds: Vec<rusqlite::types::Value> = chunk.iter().copied().map(Into::into).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(binds), |r| {
+            let cats_json: String = r.get(4)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                CollectionLinkedPeer {
+                    id: r.get(1)?,
+                    source_type: r.get(2)?,
+                    source_label: r.get(3)?,
+                    categories: serde_json::from_str(&cats_json).unwrap_or_default(),
+                    venue_id: r.get(5)?,
+                    venue_kind: r.get(6)?,
+                    ccf_rank: r.get(7)?,
+                },
+            ))
+        })?;
+        for entry in rows {
+            let (wid, peer) = entry?;
+            if peer.source_type == "venue" {
+                venues_by_wid.entry(wid).or_default().push(peer);
+            } else if peer.source_type == "arxiv" {
+                arxivs_by_wid.entry(wid).or_default().push(peer);
+            }
+        }
+    }
+
+    for peers in venues_by_wid.values_mut() {
+        peers.sort_by(|a, b| {
+            ccf_rank_priority(b.ccf_rank.as_deref())
+                .cmp(&ccf_rank_priority(a.ccf_rank.as_deref()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    }
+
+    let peer_in_enabled_scope = |peer: &CollectionLinkedPeer| -> bool {
+        if enabled_cats.is_empty() {
+            return true;
+        }
+        enabled_cats.iter().any(|cat| {
+            peer.source_label.eq_ignore_ascii_case(cat)
+                || peer
+                    .categories
+                    .iter()
+                    .any(|pc| pc.eq_ignore_ascii_case(cat))
+        })
+    };
+
+    for item in items.iter_mut() {
+        let Some(&wid) = id_to_wid.get(&item.id) else {
+            continue;
+        };
+        if item.source_type == "arxiv" {
+            if let Some(peer) = venues_by_wid.get(&wid).and_then(|v| v.first()) {
+                item.linked_peer = Some(peer.clone());
+            }
+        } else if item.source_type == "venue" {
+            if let Some(peers) = arxivs_by_wid.get(&wid) {
+                let best = peers
+                    .iter()
+                    .find(|p| peer_in_enabled_scope(p))
+                    .or_else(|| peers.first());
+                if let Some(peer) = best {
+                    item.linked_peer = Some(peer.clone());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn load_summaries_by_row_ids(
@@ -1243,12 +1397,54 @@ fn sync_paper_relations(
 
 // ─── Canonical Work Graph & In-Collection Citations ───
 
+/// Normalize an optional `canonical_works.refs_checked_at` timestamp to the
+/// canonical UTC RFC 3339 millisecond form (`YYYY-MM-DDTHH:MM:SS.mmmZ`) so
+/// SQLite string comparisons against TTL cutoffs remain exact.
+pub(crate) fn normalize_refs_checked_at(raw: &str) -> Option<String> {
+    let norm = crate::time::normalize_rfc3339_millis(raw)?;
+    if norm.ends_with('Z') {
+        return Some(norm);
+    }
+    chrono::DateTime::parse_from_rfc3339(&norm).ok().map(|dt| {
+        dt.with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    })
+}
+
+/// Merge two `canonical_works.refs_checked_at` timestamps monotonically, keeping
+/// the later canonical UTC millisecond timestamp.
+///
+/// Invariant for `canonical_works` merges (including arXiv-only + Venue merges):
+/// merging is commutative (`max` over valid timestamps) and preserves the most
+/// recent check timestamp so neither `work_id` ordering nor re-upserts regress
+/// cooldown state or wipe an existing Venue check timestamp.
+pub(crate) fn newer_refs_checked_at(
+    existing: Option<String>,
+    incoming: Option<String>,
+) -> Option<String> {
+    let ex = existing.as_deref().and_then(normalize_refs_checked_at);
+    let inc = incoming.as_deref().and_then(normalize_refs_checked_at);
+    match (ex, inc) {
+        (Some(a), Some(b)) => {
+            if b > a {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 struct CanonicalWorkRow {
     openalex_id: Option<String>,
     doi_norm: Option<String>,
     arxiv_id_norm: Option<String>,
     title_norm: String,
     author_norm: String,
+    refs_checked_at: Option<String>,
 }
 
 fn load_canonical_work_row(
@@ -1259,7 +1455,7 @@ fn load_canonical_work_row(
         return Ok(None);
     }
     let mut stmt = conn.prepare_cached(
-        "SELECT openalex_id, doi_norm, arxiv_id_norm, COALESCE(title_norm, ''), COALESCE(author_norm, '') \
+        "SELECT openalex_id, doi_norm, arxiv_id_norm, COALESCE(title_norm, ''), COALESCE(author_norm, ''), refs_checked_at \
          FROM canonical_works WHERE work_id = ?1",
     )?;
     stmt.query_row([work_id], |r| {
@@ -1269,6 +1465,7 @@ fn load_canonical_work_row(
             arxiv_id_norm: r.get(2)?,
             title_norm: r.get(3)?,
             author_norm: r.get(4)?,
+            refs_checked_at: r.get(5)?,
         })
     })
     .optional()
@@ -1393,7 +1590,9 @@ pub(crate) fn resolve_or_merge_work_id_tx(
         arxiv_id_norm: None,
         title_norm: String::new(),
         author_norm: String::new(),
+        refs_checked_at: None,
     });
+    merged.refs_checked_at = newer_refs_checked_at(merged.refs_checked_at, None);
 
     for &sec_id in &matched_ids[1..] {
         if let Some(sec) = load_canonical_work_row(conn, sec_id)? {
@@ -1412,6 +1611,8 @@ pub(crate) fn resolve_or_merge_work_id_tx(
             if merged.author_norm.is_empty() {
                 merged.author_norm = sec.author_norm;
             }
+            merged.refs_checked_at =
+                newer_refs_checked_at(merged.refs_checked_at, sec.refs_checked_at);
         }
         conn.execute(
             "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key) \
@@ -1452,8 +1653,8 @@ pub(crate) fn resolve_or_merge_work_id_tx(
 
     let mut upd = conn.prepare_cached(
         "UPDATE canonical_works SET \
-            openalex_id = ?1, doi_norm = ?2, arxiv_id_norm = ?3, title_norm = ?4, author_norm = ?5 \
-         WHERE work_id = ?6",
+            openalex_id = ?1, doi_norm = ?2, arxiv_id_norm = ?3, title_norm = ?4, author_norm = ?5, refs_checked_at = ?6 \
+         WHERE work_id = ?7",
     )?;
     upd.execute(params![
         merged.openalex_id,
@@ -1461,6 +1662,7 @@ pub(crate) fn resolve_or_merge_work_id_tx(
         merged.arxiv_id_norm,
         (!merged.title_norm.is_empty()).then_some(merged.title_norm),
         (!merged.author_norm.is_empty()).then_some(merged.author_norm),
+        merged.refs_checked_at,
         primary_id,
     ])?;
 
@@ -2384,39 +2586,43 @@ pub(crate) fn paper_get_conn(
         })
         .optional()?;
 
-    Ok(row.map(|(s, raw_bib)| {
-        let citation_text = format_paper_citation_text(&s);
-        let bibtex = Some(format_paper_bibtex(&s, raw_bib.as_deref()));
-        CollectionPaperDetail {
-            id: s.id,
-            title: s.title,
-            authors: s.authors,
-            abstract_text: s.abstract_text,
-            published_at: s.published_at,
-            year: s.year,
-            source_type: s.source_type,
-            source_label: s.source_label,
-            categories: s.categories,
-            url: s.url,
-            pdf_url: s.pdf_url,
-            arxiv_id: s.arxiv_id,
-            doi: s.doi,
-            venue_id: s.venue_id,
-            venue_kind: s.venue_kind,
-            venue_domain: s.venue_domain,
-            ccf_rank: s.ccf_rank,
-            venue_full: s.venue_full,
-            citation_count: s.citation_count,
-            keywords: s.keywords,
-            keyword_source: s.keyword_source,
-            volume: s.volume,
-            issue: s.issue,
-            pages: s.pages,
-            cool_papers_id: s.cool_papers_id,
-            recommended_at: s.recommended_at,
-            bibtex,
-            citation_text,
-        }
+    let Some((mut s, raw_bib)) = row else {
+        return Ok(None);
+    };
+    attach_linked_peers(conn, std::slice::from_mut(&mut s))?;
+
+    let citation_text = format_paper_citation_text(&s);
+    let bibtex = Some(format_paper_bibtex(&s, raw_bib.as_deref()));
+    Ok(Some(CollectionPaperDetail {
+        id: s.id,
+        title: s.title,
+        authors: s.authors,
+        abstract_text: s.abstract_text,
+        published_at: s.published_at,
+        year: s.year,
+        source_type: s.source_type,
+        source_label: s.source_label,
+        categories: s.categories,
+        url: s.url,
+        pdf_url: s.pdf_url,
+        arxiv_id: s.arxiv_id,
+        doi: s.doi,
+        venue_id: s.venue_id,
+        venue_kind: s.venue_kind,
+        venue_domain: s.venue_domain,
+        ccf_rank: s.ccf_rank,
+        venue_full: s.venue_full,
+        citation_count: s.citation_count,
+        keywords: s.keywords,
+        keyword_source: s.keyword_source,
+        volume: s.volume,
+        issue: s.issue,
+        pages: s.pages,
+        cool_papers_id: s.cool_papers_id,
+        recommended_at: s.recommended_at,
+        linked_peer: s.linked_peer,
+        bibtex,
+        citation_text,
     }))
 }
 
@@ -2469,6 +2675,7 @@ pub(crate) fn papers_by_ids_conn(
             }
         }
     }
+    attach_linked_peers(conn, &mut out)?;
     Ok(out)
 }
 
@@ -2490,7 +2697,15 @@ pub(crate) fn list_papers_conn(
     args: &CollectionListPapersArgs,
 ) -> Result<CollectionPapersPage, AppError> {
     let enabled_cats = load_enabled_categories(conn)?;
-    let latest_iso = max_published_at_in_scope(conn, &enabled_cats)?;
+    let latest_iso = if needs_relative_date_anchor(
+        args.time_preset.as_deref(),
+        args.date_from.as_deref(),
+        args.date_to.as_deref(),
+    ) {
+        max_published_at_in_scope(conn, &enabled_cats)?
+    } else {
+        None
+    };
     let (from_ymd, to_ymd) = resolve_date_bounds(
         args.time_preset.as_deref(),
         args.date_from.as_deref(),
@@ -2498,26 +2713,48 @@ pub(crate) fn list_papers_conn(
         latest_iso.as_deref(),
     );
 
+    let source_type_lower = args
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .map(str::to_ascii_lowercase);
+    let category_filter = args
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"));
+    let category_in_enabled_scope = category_filter.is_some_and(|cat| {
+        enabled_cats
+            .iter()
+            .any(|enabled| enabled.eq_ignore_ascii_case(cat))
+    });
+
     let mut where_sql = String::from(" WHERE 1=1");
     let mut binds: Vec<rusqlite::types::Value> = Vec::new();
-    append_enabled_scope_clause(&mut where_sql, &mut binds, "p", &enabled_cats);
 
-    if let Some(st) = args.source_type.as_deref().map(str::trim) {
-        if !st.is_empty() && !st.eq_ignore_ascii_case("all") {
-            where_sql.push_str(" AND p.source_type COLLATE NOCASE = ?");
-            binds.push(st.to_string().into());
-        }
+    if let Some(ref st) = source_type_lower {
+        // `papers.source_type` is stored lowercase (`"arxiv"` / `"venue"`), so exact
+        // BINARY equality lets SQLite use `idx_papers_source_pub(source_type, published_at DESC)`.
+        where_sql.push_str(" AND p.source_type = ?");
+        binds.push(st.clone().into());
     }
 
-    if let Some(cat) = args.category.as_deref().map(str::trim) {
-        if !cat.is_empty() && !cat.eq_ignore_ascii_case("all") {
-            where_sql.push_str(
-                " AND (p.source_type != 'arxiv' OR p.source_label COLLATE NOCASE = ? \
-                  OR EXISTS (SELECT 1 FROM paper_categories pc WHERE pc.paper_id = p.id AND pc.category = ?))",
-            );
-            binds.push(cat.to_string().into());
-            binds.push(cat.to_string().into());
-        }
+    // Venue rows are always in scope, and a single enabled arXiv category filter is
+    // strictly narrower than the full enabled-categories scope clause.
+    let need_scope_clause = source_type_lower.as_deref() != Some("venue")
+        && !(source_type_lower.as_deref() == Some("arxiv") && category_in_enabled_scope);
+    if need_scope_clause {
+        append_enabled_scope_clause(&mut where_sql, &mut binds, "p", &enabled_cats);
+    }
+
+    if let Some(cat) = category_filter {
+        where_sql.push_str(
+            " AND (p.source_type != 'arxiv' OR p.source_label COLLATE NOCASE = ? \
+              OR EXISTS (SELECT 1 FROM paper_categories pc WHERE pc.paper_id = p.id AND pc.category = ?))",
+        );
+        binds.push(cat.to_string().into());
+        binds.push(cat.to_string().into());
     }
 
     if let Some(vk) = args.venue_kind.as_deref().map(str::trim) {
@@ -2579,9 +2816,10 @@ pub(crate) fn list_papers_conn(
     binds.push((offset as i64).into());
 
     let mut stmt = conn.prepare(&page_sql)?;
-    let items = stmt
+    let mut items = stmt
         .query_map(params_from_iter(binds), map_paper_summary_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    attach_linked_peers(conn, &mut items)?;
 
     let has_more = offset.saturating_add(items.len()) < total;
     Ok(CollectionPapersPage {

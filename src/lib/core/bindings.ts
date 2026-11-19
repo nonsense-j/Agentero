@@ -478,13 +478,13 @@ export const commands = {
 	/**  Apply incremental metadata patches (abstract, citations, keywords, BibTeX, `recommendedAt`) to existing papers. */
 	plazaCollectionPatchPapers: (args: CollectionPatchPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_patch_papers", { args }),
 	/**  List a filtered, sorted page of lightweight Paper Collection summaries. */
-	plazaCollectionListPapers: (args: CollectionListPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionPapersPage>>("plaza_collection_list_papers", { args }),
+	plazaCollectionListPapers: (args: CollectionListPapersArgs) => __TAURI_INVOKE<ApiResult<CollectionPapersPage_Serialize>>("plaza_collection_list_papers", { args }),
 	/**  Load complete paper details (including formatted BibTeX and citation string) for a single paper ID. */
-	plazaCollectionPaperGet: (args: CollectionPaperIdArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperDetail | null>>("plaza_collection_paper_get", { args }),
+	plazaCollectionPaperGet: (args: CollectionPaperIdArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperDetail_Serialize | null>>("plaza_collection_paper_get", { args }),
 	/**  Batch-fetch lightweight paper summaries by IDs while preserving requested ID order. */
-	plazaCollectionPapersByIds: (args: CollectionPaperIdsArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperSummary[]>>("plaza_collection_papers_by_ids", { args }),
+	plazaCollectionPapersByIds: (args: CollectionPaperIdsArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperSummary_Serialize[]>>("plaza_collection_papers_by_ids", { args }),
 	/**  Execute SQLite FTS5 + weighted boolean search with combinable range/rank/venue filters. */
-	plazaCollectionSearch: (args: CollectionSearchArgs) => __TAURI_INVOKE<ApiResult<CollectionSearchResult>>("plaza_collection_search", { args }),
+	plazaCollectionSearch: (args: CollectionSearchArgs) => __TAURI_INVOKE<ApiResult<CollectionSearchResult_Serialize>>("plaza_collection_search", { args }),
 	/**  Read persisted Paper Recommend keyword chips, selected cloud terms, and Top-N configuration. */
 	plazaCollectionRecommendStateGet: () => __TAURI_INVOKE<ApiResult<RecommendPoolStateDto>>("plaza_collection_recommend_state_get"),
 	/**  Persist Paper Recommend keyword chips, selected cloud terms, or Top-N configuration. */
@@ -492,15 +492,20 @@ export const commands = {
 	/**  Compute Top-N word cloud keywords (`count`, `unrecommendedCount`, best display casing) over in-scope papers. */
 	plazaCollectionWordCloud: (args: CollectionWordCloudArgs) => __TAURI_INVOKE<ApiResult<WordCloudOut>>("plaza_collection_word_cloud", { args }),
 	/**  Score unrecommended in-scope papers against active keywords, atomically stamp `recommendedAt`, and return the batch. */
-	plazaCollectionRecommendNext: (args: RecommendNextArgs) => __TAURI_INVOKE<ApiResult<RecommendNextOut>>("plaza_collection_recommend_next", { args }),
+	plazaCollectionRecommendNext: (args: RecommendNextArgs) => __TAURI_INVOKE<ApiResult<RecommendNextOut_Serialize>>("plaza_collection_recommend_next", { args }),
 	/**  Reset or clear Paper Collection data (`all`, `papers`, `venue`, `recommended`, or `citations`). */
 	plazaCollectionClear: (args: CollectionClearArgs) => __TAURI_INVOKE<ApiResult<CollectionStateSummary>>("plaza_collection_clear", { args }),
 	/**  Resolve bidirectional in-collection citation lineage, bibliographic coupling peers, and personal Vault matches. */
-	plazaCollectionPaperLineage: (args: CollectionPaperLineageArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperLineageOut>>("plaza_collection_paper_lineage", { args }),
+	plazaCollectionPaperLineage: (args: CollectionPaperLineageArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperLineageOut_Serialize>>("plaza_collection_paper_lineage", { args }),
 	/**  Resolve direct citation edges, shared-reference edges, and unexpanded pool neighbor counts across a set of paper IDs. */
 	plazaCollectionSubgraph: (args: CollectionSubgraphArgs) => __TAURI_INVOKE<ApiResult<CollectionSubgraphOut>>("plaza_collection_subgraph", { args }),
 	/**  Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path). */
 	plazaCollectionSeedSync: (args: CollectionSeedSyncArgs) => __TAURI_INVOKE<ApiResult<CollectionSeedSyncOut>>("plaza_collection_seed_sync", { args }),
+	/**
+	 *  Backfill missing OpenAlex `raw_refs` locally using the unified TTL/age policy
+	 *  (arXiv-only: 7d TTL & <=60d old; Venue: 14d TTL, no age cutoff) and recompute citations.
+	 */
+	plazaCollectionBackfillRefs: (args: CollectionBackfillRefsArgs) => __TAURI_INVOKE<ApiResult<CollectionBackfillRefsOut>>("plaza_collection_backfill_refs", { args }),
 	feedsSetPinned: (args: FeedsSetPinnedArgs) => __TAURI_INVOKE<ApiResult<FeedSub>>("feeds_set_pinned", { args }),
 	feedsResolveBody: (args: FeedsIdArgs) => __TAURI_INVOKE<ApiResult<FeedItem>>("feeds_resolve_body", { args }),
 	/**
@@ -2475,6 +2480,23 @@ export type CollectionArxivWatermarkInput = {
 	historyComplete?: boolean | null,
 };
 
+/**  Request payload for client-side OpenAlex `raw_refs` backfill during manual refresh. */
+export type CollectionBackfillRefsArgs = {
+	/**  `"arxiv"`, `"venue"`, or `"all"` (defaults to `"all"`). */
+	sourceType?: string | null,
+	/**  Optional arXiv categories to scope arXiv-only backfill. */
+	categories?: string[],
+	/**  Optional venue IDs to scope Venue backfill. */
+	venueIds?: string[],
+};
+
+/**  Summary returned after client-side OpenAlex `raw_refs` backfill completes. */
+export type CollectionBackfillRefsOut = {
+	checkedWorks: number,
+	enrichedWorks: number,
+	state: CollectionStateSummary,
+};
+
 export type CollectionCitationEdgeDto = {
 	citingId: string,
 	citedId: string,
@@ -2491,6 +2513,21 @@ export type CollectionConfigUpdateArgs = {
 	arxivWatermarks?: { [key in string]: CollectionArxivWatermarkInput } | null,
 	lastRefreshedAt?: string | null,
 	latestArxiv?: CollectionArxivLatest | null,
+};
+
+/**
+ *  Lightweight paper record returned in paginated lists, search hits, and recommend batches.
+ *  Cross-portal twin of the same canonical work (`arXiv` <-> `Venue`) so the UI
+ *  can render a direct jump button to the sibling venue or arXiv card.
+ */
+export type CollectionLinkedPeer = {
+	id: string,
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	venueId: string | null,
+	venueKind: string | null,
+	ccfRank: string | null,
 };
 
 export type CollectionListPapersArgs = {
@@ -2521,7 +2558,10 @@ export type CollectionOverviewOut = {
 };
 
 /**  Complete paper record for the detail dialog and BibTeX / academic citation copy actions. */
-export type CollectionPaperDetail = {
+export type CollectionPaperDetail = CollectionPaperDetail_Serialize | CollectionPaperDetail_Deserialize;
+
+/**  Complete paper record for the detail dialog and BibTeX / academic citation copy actions. */
+export type CollectionPaperDetail_Deserialize = {
 	id: string,
 	title: string,
 	authors: string[],
@@ -2548,6 +2588,40 @@ export type CollectionPaperDetail = {
 	pages: string | null,
 	coolPapersId: string | null,
 	recommendedAt: string | null,
+	linkedPeer?: CollectionLinkedPeer | null,
+	bibtex: string | null,
+	citationText: string,
+};
+
+/**  Complete paper record for the detail dialog and BibTeX / academic citation copy actions. */
+export type CollectionPaperDetail_Serialize = {
+	id: string,
+	title: string,
+	authors: string[],
+	abstract: string,
+	publishedAt: string,
+	year: number,
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	url: string,
+	pdfUrl: string | null,
+	arxivId: string | null,
+	doi: string | null,
+	venueId: string | null,
+	venueKind: string | null,
+	venueDomain: string | null,
+	ccfRank: string | null,
+	venueFull: string | null,
+	citationCount: number,
+	keywords: string[],
+	keywordSource: string | null,
+	volume: string | null,
+	issue: string | null,
+	pages: string | null,
+	coolPapersId: string | null,
+	recommendedAt: string | null,
+	linkedPeer?: CollectionLinkedPeer | null,
 	bibtex: string | null,
 	citationText: string,
 };
@@ -2563,12 +2637,33 @@ export type CollectionPaperIdsArgs = {
 export type CollectionPaperLineageArgs = {
 	id: string,
 	vaultPath?: string | null,
+	/**
+	 *  When `true`, compute only the three lineage counts and `vault_matches`,
+	 *  returning empty paper lists so the detail dialog opens without loading
+	 *  hundreds of paper rows until the user expands the Lineage section.
+	 */
+	countsOnly?: boolean | null,
 };
 
-export type CollectionPaperLineageOut = {
-	citedByInPool: CollectionPaperSummary[],
-	referencesInPool: CollectionPaperSummary[],
-	sharedRefPeers: CollectionSharedRefPeer[],
+export type CollectionPaperLineageOut = CollectionPaperLineageOut_Serialize | CollectionPaperLineageOut_Deserialize;
+
+export type CollectionPaperLineageOut_Deserialize = {
+	citedByCount: number,
+	referencesCount: number,
+	sharedRefCount: number,
+	citedByInPool: CollectionPaperSummary_Deserialize[],
+	referencesInPool: CollectionPaperSummary_Deserialize[],
+	sharedRefPeers: CollectionSharedRefPeer_Deserialize[],
+	vaultMatches: CollectionVaultPaperMatch[],
+};
+
+export type CollectionPaperLineageOut_Serialize = {
+	citedByCount: number,
+	referencesCount: number,
+	sharedRefCount: number,
+	citedByInPool: CollectionPaperSummary_Serialize[],
+	referencesInPool: CollectionPaperSummary_Serialize[],
+	sharedRefPeers: CollectionSharedRefPeer_Serialize[],
 	vaultMatches: CollectionVaultPaperMatch[],
 };
 
@@ -2602,11 +2697,11 @@ export type CollectionPaperPatch = {
 	recommendedAt?: string | null,
 };
 
-/**
- *  Lightweight paper record returned in paginated lists, search hits, and recommend batches.
- *  Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory.
- */
-export type CollectionPaperSummary = {
+/**  Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory. */
+export type CollectionPaperSummary = CollectionPaperSummary_Serialize | CollectionPaperSummary_Deserialize;
+
+/**  Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory. */
+export type CollectionPaperSummary_Deserialize = {
 	id: string,
 	title: string,
 	authors: string[],
@@ -2633,6 +2728,38 @@ export type CollectionPaperSummary = {
 	pages: string | null,
 	coolPapersId: string | null,
 	recommendedAt: string | null,
+	linkedPeer?: CollectionLinkedPeer | null,
+};
+
+/**  Omits heavy `bibtex` payloads to minimize IPC serialization and resident UI memory. */
+export type CollectionPaperSummary_Serialize = {
+	id: string,
+	title: string,
+	authors: string[],
+	abstract: string,
+	publishedAt: string,
+	year: number,
+	sourceType: string,
+	sourceLabel: string,
+	categories: string[],
+	url: string,
+	pdfUrl: string | null,
+	arxivId: string | null,
+	doi: string | null,
+	venueId: string | null,
+	venueKind: string | null,
+	venueDomain: string | null,
+	ccfRank: string | null,
+	venueFull: string | null,
+	citationCount: number,
+	keywords: string[],
+	keywordSource: string | null,
+	volume: string | null,
+	issue: string | null,
+	pages: string | null,
+	coolPapersId: string | null,
+	recommendedAt: string | null,
+	linkedPeer?: CollectionLinkedPeer | null,
 };
 
 export type CollectionPaperUpsertInput = {
@@ -2667,8 +2794,16 @@ export type CollectionPaperUpsertInput = {
 	recommendedAt?: string | null,
 };
 
-export type CollectionPapersPage = {
-	items: CollectionPaperSummary[],
+export type CollectionPapersPage = CollectionPapersPage_Serialize | CollectionPapersPage_Deserialize;
+
+export type CollectionPapersPage_Deserialize = {
+	items: CollectionPaperSummary_Deserialize[],
+	total: number,
+	hasMore: boolean,
+};
+
+export type CollectionPapersPage_Serialize = {
+	items: CollectionPaperSummary_Serialize[],
 	total: number,
 	hasMore: boolean,
 };
@@ -2694,8 +2829,15 @@ export type CollectionSearchArgs = {
 	offset?: number | null,
 };
 
-export type CollectionSearchResult = {
-	items: ScoredCollectionPaperDto[],
+export type CollectionSearchResult = CollectionSearchResult_Serialize | CollectionSearchResult_Deserialize;
+
+export type CollectionSearchResult_Deserialize = {
+	items: ScoredCollectionPaperDto_Deserialize[],
+	totalMatched: number,
+};
+
+export type CollectionSearchResult_Serialize = {
+	items: ScoredCollectionPaperDto_Serialize[],
 	totalMatched: number,
 };
 
@@ -2717,8 +2859,15 @@ export type CollectionSharedRefEdgeDto = {
 	sharedCount: number,
 };
 
-export type CollectionSharedRefPeer = {
-	paper: CollectionPaperSummary,
+export type CollectionSharedRefPeer = CollectionSharedRefPeer_Serialize | CollectionSharedRefPeer_Deserialize;
+
+export type CollectionSharedRefPeer_Deserialize = {
+	paper: CollectionPaperSummary_Deserialize,
+	sharedCount: number,
+};
+
+export type CollectionSharedRefPeer_Serialize = {
+	paper: CollectionPaperSummary_Serialize,
 	sharedCount: number,
 };
 
@@ -3831,12 +3980,16 @@ export type KeywordLlmOverrideArgs = {
 
 /**  Generic OpenAI-compatible LLM configuration for fallback keyword extraction. */
 export type KeywordLlmSettings = {
-	/**  OpenAI-compatible API base URL (defaults to `https://x666.me/v1`). */
+	/**  OpenAI-compatible API base URL (defaults to `https://openrouter.ai/api/v1`). */
 	baseUrl?: string,
 	/**  Optional API key; masked (`*`) when echoed back from the Host. */
 	apiKey?: string,
-	/**  Chat model id (defaults to `ernie-5.5-flash-preview`). */
+	/**  Chat model id (defaults to `baidu/ernie-5.5-flash-preview:free`). */
 	model?: string,
+	/**  Number of papers sent per LLM keyword-extraction request (`1..=50`, default `20`). */
+	batchSize?: number,
+	/**  Concurrent LLM keyword-extraction requests (`1..=8`, default `1`). */
+	concurrency?: number,
 };
 
 export type LayoutProviderConfig = {
@@ -4933,8 +5086,17 @@ export type RecommendNextArgs = {
 	vaultPath?: string | null,
 };
 
-export type RecommendNextOut = {
-	items: RecommendedPaperDto[],
+export type RecommendNextOut = RecommendNextOut_Serialize | RecommendNextOut_Deserialize;
+
+export type RecommendNextOut_Deserialize = {
+	items: RecommendedPaperDto_Deserialize[],
+	state: RecommendPoolStateDto,
+	exhausted: boolean,
+	remainingUnrecommended: number,
+};
+
+export type RecommendNextOut_Serialize = {
+	items: RecommendedPaperDto_Serialize[],
 	state: RecommendPoolStateDto,
 	exhausted: boolean,
 	remainingUnrecommended: number,
@@ -4964,8 +5126,17 @@ export type RecommendResult = {
 	reusedCache: boolean,
 };
 
-export type RecommendedPaperDto = {
-	paper: CollectionPaperSummary,
+export type RecommendedPaperDto = RecommendedPaperDto_Serialize | RecommendedPaperDto_Deserialize;
+
+export type RecommendedPaperDto_Deserialize = {
+	paper: CollectionPaperSummary_Deserialize,
+	matchedKeywords: string[],
+	score: number | null,
+	citedVaultCount: number,
+};
+
+export type RecommendedPaperDto_Serialize = {
+	paper: CollectionPaperSummary_Serialize,
 	matchedKeywords: string[],
 	score: number | null,
 	citedVaultCount: number,
@@ -5178,8 +5349,16 @@ export type RunOnceRequest_Serialize = {
 	resumeTranscript?: string | null,
 };
 
-export type ScoredCollectionPaperDto = {
-	paper: CollectionPaperSummary,
+export type ScoredCollectionPaperDto = ScoredCollectionPaperDto_Serialize | ScoredCollectionPaperDto_Deserialize;
+
+export type ScoredCollectionPaperDto_Deserialize = {
+	paper: CollectionPaperSummary_Deserialize,
+	score: number | null,
+	matchedFields: string[],
+};
+
+export type ScoredCollectionPaperDto_Serialize = {
+	paper: CollectionPaperSummary_Serialize,
 	score: number | null,
 	matchedFields: string[],
 };

@@ -14,7 +14,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures_util::stream::{self, StreamExt};
 use reqwest::StatusCode;
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -27,17 +27,18 @@ use crate::openai_compat::{
 
 use super::keywords::{canonicalize_keywords, normalize_keyword_key, SYNONYM_GROUPS};
 use super::models::{
-    CollectionArxivWatermarkInput, CollectionPaperUpsertInput, CollectionSeedSyncArgs,
-    CollectionSeedSyncOut, CollectionVenueWatermarkUpdate,
+    CollectionArxivWatermarkInput, CollectionBackfillRefsArgs, CollectionBackfillRefsOut,
+    CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionSeedSyncOut,
+    CollectionVenueWatermarkUpdate,
 };
 use super::schema::{collection_db_path, ensure_collection_at};
 use super::store::{
     apply_venue_watermark_update_tx, build_keywords_text, clean_arxiv_key, clean_doi_key,
     clean_openalex_id, clean_opt_str, clean_publisher_doi, clean_string_vec,
     insert_work_raw_refs_tx, is_artifact_or_dataset_doi, is_publisher_doi, load_enabled_categories,
-    norm_title_key, normalize_ref_key, now_rfc3339, read_state_summary_conn,
-    recompute_graph_and_citations_tx, same_work_by_title_and_authors, upsert_arxiv_watermarks_tx,
-    upsert_single_paper_tx,
+    newer_refs_checked_at, norm_title_key, normalize_ref_key, normalize_refs_checked_at,
+    now_rfc3339, read_state_summary_conn, recompute_graph_and_citations_tx,
+    same_work_by_title_and_authors, upsert_arxiv_watermarks_tx, upsert_single_paper_tx,
 };
 
 pub const DEFAULT_SEED_MANIFEST_URL: &str =
@@ -56,7 +57,12 @@ const MAX_OA_SOURCE_PAGES: usize = 30;
 const MAX_OA_TITLE_SEARCH_CALLS: usize = 850;
 const MAX_OA_TITLE_SEARCH_BATCH_SIZE: usize = 75;
 const MAX_OA_TITLE_SEARCH_URL_BYTES: usize = 7800;
-const OA_REFS_CHECK_TTL_DAYS: i64 = 14;
+/// Re-check missing OpenAlex `referenced_works` every 7 days for arXiv-only papers.
+pub const ARXIV_OA_REFS_CHECK_TTL_DAYS: i64 = 7;
+/// Skip OpenAlex `referenced_works` re-checks for arXiv-only papers published over 60 days ago.
+pub const ARXIV_OA_REFS_MAX_AGE_DAYS: i64 = 60;
+/// Re-check missing OpenAlex `referenced_works` every 14 days for Venue papers (no age cutoff).
+pub const VENUE_OA_REFS_CHECK_TTL_DAYS: i64 = 14;
 /// OpenAlex 2026 RPS limits: 30 req/s with free API key (~22 req/s paced), 10 req/s keyless (~8.3 req/s paced).
 const OA_SINGLETON_SLOT_KEYED_MS: u64 = 45;
 const OA_SINGLETON_SLOT_KEYLESS_MS: u64 = 120;
@@ -195,6 +201,8 @@ pub struct SeedPaperRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refs_checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<String>,
@@ -271,8 +279,24 @@ fn parse_manifest_location(raw: &str) -> Result<ManifestLocation, AppError> {
     Ok(ManifestLocation::Local(path))
 }
 
+fn seed_manifest_http_client() -> Result<reqwest::Client, AppError> {
+    crate::http::client_builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(crate::http::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| AppError::message(format!("http client: {e}")))
+}
+
 fn seed_http_client() -> Result<reqwest::Client, AppError> {
-    crate::http::client_with(Duration::from_secs(180), 10, crate::http::USER_AGENT)
+    crate::http::client_builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
+        .user_agent(crate::http::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| AppError::message(format!("http client: {e}")))
 }
 
 async fn fetch_manifest(
@@ -297,7 +321,7 @@ async fn fetch_manifest(
             Ok(Some(manifest))
         }
         ManifestLocation::Http(url) => {
-            let client = seed_http_client()?;
+            let client = seed_manifest_http_client()?;
             let resp = client
                 .get(url.clone())
                 .send()
@@ -423,6 +447,38 @@ fn shard_matches_enabled_scope(shard: &SeedShardEntry, enabled_cats: &[String]) 
         }
         _ => false,
     }
+}
+
+fn apply_seed_refs_checked_at_tx(
+    conn: &rusqlite::Connection,
+    paper_id: &str,
+    raw_checked_at: &str,
+) -> Result<(), AppError> {
+    let trimmed_id = paper_id.trim();
+    if trimmed_id.is_empty() {
+        return Ok(());
+    }
+    let Some(norm_incoming) = normalize_refs_checked_at(raw_checked_at) else {
+        return Ok(());
+    };
+    let row: Option<(i64, Option<String>)> = conn
+        .prepare_cached(
+            "SELECT cw.work_id, cw.refs_checked_at
+             FROM papers p
+             JOIN canonical_works cw ON cw.work_id = p.work_id
+             WHERE p.id = ?1",
+        )?
+        .query_row([trimmed_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((work_id, existing)) = row else {
+        return Ok(());
+    };
+    let merged = newer_refs_checked_at(existing.clone(), Some(norm_incoming));
+    if merged != existing {
+        conn.prepare_cached("UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2")?
+            .execute(params![merged, work_id])?;
+    }
+    Ok(())
 }
 
 pub async fn seed_sync(args: CollectionSeedSyncArgs) -> Result<CollectionSeedSyncOut, AppError> {
@@ -555,8 +611,13 @@ pub async fn seed_sync_at(
                         line_idx + 1
                     ))
                 })?;
+                let paper_id = rec.id.clone();
+                let incoming_refs_checked_at = rec.refs_checked_at.clone();
                 let input: CollectionPaperUpsertInput = rec.into();
                 upsert_single_paper_tx(&tx, &input, &now)?;
+                if let Some(checked_at) = incoming_refs_checked_at.as_deref() {
+                    apply_seed_refs_checked_at_tx(&tx, &paper_id, checked_at)?;
+                }
                 imported_papers += 1;
             }
             if matches!(
@@ -1064,9 +1125,8 @@ fn merge_canonical_works_on_ids_tx(
                 if primary.author_norm.as_deref().is_none_or(str::is_empty) {
                     primary.author_norm = sec.author_norm;
                 }
-                if primary.refs_checked_at.is_none() {
-                    primary.refs_checked_at = sec.refs_checked_at;
-                }
+                primary.refs_checked_at =
+                    newer_refs_checked_at(primary.refs_checked_at, sec.refs_checked_at);
             }
             tx.execute(
                 "INSERT OR IGNORE INTO paper_raw_refs (src_work_id, ref_key)
@@ -1316,9 +1376,20 @@ fn merge_parsed_into_update(existing: &mut WorkRefUpdate, parsed: &ParsedOpenAle
     }
 }
 
-fn refs_check_ttl_cutoff() -> String {
-    (chrono::Utc::now() - chrono::Duration::days(OA_REFS_CHECK_TTL_DAYS))
+fn arxiv_refs_check_ttl_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(ARXIV_OA_REFS_CHECK_TTL_DAYS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn venue_refs_check_ttl_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(VENUE_OA_REFS_CHECK_TTL_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn arxiv_refs_min_published_ymd() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(ARXIV_OA_REFS_MAX_AGE_DAYS))
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 struct WorkTargetRow {
@@ -1361,7 +1432,9 @@ fn fold_work_targets_from_rows(rows: Vec<WorkTargetRow>) -> Vec<WorkRefTarget> {
 
 fn load_pass_a1_targets(
     conn: &rusqlite::Connection,
-    ttl_cutoff: &str,
+    arxiv_ttl_cutoff: &str,
+    venue_ttl_cutoff: &str,
+    arxiv_min_ymd: &str,
 ) -> Result<(Vec<WorkRefTarget>, HashSet<i64>), AppError> {
     let mut stmt = conn.prepare(
         "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm, p.title, p.authors_json,
@@ -1370,7 +1443,21 @@ fn load_pass_a1_targets(
          LEFT JOIN papers p ON p.work_id = cw.work_id
          WHERE NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
            AND (cw.openalex_id IS NOT NULL OR cw.doi_norm IS NOT NULL OR cw.arxiv_id_norm IS NOT NULL)
-           AND (cw.refs_checked_at IS NULL OR cw.refs_checked_at < ?1)
+           AND (
+             (
+               EXISTS (SELECT 1 FROM papers pv WHERE pv.work_id = cw.work_id AND pv.source_type = 'venue')
+               AND (cw.refs_checked_at IS NULL OR cw.refs_checked_at < ?2)
+             )
+             OR (
+               NOT EXISTS (SELECT 1 FROM papers pv WHERE pv.work_id = cw.work_id AND pv.source_type = 'venue')
+               AND (cw.refs_checked_at IS NULL OR cw.refs_checked_at < ?1)
+               AND EXISTS (
+                 SELECT 1 FROM papers pa
+                 WHERE pa.work_id = cw.work_id
+                   AND (pa.published_ymd = '' OR pa.published_ymd >= ?3)
+               )
+             )
+           )
          ORDER BY CASE WHEN is_venue = 1 THEN 0 ELSE 1 END,
                   cw.work_id ASC,
                   CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END,
@@ -1378,23 +1465,26 @@ fn load_pass_a1_targets(
     )?;
     let mut venue_wids: HashSet<i64> = HashSet::new();
     let rows = stmt
-        .query_map([ttl_cutoff], |r| {
-            let wid: i64 = r.get(0)?;
-            let is_venue: bool = r.get::<_, i64>(6)? != 0;
-            Ok((
-                is_venue,
-                WorkTargetRow {
-                    work_id: wid,
-                    openalex_id: r.get(1)?,
-                    doi_norm: r.get(2)?,
-                    arxiv_id_norm: r.get(3)?,
-                    title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    authors_json: r
-                        .get::<_, Option<String>>(5)?
-                        .unwrap_or_else(|| "[]".to_string()),
-                },
-            ))
-        })?
+        .query_map(
+            params![arxiv_ttl_cutoff, venue_ttl_cutoff, arxiv_min_ymd],
+            |r| {
+                let wid: i64 = r.get(0)?;
+                let is_venue: bool = r.get::<_, i64>(6)? != 0;
+                Ok((
+                    is_venue,
+                    WorkTargetRow {
+                        work_id: wid,
+                        openalex_id: r.get(1)?,
+                        doi_norm: r.get(2)?,
+                        arxiv_id_norm: r.get(3)?,
+                        title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        authors_json: r
+                            .get::<_, Option<String>>(5)?
+                            .unwrap_or_else(|| "[]".to_string()),
+                    },
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut raw_rows = Vec::with_capacity(rows.len());
     for (is_venue, row) in rows {
@@ -1410,6 +1500,287 @@ fn load_pass_a1_targets(
         .map(|t| t.work_id)
         .collect();
     Ok((targets, arxiv_only_wids))
+}
+
+fn load_client_refs_backfill_targets(
+    conn: &rusqlite::Connection,
+    args: &CollectionBackfillRefsArgs,
+    arxiv_ttl_cutoff: &str,
+    venue_ttl_cutoff: &str,
+    arxiv_min_ymd: &str,
+) -> Result<Vec<WorkRefTarget>, AppError> {
+    let scope = args
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("all");
+    let include_arxiv = scope.eq_ignore_ascii_case("all") || scope.eq_ignore_ascii_case("arxiv");
+    let include_venue = scope.eq_ignore_ascii_case("all") || scope.eq_ignore_ascii_case("venue");
+    if !include_arxiv && !include_venue {
+        return Ok(Vec::new());
+    }
+
+    let clean_cats: Vec<String> = args
+        .categories
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let clean_venues: Vec<String> = args
+        .venue_ids
+        .iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+
+    let mut branches: Vec<String> = Vec::new();
+    let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+
+    if include_venue {
+        let mut venue_clause = String::from(
+            "(EXISTS (SELECT 1 FROM papers pv WHERE pv.work_id = cw.work_id AND pv.source_type = 'venue'",
+        );
+        if !clean_venues.is_empty() {
+            let ph = std::iter::repeat_n("?", clean_venues.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            venue_clause.push_str(&format!(" AND pv.venue_id COLLATE NOCASE IN ({ph})"));
+            for vid in &clean_venues {
+                binds.push(vid.clone().into());
+            }
+        }
+        venue_clause.push_str(") AND (cw.refs_checked_at IS NULL OR cw.refs_checked_at < ?))");
+        binds.push(venue_ttl_cutoff.to_string().into());
+        branches.push(venue_clause);
+    }
+
+    if include_arxiv {
+        let mut arxiv_clause = String::from(
+            "(NOT EXISTS (SELECT 1 FROM papers pv WHERE pv.work_id = cw.work_id AND pv.source_type = 'venue') \
+             AND (cw.refs_checked_at IS NULL OR cw.refs_checked_at < ?) \
+             AND EXISTS (SELECT 1 FROM papers pa WHERE pa.work_id = cw.work_id AND pa.source_type = 'arxiv' \
+               AND (pa.published_ymd = '' OR pa.published_ymd >= ?)",
+        );
+        binds.push(arxiv_ttl_cutoff.to_string().into());
+        binds.push(arxiv_min_ymd.to_string().into());
+        if !clean_cats.is_empty() {
+            let ph = std::iter::repeat_n("?", clean_cats.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            arxiv_clause.push_str(&format!(
+                " AND (pa.source_label COLLATE NOCASE IN ({ph}) \
+                  OR EXISTS (SELECT 1 FROM paper_categories pc WHERE pc.paper_id = pa.id AND pc.category IN ({ph})))"
+            ));
+            for cat in &clean_cats {
+                binds.push(cat.clone().into());
+            }
+            for cat in &clean_cats {
+                binds.push(cat.clone().into());
+            }
+        }
+        arxiv_clause.push_str("))");
+        branches.push(arxiv_clause);
+    }
+
+    let sql = format!(
+        "SELECT cw.work_id, cw.openalex_id, cw.doi_norm, cw.arxiv_id_norm, p.title, p.authors_json
+         FROM canonical_works cw
+         JOIN papers p ON p.work_id = cw.work_id
+         WHERE cw.active_in_scope = 1
+           AND NOT EXISTS (SELECT 1 FROM paper_raw_refs r WHERE r.src_work_id = cw.work_id)
+           AND (cw.openalex_id IS NOT NULL OR cw.doi_norm IS NOT NULL OR cw.arxiv_id_norm IS NOT NULL)
+           AND ({})
+         ORDER BY cw.work_id ASC,
+                  CASE WHEN p.source_type = 'venue' THEN 0 ELSE 1 END,
+                  p.row_id ASC",
+        branches.join(" OR ")
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(binds), |r| {
+            Ok(WorkTargetRow {
+                work_id: r.get(0)?,
+                openalex_id: r.get(1)?,
+                doi_norm: r.get(2)?,
+                arxiv_id_norm: r.get(3)?,
+                title: r.get(4)?,
+                authors_json: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(fold_work_targets_from_rows(rows))
+}
+
+/// Client-side zero-credit OpenAlex `referenced_works` backfill sharing the exact same
+/// TTL & arXiv age-cutoff policy as server `seed_bake`:
+/// - arXiv-only papers: 7-day TTL, skip papers published >60 days ago.
+/// - Venue papers: 14-day TTL, no age cutoff.
+pub async fn backfill_missing_refs(
+    args: CollectionBackfillRefsArgs,
+    openalex_api_key: Option<&str>,
+) -> Result<CollectionBackfillRefsOut, AppError> {
+    let db_path = collection_db_path();
+    backfill_missing_refs_at(&db_path, args, openalex_api_key).await
+}
+
+pub async fn backfill_missing_refs_at(
+    db_path: &Path,
+    args: CollectionBackfillRefsArgs,
+    openalex_api_key: Option<&str>,
+) -> Result<CollectionBackfillRefsOut, AppError> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let arxiv_ttl = arxiv_refs_check_ttl_cutoff();
+    let venue_ttl = venue_refs_check_ttl_cutoff();
+    let arxiv_min_ymd = arxiv_refs_min_published_ymd();
+
+    let db_load = db_path.to_path_buf();
+    let targets = tokio::task::spawn_blocking(move || -> Result<Vec<WorkRefTarget>, AppError> {
+        let conn = ensure_collection_at(&db_load)?;
+        load_client_refs_backfill_targets(&conn, &args, &arxiv_ttl, &venue_ttl, &arxiv_min_ymd)
+    })
+    .await
+    .map_err(|e| AppError::message(format!("backfill_missing_refs load: {e}")))??;
+
+    if targets.is_empty() {
+        let db_state = db_path.to_path_buf();
+        let state = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            let conn = ensure_collection_at(&db_state)?;
+            read_state_summary_conn(&conn)
+        })
+        .await
+        .map_err(|e| AppError::message(format!("backfill_missing_refs state: {e}")))??;
+        return Ok(CollectionBackfillRefsOut {
+            checked_works: 0,
+            enriched_works: 0,
+            state,
+        });
+    }
+
+    let resolved_key = openalex_api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(crate::features::paper::scholar_api::client::openalex_api_key);
+    let has_oa_key = resolved_key.is_some();
+    let oa_key_param = resolved_key
+        .as_deref()
+        .map(|k| format!("&api_key={}", urlencoding::encode(k)))
+        .unwrap_or_default();
+    let oa_slot_interval = Duration::from_millis(if has_oa_key {
+        OA_SINGLETON_SLOT_KEYED_MS
+    } else {
+        OA_SINGLETON_SLOT_KEYLESS_MS
+    });
+    let oa_singleton_concurrency = if has_oa_key {
+        OA_SINGLETON_CONCURRENCY_KEYED
+    } else {
+        OA_SINGLETON_CONCURRENCY_KEYLESS
+    };
+    let oa_next_slot = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let client = crate::http::client_with(Duration::from_secs(20), 5, crate::http::USER_AGENT)?;
+
+    let mut futs = stream::iter(targets.into_iter().filter_map(|t| {
+        let url = if let Some(ref oa) = t.openalex_id {
+            format!(
+                "https://api.openalex.org/works/{oa}?select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}"
+            )
+        } else if let Some(ref d) = t.doi_norm {
+            format!(
+                "https://api.openalex.org/works/https://doi.org/{d}?select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}"
+            )
+        } else {
+            let a = t.arxiv_id_norm.as_deref()?;
+            format!(
+                "https://api.openalex.org/works/https://doi.org/10.48550/arxiv.{a}?select={OPENALEX_SELECT}&mailto={OPENALEX_MAILTO}{oa_key_param}"
+            )
+        };
+        let client_c = client.clone();
+        let slot_c = Arc::clone(&oa_next_slot);
+        Some(async move {
+            acquire_rate_slot(&slot_c, oa_slot_interval).await;
+            let res = fetch_openalex_json(&client_c, &url).await;
+            (t, res)
+        })
+    }))
+    .buffer_unordered(oa_singleton_concurrency);
+
+    let mut checked_works = 0usize;
+    let mut enriched_works = 0usize;
+    let mut pending_updates: Vec<WorkRefUpdate> = Vec::new();
+    let mut pending_checked: Vec<i64> = Vec::new();
+
+    while let Some((target, res)) = futs.next().await {
+        match res {
+            OpenAlexFetchResult::Ok(json) => {
+                checked_works += 1;
+                let mut got_refs = false;
+                if let Some(upd) = match_single_openalex_work_to_target(&target, &json) {
+                    got_refs = !upd.refs.is_empty();
+                    pending_updates.push(upd);
+                }
+                if !got_refs {
+                    pending_checked.push(target.work_id);
+                }
+            }
+            OpenAlexFetchResult::NotFound => {
+                checked_works += 1;
+                pending_checked.push(target.work_id);
+            }
+            OpenAlexFetchResult::RateLimited | OpenAlexFetchResult::Error => {}
+        }
+        if pending_updates.len() >= 50 {
+            let flush = std::mem::take(&mut pending_updates);
+            let db_p = db_path.to_path_buf();
+            enriched_works += tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &flush))
+                .await
+                .map_err(|e| AppError::message(format!("backfill_missing_refs persist: {e}")))??;
+        }
+        if pending_checked.len() >= 50 {
+            let flush_chk = std::mem::take(&mut pending_checked);
+            let db_chk = db_path.to_path_buf();
+            tokio::task::spawn_blocking(move || mark_works_refs_checked(&db_chk, &flush_chk))
+                .await
+                .map_err(|e| AppError::message(format!("backfill_missing_refs mark: {e}")))??;
+        }
+    }
+
+    if !pending_updates.is_empty() {
+        let db_p = db_path.to_path_buf();
+        enriched_works +=
+            tokio::task::spawn_blocking(move || persist_ref_batch(&db_p, &pending_updates))
+                .await
+                .map_err(|e| AppError::message(format!("backfill_missing_refs persist: {e}")))??;
+    }
+    if !pending_checked.is_empty() {
+        let db_chk = db_path.to_path_buf();
+        tokio::task::spawn_blocking(move || mark_works_refs_checked(&db_chk, &pending_checked))
+            .await
+            .map_err(|e| AppError::message(format!("backfill_missing_refs mark: {e}")))??;
+    }
+
+    let db_fin = db_path.to_path_buf();
+    let should_recompute = enriched_works > 0;
+    let state = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+        let mut conn = ensure_collection_at(&db_fin)?;
+        if should_recompute {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            recompute_graph_and_citations_tx(&tx)?;
+            tx.commit()?;
+        }
+        read_state_summary_conn(&conn)
+    })
+    .await
+    .map_err(|e| AppError::message(format!("backfill_missing_refs finalize: {e}")))??;
+
+    Ok(CollectionBackfillRefsOut {
+        checked_works,
+        enriched_works,
+        state,
+    })
 }
 
 fn load_pass_a1_5_targets_by_venue(
@@ -1627,19 +1998,27 @@ async fn run_step_a_refs_backfill(
 
     let mut oa_enriched = 0usize;
     let mut oa_rate_limited = false;
-    let ttl_cutoff = if force_clean {
+    let arxiv_ttl_cutoff = if force_clean {
         "9999-12-31T23:59:59.999Z".to_string()
     } else {
-        refs_check_ttl_cutoff()
+        arxiv_refs_check_ttl_cutoff()
     };
+    let venue_ttl_cutoff = if force_clean {
+        "9999-12-31T23:59:59.999Z".to_string()
+    } else {
+        venue_refs_check_ttl_cutoff()
+    };
+    let arxiv_min_ymd = arxiv_refs_min_published_ymd();
 
     // Stage 2.1: Concurrent Zero-Credit OpenAlex Singleton Lookup (`0 credits`, paced by RPS tier)
     let db_load = db_path.to_path_buf();
-    let ttl_for_a1 = ttl_cutoff.clone();
+    let arxiv_ttl_for_a1 = arxiv_ttl_cutoff.clone();
+    let venue_ttl_for_a1 = venue_ttl_cutoff.clone();
+    let min_ymd_for_a1 = arxiv_min_ymd.clone();
     let (a1_targets, arxiv_only_wids) =
         tokio::task::spawn_blocking(move || -> Result<_, AppError> {
             let conn = ensure_collection_at(&db_load)?;
-            load_pass_a1_targets(&conn, &ttl_for_a1)
+            load_pass_a1_targets(&conn, &arxiv_ttl_for_a1, &venue_ttl_for_a1, &min_ymd_for_a1)
         })
         .await
         .map_err(|e| AppError::message(format!("seed_bake load 2.1 targets: {e}")))??;
@@ -1904,7 +2283,7 @@ async fn run_step_a_refs_backfill(
     let mut newly_discovered_s2: Vec<(i64, String)> = Vec::new();
     if !oa_rate_limited {
         let db_a25 = db_path.to_path_buf();
-        let ttl_for_a25 = ttl_cutoff.clone();
+        let ttl_for_a25 = venue_ttl_cutoff.clone();
         let a25_targets = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
             let conn = ensure_collection_at(&db_a25)?;
             load_pass_a2_5_targets(&conn, &ttl_for_a25)
@@ -3309,6 +3688,23 @@ fn export_seed_shards_sync(
         }
     }
 
+    // Preload `work_id -> refs_checked_at` (canonical UTC millisecond RFC 3339) for works
+    // still lacking `raw_refs`, so clients syncing from seed honor the maintainer's TTL.
+    let mut refs_checked_by_work: HashMap<i64, String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT work_id, refs_checked_at FROM canonical_works
+             WHERE refs_checked_at IS NOT NULL AND TRIM(refs_checked_at) != ''",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for entry in rows {
+            let (wid, raw_ts) = entry?;
+            if let Some(norm) = normalize_refs_checked_at(&raw_ts) {
+                refs_checked_by_work.insert(wid, norm);
+            }
+        }
+    }
+
     let mut core_writer = GzShardWriter::create(out_dir, "core")?;
     let mut cs_ai_writer = GzShardWriter::create(out_dir, "addon-cs-ai")?;
     let delta_cutoff = delta_since.map(str::trim).filter(|s| !s.is_empty());
@@ -3337,6 +3733,12 @@ fn export_seed_shards_sync(
             let kw_src_raw: String = r.get(19)?;
             let wid: i64 = r.get(21)?;
             let categories: Vec<String> = serde_json::from_str(&cats_json).unwrap_or_default();
+            let raw_refs = refs_by_work.get(&wid).cloned().unwrap_or_default();
+            let refs_checked_at = if raw_refs.is_empty() {
+                refs_checked_by_work.get(&wid).cloned()
+            } else {
+                None
+            };
             let rec = SeedPaperRecord {
                 id: r.get(0)?,
                 title: r.get(1)?,
@@ -3362,7 +3764,8 @@ fn export_seed_shards_sync(
                 keyword_source: (!kw_src_raw.trim().is_empty())
                     .then(|| kw_src_raw.trim().to_string()),
                 openalex_id: r.get(20)?,
-                raw_refs: refs_by_work.get(&wid).cloned().unwrap_or_default(),
+                raw_refs,
+                refs_checked_at,
                 volume: r.get(22)?,
                 issue: r.get(23)?,
                 pages: r.get(24)?,
@@ -4128,7 +4531,7 @@ mod tests {
         )
         .unwrap();
 
-        let targets = load_pass_a2_5_targets(&conn, &refs_check_ttl_cutoff()).unwrap();
+        let targets = load_pass_a2_5_targets(&conn, &venue_refs_check_ttl_cutoff()).unwrap();
         let titles: Vec<&str> = targets.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(
             titles,
@@ -4178,5 +4581,733 @@ mod tests {
         assert_eq!(opts.llm_model, DEFAULT_BAKE_LLM_MODEL);
         assert_eq!(opts.llm_rpm, DEFAULT_BAKE_LLM_RPM);
         assert_eq!(opts.llm_concurrency, DEFAULT_BAKE_LLM_CONCURRENCY);
+    }
+
+    #[test]
+    fn refs_backfill_policy_uses_7d_60d_for_arxiv_and_14d_no_age_cap_for_venue() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("collection.sqlite");
+
+        let ymd_days_ago = |days: i64| -> String {
+            (chrono::Utc::now() - chrono::Duration::days(days))
+                .format("%Y-%m-%dT12:00:00Z")
+                .to_string()
+        };
+        let ts_days_ago = |days: i64| -> String {
+            (chrono::Utc::now() - chrono::Duration::days(days))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![
+                    // 1. arXiv-only, published 20d ago, checked 8d ago (>7d TTL) -> INCLUDED
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2610.00001".into(),
+                        title: "Recent Arxiv Past 7d TTL".into(),
+                        authors: vec!["Alice".into()],
+                        published_at: ymd_days_ago(20),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2610.00001".into()),
+                        ..Default::default()
+                    },
+                    // 2. arXiv-only, published 20d ago, checked 3d ago (<7d TTL) -> EXCLUDED
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2610.00002".into(),
+                        title: "Recent Arxiv Within 7d TTL".into(),
+                        authors: vec!["Bob".into()],
+                        published_at: ymd_days_ago(20),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2610.00002".into()),
+                        ..Default::default()
+                    },
+                    // 3. arXiv-only, published 75d ago (>60d max age), never checked -> EXCLUDED
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2608.00003".into(),
+                        title: "Old Arxiv Over 60d Cutoff".into(),
+                        authors: vec!["Carol".into()],
+                        published_at: ymd_days_ago(75),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2608.00003".into()),
+                        ..Default::default()
+                    },
+                    // 4. Venue, published 120d ago, checked 15d ago (>14d TTL, NO 60d cap) -> INCLUDED
+                    CollectionPaperUpsertInput {
+                        id: "doi:10.1145/venue.old.stale".into(),
+                        title: "Old Venue Past 14d TTL".into(),
+                        authors: vec!["Dave".into()],
+                        published_at: ymd_days_ago(120),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        doi: Some("10.1145/venue.old.stale".into()),
+                        venue_id: Some("icse-2026".into()),
+                        ..Default::default()
+                    },
+                    // 5. Venue, published 120d ago, checked 10d ago (<14d TTL) -> EXCLUDED
+                    CollectionPaperUpsertInput {
+                        id: "doi:10.1145/venue.old.fresh".into(),
+                        title: "Old Venue Within 14d TTL".into(),
+                        authors: vec!["Eve".into()],
+                        published_at: ymd_days_ago(120),
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        doi: Some("10.1145/venue.old.fresh".into()),
+                        venue_id: Some("icse-2026".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let conn = ensure_collection_at(&db).unwrap();
+        for (pid, days) in [
+            ("arxiv:2610.00001", 8),
+            ("arxiv:2610.00002", 3),
+            ("doi:10.1145/venue.old.stale", 15),
+            ("doi:10.1145/venue.old.fresh", 10),
+        ] {
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = (SELECT work_id FROM papers WHERE id = ?2)",
+                params![ts_days_ago(days), pid],
+            )
+            .unwrap();
+        }
+
+        let arxiv_ttl = arxiv_refs_check_ttl_cutoff();
+        let venue_ttl = venue_refs_check_ttl_cutoff();
+        let arxiv_min_ymd = arxiv_refs_min_published_ymd();
+
+        // Server Pass A1
+        let (a1_targets, _) =
+            load_pass_a1_targets(&conn, &arxiv_ttl, &venue_ttl, &arxiv_min_ymd).unwrap();
+        let a1_titles: Vec<&str> = a1_targets.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            a1_titles,
+            vec!["Old Venue Past 14d TTL", "Recent Arxiv Past 7d TTL"]
+        );
+
+        // Client arXiv-scoped backfill
+        let client_arxiv = load_client_refs_backfill_targets(
+            &conn,
+            &CollectionBackfillRefsArgs {
+                source_type: Some("arxiv".into()),
+                categories: vec!["cs.SE".into()],
+                venue_ids: vec![],
+            },
+            &arxiv_ttl,
+            &venue_ttl,
+            &arxiv_min_ymd,
+        )
+        .unwrap();
+        assert_eq!(
+            client_arxiv
+                .iter()
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Recent Arxiv Past 7d TTL"]
+        );
+
+        // Client Venue-scoped backfill
+        let client_venue = load_client_refs_backfill_targets(
+            &conn,
+            &CollectionBackfillRefsArgs {
+                source_type: Some("venue".into()),
+                categories: vec![],
+                venue_ids: vec!["icse-2026".into()],
+            },
+            &arxiv_ttl,
+            &venue_ttl,
+            &arxiv_min_ymd,
+        )
+        .unwrap();
+        assert_eq!(
+            client_venue
+                .iter()
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Old Venue Past 14d TTL"]
+        );
+    }
+
+    #[test]
+    fn export_seed_shards_emits_refs_checked_at_only_when_raw_refs_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+        let out_dir = tmp.path().join("out");
+
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2601.10001".into(),
+                        title: "Missing Refs Checked Paper".into(),
+                        authors: vec!["Alice".into()],
+                        published_at: "2026-01-10T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2601.10001".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2601.10002".into(),
+                        title: "Has Refs Should Omit Checked At".into(),
+                        authors: vec!["Bob".into()],
+                        published_at: "2026-01-11T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2601.10002".into()),
+                        raw_refs: vec!["arxiv:2601.10001".into()],
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2601.10003".into(),
+                        title: "Unchecked Empty Paper".into(),
+                        authors: vec!["Carol".into()],
+                        published_at: "2026-01-12T00:00:00Z".into(),
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2601.10003".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        {
+            let conn = ensure_collection_at(&db).unwrap();
+            // Non-UTC offset should be normalized to canonical UTC `...Z` millisecond form.
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = '2026-11-18T10:00:00+08:00'
+                 WHERE work_id = (SELECT work_id FROM papers WHERE id = 'arxiv:2601.10001')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = '2026-11-18T02:00:00.000Z'
+                 WHERE work_id = (SELECT work_id FROM papers WHERE id = 'arxiv:2601.10002')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = ''
+                 WHERE work_id = (SELECT work_id FROM papers WHERE id = 'arxiv:2601.10003')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (_manifest_path, shards) = export_seed_shards_sync(&db, &out_dir, None).unwrap();
+        let core = shards.iter().find(|s| s.kind == "core").unwrap();
+        let gz = GzDecoder::new(File::open(out_dir.join(&core.filename)).unwrap());
+        let mut records: HashMap<String, (String, SeedPaperRecord)> = HashMap::new();
+        for line in BufReader::new(gz).lines() {
+            let raw = line.unwrap();
+            let rec: SeedPaperRecord = serde_json::from_str(&raw).unwrap();
+            records.insert(rec.id.clone(), (raw, rec));
+        }
+
+        assert_eq!(
+            records["arxiv:2601.10001"].1.refs_checked_at.as_deref(),
+            Some("2026-11-18T02:00:00.000Z")
+        );
+        assert!(records["arxiv:2601.10002"].1.refs_checked_at.is_none());
+        assert!(!records["arxiv:2601.10002"].0.contains("\"refsCheckedAt\""));
+        assert!(records["arxiv:2601.10003"].1.refs_checked_at.is_none());
+        assert!(!records["arxiv:2601.10003"].0.contains("\"refsCheckedAt\""));
+    }
+
+    #[tokio::test]
+    async fn seed_sync_imports_refs_checked_at_monotonically_and_backfill_honors_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed_dir = tmp.path().join("seed");
+        let dst_db = tmp.path().join("dst_collection.sqlite");
+        fs::create_dir_all(&seed_dir).unwrap();
+
+        let ymd_days_ago = |days: i64| -> String {
+            (chrono::Utc::now() - chrono::Duration::days(days))
+                .format("%Y-%m-%dT12:00:00Z")
+                .to_string()
+        };
+        let ts_days_ago = |days: i64| -> String {
+            (chrono::Utc::now() - chrono::Duration::days(days))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+
+        let write_manifest_and_shard = |records: &[SeedPaperRecord], shard_id: &str| {
+            let mut w = GzShardWriter::create(&seed_dir, "core").unwrap();
+            for rec in records {
+                w.write_record(rec).unwrap();
+            }
+            let shard = w
+                .finish(&seed_dir, "core", shard_id, vec!["cs.SE".into()])
+                .unwrap()
+                .unwrap();
+            let manifest = SeedManifest {
+                version: 2,
+                generated_at: ts_days_ago(0),
+                shards: vec![shard],
+                arxiv_watermarks: HashMap::new(),
+                venue_watermarks: HashMap::new(),
+            };
+            let manifest_path = seed_dir.join("manifest.json");
+            fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            manifest_path
+        };
+
+        let make_rec = |id: &str,
+                        title: &str,
+                        source_type: &str,
+                        pub_days_ago: i64,
+                        refs_checked_at: Option<String>| SeedPaperRecord {
+            id: id.into(),
+            title: title.into(),
+            authors: vec!["Alice".into()],
+            abstract_text: "Abstract.".into(),
+            published_at: ymd_days_ago(pub_days_ago),
+            year: 2026,
+            source_type: source_type.into(),
+            source_label: if source_type == "arxiv" {
+                "cs.SE".into()
+            } else {
+                "ICSE 2026".into()
+            },
+            categories: if source_type == "arxiv" {
+                vec!["cs.SE".into()]
+            } else {
+                vec!["ICSE 2026".into()]
+            },
+            url: String::new(),
+            pdf_url: None,
+            arxiv_id: (source_type == "arxiv").then(|| id.trim_start_matches("arxiv:").to_string()),
+            doi: (source_type == "venue").then(|| format!("10.1145/{}", id.replace(':', "."))),
+            venue_id: (source_type == "venue").then(|| "icse-2026".to_string()),
+            venue_kind: None,
+            venue_domain: None,
+            ccf_rank: None,
+            venue_full: None,
+            keywords: vec!["Testing".into()],
+            keyword_source: Some("author".into()),
+            openalex_id: None,
+            raw_refs: Vec::new(),
+            refs_checked_at,
+            volume: None,
+            issue: None,
+            pages: None,
+            bibtex: None,
+            cool_papers_id: None,
+        };
+
+        let ts_2d = ts_days_ago(2);
+        let ts_3d = ts_days_ago(3);
+        let ts_9d = ts_days_ago(9);
+        let ts_15d = ts_days_ago(15);
+
+        let manifest_path = write_manifest_and_shard(
+            &[
+                make_rec(
+                    "arxiv:2610.10001",
+                    "Arxiv Within TTL",
+                    "arxiv",
+                    15,
+                    Some(ts_2d.clone()),
+                ),
+                make_rec(
+                    "arxiv:2610.10002",
+                    "Arxiv Past TTL",
+                    "arxiv",
+                    15,
+                    Some(ts_9d.clone()),
+                ),
+                make_rec(
+                    "venue:icse-2026:fresh",
+                    "Venue Within TTL",
+                    "venue",
+                    60,
+                    Some(ts_3d.clone()),
+                ),
+                make_rec(
+                    "venue:icse-2026:stale",
+                    "Venue Past TTL",
+                    "venue",
+                    60,
+                    Some(ts_15d.clone()),
+                ),
+                make_rec(
+                    "venue:icse-2026:none",
+                    "Venue Never Checked",
+                    "venue",
+                    60,
+                    None,
+                ),
+            ],
+            "core-v1",
+        );
+
+        let sync1 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path.to_string_lossy().to_string()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sync1.imported_papers, 5);
+
+        let read_checked_at = |pid: &str| -> Option<String> {
+            let conn = ensure_collection_at(&dst_db).unwrap();
+            conn.query_row(
+                "SELECT cw.refs_checked_at FROM papers p
+                 JOIN canonical_works cw ON cw.work_id = p.work_id
+                 WHERE p.id = ?1",
+                [pid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            read_checked_at("arxiv:2610.10001").as_deref(),
+            Some(ts_2d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("arxiv:2610.10002").as_deref(),
+            Some(ts_9d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("venue:icse-2026:fresh").as_deref(),
+            Some(ts_3d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("venue:icse-2026:stale").as_deref(),
+            Some(ts_15d.as_str())
+        );
+        assert_eq!(read_checked_at("venue:icse-2026:none"), None);
+
+        {
+            let conn = ensure_collection_at(&dst_db).unwrap();
+            let targets = load_client_refs_backfill_targets(
+                &conn,
+                &CollectionBackfillRefsArgs::default(),
+                &arxiv_refs_check_ttl_cutoff(),
+                &venue_refs_check_ttl_cutoff(),
+                &arxiv_refs_min_published_ymd(),
+            )
+            .unwrap();
+            let titles: Vec<&str> = targets.iter().map(|t| t.title.as_str()).collect();
+            assert_eq!(
+                titles,
+                vec!["Arxiv Past TTL", "Venue Past TTL", "Venue Never Checked"]
+            );
+        }
+
+        // Second sync with: older ts for 10001 (must NOT regress), newer ts for 10002 (must advance),
+        // None for venue:fresh (must NOT clear), new ts for venue:none (must populate).
+        let ts_5d = ts_days_ago(5);
+        let ts_1d = ts_days_ago(1);
+        let ts_4d = ts_days_ago(4);
+        let ts_1d_plus8 = chrono::DateTime::parse_from_rfc3339(&ts_1d)
+            .unwrap()
+            .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+
+        let manifest_path_2 = write_manifest_and_shard(
+            &[
+                make_rec(
+                    "arxiv:2610.10001",
+                    "Arxiv Within TTL",
+                    "arxiv",
+                    15,
+                    Some(ts_5d),
+                ),
+                make_rec(
+                    "arxiv:2610.10002",
+                    "Arxiv Past TTL",
+                    "arxiv",
+                    15,
+                    Some(ts_1d_plus8.clone()),
+                ),
+                make_rec(
+                    "venue:icse-2026:fresh",
+                    "Venue Within TTL",
+                    "venue",
+                    60,
+                    None,
+                ),
+                make_rec(
+                    "venue:icse-2026:stale",
+                    "Venue Past TTL",
+                    "venue",
+                    60,
+                    Some(ts_1d.clone()),
+                ),
+                make_rec(
+                    "venue:icse-2026:none",
+                    "Venue Never Checked",
+                    "venue",
+                    60,
+                    Some(ts_4d.clone()),
+                ),
+            ],
+            "core-v2",
+        );
+
+        let sync2 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path_2.to_string_lossy().to_string()),
+                force: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sync2.imported_papers, 5);
+
+        let expected_1d_norm = normalize_refs_checked_at(&ts_1d_plus8).unwrap();
+        assert_eq!(
+            read_checked_at("arxiv:2610.10001").as_deref(),
+            Some(ts_2d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("arxiv:2610.10002").as_deref(),
+            Some(expected_1d_norm.as_str())
+        );
+        assert_eq!(
+            read_checked_at("venue:icse-2026:fresh").as_deref(),
+            Some(ts_3d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("venue:icse-2026:stale").as_deref(),
+            Some(ts_1d.as_str())
+        );
+        assert_eq!(
+            read_checked_at("venue:icse-2026:none").as_deref(),
+            Some(ts_4d.as_str())
+        );
+
+        // Now every work is within its TTL, so `backfill_missing_refs_at` skips all of them with 0 API calls.
+        let bf = backfill_missing_refs_at(&dst_db, CollectionBackfillRefsArgs::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(bf.checked_works, 0);
+        assert_eq!(bf.enriched_works, 0);
+    }
+
+    #[test]
+    fn canonical_work_merge_preserves_newest_refs_checked_at_across_store_and_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+
+        // Case 1 (`store.rs` `resolve_or_merge_work_id_tx`):
+        // Primary (`work_id` smaller) is arXiv-only with older ts; secondary (`work_id` larger)
+        // is Venue with newer ts -> merge by matching title+authors keeps the newer ts.
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2605.11111".into(),
+                        title: "Twin Merge Preserves Newest Check Timestamp".into(),
+                        authors: vec!["Ada Lovelace".into()],
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.SE".into(),
+                        categories: vec!["cs.SE".into()],
+                        arxiv_id: Some("2605.11111".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:twin-a".into(),
+                        title: "Twin Merge Preserves Newest Check Timestamp".into(),
+                        authors: vec!["Grace Hopper".into()],
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        doi: Some("10.1145/twin.merge.1".into()),
+                        venue_id: Some("icse-2026".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let ts_old = "2026-11-01T00:00:00.000Z";
+        let ts_new = "2026-11-15T12:30:00.000Z";
+        {
+            let conn = ensure_collection_at(&db).unwrap();
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = ?1
+                 WHERE work_id = (SELECT work_id FROM papers WHERE id = 'arxiv:2605.11111')",
+                [ts_old],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE canonical_works SET refs_checked_at = ?1
+                 WHERE work_id = (SELECT work_id FROM papers WHERE id = 'venue:icse-2026:twin-a')",
+                [ts_new],
+            )
+            .unwrap();
+        }
+
+        // Upserting the Venue paper with the bridging arXiv ID triggers `resolve_or_merge_work_id_tx`
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "venue:icse-2026:twin-a".into(),
+                    title: "Twin Merge Preserves Newest Check Timestamp".into(),
+                    authors: vec!["Grace Hopper".into()],
+                    year: 2026,
+                    source_type: "venue".into(),
+                    source_label: "ICSE 2026".into(),
+                    categories: vec!["ICSE 2026".into()],
+                    arxiv_id: Some("2605.11111".into()),
+                    doi: Some("10.1145/twin.merge.1".into()),
+                    venue_id: Some("icse-2026".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        {
+            let conn = ensure_collection_at(&db).unwrap();
+            let (w1, ts1): (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT cw.work_id, cw.refs_checked_at FROM papers p
+                     JOIN canonical_works cw ON cw.work_id = p.work_id
+                     WHERE p.id = 'arxiv:2605.11111'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let (w2, ts2): (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT cw.work_id, cw.refs_checked_at FROM papers p
+                     JOIN canonical_works cw ON cw.work_id = p.work_id
+                     WHERE p.id = 'venue:icse-2026:twin-a'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(w1, w2);
+            assert_eq!(ts1.as_deref(), Some(ts_new));
+            assert_eq!(ts2.as_deref(), Some(ts_new));
+        }
+
+        // Case 2 (`seed.rs` `merge_canonical_works_on_ids_tx`):
+        // Primary (`work_id` smaller) has older ts; secondary (`work_id` larger) has newer ts.
+        super::super::store::upsert_papers_at(
+            &db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![
+                    CollectionPaperUpsertInput {
+                        id: "arxiv:2605.22222".into(),
+                        title: "Seed Merge Primary Older".into(),
+                        authors: vec!["Alan Turing".into()],
+                        year: 2026,
+                        source_type: "arxiv".into(),
+                        source_label: "cs.PL".into(),
+                        categories: vec!["cs.PL".into()],
+                        arxiv_id: Some("2605.22222".into()),
+                        ..Default::default()
+                    },
+                    CollectionPaperUpsertInput {
+                        id: "venue:icse-2026:twin-b".into(),
+                        title: "Seed Merge Secondary Newer".into(),
+                        authors: vec!["Alan Turing".into()],
+                        year: 2026,
+                        source_type: "venue".into(),
+                        source_label: "ICSE 2026".into(),
+                        categories: vec!["ICSE 2026".into()],
+                        doi: Some("10.1145/twin.merge.2".into()),
+                        venue_id: Some("icse-2026".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut conn = ensure_collection_at(&db).unwrap();
+        let wid_a: i64 = conn
+            .query_row(
+                "SELECT work_id FROM papers WHERE id = 'arxiv:2605.22222'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let wid_b: i64 = conn
+            .query_row(
+                "SELECT work_id FROM papers WHERE id = 'venue:icse-2026:twin-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2",
+            params![ts_old, wid_a],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2",
+            params![ts_new, wid_b],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let mut aliases = HashMap::new();
+        let merged_id = merge_canonical_works_on_ids_tx(
+            &tx,
+            &mut aliases,
+            wid_a,
+            None,
+            Some("10.1145/twin.merge.2"),
+            Some("2605.22222"),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(merged_id, wid_a.min(wid_b));
+        let merged_ts: Option<String> = conn
+            .query_row(
+                "SELECT refs_checked_at FROM canonical_works WHERE work_id = ?1",
+                [merged_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(merged_ts.as_deref(), Some(ts_new));
     }
 }
