@@ -38,16 +38,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: Agentero ${{ env.RELEASE_TAG }}
-          draft: false
-          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
-          body: |
-            Desktop installers for Agentero ${{ env.RELEASE_TAG }} (AI & SE Plaza Overhaul + Magpie UI).
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_PRERELEASE: ${{ contains(env.RELEASE_TAG, '-') }}
+        run: |
+          set -euo pipefail
+          NOTES="Desktop installers for Agentero ${RELEASE_TAG} (AI & SE Plaza Overhaul + Magpie UI)."
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Agentero ${RELEASE_TAG}" \
+              --notes "${NOTES}" \
+              --draft=false \
+              --prerelease="${IS_PRERELEASE}"
+          else
+            args=(
+              release create "${RELEASE_TAG}"
+              --repo "${GITHUB_REPOSITORY}"
+              --title "Agentero ${RELEASE_TAG}"
+              --notes "${NOTES}"
+              --target "${GITHUB_SHA}"
+            )
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh "${args[@]}"
+          fi
 
   build-windows:
     name: Build Windows App (x64)
