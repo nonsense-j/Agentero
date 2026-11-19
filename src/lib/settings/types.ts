@@ -463,10 +463,14 @@ export type EmbeddingSettings = {
 
 /** Fallback keyword-extraction LLM settings (any OpenAI-compatible endpoint). */
 export type KeywordLlmSettings = {
-	/** OpenAI-compatible base URL (defaults to `https://x666.me/v1`). */
+	/** OpenAI-compatible base URL (defaults to `https://openrouter.ai/api/v1`). */
 	baseUrl: string;
 	/** API key; masked (`*`) when echoed back from the Host. */
 	apiKey: string;
-	/** Chat model id (defaults to `ernie-5.5-flash-preview`). */
+	/** Chat model id (defaults to `baidu/ernie-5.5-flash-preview:free`). */
 	model: string;
+	/** Number of papers sent per LLM keyword-extraction request (`1..=50`, default `20`). */
+	batchSize: number;
+	/** Concurrent LLM keyword-extraction requests (`1..=8`, default `1`). */
+	concurrency: number;
 };

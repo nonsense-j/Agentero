@@ -95,13 +95,43 @@ export const DECISION_PROVIDER_PRESETS: Record<
 export const DEFAULT_TRANSLATOR_BASE_URL =
 	"https://translation-server.agentero.app";
 export const DEFAULT_NETWORK_PROXY_URL = "http://127.0.0.1:7890";
-export const DEFAULT_KEYWORD_LLM_BASE_URL = "https://x666.me/v1";
-export const DEFAULT_KEYWORD_LLM_MODEL = "ernie-5.5-flash-preview";
+export const DEFAULT_KEYWORD_LLM_BASE_URL = "https://openrouter.ai/api/v1";
+export const DEFAULT_KEYWORD_LLM_MODEL = "baidu/ernie-5.5-flash-preview:free";
+export const DEFAULT_KEYWORD_LLM_BATCH_SIZE = 20;
+export const KEYWORD_LLM_BATCH_SIZE_MIN = 1;
+export const KEYWORD_LLM_BATCH_SIZE_MAX = 50;
+export const KEYWORD_LLM_BATCH_SIZE_CHOICES = [
+	1, 5, 10, 15, 20, 30, 50,
+] as const;
+export const DEFAULT_KEYWORD_LLM_CONCURRENCY = 1;
+export const KEYWORD_LLM_CONCURRENCY_MIN = 1;
+export const KEYWORD_LLM_CONCURRENCY_MAX = 8;
+export const KEYWORD_LLM_CONCURRENCY_CHOICES = [1, 2, 3, 4, 6, 8] as const;
+
+export function clampKeywordLlmBatchSize(raw: unknown): number {
+	const n = typeof raw === "number" ? Math.round(raw) : Number.NaN;
+	if (!Number.isFinite(n) || n <= 0) return DEFAULT_KEYWORD_LLM_BATCH_SIZE;
+	return Math.max(
+		KEYWORD_LLM_BATCH_SIZE_MIN,
+		Math.min(KEYWORD_LLM_BATCH_SIZE_MAX, n),
+	);
+}
+
+export function clampKeywordLlmConcurrency(raw: unknown): number {
+	const n = typeof raw === "number" ? Math.round(raw) : Number.NaN;
+	if (!Number.isFinite(n) || n <= 0) return DEFAULT_KEYWORD_LLM_CONCURRENCY;
+	return Math.max(
+		KEYWORD_LLM_CONCURRENCY_MIN,
+		Math.min(KEYWORD_LLM_CONCURRENCY_MAX, n),
+	);
+}
 
 export const DEFAULT_KEYWORD_LLM_SETTINGS: KeywordLlmSettings = {
 	baseUrl: DEFAULT_KEYWORD_LLM_BASE_URL,
 	apiKey: "",
 	model: DEFAULT_KEYWORD_LLM_MODEL,
+	batchSize: DEFAULT_KEYWORD_LLM_BATCH_SIZE,
+	concurrency: DEFAULT_KEYWORD_LLM_CONCURRENCY,
 };
 
 /** Gateway flavour for the institution proxy (`institutionProxyType`). */

@@ -862,7 +862,8 @@ pub async fn keyword_llm_probe(
         resolve_keyword_llm_config, DEFAULT_KEYWORD_LLM_BASE_URL,
     };
     use agentero_core::openai_compat::{
-        is_unsupported_param_status, resolve_openai_compatible_url,
+        resolve_openai_compatible_url, send_chat_with_reasoning_fallback, summarize_error_body,
+        ChatFallbackRequest,
     };
 
     let store = app.state::<AppSettingsStore>();
@@ -877,48 +878,58 @@ pub async fn keyword_llm_probe(
     ) else {
         return ApiResult::ok(false);
     };
-    let Ok(client) = build_keyword_llm_client(15) else {
+    let Ok(client) = build_keyword_llm_client(25) else {
         return ApiResult::ok(false);
     };
 
-    let primary_body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-    });
-    let fallback_body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [{"role": "user", "content": "ping"}],
-    });
-
-    let send_probe = |body: &serde_json::Value| {
-        let mut req = client
-            .post(chat_url.clone())
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .json(body);
-        if let Some(ref key) = cfg.api_key {
-            req = req.bearer_auth(key);
-        }
-        req.send()
-    };
-
-    let mut resp = match send_probe(&primary_body).await {
+    let messages = serde_json::json!([{"role": "user", "content": "ping"}]);
+    let resp = match send_chat_with_reasoning_fallback(
+        &ChatFallbackRequest {
+            client: &client,
+            endpoint: chat_url.as_str(),
+            model: &cfg.model,
+            api_key: cfg.api_key.as_deref(),
+            messages: &messages,
+            max_tokens: Some(16),
+            reasoning_rejected: None,
+        },
+        || std::future::ready(()),
+    )
+    .await
+    {
         Ok(r) => r,
-        Err(_) => return ApiResult::ok(false),
+        Err(e) => {
+            log::warn!(
+                "keyword_llm_probe transport error model={}: {}",
+                cfg.model,
+                e
+            );
+            return ApiResult::ok(false);
+        }
     };
-    if is_unsupported_param_status(resp.status().as_u16()) {
-        resp = match send_probe(&fallback_body).await {
-            Ok(r) => r,
-            Err(_) => return ApiResult::ok(false),
-        };
-    }
-    if !resp.status().is_success() {
+
+    let status = resp.status();
+    let raw_body = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!(
+                "keyword_llm_probe body read error model={}: {}",
+                cfg.model,
+                e
+            );
+            return ApiResult::ok(false);
+        }
+    };
+    if !status.is_success() {
+        log::warn!(
+            "keyword_llm_probe HTTP {} model={} detail={}",
+            status.as_u16(),
+            cfg.model,
+            summarize_error_body(&raw_body)
+        );
         return ApiResult::ok(false);
     }
-    let ok = resp
-        .json::<serde_json::Value>()
-        .await
+    let ok = serde_json::from_str::<serde_json::Value>(&raw_body)
         .map(|json| json.get("choices").is_some())
         .unwrap_or(false);
     ApiResult::ok(ok)

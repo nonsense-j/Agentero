@@ -46,6 +46,7 @@ const PROBE_LABEL_KEYS = {
 
 function normalizeKeywordLlm(value: KeywordLlmSettings): KeywordLlmSettings {
 	return {
+		...value,
 		baseUrl: value.baseUrl.trim(),
 		apiKey: value.apiKey.trim(),
 		model: value.model.trim(),

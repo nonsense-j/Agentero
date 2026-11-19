@@ -10,6 +10,8 @@ import {
 } from "@/lib/keyword-llm";
 import {
 	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_BATCH_SIZE,
+	DEFAULT_KEYWORD_LLM_CONCURRENCY,
 	DEFAULT_KEYWORD_LLM_MODEL,
 	DEFAULT_KEYWORD_LLM_SETTINGS,
 	DEFAULT_SETTINGS,
@@ -23,11 +25,19 @@ afterEach(() => {
 });
 
 describe("Keyword LLM settings normalization, URL resolution & batch extraction", () => {
-	it("uses single OpenAI-compatible 3-field defaults and ignores unknown legacy fields", () => {
+	it("uses OpenRouter defaults with batchSize=20, concurrency=1 and ignores unknown legacy fields", () => {
+		expect(DEFAULT_KEYWORD_LLM_BASE_URL).toBe("https://openrouter.ai/api/v1");
+		expect(DEFAULT_KEYWORD_LLM_MODEL).toBe(
+			"baidu/ernie-5.5-flash-preview:free",
+		);
+		expect(DEFAULT_KEYWORD_LLM_BATCH_SIZE).toBe(20);
+		expect(DEFAULT_KEYWORD_LLM_CONCURRENCY).toBe(1);
 		expect(DEFAULT_KEYWORD_LLM_SETTINGS).toEqual({
 			baseUrl: DEFAULT_KEYWORD_LLM_BASE_URL,
 			apiKey: "",
 			model: DEFAULT_KEYWORD_LLM_MODEL,
+			batchSize: 20,
+			concurrency: 1,
 		});
 
 		const legacyPayload = {
@@ -45,6 +55,8 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 			baseUrl: DEFAULT_KEYWORD_LLM_BASE_URL,
 			apiKey: "sk-legacy-123",
 			model: DEFAULT_KEYWORD_LLM_MODEL,
+			batchSize: 20,
+			concurrency: 1,
 		});
 
 		applyExternalSettings({
@@ -53,6 +65,8 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 				baseUrl: "  https://api.example.com/v1/  ",
 				apiKey: "  sk-byok-456 ",
 				model: " gpt-4.1-mini ",
+				batchSize: 12,
+				concurrency: 3,
 			},
 		});
 
@@ -60,6 +74,8 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 			baseUrl: "https://api.example.com/v1/",
 			apiKey: "sk-byok-456",
 			model: "gpt-4.1-mini",
+			batchSize: 12,
+			concurrency: 3,
 		});
 	});
 
@@ -78,9 +94,11 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 
 	it("resolves OpenAI-compatible /chat/completions and /models endpoints without double /v1", () => {
 		expect(resolveKeywordLlmChatUrl("")).toBe(
-			"https://x666.me/v1/chat/completions",
+			"https://openrouter.ai/api/v1/chat/completions",
 		);
-		expect(resolveKeywordLlmModelsUrl("")).toBe("https://x666.me/v1/models");
+		expect(resolveKeywordLlmModelsUrl("")).toBe(
+			"https://openrouter.ai/api/v1/models",
+		);
 		expect(resolveKeywordLlmChatUrl("https://my-gateway.example.com")).toBe(
 			"https://my-gateway.example.com/v1/chat/completions",
 		);
@@ -134,7 +152,7 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 					JSON.stringify({
 						data: [
 							{ id: "gpt-4o-mini" },
-							{ id: "ernie-5.5-flash-preview" },
+							{ id: "baidu/ernie-5.5-flash-preview:free" },
 							{ id: "deepseek-v3.2" },
 						],
 					}),
@@ -142,7 +160,7 @@ describe("Keyword LLM settings normalization, URL resolution & batch extraction"
 				),
 		);
 		expect(defaultModels).toEqual([
-			"ernie-5.5-flash-preview",
+			"baidu/ernie-5.5-flash-preview:free",
 			"deepseek-v3.2",
 			"gpt-4o-mini",
 		]);

@@ -22,6 +22,8 @@ import {
 } from "@/lib/pdf/layout/settings";
 import {
 	clampEditorLineHeight,
+	clampKeywordLlmBatchSize,
+	clampKeywordLlmConcurrency,
 	clampMarkdownMaxWidth,
 	clampWikiEmbedFontSize,
 	DECISION_PROVIDER_PRESETS,
@@ -577,6 +579,12 @@ function normalizeKeywordLlmSettings(raw: unknown): KeywordLlmSettings {
 	}
 	if (typeof partial.model === "string") {
 		base.model = partial.model.trim() || DEFAULT_KEYWORD_LLM_MODEL;
+	}
+	if (partial.batchSize !== undefined) {
+		base.batchSize = clampKeywordLlmBatchSize(partial.batchSize);
+	}
+	if (partial.concurrency !== undefined) {
+		base.concurrency = clampKeywordLlmConcurrency(partial.concurrency);
 	}
 	return base;
 }

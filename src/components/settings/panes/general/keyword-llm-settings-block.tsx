@@ -12,6 +12,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
@@ -29,8 +36,12 @@ import {
 } from "@/lib/keyword-llm";
 import {
 	type AppSettings,
+	clampKeywordLlmBatchSize,
+	clampKeywordLlmConcurrency,
 	DEFAULT_KEYWORD_LLM_BASE_URL,
 	DEFAULT_KEYWORD_LLM_MODEL,
+	KEYWORD_LLM_BATCH_SIZE_CHOICES,
+	KEYWORD_LLM_CONCURRENCY_CHOICES,
 	type KeywordLlmSettings,
 	saveSettingsAsync,
 } from "@/lib/settings";
@@ -40,6 +51,8 @@ function normalizeDraft(value: KeywordLlmSettings): KeywordLlmSettings {
 		baseUrl: value.baseUrl.trim(),
 		apiKey: value.apiKey.trim(),
 		model: value.model.trim(),
+		batchSize: clampKeywordLlmBatchSize(value.batchSize),
+		concurrency: clampKeywordLlmConcurrency(value.concurrency),
 	};
 }
 
@@ -79,6 +92,10 @@ export function KeywordLlmSettingsBlock({
 		isKeywordLlmConfigured(saved) ||
 		(isDefaultKeywordLlmBaseUrl(saved.baseUrl) && hasBuiltinKey);
 
+	const savedBaseUrl = saved.baseUrl.trim();
+	const savedApiKey = saved.apiKey.trim();
+	const savedModel = saved.model.trim();
+
 	const runProbe = useCallback(async () => {
 		if (!configured) {
 			setStatus("idle");
@@ -88,10 +105,17 @@ export function KeywordLlmSettingsBlock({
 		const ac = new AbortController();
 		abortRef.current = ac;
 		setStatus("probing");
-		const ok = await probeKeywordLlm(null, ac.signal);
+		const ok = await probeKeywordLlm(
+			{
+				baseUrl: savedBaseUrl,
+				apiKey: savedApiKey,
+				model: savedModel,
+			},
+			ac.signal,
+		);
 		if (ac.signal.aborted) return;
 		setStatus(ok ? "ok" : "fail");
-	}, [configured]);
+	}, [configured, savedApiKey, savedBaseUrl, savedModel]);
 
 	useEffect(() => {
 		void runProbe();
@@ -117,7 +141,11 @@ export function KeywordLlmSettingsBlock({
 		const a = normalizeDraft(saved);
 		const b = normalizeDraft(draft);
 		return (
-			a.baseUrl !== b.baseUrl || a.apiKey !== b.apiKey || a.model !== b.model
+			a.baseUrl !== b.baseUrl ||
+			a.apiKey !== b.apiKey ||
+			a.model !== b.model ||
+			a.batchSize !== b.batchSize ||
+			a.concurrency !== b.concurrency
 		);
 	}, [saved, draft]);
 
@@ -193,6 +221,16 @@ export function KeywordLlmSettingsBlock({
 										status={status}
 										configured={configured}
 										label={statusLabel}
+										className={
+											configured && status !== "probing"
+												? "cursor-pointer"
+												: undefined
+										}
+										onClick={
+											configured && status !== "probing"
+												? () => void runProbe()
+												: undefined
+										}
 									/>
 								</TooltipTrigger>
 								<TooltipContent>{statusLabel}</TooltipContent>
@@ -302,6 +340,80 @@ export function KeywordLlmSettingsBlock({
 							onRefreshModels={handleRefreshModels}
 						/>
 					</ProviderFieldRow>
+
+					<div className="grid grid-cols-2 gap-3">
+						<ProviderFieldRow
+							label={t("general.keywordLlm.batchSizeLabel")}
+							htmlFor="keyword-llm-batch-size"
+						>
+							<Select
+								value={String(clampKeywordLlmBatchSize(draft.batchSize))}
+								onValueChange={(value) => {
+									setDraft((prev) => ({
+										...prev,
+										batchSize: clampKeywordLlmBatchSize(Number(value)),
+									}));
+								}}
+							>
+								<SelectTrigger
+									id="keyword-llm-batch-size"
+									className="h-8 min-w-0 flex-1 text-xs"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{Array.from(
+										new Set([
+											...KEYWORD_LLM_BATCH_SIZE_CHOICES,
+											clampKeywordLlmBatchSize(draft.batchSize),
+										]),
+									)
+										.sort((a, b) => a - b)
+										.map((value) => (
+											<SelectItem key={value} value={String(value)}>
+												{value}
+											</SelectItem>
+										))}
+								</SelectContent>
+							</Select>
+						</ProviderFieldRow>
+
+						<ProviderFieldRow
+							label={t("general.keywordLlm.concurrencyLabel")}
+							htmlFor="keyword-llm-concurrency"
+						>
+							<Select
+								value={String(clampKeywordLlmConcurrency(draft.concurrency))}
+								onValueChange={(value) => {
+									setDraft((prev) => ({
+										...prev,
+										concurrency: clampKeywordLlmConcurrency(Number(value)),
+									}));
+								}}
+							>
+								<SelectTrigger
+									id="keyword-llm-concurrency"
+									className="h-8 min-w-0 flex-1 text-xs"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{Array.from(
+										new Set([
+											...KEYWORD_LLM_CONCURRENCY_CHOICES,
+											clampKeywordLlmConcurrency(draft.concurrency),
+										]),
+									)
+										.sort((a, b) => a - b)
+										.map((value) => (
+											<SelectItem key={value} value={String(value)}>
+												{value}
+											</SelectItem>
+										))}
+								</SelectContent>
+							</Select>
+						</ProviderFieldRow>
+					</div>
 				</div>
 			</ProviderCard>
 		</div>

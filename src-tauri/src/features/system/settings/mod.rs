@@ -21,10 +21,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_NETWORK_PROXY_URL: &str = "http://127.0.0.1:7890";
-/// Default OpenAI-compatible API base URL for keyword extraction (`x666.me`).
-pub const DEFAULT_KEYWORD_LLM_BASE_URL: &str = "https://x666.me/v1";
-/// Default chat model id used for fallback keyword extraction.
-pub const DEFAULT_KEYWORD_LLM_MODEL: &str = "ernie-5.5-flash-preview";
+/// Default OpenAI-compatible API base URL for keyword extraction (`OpenRouter`).
+pub const DEFAULT_KEYWORD_LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Default free OpenRouter chat model id used for fallback keyword extraction.
+pub const DEFAULT_KEYWORD_LLM_MODEL: &str = "baidu/ernie-5.5-flash-preview:free";
+/// Default papers sent per keyword-extraction LLM request.
+pub const DEFAULT_KEYWORD_LLM_BATCH_SIZE: u32 = 20;
+pub const KEYWORD_LLM_BATCH_SIZE_MIN: u32 = 1;
+pub const KEYWORD_LLM_BATCH_SIZE_MAX: u32 = 50;
+/// Default concurrent keyword-extraction LLM requests.
+pub const DEFAULT_KEYWORD_LLM_CONCURRENCY: u32 = 1;
+pub const KEYWORD_LLM_CONCURRENCY_MIN: u32 = 1;
+pub const KEYWORD_LLM_CONCURRENCY_MAX: u32 = 8;
 /// Default System One endpoint (TypeSafe jEV). Clef/OpenAI presets override it.
 pub const DEFAULT_DECISION_BASE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 /// Default Zotero Connector port (must match the official extension default).
@@ -303,15 +311,21 @@ impl Default for DecisionSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct KeywordLlmSettings {
-    /// OpenAI-compatible API base URL (defaults to `https://x666.me/v1`).
+    /// OpenAI-compatible API base URL (defaults to `https://openrouter.ai/api/v1`).
     #[serde(default = "default_keyword_llm_base_url")]
     pub base_url: String,
     /// Optional API key; masked (`*`) when echoed back from the Host.
     #[serde(default)]
     pub api_key: String,
-    /// Chat model id (defaults to `ernie-5.5-flash-preview`).
+    /// Chat model id (defaults to `baidu/ernie-5.5-flash-preview:free`).
     #[serde(default = "default_keyword_llm_model")]
     pub model: String,
+    /// Number of papers sent per LLM keyword-extraction request (`1..=50`, default `20`).
+    #[serde(default = "default_keyword_llm_batch_size")]
+    pub batch_size: u32,
+    /// Concurrent LLM keyword-extraction requests (`1..=8`, default `1`).
+    #[serde(default = "default_keyword_llm_concurrency")]
+    pub concurrency: u32,
 }
 
 impl Default for KeywordLlmSettings {
@@ -320,6 +334,8 @@ impl Default for KeywordLlmSettings {
             base_url: default_keyword_llm_base_url(),
             api_key: String::new(),
             model: default_keyword_llm_model(),
+            batch_size: default_keyword_llm_batch_size(),
+            concurrency: default_keyword_llm_concurrency(),
         }
     }
 }
@@ -570,6 +586,12 @@ fn default_keyword_llm_base_url() -> String {
 }
 fn default_keyword_llm_model() -> String {
     DEFAULT_KEYWORD_LLM_MODEL.to_string()
+}
+fn default_keyword_llm_batch_size() -> u32 {
+    DEFAULT_KEYWORD_LLM_BATCH_SIZE
+}
+fn default_keyword_llm_concurrency() -> u32 {
+    DEFAULT_KEYWORD_LLM_CONCURRENCY
 }
 
 /// Optional compile-time API key for the default keyword-LLM endpoint.
@@ -1383,6 +1405,20 @@ fn normalize(s: &mut AppSettings) {
     if s.keyword_llm.model.is_empty() {
         s.keyword_llm.model = default_keyword_llm_model();
     }
+    s.keyword_llm.batch_size = if s.keyword_llm.batch_size == 0 {
+        DEFAULT_KEYWORD_LLM_BATCH_SIZE
+    } else {
+        s.keyword_llm
+            .batch_size
+            .clamp(KEYWORD_LLM_BATCH_SIZE_MIN, KEYWORD_LLM_BATCH_SIZE_MAX)
+    };
+    s.keyword_llm.concurrency = if s.keyword_llm.concurrency == 0 {
+        DEFAULT_KEYWORD_LLM_CONCURRENCY
+    } else {
+        s.keyword_llm
+            .concurrency
+            .clamp(KEYWORD_LLM_CONCURRENCY_MIN, KEYWORD_LLM_CONCURRENCY_MAX)
+    };
     s.decision.api_key = s.decision.api_key.trim().to_string();
     let provider = s.decision.provider.trim().to_ascii_lowercase();
     s.decision.provider = if provider.is_empty() {
@@ -2669,6 +2705,8 @@ mod tests {
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 api_key: "  test-router-secret  ".to_string(),
                 model: "openai/gpt-4o-mini".to_string(),
+                batch_size: 12,
+                concurrency: 3,
             },
             ..AppSettings::default()
         };
@@ -2679,19 +2717,25 @@ mod tests {
             "https://openrouter.ai/api/v1"
         );
         assert_eq!(redacted.keyword_llm.model, "openai/gpt-4o-mini");
+        assert_eq!(redacted.keyword_llm.batch_size, 12);
+        assert_eq!(redacted.keyword_llm.concurrency, 3);
         let resolved = store.keyword_llm_config().unwrap();
         assert_eq!(resolved.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("test-router-secret"));
         assert_eq!(resolved.model, "openai/gpt-4o-mini");
 
-        // Mask preserves previous secret across updates.
+        // Mask preserves previous secret across updates, and out-of-range batch/concurrency clamp cleanly.
         incoming.keyword_llm = KeywordLlmSettings {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: redacted.keyword_llm.api_key.clone(),
             model: "gpt-4o-mini".to_string(),
+            batch_size: 999,
+            concurrency: 99,
         };
         let updated = store.set(incoming.clone()).unwrap();
         assert_eq!(updated.keyword_llm.api_key, "******************");
+        assert_eq!(updated.keyword_llm.batch_size, KEYWORD_LLM_BATCH_SIZE_MAX);
+        assert_eq!(updated.keyword_llm.concurrency, KEYWORD_LLM_CONCURRENCY_MAX);
         let byok_resolved = store.keyword_llm_config().unwrap();
         assert_eq!(byok_resolved.base_url, "https://api.openai.com/v1");
         assert_eq!(byok_resolved.api_key.as_deref(), Some("test-router-secret"));
@@ -2702,6 +2746,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".to_string(),
             api_key: String::new(),
             model: "qwen2.5:7b".to_string(),
+            ..KeywordLlmSettings::default()
         };
         store.set(incoming.clone()).unwrap();
         let local_resolved = store.keyword_llm_config().unwrap();

@@ -2,8 +2,9 @@
  * Generic OpenAI-compatible helpers for academic keyword extraction across arXiv
  * and Venue papers when upstream publisher / OpenAlex keywords are absent.
  *
- * Defaults to `https://x666.me/v1` + `ernie-5.5-flash-preview` and works with any
- * OpenAI-compatible endpoint (`Base URL`, `API Key`, `Model`).
+ * Defaults to `https://openrouter.ai/api/v1` + `baidu/ernie-5.5-flash-preview:free`
+ * and works with any OpenAI-compatible endpoint (`Base URL`, `API Key`, `Model`,
+ * `Batch Size`, `Concurrency`).
  *
  * On desktop (`isTauri()`), probes, `/models` fetches, and `/chat/completions`
  * execute inside the Rust Host so BYOK keys remain masked (`*`) in the WebView,
@@ -16,16 +17,25 @@ import { callApi } from "@/lib/core/ipc";
 import { hasSecret, isSecretMask } from "@/lib/core/secret-mask";
 import { isTauri } from "@/lib/core/tauri";
 import {
+	clampKeywordLlmBatchSize,
+	clampKeywordLlmConcurrency,
 	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_BATCH_SIZE,
+	DEFAULT_KEYWORD_LLM_CONCURRENCY,
 	DEFAULT_KEYWORD_LLM_MODEL,
 } from "@/lib/settings/defaults";
 import { loadSettings } from "@/lib/settings/store";
 import type { KeywordLlmSettings } from "@/lib/settings/types";
 import type { ProbeStatus } from "@/lib/ui/probe-status";
 
-export { DEFAULT_KEYWORD_LLM_BASE_URL, DEFAULT_KEYWORD_LLM_MODEL };
+export {
+	DEFAULT_KEYWORD_LLM_BASE_URL,
+	DEFAULT_KEYWORD_LLM_BATCH_SIZE,
+	DEFAULT_KEYWORD_LLM_CONCURRENCY,
+	DEFAULT_KEYWORD_LLM_MODEL,
+};
 
-export const KEYWORD_LLM_KEY_URL = "https://x666.me";
+export const KEYWORD_LLM_KEY_URL = "https://openrouter.ai/settings/keys";
 
 export type KeywordLlmProbeStatus = ProbeStatus;
 
@@ -159,6 +169,25 @@ export function setCachedKeywordLlmConfigForTests(
 		baseUrl,
 		apiKey: (override.apiKey ?? "").trim(),
 		model,
+		batchSize: clampKeywordLlmBatchSize(override.batchSize),
+		concurrency: clampKeywordLlmConcurrency(override.concurrency),
+	};
+}
+
+/**
+ * Active Keyword LLM batch size and concurrency from settings (or test override).
+ */
+export function getKeywordLlmExecutionConfig(): {
+	batchSize: number;
+	concurrency: number;
+} {
+	const cfg =
+		testConfigOverride === undefined
+			? loadSettings().keywordLlm
+			: testConfigOverride;
+	return {
+		batchSize: clampKeywordLlmBatchSize(cfg?.batchSize),
+		concurrency: clampKeywordLlmConcurrency(cfg?.concurrency),
 	};
 }
 
@@ -726,8 +755,13 @@ export async function extractKeywordsWithKeywordLlmBatch(
 	);
 	if (validItems.length === 0) return result;
 
-	const batchSize = Math.max(1, Math.min(8, options?.batchSize ?? 6));
-	const concurrency = Math.max(1, Math.min(4, options?.concurrency ?? 1));
+	const execCfg = getKeywordLlmExecutionConfig();
+	const batchSize = clampKeywordLlmBatchSize(
+		options?.batchSize ?? execCfg.batchSize,
+	);
+	const concurrency = clampKeywordLlmConcurrency(
+		options?.concurrency ?? execCfg.concurrency,
+	);
 	const minSpacingMs = Math.max(0, options?.minSpacingMs ?? 0);
 	const chunks: KeywordLlmInput[][] = [];
 	for (let i = 0; i < validItems.length; i += batchSize) {
