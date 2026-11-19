@@ -33,7 +33,7 @@
       "requireLiteralLeadingDot": false
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4Q0VGREIxQjk3OTBDQkQKUldTOURIbTVzZjNPZUwzVW9OcExLS0VxUTVyOExrTEJ1VmZQcVdmVTBqaUZ0WW8zak53MnpNQ0oK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFM0JFMzE2N0JGNUZDOUIKUldTYi9QVjdGdU03UHZ2Z0RDYTZEUWdPTWdpb1JYK0trWWVlbG1PbjZCUGR4TTZvakhtditzc1MK",
       "endpoints": [
         "https://github.com/nonsense-j/Agentero/releases/latest/download/latest.json"
       ]
