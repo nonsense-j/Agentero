@@ -51,7 +51,7 @@ const PRUNED_PATH_PATTERNS = [
 	/^src\/components\/settings\/panes\/account-pane\.tsx$/,
 	/^src\/components\/settings\/cloud-usage\.tsx$/,
 	/^src\/components\/settings\/panes\/about-feedback\.tsx$/,
-	/^crates\/agentero-core\/src\/features\/sync\/(?:agentero|config)\.rs$/,
+	/^crates\/agentero-core\/src\/features\/sync\/agentero\.rs$/,
 	/^crates\/agentero-core\/src\/remote\.rs$/,
 	/^crates\/agentero-plugin-host\//,
 	/^crates\/agentero-core\/src\/plugins\.rs$/,
@@ -78,7 +78,6 @@ const PRUNED_PATH_PATTERNS = [
 	/^patches\/.*tesseract/,
 	/^templates\/vault\/thesis\//,
 	/^templates\/vault\/\.agents\/skills\/research-paper-writing\//,
-	/^mkdocs\.yml$/,
 	/^docs\/(?:backend\/word|frontend\/latex|frontend\/zhihu)\.md$/,
 	/^src\/i18n\/locales\/[^/]+\/(?:account|latexBuild|latexLanguage|latexPdf|mobile)\.json$/,
 ];
