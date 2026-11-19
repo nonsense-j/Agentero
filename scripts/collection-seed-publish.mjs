@@ -1,22 +1,28 @@
 #!/usr/bin/env node
 
 /**
- * Maintainer single-command seed pipeline for Plaza Paper Collection (`2026`).
+ * Maintainer one-command seed pipeline for Plaza Paper Collection (`2026`).
  *
- * Orchestrates:
+ * Default mode is incremental & zero-maintenance:
+ *   Step 0: Inspect local `collection.sqlite` state (`agentero-cli collection state`).
+ *           If local DB is empty (and not `--force-clean`), best-effort bootstrap
+ *           from the existing GitHub Release seed so even a fresh machine runs incrementally.
+ *           If `--force-clean` is passed, wipe target scope for a full rebuild.
  *   Step 1: Stateless TS multi-channel crawling (28 Venues + 2026 arXiv categories)
- *           loaded directly via Vite SSR (`ssrLoadModule`, zero extra npm deps),
- *           persisting each Venue / arXiv batch into `collection.sqlite` via
- *           `agentero-cli collection upsert-file`.
- *   Step 2: High-concurrency citation edge resolution, maintainer LLM keyword baking,
- *           and `.jsonl.gz` + `manifest.json` bundle export via
- *           `agentero-cli collection seed-bake`.
- *   Step 3: Optional GitHub Prerelease upload (`collection-seed-2026`) via `gh` CLI
- *           or `GITHUB_TOKEN` REST API when `--upload` is passed.
+ *           loaded directly via Vite SSR (`ssrLoadModule`, zero extra npm deps).
+ *           arXiv defaults to watermark-based incremental crawling (`max_results=1`
+ *           probe + 12h overlap delta window); pass `--force-clean` for full-year re-crawl.
+ *   Step 2: Incremental citation edge resolution, maintainer LLM keyword baking,
+ *           `.jsonl.gz` + `manifest.json` export, and automatic pruning of stale
+ *           local `.jsonl.gz` files via `agentero-cli collection seed-bake`.
+ *   Step 3: Atomic GitHub Prerelease upload (`collection-seed-2026`, enabled by default;
+ *           pass `--no-upload` for local-only builds): uploads new shards first,
+ *           publishes `manifest.json` last, and deletes stale old-hash `.jsonl.gz`
+ *           release assets automatically.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -65,18 +71,21 @@ function loadRepoDotenv() {
 
 const HELP_TEXT = `Usage: node scripts/collection-seed-publish.mjs [options]
 
-Maintainer pipeline to crawl 2026 Venue + arXiv papers, bake citation edges and
-maintainer LLM keywords into collection.sqlite, export compressed seed bundles,
-and optionally publish assets to GitHub Release (${DEFAULT_RELEASE_TAG}).
+One-command maintainer pipeline to incrementally update 2026 Venue + arXiv papers,
+bake citation edges and maintainer LLM keywords into collection.sqlite, export clean
+compressed seed shards, and atomically publish to GitHub Release (${DEFAULT_RELEASE_TAG}).
 
 Options:
   -h, --help                  Show this help message and exit
   --dry-run                   Verify Vite SSR TS module loading and print planned steps
+  --force-clean               Full clean rebuild: wipe target DB scope, ignore watermarks/TTL,
+                              re-bake non-author keywords, and re-upload all release shards
   --skip-fetch                Skip Step 1 upstream fetching; run Step 2 seed-bake directly
   --only-venues               Fetch only 2026 Venues in Step 1 (skip arXiv)
   --only-arxiv                Fetch only 2026 arXiv categories in Step 1 (skip Venues)
   --venues <ids>              Comma-separated venue IDs to fetch (default: all 28 built-in)
-  --categories <cats>         Comma-separated arXiv categories (default: ${DEFAULT_CATEGORIES})
+  --categories <cats>         Comma-separated arXiv categories (default: ${DEFAULT_CATEGORIES}
+                              + any extra categories already tracked in local collection.sqlite)
   --year <yyyy>               Target publication year (default: ${DEFAULT_YEAR})
   --db <path>                 Custom path to collection.sqlite
   --out-dir <dir>             Output directory for seed bundle (default: ${DEFAULT_OUT_DIR})
@@ -90,15 +99,17 @@ Options:
   --skip-refs                 Pass --skip-refs to agentero-cli collection seed-bake
   --skip-llm                  Pass --skip-llm to agentero-cli collection seed-bake
   --delta-since <iso>         Also emit delta bundle since ISO timestamp in seed-bake
-  --upload                    Upload exported seed assets to GitHub Release (--prerelease)
-  --no-upload                 Do not upload to GitHub Release (default)
+  --upload                    Upload exported seed assets to GitHub Release (default: enabled)
+  --no-upload                 Build local seed bundle only without uploading to GitHub Release
   --release-tag <tag>         GitHub Release tag name (default: ${DEFAULT_RELEASE_TAG})
   --repo <owner/name>         GitHub repository slug (auto-detected from git origin if omitted)
 
 Examples:
+  pnpm collection:seed-publish
   pnpm collection:seed-publish --dry-run
+  pnpm collection:seed-publish --no-upload
+  pnpm collection:seed-publish --force-clean
   pnpm collection:seed-publish --categories cs.SE,cs.CR,cs.PL,cs.AI
-  pnpm collection:seed-publish --skip-fetch --out-dir dist/seed --upload
 `;
 
 function parseCliOptions(argv) {
@@ -109,11 +120,12 @@ function parseCliOptions(argv) {
 		options: {
 			help: { type: "boolean", short: "h", default: false },
 			"dry-run": { type: "boolean", default: false },
+			"force-clean": { type: "boolean", default: false },
 			"skip-fetch": { type: "boolean", default: false },
 			"only-venues": { type: "boolean", default: false },
 			"only-arxiv": { type: "boolean", default: false },
 			venues: { type: "string" },
-			categories: { type: "string", default: DEFAULT_CATEGORIES },
+			categories: { type: "string" },
 			year: { type: "string", default: String(DEFAULT_YEAR) },
 			db: { type: "string" },
 			"out-dir": { type: "string", default: DEFAULT_OUT_DIR },
@@ -133,7 +145,7 @@ function parseCliOptions(argv) {
 			"skip-refs": { type: "boolean", default: false },
 			"skip-llm": { type: "boolean", default: false },
 			"delta-since": { type: "string" },
-			upload: { type: "boolean", default: false },
+			upload: { type: "boolean", default: true },
 			"release-tag": { type: "string", default: DEFAULT_RELEASE_TAG },
 			repo: { type: "string" },
 		},
@@ -165,7 +177,9 @@ function parseCliOptions(argv) {
 		throw new Error(`Invalid --llm-rpm value: ${values["llm-rpm"]}`);
 	}
 
-	const categories = values.categories
+	const categoriesExplicit = values.categories !== undefined;
+	const rawCategories = values.categories ?? DEFAULT_CATEGORIES;
+	const categories = rawCategories
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
@@ -181,10 +195,12 @@ function parseCliOptions(argv) {
 	return {
 		help: Boolean(values.help),
 		dryRun: Boolean(values["dry-run"]),
+		forceClean: Boolean(values["force-clean"]),
 		skipFetch: Boolean(values["skip-fetch"]),
 		onlyVenues: Boolean(values["only-venues"]),
 		onlyArxiv: Boolean(values["only-arxiv"]),
 		venueFilter,
+		categoriesExplicit,
 		categories,
 		year,
 		dbPath: values.db ? path.resolve(REPO_ROOT, values.db) : null,
@@ -336,6 +352,18 @@ function toArxivUpperDateStamp(isoString, targetYear, minusMinutes = 0) {
 	const roundedUpMinute =
 		Math.floor(parsed / 60_000) * 60_000 + (1 - minusMinutes) * 60_000;
 	return formatArxivDateStamp(Math.max(minYearMs, roundedUpMinute));
+}
+
+function toArxivLowerDateStamp(
+	isoString,
+	targetYear,
+	overlapMinutes = 12 * 60,
+) {
+	const parsed = Date.parse(isoString);
+	const minYearMs = Date.UTC(targetYear, 0, 1, 0, 0, 0);
+	if (Number.isNaN(parsed)) return formatArxivDateStamp(minYearMs);
+	const lowerMs = Math.max(minYearMs, parsed - overlapMinutes * 60_000);
+	return formatArxivDateStamp(lowerMs);
 }
 
 /**
@@ -492,6 +520,74 @@ function runAgenteroCli(cliRunner, subArgs) {
 	}
 }
 
+function runAgenteroCliJson(cliRunner, subArgs, { allowFailure = false } = {}) {
+	const fullArgs = [...cliRunner.prefixArgs, ...subArgs, "--json"];
+	const res = spawnSync(cliRunner.cmd, fullArgs, {
+		cwd: REPO_ROOT,
+		stdio: ["ignore", "pipe", "inherit"],
+		encoding: "utf8",
+		windowsHide: true,
+	});
+	if (res.status !== 0) {
+		if (allowFailure) return null;
+		throw new Error(
+			`agentero-cli command failed (exit ${res.status}): ${cliRunner.cmd} ${fullArgs.join(" ")}`,
+		);
+	}
+	const raw = String(res.stdout ?? "").trim();
+	if (!raw) return null;
+	try {
+		return JSON.parse(raw);
+	} catch (err) {
+		if (allowFailure) return null;
+		throw new Error(
+			`Failed parsing JSON output from agentero-cli: ${err instanceof Error ? err.message : err}`,
+		);
+	}
+}
+
+function readCollectionState(cliRunner, dbPath) {
+	const args = ["collection", "state"];
+	if (dbPath) {
+		args.push("--db", dbPath);
+	}
+	return runAgenteroCliJson(cliRunner, args);
+}
+
+function clearCollectionScope(cliRunner, { scope, venueId, dbPath }) {
+	const args = ["collection", "clear", "--scope", scope, "-y"];
+	if (venueId) {
+		args.push("--venue-id", venueId);
+	}
+	if (dbPath) {
+		args.push("--db", dbPath);
+	}
+	return runAgenteroCliJson(cliRunner, args);
+}
+
+function tryBootstrapSeedImport(cliRunner, { repoSlug, releaseTag, dbPath }) {
+	if (!repoSlug) return false;
+	const manifestUrl = `https://github.com/${repoSlug}/releases/download/${encodeURIComponent(releaseTag)}/manifest.json`;
+	console.log(
+		`[bootstrap] Local collection.sqlite is empty; attempting incremental bootstrap from ${manifestUrl}...`,
+	);
+	const args = ["collection", "seed-import", "--manifest", manifestUrl];
+	if (dbPath) {
+		args.push("--db", dbPath);
+	}
+	const res = runAgenteroCliJson(cliRunner, args, { allowFailure: true });
+	if (res && !res.skipped && Number(res.importedPapers) > 0) {
+		console.log(
+			`[bootstrap] Restored ${res.importedPapers} papers from existing release seed.`,
+		);
+		return true;
+	}
+	console.log(
+		"[bootstrap] No existing remote seed imported (first publish or offline); proceeding with fresh crawl.",
+	);
+	return false;
+}
+
 async function runUpsertFile(cliRunner, tmpDir, tag, payload, dbPath, venueId) {
 	const safeTag = tag.replace(/[^a-zA-Z0-9._-]+/g, "_");
 	const jsonPath = path.join(tmpDir, `upsert-${safeTag}-${Date.now()}.json`);
@@ -558,12 +654,21 @@ async function crawlArxivCategoryIntoDb({
 	cat,
 	allCategories,
 	year,
+	existingWatermark,
+	forceClean,
 	extractArxivDoiFromAtomEntry,
 	cliRunner,
 	tmpDir,
 	dbPath,
 }) {
-	const fromStamp = `${year}01010000`;
+	const canIncremental = Boolean(
+		!forceClean &&
+			existingWatermark?.historyComplete &&
+			existingWatermark?.latestPublishedAt &&
+			existingWatermark?.latestArxivId,
+	);
+
+	let fromStamp = `${year}01010000`;
 	let upperStamp = `${year}12312359`;
 	const pageSize = 200;
 	const maxOffsetPerWindow = 800;
@@ -571,12 +676,88 @@ async function crawlArxivCategoryIntoDb({
 	const seenIds = new Set();
 	let pendingBatch = [];
 	let remoteTotal;
-	let newestPublishedAt;
-	let newestArxivId;
-	let oldestPublishedAt;
+	let newestPublishedAt = canIncremental
+		? existingWatermark.latestPublishedAt
+		: undefined;
+	let newestArxivId = canIncremental
+		? stripArxivVer(existingWatermark.latestArxivId)
+		: undefined;
+	let oldestPublishedAt = canIncremental
+		? existingWatermark.oldestSyncedPublishedAt || undefined
+		: undefined;
 	let stalledWindows = 0;
 
-	console.log(`[arxiv:${cat}] Crawling ${year} papers...`);
+	if (canIncremental) {
+		const probeUrl = `https://export.arxiv.org/api/query?search_query=cat:${encodeURIComponent(cat)}+AND+submittedDate:[${year}01010000+TO+${year}12312359]&sortBy=submittedDate&sortOrder=descending&start=0&max_results=1`;
+		const probeXml = await resilientFetchText(
+			probeUrl,
+			"application/atom+xml,text/xml,*/*",
+		);
+		const probePage = parseArxivAtomPage(
+			probeXml,
+			cat,
+			allCategories,
+			year,
+			extractArxivDoiFromAtomEntry,
+		);
+		if (probePage.totalResults !== undefined) {
+			remoteTotal = probePage.totalResults;
+		}
+		const top = probePage.items[0];
+		if (
+			top &&
+			stripArxivVer(top.arxivId) ===
+				stripArxivVer(existingWatermark.latestArxivId) &&
+			top.publishedAt <= existingWatermark.latestPublishedAt
+		) {
+			const nowIso = new Date().toISOString();
+			await runUpsertFile(
+				cliRunner,
+				tmpDir,
+				`arxiv-${cat}-noop`,
+				{
+					items: [],
+					arxivWatermarks: {
+						[cat]: {
+							latestPublishedAt: existingWatermark.latestPublishedAt,
+							latestArxivId: stripArxivVer(existingWatermark.latestArxivId),
+							lastSyncedAt: nowIso,
+							oldestSyncedPublishedAt:
+								existingWatermark.oldestSyncedPublishedAt ??
+								existingWatermark.latestPublishedAt,
+							...(remoteTotal !== undefined
+								? { remoteTotal }
+								: existingWatermark.remoteTotal !== undefined
+									? { remoteTotal: existingWatermark.remoteTotal }
+									: {}),
+							historyComplete: true,
+						},
+					},
+					lastRefreshedAt: nowIso,
+				},
+				dbPath,
+				null,
+			);
+			console.log(
+				`[arxiv:${cat}] Up to date at ${top.arxivId} (${top.publishedAt}), skipped crawl.`,
+			);
+			return;
+		}
+
+		fromStamp = toArxivLowerDateStamp(
+			existingWatermark.latestPublishedAt,
+			year,
+			12 * 60,
+		);
+		console.log(
+			`[arxiv:${cat}] Incremental crawl from ${fromStamp} (watermark: ${existingWatermark.latestArxivId} @ ${existingWatermark.latestPublishedAt})...`,
+		);
+		await sleepMs(3_250);
+	} else {
+		console.log(
+			`[arxiv:${cat}] Full ${year} crawl (${forceClean ? "force-clean" : "no complete watermark"})...`,
+		);
+	}
 
 	while (stalledWindows < 3) {
 		let windowOldestPublishedAt;
@@ -676,6 +857,9 @@ async function crawlArxivCategoryIntoDb({
 			}
 			upperStamp = forcedUpper;
 		} else {
+			if (nextUpper <= fromStamp) {
+				break;
+			}
 			stalledWindows = 0;
 			upperStamp = nextUpper;
 		}
@@ -734,21 +918,31 @@ function detectGitHubRepoSlug(explicitRepo) {
 	return null;
 }
 
-function collectSeedAssetFiles(outDir) {
+function collectSeedBundle(outDir) {
 	if (!existsSync(outDir)) {
 		throw new Error(`Seed output directory does not exist: ${outDir}`);
 	}
-	const entries = readdirSync(outDir);
-	const assets = entries
-		.filter((name) => name === "manifest.json" || name.endsWith(".jsonl.gz"))
-		.map((name) => path.join(outDir, name))
-		.filter((fullPath) => statSync(fullPath).isFile());
-	if (assets.length === 0) {
-		throw new Error(
-			`No seed bundle assets (manifest.json / *.jsonl.gz) found in ${outDir}`,
-		);
+	const manifestPath = path.join(outDir, "manifest.json");
+	if (!existsSync(manifestPath) || !statSync(manifestPath).isFile()) {
+		throw new Error(`Seed manifest.json not found in ${outDir}`);
 	}
-	return assets;
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+	const shardPaths = [];
+	for (const shard of Array.isArray(manifest?.shards) ? manifest.shards : []) {
+		const filename = typeof shard?.filename === "string" ? shard.filename : "";
+		if (!filename) continue;
+		const fullPath = path.join(outDir, filename);
+		if (!existsSync(fullPath) || !statSync(fullPath).isFile()) {
+			throw new Error(
+				`Seed shard listed in manifest.json missing: ${fullPath}`,
+			);
+		}
+		shardPaths.push(fullPath);
+	}
+	if (shardPaths.length === 0) {
+		throw new Error(`No shards referenced by ${manifestPath}`);
+	}
+	return { manifestPath, shardPaths };
 }
 
 function hasGhCli() {
@@ -760,7 +954,13 @@ function hasGhCli() {
 	return res.status === 0;
 }
 
-async function uploadReleaseAssetsViaRestApi(repoSlug, tag, assetPaths, token) {
+async function uploadReleaseAssetsViaRestApi(
+	repoSlug,
+	tag,
+	{ manifestPath, shardPaths },
+	token,
+	forceClean,
+) {
 	const apiBase = `https://api.github.com/repos/${repoSlug}`;
 	const authHeaders = {
 		Authorization: `Bearer ${token}`,
@@ -812,9 +1012,23 @@ async function uploadReleaseAssetsViaRestApi(repoSlug, tag, assetPaths, token) {
 	}
 
 	const existingAssets = Array.isArray(release.assets) ? release.assets : [];
-	for (const assetPath of assetPaths) {
+	const existingByName = new Map(
+		existingAssets
+			.filter((a) => typeof a?.name === "string" && a.name.length > 0)
+			.map((a) => [a.name, a]),
+	);
+
+	// Upload new/changed `.jsonl.gz` shards first, then `manifest.json` last (atomic cutover).
+	const orderedAssets = [...shardPaths, manifestPath];
+	for (const assetPath of orderedAssets) {
 		const fileName = path.basename(assetPath);
-		const prev = existingAssets.find((a) => a?.name === fileName);
+		const prev = existingByName.get(fileName);
+		if (!forceClean && fileName.endsWith(".jsonl.gz") && prev?.id) {
+			console.log(
+				`[upload] Unchanged content-hashed shard ${fileName} already on ${repoSlug}@${tag}, skipping.`,
+			);
+			continue;
+		}
 		if (prev?.id) {
 			const delRes = await fetch(`${apiBase}/releases/assets/${prev.id}`, {
 				method: "DELETE",
@@ -849,20 +1063,50 @@ async function uploadReleaseAssetsViaRestApi(repoSlug, tag, assetPaths, token) {
 		}
 		console.log(`[upload] Uploaded ${fileName} to ${repoSlug}@${tag}`);
 	}
+
+	// Prune stale `.jsonl.gz` assets no longer referenced by `manifest.json`.
+	const activeShardNames = new Set(shardPaths.map((p) => path.basename(p)));
+	for (const prev of existingAssets) {
+		const name = typeof prev?.name === "string" ? prev.name : "";
+		if (
+			!prev?.id ||
+			!name.endsWith(".jsonl.gz") ||
+			activeShardNames.has(name)
+		) {
+			continue;
+		}
+		const delRes = await fetch(`${apiBase}/releases/assets/${prev.id}`, {
+			method: "DELETE",
+			headers: authHeaders,
+		});
+		if (delRes.ok || delRes.status === 404) {
+			console.log(`[upload] Pruned stale release asset ${name}`);
+		} else {
+			console.warn(
+				`[upload] Warning: failed pruning stale asset ${name} (HTTP ${delRes.status})`,
+			);
+		}
+	}
 }
 
-async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
-	const assetPaths = collectSeedAssetFiles(outDir);
+async function publishSeedToGitHubRelease({
+	outDir,
+	releaseTag,
+	repo,
+	forceClean,
+}) {
+	const bundle = collectSeedBundle(outDir);
 	const repoSlug = detectGitHubRepoSlug(repo);
 
 	if (hasGhCli()) {
 		const repoArgs = repoSlug ? ["--repo", repoSlug] : [];
 		const viewRes = spawnSync(
 			"gh",
-			["release", "view", releaseTag, ...repoArgs],
+			["release", "view", releaseTag, "--json", "assets", ...repoArgs],
 			{
 				cwd: REPO_ROOT,
-				stdio: "ignore",
+				stdio: ["ignore", "pipe", "ignore"],
+				encoding: "utf8",
 				windowsHide: true,
 			},
 		);
@@ -874,7 +1118,8 @@ async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
 					"release",
 					"create",
 					releaseTag,
-					...assetPaths,
+					...bundle.shardPaths,
+					bundle.manifestPath,
 					"--prerelease",
 					"--title",
 					`Plaza Paper Collection Seed (${releaseTag})`,
@@ -896,16 +1141,70 @@ async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
 			return;
 		}
 
+		let existingAssetNames = [];
+		try {
+			const parsed = JSON.parse(String(viewRes.stdout ?? "{}"));
+			if (Array.isArray(parsed?.assets)) {
+				existingAssetNames = parsed.assets
+					.map((a) => (typeof a?.name === "string" ? a.name : ""))
+					.filter(Boolean);
+			}
+		} catch {
+			// Ignore JSON parse errors; proceed with clobber upload.
+		}
+		const existingSet = new Set(existingAssetNames);
+
+		// Upload new/changed `.jsonl.gz` shards first, then `manifest.json` last (atomic cutover).
+		const shardsToUpload = forceClean
+			? bundle.shardPaths
+			: bundle.shardPaths.filter((p) => {
+					const name = path.basename(p);
+					if (existingSet.has(name)) {
+						console.log(
+							`[upload] Unchanged content-hashed shard ${name} already on ${releaseTag}, skipping.`,
+						);
+						return false;
+					}
+					return true;
+				});
+
+		if (shardsToUpload.length > 0) {
+			console.log(
+				`[upload] Uploading ${shardsToUpload.length} shard(s) to ${releaseTag} (--clobber)...`,
+			);
+			const shardRes = spawnSync(
+				"gh",
+				[
+					"release",
+					"upload",
+					releaseTag,
+					...shardsToUpload,
+					"--clobber",
+					...repoArgs,
+				],
+				{
+					cwd: REPO_ROOT,
+					stdio: "inherit",
+					windowsHide: true,
+				},
+			);
+			if (shardRes.status !== 0) {
+				throw new Error(
+					`gh release upload shards to ${releaseTag} failed (exit ${shardRes.status})`,
+				);
+			}
+		}
+
 		console.log(
-			`[upload] Uploading ${assetPaths.length} assets to ${releaseTag} (--clobber)...`,
+			`[upload] Uploading manifest.json to ${releaseTag} (--clobber)...`,
 		);
-		const uploadRes = spawnSync(
+		const manifestRes = spawnSync(
 			"gh",
 			[
 				"release",
 				"upload",
 				releaseTag,
-				...assetPaths,
+				bundle.manifestPath,
 				"--clobber",
 				...repoArgs,
 			],
@@ -915,10 +1214,33 @@ async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
 				windowsHide: true,
 			},
 		);
-		if (uploadRes.status !== 0) {
+		if (manifestRes.status !== 0) {
 			throw new Error(
-				`gh release upload ${releaseTag} failed (exit ${uploadRes.status})`,
+				`gh release upload manifest.json to ${releaseTag} failed (exit ${manifestRes.status})`,
 			);
+		}
+
+		const activeShardNames = new Set(
+			bundle.shardPaths.map((p) => path.basename(p)),
+		);
+		for (const name of existingAssetNames) {
+			if (!name.endsWith(".jsonl.gz") || activeShardNames.has(name)) continue;
+			const delRes = spawnSync(
+				"gh",
+				["release", "delete-asset", releaseTag, name, "--yes", ...repoArgs],
+				{
+					cwd: REPO_ROOT,
+					stdio: "inherit",
+					windowsHide: true,
+				},
+			);
+			if (delRes.status === 0) {
+				console.log(`[upload] Pruned stale release asset ${name}`);
+			} else {
+				console.warn(
+					`[upload] Warning: failed pruning stale asset ${name} (exit ${delRes.status})`,
+				);
+			}
 		}
 		return;
 	}
@@ -928,8 +1250,9 @@ async function publishSeedToGitHubRelease({ outDir, releaseTag, repo }) {
 		await uploadReleaseAssetsViaRestApi(
 			repoSlug,
 			releaseTag,
-			assetPaths,
+			bundle,
 			ghToken,
+			forceClean,
 		);
 		return;
 	}
@@ -1086,6 +1409,8 @@ async function main() {
 					{
 						status: "ok",
 						mode: "dry-run",
+						strategy: opts.forceClean ? "force-clean" : "incremental",
+						forceClean: opts.forceClean,
 						year: opts.year,
 						skipFetch: opts.skipFetch,
 						venueCount: opts.onlyArxiv ? 0 : targetVenues.length,
@@ -1114,6 +1439,78 @@ async function main() {
 	}
 
 	const cliRunner = buildAgenteroCliBinary();
+	const repoSlug = detectGitHubRepoSlug(opts.repo);
+
+	// Step 0: Inspect DB state; bootstrap from existing release if empty (incremental),
+	// or wipe target scope when `--force-clean` is requested.
+	let collectionState = readCollectionState(cliRunner, opts.dbPath);
+
+	if (opts.forceClean) {
+		const isFullClean =
+			!opts.skipFetch &&
+			!opts.onlyVenues &&
+			!opts.onlyArxiv &&
+			!opts.venueFilter;
+		if (isFullClean) {
+			console.log(
+				"[force-clean] Clearing entire collection.sqlite for full rebuild...",
+			);
+			collectionState = clearCollectionScope(cliRunner, {
+				scope: "all",
+				venueId: null,
+				dbPath: opts.dbPath,
+			});
+		} else if (opts.venueFilter && !opts.onlyArxiv && !opts.skipFetch) {
+			for (const vid of opts.venueFilter) {
+				console.log(`[force-clean] Clearing venue ${vid}...`);
+				collectionState = clearCollectionScope(cliRunner, {
+					scope: "venue",
+					venueId: vid,
+					dbPath: opts.dbPath,
+				});
+			}
+		}
+	} else if (
+		!opts.skipFetch &&
+		Number(collectionState?.totalCount ?? 0) === 0
+	) {
+		if (
+			tryBootstrapSeedImport(cliRunner, {
+				repoSlug,
+				releaseTag: opts.releaseTag,
+				dbPath: opts.dbPath,
+			})
+		) {
+			collectionState = readCollectionState(cliRunner, opts.dbPath);
+		}
+	}
+
+	const existingWatermarks = collectionState?.arxivWatermarks ?? {};
+	const existingVenueCounts = new Map(
+		(Array.isArray(collectionState?.venues) ? collectionState.venues : []).map(
+			(v) => [v.id, Number(v.paperCount ?? 0)],
+		),
+	);
+
+	// When `--categories` is omitted, keep any extra categories already tracked in DB
+	// (such as `cs.AI`) automatically synced so one-command updates never leave them stale.
+	const effectiveCategories = [...opts.categories];
+	if (!opts.categoriesExplicit) {
+		const catSet = new Set(effectiveCategories);
+		const tracked = [
+			...Object.keys(existingWatermarks),
+			...(Array.isArray(collectionState?.categories)
+				? collectionState.categories
+				: []),
+		];
+		for (const c of tracked) {
+			const trimmed = String(c ?? "").trim();
+			if (trimmed && !catSet.has(trimmed)) {
+				catSet.add(trimmed);
+				effectiveCategories.push(trimmed);
+			}
+		}
+	}
 
 	if (!opts.skipFetch) {
 		const pipeline = await loadPlazaTsPipeline(opts.openAlexApiKey);
@@ -1152,6 +1549,13 @@ async function main() {
 							resilientFetchText,
 							{ maxPages: 30, skipTitleSearch: true },
 						);
+						const prevCount = existingVenueCounts.get(spec.id) ?? 0;
+						if (!opts.forceClean && res.items.length === 0 && prevCount > 0) {
+							console.warn(
+								`[venues ${i + 1}/${targetVenues.length}] Upstream returned 0 papers for ${spec.name} (previously ${prevCount}); preserving existing rows.`,
+							);
+							continue;
+						}
 						const nowIso = new Date().toISOString();
 						await runUpsertFile(
 							cliRunner,
@@ -1184,11 +1588,13 @@ async function main() {
 			}
 
 			if (!opts.onlyVenues) {
-				for (const cat of opts.categories) {
+				for (const cat of effectiveCategories) {
 					await crawlArxivCategoryIntoDb({
 						cat,
-						allCategories: opts.categories,
+						allCategories: effectiveCategories,
 						year: opts.year,
+						existingWatermark: existingWatermarks[cat] ?? null,
+						forceClean: opts.forceClean,
 						extractArxivDoiFromAtomEntry: pipeline.extractArxivDoiFromAtomEntry,
 						cliRunner,
 						tmpDir,
@@ -1202,7 +1608,7 @@ async function main() {
 		}
 	}
 
-	// Step 2: Bake citation edges + maintainer LLM keywords + export seed bundle
+	// Step 2: Bake citation edges + maintainer LLM keywords + export clean seed bundle
 	const bakeArgs = [
 		"collection",
 		"seed-bake",
@@ -1231,6 +1637,9 @@ async function main() {
 	if (opts.skipLlm) {
 		bakeArgs.push("--skip-llm");
 	}
+	if (opts.forceClean) {
+		bakeArgs.push("--force-clean");
+	}
 	if (opts.deltaSince) {
 		bakeArgs.push("--delta-since", opts.deltaSince);
 	}
@@ -1238,16 +1647,17 @@ async function main() {
 	console.log(`[seed-bake] Running agentero-cli ${bakeArgs.join(" ")}...`);
 	runAgenteroCli(cliRunner, bakeArgs);
 
-	// Step 3: Optional GitHub Release upload
+	// Step 3: Atomic GitHub Release upload + stale release asset pruning
 	if (opts.upload) {
 		await publishSeedToGitHubRelease({
 			outDir: opts.outDir,
 			releaseTag: opts.releaseTag,
 			repo: opts.repo,
+			forceClean: opts.forceClean,
 		});
 	} else {
 		console.log(
-			`[done] Seed bundle ready in ${opts.outDir} (pass --upload to publish to GitHub Release ${opts.releaseTag}).`,
+			`[done] Seed bundle ready in ${opts.outDir} (omit --no-upload to publish to GitHub Release ${opts.releaseTag}).`,
 		);
 	}
 }

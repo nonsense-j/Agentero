@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use agentero_core::features::paper::discovery::collection::{
-    self, CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionUpsertPapersArgs,
-    SeedBakeOptions, DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE,
-    DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL, DEFAULT_BAKE_LLM_RPM,
+    self, CollectionClearArgs, CollectionPaperUpsertInput, CollectionSeedSyncArgs,
+    CollectionUpsertPapersArgs, SeedBakeOptions, DEFAULT_BAKE_LLM_BASE_URL,
+    DEFAULT_BAKE_LLM_BATCH_SIZE, DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL,
+    DEFAULT_BAKE_LLM_RPM,
 };
 use agentero_core::openai_compat::same_endpoint_host;
 use clap::{Subcommand, ValueHint};
@@ -154,6 +155,26 @@ fn resolve_bake_llm_api_key(explicit: Option<String>, llm_base_url: &str) -> Opt
 
 #[derive(Debug, Subcommand)]
 pub enum CollectionCmd {
+    /// Inspect `collection.sqlite` summary, venue counts, and arXiv sync watermarks.
+    State {
+        /// Optional override path to `collection.sqlite`.
+        #[arg(long = "db", value_name = "PATH", value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+    },
+
+    /// Clear `collection.sqlite` papers/watermarks (`all`, `venue`, `recommended`, `citations`).
+    Clear {
+        /// Scope to clear (`all`, `papers`, `venue`, `recommended`, `citations`).
+        #[arg(long = "scope", value_name = "SCOPE", default_value = "all")]
+        scope: String,
+        /// Target venue ID when `--scope venue` is used.
+        #[arg(long = "venue-id", value_name = "ID")]
+        venue_id: Option<String>,
+        /// Optional override path to `collection.sqlite`.
+        #[arg(long = "db", value_name = "PATH", value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+    },
+
     /// Batch-upsert papers into `collection.sqlite` from a JSON file
     /// (`CollectionUpsertPapersArgs` object or bare `CollectionPaperUpsertInput[]` array).
     UpsertFile {
@@ -232,6 +253,9 @@ pub enum CollectionCmd {
         /// Skip Step B (LLM keyword extraction).
         #[arg(long = "skip-llm")]
         skip_llm: bool,
+        /// Bypass 14-day reference check TTL and re-bake non-author keywords.
+        #[arg(long = "force-clean")]
+        force_clean: bool,
         /// Optional ISO timestamp watermark to also emit a `delta-2026-...jsonl.gz` shard.
         #[arg(long = "delta-since", value_name = "ISO")]
         delta_since: Option<String>,
@@ -253,6 +277,58 @@ pub enum CollectionCmd {
 
 pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliError> {
     match cmd {
+        CollectionCmd::State { db } => {
+            let db_path = db.unwrap_or_else(collection::collection_db_path);
+            let state = tokio::task::spawn_blocking(move || collection::state_get_at(&db_path))
+                .await
+                .map_err(|e| CliError::message(format!("collection state join failed: {e}")))?
+                .map_err(CliError::from)?;
+            let lines = vec![globals.style.ok(&format!(
+                "collection pool: {} papers (arxiv: {}, venue: {}, watermarks: {})",
+                state.total_count,
+                state.arxiv_count,
+                state.venue_count,
+                state.arxiv_watermarks.len()
+            ))];
+            let mut out = to_value(&state)?;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("lines".into(), json!(lines));
+            }
+            Ok(out)
+        }
+        CollectionCmd::Clear {
+            scope,
+            venue_id,
+            db,
+        } => {
+            let msg = match venue_id.as_deref() {
+                Some(vid) => format!("Clear collection scope '{scope}' for venue '{vid}'?"),
+                None => format!("Clear collection scope '{scope}'?"),
+            };
+            if !crate::prompt::confirm(globals, &msg, false)? {
+                return Err(CliError::needs_confirmation("collection clear cancelled"));
+            }
+            let db_path = db.unwrap_or_else(collection::collection_db_path);
+            let args = CollectionClearArgs {
+                scope: scope.clone(),
+                venue_id,
+            };
+            let state = tokio::task::spawn_blocking(move || {
+                collection::clear_collection_at(&db_path, &args)
+            })
+            .await
+            .map_err(|e| CliError::message(format!("collection clear join failed: {e}")))?
+            .map_err(CliError::from)?;
+            let lines = vec![globals.style.ok(&format!(
+                "cleared collection scope '{scope}' (remaining pool: {})",
+                state.total_count
+            ))];
+            let mut out = to_value(&state)?;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("lines".into(), json!(lines));
+            }
+            Ok(out)
+        }
         CollectionCmd::UpsertFile {
             file,
             replace_venue_id,
@@ -269,6 +345,7 @@ pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliE
             llm_rpm,
             skip_refs,
             skip_llm,
+            force_clean,
             delta_since,
         } => {
             ensure_desktop_network_settings_loaded();
@@ -284,6 +361,7 @@ pub async fn run(cmd: CollectionCmd, globals: &GlobalOpts) -> Result<Value, CliE
                 llm_rpm,
                 skip_refs,
                 skip_llm,
+                force_clean,
                 delta_since,
             };
             let report = collection::seed_bake_at(&db_path, opts)
@@ -468,9 +546,24 @@ mod tests {
         assert_eq!(upsert_val["totalCount"], 2);
         assert_eq!(upsert_val["upsertedInputCount"], 2);
 
+        let state_val = run(
+            CollectionCmd::State {
+                db: Some(db1.clone()),
+            },
+            &globals,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state_val["totalCount"], 2);
+
+        // Pre-seed a stale shard file to verify `seed-bake` prunes old `.jsonl.gz` assets.
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let stale_shard = out_dir.join("core-2026-00000000.jsonl.gz");
+        std::fs::write(&stale_shard, b"stale").unwrap();
+
         let bake_val = run(
             CollectionCmd::SeedBake {
-                db: Some(db1),
+                db: Some(db1.clone()),
                 out_dir: out_dir.clone(),
                 llm_base_url: DEFAULT_BAKE_LLM_BASE_URL.into(),
                 llm_model: DEFAULT_BAKE_LLM_MODEL.into(),
@@ -480,6 +573,7 @@ mod tests {
                 llm_rpm: DEFAULT_BAKE_LLM_RPM,
                 skip_refs: true,
                 skip_llm: true,
+                force_clean: false,
                 delta_since: None,
             },
             &globals,
@@ -487,6 +581,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bake_val["shards"].as_array().unwrap().len(), 1);
+        assert!(
+            !stale_shard.exists(),
+            "seed-bake must prune stale .jsonl.gz files in out_dir"
+        );
+
+        let cleared_val = run(
+            CollectionCmd::Clear {
+                scope: "all".into(),
+                venue_id: None,
+                db: Some(db1),
+            },
+            &globals,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared_val["totalCount"], 0);
 
         let import_val = run(
             CollectionCmd::SeedImport {

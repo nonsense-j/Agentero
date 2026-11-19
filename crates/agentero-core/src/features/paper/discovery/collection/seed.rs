@@ -694,6 +694,8 @@ pub struct SeedBakeOptions {
     pub llm_rpm: u32,
     pub skip_refs: bool,
     pub skip_llm: bool,
+    /// When `true`, bypass the 14-day reference check TTL and re-bake non-author keywords.
+    pub force_clean: bool,
     pub delta_since: Option<String>,
 }
 
@@ -709,6 +711,7 @@ impl Default for SeedBakeOptions {
             llm_rpm: DEFAULT_BAKE_LLM_RPM,
             skip_refs: false,
             skip_llm: false,
+            force_clean: false,
             delta_since: None,
         }
     }
@@ -1596,7 +1599,10 @@ async fn run_s2_batch_pass(
     Ok(enriched)
 }
 
-async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppError> {
+async fn run_step_a_refs_backfill(
+    db_path: &Path,
+    force_clean: bool,
+) -> Result<(usize, usize), AppError> {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -1621,7 +1627,11 @@ async fn run_step_a_refs_backfill(db_path: &Path) -> Result<(usize, usize), AppE
 
     let mut oa_enriched = 0usize;
     let mut oa_rate_limited = false;
-    let ttl_cutoff = refs_check_ttl_cutoff();
+    let ttl_cutoff = if force_clean {
+        "9999-12-31T23:59:59.999Z".to_string()
+    } else {
+        refs_check_ttl_cutoff()
+    };
 
     // Stage 2.1: Concurrent Zero-Credit OpenAlex Singleton Lookup (`0 credits`, paced by RPS tier)
     let db_load = db_path.to_path_buf();
@@ -3077,16 +3087,24 @@ fn persist_maintainer_llm_batch(
 
 async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<usize, AppError> {
     let db_load = db_path.to_path_buf();
+    let force_clean = opts.force_clean;
     let targets: Vec<LlmPaperTarget> =
         tokio::task::spawn_blocking(move || -> Result<_, AppError> {
             let conn = ensure_collection_at(&db_load)?;
-            let mut stmt = conn.prepare(
+            let sql = if force_clean {
                 "SELECT id, title, abstract_text, categories_json, source_label
-             FROM papers
-             WHERE (keywords_json = '[]' OR keyword_source NOT IN ('author', 'maintainer_llm'))
-               AND TRIM(title) != ''
-             ORDER BY row_id ASC",
-            )?;
+                 FROM papers
+                 WHERE keyword_source != 'author'
+                   AND TRIM(title) != ''
+                 ORDER BY row_id ASC"
+            } else {
+                "SELECT id, title, abstract_text, categories_json, source_label
+                 FROM papers
+                 WHERE (keywords_json = '[]' OR keyword_source NOT IN ('author', 'maintainer_llm'))
+                   AND TRIM(title) != ''
+                 ORDER BY row_id ASC"
+            };
+            let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map([], |r| {
                 let cats_json: String = r.get(3)?;
                 Ok(LlmPaperTarget {
@@ -3493,6 +3511,22 @@ fn export_seed_shards_sync(
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     fs::write(&manifest_path, manifest_bytes)?;
 
+    // Prune stale `.jsonl.gz` shard files left in `out_dir` from previous bakes.
+    let active_filenames: HashSet<&str> = shards.iter().map(|s| s.filename.as_str()).collect();
+    if let Ok(entries) = fs::read_dir(out_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".jsonl.gz") && !active_filenames.contains(name) {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     Ok((manifest_path, shards))
 }
 
@@ -3503,7 +3537,7 @@ pub async fn seed_bake_at(
     let (oa_enriched, s2_enriched) = if opts.skip_refs {
         (0, 0)
     } else {
-        run_step_a_refs_backfill(db_path).await?
+        run_step_a_refs_backfill(db_path, opts.force_clean).await?
     };
 
     let llm_enriched = if opts.skip_llm {

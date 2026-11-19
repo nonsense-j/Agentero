@@ -2044,6 +2044,7 @@ mod tests {
                 llm_rpm: 0,
                 skip_refs: true,
                 skip_llm: false,
+                force_clean: false,
                 delta_since: None,
             },
         )
