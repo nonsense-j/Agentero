@@ -81,6 +81,9 @@ export function DiscoverFastView({
 	const [totalMatched, setTotalMatched] = useState(0);
 	const [searching, setSearching] = useState(false);
 	const [loadingMore, setLoadingMore] = useState(false);
+	const [completedSearchKey, setCompletedSearchKey] = useState<string | null>(
+		null,
+	);
 
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [batchBusy, setBatchBusy] = useState(false);
@@ -93,6 +96,29 @@ export function DiscoverFastView({
 	} | null>(null);
 	const onObservePapersRef = useRef(onObservePapers);
 	onObservePapersRef.current = onObservePapers;
+
+	const hasScopeFilter = useMemo(() => {
+		const hasTimeFilter =
+			filters.timePreset !== "all" &&
+			(filters.timePreset !== "custom" ||
+				filters.dateFrom.trim().length > 0 ||
+				filters.dateTo.trim().length > 0);
+		return (
+			hasTimeFilter ||
+			filters.sourceType !== "all" ||
+			filters.categories.length > 0 ||
+			filters.venues.length > 0 ||
+			filters.venueKind !== "all" ||
+			filters.venueDomain !== "all" ||
+			filters.ccfRanks.length > 0
+		);
+	}, [filters]);
+
+	const hasSearchCriteria = debouncedQuery.trim().length > 0 || hasScopeFilter;
+	const graphResetKey = useMemo(
+		() => `${debouncedQuery}\u0000${JSON.stringify(filters)}`,
+		[debouncedQuery, filters],
+	);
 
 	useEffect(() => {
 		if (!query.trim()) {
@@ -119,15 +145,22 @@ export function DiscoverFastView({
 		if (summary.totalCount === 0 && !summary.hydrated) {
 			return;
 		}
-		if (summary.totalCount === 0) {
+		if (summary.totalCount === 0 || !hasSearchCriteria) {
+			reqSeqRef.current += 1;
 			setItems([]);
 			setTotalMatched(0);
 			setSearching(false);
+			setLoadingMore(false);
+			setCompletedSearchKey(null);
+			setSelectedIds((prevSelected) =>
+				prevSelected.size > 0 ? new Set() : prevSelected,
+			);
 			return;
 		}
 
 		const seq = ++reqSeqRef.current;
 		const limit = loadedLimitRef.current;
+		const searchKey = graphResetKey;
 		setSearching(true);
 		void searchCollectionFastRemote(debouncedQuery, filters, {
 			limit,
@@ -137,10 +170,12 @@ export function DiscoverFastView({
 				if (seq !== reqSeqRef.current) return;
 				setItems(res.items);
 				setTotalMatched(res.totalMatched);
+				setCompletedSearchKey(searchKey);
 				onObservePapersRef.current?.(res.items.map((e) => e.paper));
 			})
 			.catch((err) => {
 				if (seq !== reqSeqRef.current) return;
+				setCompletedSearchKey(searchKey);
 				notifyError(errorText(err));
 			})
 			.finally(() => {
@@ -151,13 +186,22 @@ export function DiscoverFastView({
 	}, [
 		debouncedQuery,
 		filters,
+		graphResetKey,
+		hasSearchCriteria,
 		summary.hydrated,
 		summary.revision,
 		summary.totalCount,
 	]);
 
 	const handleLoadMore = useCallback(async () => {
-		if (loadingMore || searching || items.length >= totalMatched) return;
+		if (
+			!hasSearchCriteria ||
+			loadingMore ||
+			searching ||
+			items.length >= totalMatched
+		) {
+			return;
+		}
 		const seq = ++reqSeqRef.current;
 		const offset = items.length;
 		setLoadingMore(true);
@@ -188,6 +232,7 @@ export function DiscoverFastView({
 	}, [
 		debouncedQuery,
 		filters,
+		hasSearchCriteria,
 		items.length,
 		loadingMore,
 		searching,
@@ -200,10 +245,8 @@ export function DiscoverFastView({
 	);
 
 	const seedPapers = useMemo(() => items.map((e) => e.paper), [items]);
-	const graphResetKey = useMemo(
-		() => `${debouncedQuery}\u0000${JSON.stringify(filters)}`,
-		[debouncedQuery, filters],
-	);
+	const searchPending =
+		hasSearchCriteria && (searching || completedSearchKey !== graphResetKey);
 
 	const availableVenues = useMemo(() => {
 		return summary.venues.filter((v) => {
@@ -306,10 +349,18 @@ export function DiscoverFastView({
 							{t("plaza.discover.fastTitle")}
 						</span>
 						<span className="font-mono text-muted-foreground text-xs tabular-nums">
-							{t("plaza.discover.matchedCount", {
-								count: totalMatched,
-							})}{" "}
-							/ {summary.totalCount}
+							{hasSearchCriteria ? (
+								<>
+									{t("plaza.discover.matchedCount", {
+										count: totalMatched,
+									})}{" "}
+									/ {summary.totalCount}
+								</>
+							) : (
+								t("plaza.collection.papersCount", {
+									count: summary.totalCount,
+								})
+							)}
 						</span>
 						{searching ? (
 							<Loader2 className="size-3.5 animate-spin text-muted-foreground" />
@@ -443,6 +494,11 @@ export function DiscoverFastView({
 							type="text"
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									setDebouncedQuery(query);
+								}
+							}}
 							placeholder={t("plaza.discover.searchPlaceholder")}
 							className="h-8 w-full rounded-lg border bg-background pr-8 pl-8 text-xs text-foreground placeholder:text-muted-foreground focus:border-brand/60 focus:outline-none"
 						/>
@@ -792,7 +848,17 @@ export function DiscoverFastView({
 						<p>{t("plaza.discover.poolEmptyHint")}</p>
 					)}
 				</div>
-			) : searching && items.length === 0 ? (
+			) : !hasSearchCriteria ? (
+				<div
+					data-fast-search-idle
+					className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground text-xs"
+				>
+					<Search className="size-6 opacity-30" />
+					<p className="max-w-md leading-relaxed">
+						{t("plaza.discover.searchPlaceholder")}
+					</p>
+				</div>
+			) : searchPending && items.length === 0 ? (
 				<div className="flex h-48 items-center justify-center p-4 text-muted-foreground text-xs">
 					<Loader2 className="size-4 animate-spin" />
 				</div>

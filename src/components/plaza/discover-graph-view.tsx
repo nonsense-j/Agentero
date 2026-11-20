@@ -1,4 +1,5 @@
 import {
+	GitBranchPlus,
 	Library,
 	Loader2,
 	Maximize2,
@@ -41,12 +42,30 @@ import {
 	type PaperGraphPosition,
 } from "@/lib/plaza/paper-graph";
 import { sameCollectionPaperWork } from "@/lib/plaza/paper-identity";
-import { getVaultPath } from "@/lib/vault/store";
 
 const MAX_EXPAND_NEIGHBORS_PER_NODE = 16;
+const EXPAND_ALL_CONCURRENCY = 6;
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 2.4;
 const DRAG_CLICK_THRESHOLD_PX = 5;
+
+async function fetchExpandNeighbors(
+	paperId: string,
+): Promise<CollectionPaperItem[]> {
+	const lineage = await getCollectionPaperLineage(paperId, null);
+	const combined: CollectionPaperItem[] = [];
+	for (const item of [...lineage.citedByInPool, ...lineage.referencesInPool]) {
+		if (item.id === paperId) continue;
+		if (combined.some((c) => sameCollectionPaperWork(c, item))) continue;
+		combined.push(item);
+	}
+	combined.sort(
+		(a, b) =>
+			(b.citationCount ?? 0) - (a.citationCount ?? 0) ||
+			b.publishedAt.localeCompare(a.publishedAt),
+	);
+	return combined.slice(0, MAX_EXPAND_NEIGHBORS_PER_NODE);
+}
 
 type ResolvedGraphNode = {
 	paper: CollectionPaperItem;
@@ -124,6 +143,7 @@ export function DiscoverGraphView({
 	const [expandingIds, setExpandingIds] = useState<Set<string>>(
 		() => new Set(),
 	);
+	const [expandingAll, setExpandingAll] = useState(false);
 	const [subgraph, setSubgraph] = useState<CollectionSubgraphResult>({
 		citationEdges: [],
 		sharedRefEdges: [],
@@ -144,17 +164,28 @@ export function DiscoverGraphView({
 		new Map(),
 	);
 	const needsAutoFitRef = useRef(true);
+	const pendingFitAfterSubgraphRef = useRef(false);
+	const graphEpochRef = useRef(0);
 	const prevResetKeyRef = useRef(resetKey);
 	const subgraphReqSeqRef = useRef(0);
 	const onObservePapersRef = useRef(onObservePapers);
 	onObservePapersRef.current = onObservePapers;
 
+	useEffect(() => {
+		return () => {
+			graphEpochRef.current += 1;
+		};
+	}, []);
+
 	// Reset expanded neighborhood & manual drags when search query or filters change
 	useEffect(() => {
 		if (prevResetKeyRef.current === resetKey) return;
 		prevResetKeyRef.current = resetKey;
+		graphEpochRef.current += 1;
+		pendingFitAfterSubgraphRef.current = false;
 		setExpandedBySeed(new Map());
 		setExpandingIds(new Set());
+		setExpandingAll(false);
 		setManualOffsets(new Map());
 		setHoveredId(null);
 		prevLayoutPositionsRef.current = new Map();
@@ -245,10 +276,15 @@ export function DiscoverGraphView({
 		void getCollectionSubgraph(ids)
 			.then((res) => {
 				if (seq !== subgraphReqSeqRef.current) return;
+				if (pendingFitAfterSubgraphRef.current) {
+					pendingFitAfterSubgraphRef.current = false;
+					needsAutoFitRef.current = true;
+				}
 				setSubgraph(res);
 			})
 			.catch((err) => {
 				if (seq !== subgraphReqSeqRef.current) return;
+				pendingFitAfterSubgraphRef.current = false;
 				notifyError(errorText(err));
 			})
 			.finally(() => {
@@ -331,6 +367,16 @@ export function DiscoverGraphView({
 		return connected;
 	}, [hoveredId, subgraph.citationEdges, subgraph.sharedRefEdges]);
 
+	const expandableNodes = useMemo(
+		() =>
+			resolvedNodes.filter(
+				(n) =>
+					!expandedBySeed.has(n.paper.id) &&
+					(subgraph.unexpandedCounts[n.paper.id] ?? 0) > 0,
+			),
+		[resolvedNodes, expandedBySeed, subgraph.unexpandedCounts],
+	);
+
 	const handleToggleExpand = useCallback(
 		async (paper: CollectionPaperItem) => {
 			if (expandingIds.has(paper.id)) return;
@@ -343,6 +389,7 @@ export function DiscoverGraphView({
 				return;
 			}
 
+			const epoch = graphEpochRef.current;
 			setExpandingIds((prev) => {
 				const next = new Set(prev);
 				next.add(paper.id);
@@ -350,25 +397,8 @@ export function DiscoverGraphView({
 			});
 
 			try {
-				const lineage = await getCollectionPaperLineage(
-					paper.id,
-					getVaultPath(),
-				);
-				const combined: CollectionPaperItem[] = [];
-				for (const item of [
-					...lineage.citedByInPool,
-					...lineage.referencesInPool,
-				]) {
-					if (item.id === paper.id) continue;
-					if (combined.some((c) => sameCollectionPaperWork(c, item))) continue;
-					combined.push(item);
-				}
-				combined.sort(
-					(a, b) =>
-						(b.citationCount ?? 0) - (a.citationCount ?? 0) ||
-						b.publishedAt.localeCompare(a.publishedAt),
-				);
-				const picked = combined.slice(0, MAX_EXPAND_NEIGHBORS_PER_NODE);
+				const picked = await fetchExpandNeighbors(paper.id);
+				if (graphEpochRef.current !== epoch) return;
 				if (picked.length > 0) {
 					onObservePapersRef.current?.(picked);
 				}
@@ -378,19 +408,121 @@ export function DiscoverGraphView({
 					return next;
 				});
 			} catch (err) {
-				notifyError(errorText(err));
+				if (graphEpochRef.current === epoch) {
+					notifyError(errorText(err));
+				}
 			} finally {
-				setExpandingIds((prev) => {
-					const next = new Set(prev);
-					next.delete(paper.id);
-					return next;
-				});
+				if (graphEpochRef.current === epoch) {
+					setExpandingIds((prev) => {
+						const next = new Set(prev);
+						next.delete(paper.id);
+						return next;
+					});
+				}
 			}
 		},
 		[expandedBySeed, expandingIds],
 	);
 
+	const handleExpandAll = useCallback(async () => {
+		if (expandingAll || loadingSubgraph) return;
+		const targets = expandableNodes.filter(
+			(n) => !expandingIds.has(n.paper.id),
+		);
+		if (targets.length === 0) return;
+
+		const epoch = graphEpochRef.current;
+		const targetIds = targets.map((n) => n.paper.id);
+		const existingNodeIds = new Set(resolvedNodes.map((n) => n.paper.id));
+
+		setExpandingAll(true);
+		setExpandingIds((prev) => {
+			const next = new Set(prev);
+			for (const id of targetIds) next.add(id);
+			return next;
+		});
+
+		const results = new Map<string, CollectionPaperItem[]>();
+		let firstError: unknown = null;
+		let cursor = 0;
+
+		const worker = async () => {
+			while (cursor < targetIds.length) {
+				if (graphEpochRef.current !== epoch) return;
+				const idx = cursor++;
+				const id = targetIds[idx];
+				if (!id) continue;
+				try {
+					const picked = await fetchExpandNeighbors(id);
+					if (graphEpochRef.current !== epoch) return;
+					results.set(id, picked);
+				} catch (err) {
+					if (firstError === null) firstError = err;
+				}
+			}
+		};
+
+		try {
+			const workerCount = Math.min(EXPAND_ALL_CONCURRENCY, targetIds.length);
+			await Promise.all(Array.from({ length: workerCount }, () => worker()));
+			if (graphEpochRef.current !== epoch) return;
+
+			if (firstError !== null) {
+				notifyError(errorText(firstError));
+			}
+
+			if (results.size > 0) {
+				const observed: CollectionPaperItem[] = [];
+				const seenObserved = new Set<string>();
+				let addedNewNode = false;
+				for (const picked of results.values()) {
+					for (const item of picked) {
+						if (!existingNodeIds.has(item.id)) {
+							addedNewNode = true;
+						}
+						if (!seenObserved.has(item.id)) {
+							seenObserved.add(item.id);
+							observed.push(item);
+						}
+					}
+				}
+				if (observed.length > 0) {
+					onObservePapersRef.current?.(observed);
+				}
+				if (addedNewNode) {
+					pendingFitAfterSubgraphRef.current = true;
+				}
+				setExpandedBySeed((prev) => {
+					const next = new Map(prev);
+					for (const [id, picked] of results.entries()) {
+						next.set(id, picked);
+					}
+					return next;
+				});
+			}
+		} finally {
+			if (graphEpochRef.current === epoch) {
+				setExpandingIds((prev) => {
+					const next = new Set(prev);
+					for (const id of targetIds) next.delete(id);
+					return next;
+				});
+				setExpandingAll(false);
+			}
+		}
+	}, [
+		expandableNodes,
+		expandingAll,
+		expandingIds,
+		loadingSubgraph,
+		resolvedNodes,
+	]);
+
 	const handleResetExpanded = useCallback(() => {
+		graphEpochRef.current += 1;
+		pendingFitAfterSubgraphRef.current = false;
+		setExpandingIds(new Set());
+		setExpandingAll(false);
 		setExpandedBySeed(new Map());
 		setManualOffsets(new Map());
 		prevLayoutPositionsRef.current = new Map();
@@ -831,11 +963,40 @@ export function DiscoverGraphView({
 				) : null}
 			</div>
 
-			{/* Top-right viewport controls + Reset Expanded */}
+			{/* Top-right floating controls: Expand All + Reset + Viewport */}
 			<div
 				onPointerDown={(e) => e.stopPropagation()}
 				className="pointer-events-auto absolute top-3 right-3 z-20 flex items-center gap-1 rounded-lg border bg-background/85 p-1 shadow-xs backdrop-blur-md"
 			>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							data-graph-expand-all
+							disabled={
+								expandingAll || loadingSubgraph || expandableNodes.length === 0
+							}
+							onClick={() => void handleExpandAll()}
+							aria-label={t("plaza.discover.graphExpandAll")}
+							className="h-6 gap-1 px-2 text-xs tabular-nums"
+						>
+							{expandingAll ? (
+								<Loader2 className="size-3 animate-spin" />
+							) : (
+								<GitBranchPlus className="size-3.5" />
+							)}
+							<span>{t("plaza.discover.graphExpandAll")}</span>
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">
+						{expandableNodes.length > 0
+							? `${t("plaza.discover.graphExpandAll")} (${expandableNodes.length})`
+							: t("plaza.discover.graphExpandAll")}
+					</TooltipContent>
+				</Tooltip>
+
 				{expandedBySeed.size > 0 ? (
 					<Tooltip>
 						<TooltipTrigger asChild>
@@ -843,6 +1004,7 @@ export function DiscoverGraphView({
 								type="button"
 								variant="ghost"
 								size="icon-xs"
+								data-graph-reset-expanded
 								onClick={handleResetExpanded}
 								aria-label={t("plaza.discover.graphResetExpanded")}
 							>
@@ -854,6 +1016,8 @@ export function DiscoverGraphView({
 						</TooltipContent>
 					</Tooltip>
 				) : null}
+
+				<span className="mx-0.5 h-3.5 w-px bg-border" />
 
 				<Tooltip>
 					<TooltipTrigger asChild>

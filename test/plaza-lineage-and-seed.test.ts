@@ -749,9 +749,18 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 			doi: "10.1145/outside.citing",
 			rawRefs: ["doi:10.1145/graph.a"],
 		});
+		const pOutsideCitingC = makePaper({
+			id: "doi:10.1145/outside.citing.c",
+			title: "Memory Safety Auditor",
+			authors: ["Grace Park"],
+			abstract: "Static audit workflow citing sanitizer studies.",
+			keywords: ["Static Analysis"],
+			doi: "10.1145/outside.citing.c",
+			rawRefs: ["doi:10.1145/graph.c"],
+		});
 
 		mockDb.seed({
-			items: [pA, pB, pC, pIso, pOutsideRef, pOutsideCiting],
+			items: [pA, pB, pC, pIso, pOutsideRef, pOutsideCiting, pOutsideCitingC],
 		});
 		await ensureCollectionSummaryHydrated();
 		await flush(4);
@@ -799,10 +808,18 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 			);
 		};
 
+		const searchSpy = vi.mocked(commands.plazaCollectionSearch);
+		searchSpy.mockClear();
+
 		renderFast();
 		await flush(8);
 
-		// Filter to "Fuzzing OR Harness" so pOutsideRef & pOutsideCiting are excluded from initial search
+		// Fast Search stays idle on initial open without fetching or rendering all papers
+		expect(searchSpy).not.toHaveBeenCalled();
+		expect(host.querySelector("[data-fast-search-idle]")).not.toBeNull();
+		expect(host.textContent).not.toContain("A Fuzzing Engine for Rust");
+
+		// Filter to "Fuzzing OR Harness" so pOutsideRef, pOutsideCiting & pOutsideCitingC are excluded from initial search
 		const searchInput = host.querySelector(
 			"input[type='text']",
 		) as HTMLInputElement | null;
@@ -815,6 +832,10 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		searchInput?.dispatchEvent(new Event("input", { bubbles: true }));
 		await new Promise((resolve) => setTimeout(resolve, 200));
 		await flush(8);
+
+		expect(searchSpy).toHaveBeenCalledTimes(1);
+		expect(host.querySelector("[data-fast-search-idle]")).toBeNull();
+		expect(host.textContent).toContain("A Fuzzing Engine for Rust");
 
 		// Switch Fast Search to Graph View
 		const graphSwitchBtn = host.querySelector(
@@ -853,7 +874,32 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		) as HTMLElement | null;
 		expect(nodeA?.getAttribute("data-in-library")).toBeNull();
 
-		// Expand pA -> pulls in both pOutsideRef (ref) and pOutsideCiting (cite)
+		// Floating Expand All button expands all expandable nodes (pA and pC) in one action
+		const expandAllBtn = graphCanvas?.querySelector(
+			"[data-graph-expand-all]",
+		) as HTMLButtonElement | null;
+		expect(expandAllBtn).not.toBeNull();
+		expect(expandAllBtn?.disabled).toBe(false);
+		expandAllBtn?.click();
+		await flush(12);
+
+		expect(graphCanvas?.querySelectorAll("[data-graph-node]").length).toBe(7);
+		expect(graphCanvas?.textContent).toContain("Taylor@Foundational");
+		expect(graphCanvas?.textContent).toContain("Miller@Downstream");
+		expect(graphCanvas?.textContent).toContain("Park@Memory");
+		expect(expandAllBtn?.disabled).toBe(true);
+
+		// Reset expanded restores initial 4 seeds and re-enables Expand All
+		const resetExpandedBtn = graphCanvas?.querySelector(
+			"[data-graph-reset-expanded]",
+		) as HTMLButtonElement | null;
+		expect(resetExpandedBtn).not.toBeNull();
+		resetExpandedBtn?.click();
+		await flush(10);
+		expect(graphCanvas?.querySelectorAll("[data-graph-node]").length).toBe(4);
+		expect(expandAllBtn?.disabled).toBe(false);
+
+		// Expand pA individually -> pulls in both pOutsideRef (ref) and pOutsideCiting (cite)
 		const expandABtn = graphCanvas?.querySelector(
 			`[data-graph-expand='${pA.id}']`,
 		) as HTMLButtonElement | null;
@@ -878,6 +924,13 @@ describe("Stage 2 Plaza Seed Sync, Metadata Rules, and Paper Graph Lineage UI", 
 		pillBtnA?.click();
 		await flush(2);
 		expect(openedPaper?.id).toBe(pA.id);
+
+		// Clearing search returns Fast Search to idle state without rendering all papers
+		nativeInputValueSetter?.call(searchInput, "");
+		searchInput?.dispatchEvent(new Event("input", { bubbles: true }));
+		await flush(8);
+		expect(host.querySelector("[data-fast-search-idle]")).not.toBeNull();
+		expect(host.querySelector("[data-discover-graph-view]")).toBeNull();
 
 		root.unmount();
 	});
