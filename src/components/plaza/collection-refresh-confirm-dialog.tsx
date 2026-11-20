@@ -72,6 +72,7 @@ function ServiceReadinessRow({
 	label,
 	status,
 	configured,
+	manualCheck = false,
 	readyTitle,
 	onRecheck,
 	onOpenSettings,
@@ -79,6 +80,7 @@ function ServiceReadinessRow({
 	label: string;
 	status: ProbeStatus;
 	configured: boolean;
+	manualCheck?: boolean;
 	readyTitle?: string;
 	onRecheck: () => void;
 	onOpenSettings: () => void;
@@ -91,9 +93,17 @@ function ServiceReadinessRow({
 				? t("plaza.collection.refreshConfirm.keywordReady")
 				: status === "fail"
 					? t("plaza.collection.refreshConfirm.keywordUnavailable")
-					: t("plaza.collection.refreshConfirm.keywordUnconfigured");
+					: configured
+						? t("plaza.collection.refreshConfirm.keywordConfigured")
+						: t("plaza.collection.refreshConfirm.keywordUnconfigured");
 
-	const showSettingsAction = status === "idle" || status === "fail";
+	const showCheckAction =
+		status === "fail" || (manualCheck && configured && status === "idle");
+	const checkLabel =
+		status === "fail"
+			? t("plaza.collection.refreshConfirm.keywordRecheck")
+			: t("plaza.collection.refreshConfirm.keywordCheck");
+	const showSettingsAction = !configured || status === "fail";
 
 	return (
 		<div className="flex items-center justify-between gap-3 px-3 py-2.5">
@@ -106,14 +116,20 @@ function ServiceReadinessRow({
 
 			<div className="flex shrink-0 items-center gap-1.5">
 				<span
-					title={status === "ok" && readyTitle ? readyTitle : undefined}
+					title={
+						(status === "ok" || (status === "idle" && configured)) && readyTitle
+							? readyTitle
+							: undefined
+					}
 					className={cn(
 						"inline-flex items-center gap-1 text-xs",
 						status === "ok" &&
 							"font-medium text-emerald-600 dark:text-emerald-400",
 						status === "probing" && "text-muted-foreground",
 						status === "idle" &&
-							"font-medium text-amber-600 dark:text-amber-400",
+							(configured
+								? "font-medium text-muted-foreground"
+								: "font-medium text-amber-600 dark:text-amber-400"),
 						status === "fail" && "font-medium text-destructive",
 					)}
 				>
@@ -123,22 +139,20 @@ function ServiceReadinessRow({
 					<span>{statusText}</span>
 				</span>
 
-				{status === "fail" ? (
+				{showCheckAction ? (
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<Button
 								type="button"
 								variant="ghost"
 								size="icon-xs"
-								aria-label={`${t("plaza.collection.refreshConfirm.keywordRecheck")} · ${label}`}
+								aria-label={`${checkLabel} · ${label}`}
 								onClick={onRecheck}
 							>
 								<RefreshCw className="size-3" />
 							</Button>
 						</TooltipTrigger>
-						<TooltipContent>
-							{t("plaza.collection.refreshConfirm.keywordRecheck")}
-						</TooltipContent>
+						<TooltipContent>{checkLabel}</TooltipContent>
 					</Tooltip>
 				) : null}
 
@@ -187,10 +201,9 @@ export function CollectionRefreshConfirmDialog({
 	const [hasBuiltinKey, setHasBuiltinKey] = useState(false);
 	const [builtinChecked, setBuiltinChecked] = useState(false);
 	const [keywordProbeStatus, setKeywordProbeStatus] =
-		useState<KeywordLlmProbeStatus>("probing");
+		useState<KeywordLlmProbeStatus>("idle");
 	const [openAlexProbeStatus, setOpenAlexProbeStatus] =
 		useState<OpenAlexProbeStatus>("idle");
-	const [keywordRecheckSeq, setKeywordRecheckSeq] = useState(0);
 	const [openAlexRecheckSeq, setOpenAlexRecheckSeq] = useState(0);
 	const keywordAbortRef = useRef<AbortController | null>(null);
 	const openAlexAbortRef = useRef<AbortController | null>(null);
@@ -237,52 +250,39 @@ export function CollectionRefreshConfirmDialog({
 		(isDefaultKeywordLlmBaseUrl(keywordLlm.baseUrl) && hasBuiltinKey);
 	const openAlexConfigured = hasSecret(openAlexKey);
 
-	// Probe Keyword LLM readiness whenever dialog opens or config changes.
+	// Keyword LLM stays on local configured check until the user clicks Check.
 	useEffect(() => {
-		if (!open) {
-			keywordAbortRef.current?.abort();
-			keywordAbortRef.current = null;
-			return;
-		}
-		if (!builtinChecked) {
-			setKeywordProbeStatus("probing");
-			return;
-		}
-		if (!keywordConfigured) {
-			keywordAbortRef.current?.abort();
-			keywordAbortRef.current = null;
-			setKeywordProbeStatus("idle");
-			return;
-		}
-
-		keywordAbortRef.current?.abort();
-		const ac = new AbortController();
-		keywordAbortRef.current = ac;
-		setKeywordProbeStatus("probing");
-
-		// Dependencies intentionally include key/base/model/recheckSeq so saved edits re-probe.
-		void keywordRecheckSeq;
+		void open;
+		void keywordConfigured;
 		void keywordLlm.baseUrl;
 		void keywordLlm.apiKey;
 		void keywordLlm.model;
-
-		void probeKeywordLlm(null, ac.signal).then((ok) => {
-			if (ac.signal.aborted) return;
-			setKeywordProbeStatus(ok ? "ok" : "fail");
-		});
-
+		keywordAbortRef.current?.abort();
+		keywordAbortRef.current = null;
+		setKeywordProbeStatus("idle");
 		return () => {
-			ac.abort();
+			keywordAbortRef.current?.abort();
+			keywordAbortRef.current = null;
 		};
 	}, [
 		open,
-		builtinChecked,
 		keywordConfigured,
 		keywordLlm.baseUrl,
 		keywordLlm.apiKey,
 		keywordLlm.model,
-		keywordRecheckSeq,
 	]);
+
+	const handleCheckKeywordLlm = useCallback(() => {
+		if (!keywordConfigured) return;
+		keywordAbortRef.current?.abort();
+		const ac = new AbortController();
+		keywordAbortRef.current = ac;
+		setKeywordProbeStatus("probing");
+		void probeKeywordLlm(null, ac.signal).then((ok) => {
+			if (ac.signal.aborted) return;
+			setKeywordProbeStatus(ok ? "ok" : "fail");
+		});
+	}, [keywordConfigured]);
 
 	// Probe OpenAlex API key readiness whenever dialog opens or key changes.
 	useEffect(() => {
@@ -356,6 +356,12 @@ export function CollectionRefreshConfirmDialog({
 		(isDefaultKeywordLlmBaseUrl(keywordLlm.baseUrl)
 			? DEFAULT_KEYWORD_LLM_MODEL
 			: "");
+	const keywordRowStatus: ProbeStatus =
+		!builtinChecked &&
+		!isKeywordLlmConfigured(keywordLlm) &&
+		isDefaultKeywordLlmBaseUrl(keywordLlm.baseUrl)
+			? "probing"
+			: keywordProbeStatus;
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
@@ -437,10 +443,11 @@ export function CollectionRefreshConfirmDialog({
 						<div className="divide-y divide-border/60 overflow-hidden rounded-lg border bg-muted/25">
 							<ServiceReadinessRow
 								label={t("plaza.collection.refreshConfirm.keywordLlm")}
-								status={keywordProbeStatus}
+								status={keywordRowStatus}
 								configured={keywordConfigured}
+								manualCheck
 								readyTitle={activeModel || undefined}
-								onRecheck={() => setKeywordRecheckSeq((n) => n + 1)}
+								onRecheck={handleCheckKeywordLlm}
 								onOpenSettings={openGeneralSettings}
 							/>
 							<ServiceReadinessRow

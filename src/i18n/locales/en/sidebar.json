@@ -282,10 +282,12 @@
 				"keywordLlm": "Keyword LLM",
 				"openAlex": "OpenAlex",
 				"keywordChecking": "Checking…",
+				"keywordConfigured": "Configured",
 				"keywordReady": "Ready",
 				"keywordUnconfigured": "Not configured",
 				"keywordUnavailable": "Unavailable",
 				"keywordSettings": "Settings",
+				"keywordCheck": "Check",
 				"keywordRecheck": "Recheck",
 				"confirm": "Refresh",
 				"confirmAnyway": "Refresh anyway"

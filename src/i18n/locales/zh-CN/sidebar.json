@@ -282,10 +282,12 @@
 				"keywordLlm": "关键词模型",
 				"openAlex": "OpenAlex",
 				"keywordChecking": "检测中…",
+				"keywordConfigured": "已配置",
 				"keywordReady": "就绪",
 				"keywordUnconfigured": "未配置",
 				"keywordUnavailable": "不可用",
 				"keywordSettings": "设置",
+				"keywordCheck": "检测",
 				"keywordRecheck": "重新检测",
 				"confirm": "开始刷新",
 				"confirmAnyway": "仍要刷新"

@@ -850,89 +850,79 @@ fn build_keyword_llm_client(
     )
 }
 
+async fn fetch_keyword_llm_model_ids(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    use crate::features::system::settings::DEFAULT_KEYWORD_LLM_BASE_URL;
+    use agentero_core::openai_compat::resolve_openai_compatible_url;
+    use std::collections::BTreeSet;
+
+    let models_url =
+        resolve_openai_compatible_url(base_url, DEFAULT_KEYWORD_LLM_BASE_URL, "/models")?;
+    let client = build_keyword_llm_client(15).map_err(|e| e.to_string())?;
+    let mut req = client.get(models_url).header("Accept", "application/json");
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Keyword LLM models HTTP {}",
+            resp.status().as_u16()
+        ));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let items = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.as_array())
+        .ok_or_else(|| "Keyword LLM /models response missing model list".to_string())?;
+    let mut all_ids = BTreeSet::new();
+    for item in items {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+            continue;
+        };
+        if !id.is_empty() {
+            all_ids.insert(id.to_string());
+        }
+    }
+    Ok(all_ids)
+}
+
 /// Probe an OpenAI-compatible keyword-extraction LLM configuration (using either
-/// field overrides or stored settings) via a minimal `/chat/completions` call.
+/// field overrides or stored settings) via `GET /models` without issuing a chat completion.
 #[tauri::command]
 #[specta::specta]
 pub async fn keyword_llm_probe(
     app: AppHandle,
     args: Option<KeywordLlmOverrideArgs>,
 ) -> ApiResult<bool> {
-    use crate::features::system::settings::{
-        resolve_keyword_llm_config, DEFAULT_KEYWORD_LLM_BASE_URL,
-    };
-    use agentero_core::openai_compat::{
-        resolve_openai_compatible_url, send_chat_with_reasoning_fallback, summarize_error_body,
-        ChatFallbackRequest,
-    };
+    use crate::features::system::settings::resolve_keyword_llm_config;
 
     let store = app.state::<AppSettingsStore>();
     let merged = merge_keyword_llm_overrides(&store, args);
     let Some(cfg) = resolve_keyword_llm_config(&merged) else {
         return ApiResult::ok(false);
     };
-    let Ok(chat_url) = resolve_openai_compatible_url(
-        &cfg.base_url,
-        DEFAULT_KEYWORD_LLM_BASE_URL,
-        "/chat/completions",
-    ) else {
-        return ApiResult::ok(false);
-    };
-    let Ok(client) = build_keyword_llm_client(25) else {
-        return ApiResult::ok(false);
-    };
 
-    let messages = serde_json::json!([{"role": "user", "content": "ping"}]);
-    let resp = match send_chat_with_reasoning_fallback(
-        &ChatFallbackRequest {
-            client: &client,
-            endpoint: chat_url.as_str(),
-            model: &cfg.model,
-            api_key: cfg.api_key.as_deref(),
-            messages: &messages,
-            max_tokens: Some(16),
-            reasoning_rejected: None,
-        },
-        || std::future::ready(()),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!(
-                "keyword_llm_probe transport error model={}: {}",
-                cfg.model,
-                e
-            );
-            return ApiResult::ok(false);
+    match fetch_keyword_llm_model_ids(&cfg.base_url, cfg.api_key.as_deref()).await {
+        Ok(ids) => {
+            let ok = ids.contains(cfg.model.as_str());
+            if !ok {
+                log::warn!(
+                    "keyword_llm_probe model={} not found in /models (count={})",
+                    cfg.model,
+                    ids.len()
+                );
+            }
+            ApiResult::ok(ok)
         }
-    };
-
-    let status = resp.status();
-    let raw_body = match resp.text().await {
-        Ok(t) => t,
         Err(e) => {
-            log::warn!(
-                "keyword_llm_probe body read error model={}: {}",
-                cfg.model,
-                e
-            );
-            return ApiResult::ok(false);
+            log::warn!("keyword_llm_probe /models error model={}: {}", cfg.model, e);
+            ApiResult::ok(false)
         }
-    };
-    if !status.is_success() {
-        log::warn!(
-            "keyword_llm_probe HTTP {} model={} detail={}",
-            status.as_u16(),
-            cfg.model,
-            summarize_error_body(&raw_body)
-        );
-        return ApiResult::ok(false);
     }
-    let ok = serde_json::from_str::<serde_json::Value>(&raw_body)
-        .map(|json| json.get("choices").is_some())
-        .unwrap_or(false);
-    ApiResult::ok(ok)
 }
 
 /// Fetch available model ids from an OpenAI-compatible `/models` endpoint
@@ -948,8 +938,6 @@ pub async fn keyword_llm_models_list(
         default_keyword_llm_api_key, is_default_keyword_llm_base_url, is_translate_api_key_mask,
         DEFAULT_KEYWORD_LLM_BASE_URL, DEFAULT_KEYWORD_LLM_MODEL,
     };
-    use agentero_core::openai_compat::resolve_openai_compatible_url;
-    use std::collections::BTreeSet;
 
     let store = app.state::<AppSettingsStore>();
     let merged = merge_keyword_llm_overrides(&store, args);
@@ -958,17 +946,6 @@ pub async fn keyword_llm_models_list(
     } else {
         merged.base_url.trim()
     };
-    let models_url =
-        match resolve_openai_compatible_url(resolved_base, DEFAULT_KEYWORD_LLM_BASE_URL, "/models")
-        {
-            Ok(u) => u,
-            Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
-        };
-    let client = match build_keyword_llm_client(15) {
-        Ok(c) => c,
-        Err(e) => return map_err(e),
-    };
-    let mut req = client.get(models_url).header("Accept", "application/json");
     let raw_key = merged.api_key.trim();
     let effective_key = if !raw_key.is_empty() && !is_translate_api_key_mask(raw_key) {
         Some(raw_key)
@@ -977,39 +954,11 @@ pub async fn keyword_llm_models_list(
     } else {
         None
     };
-    if let Some(key) = effective_key {
-        req = req.bearer_auth(key);
-    }
-    let resp = match req.send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            return ApiResult::err(agentero_core::error::AppError::message(format!(
-                "Keyword LLM models HTTP {}",
-                r.status().as_u16()
-            )))
-        }
-        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
-    };
-    let json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e.to_string())),
-    };
 
-    let items = json
-        .get("data")
-        .and_then(|v| v.as_array())
-        .or_else(|| json.as_array());
-    let mut all_ids = BTreeSet::new();
-    if let Some(list) = items {
-        for item in list {
-            let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
-                continue;
-            };
-            if !id.is_empty() {
-                all_ids.insert(id.to_string());
-            }
-        }
-    }
+    let mut all_ids = match fetch_keyword_llm_model_ids(resolved_base, effective_key).await {
+        Ok(ids) => ids,
+        Err(e) => return ApiResult::err(agentero_core::error::AppError::message(e)),
+    };
 
     let active_model = {
         let trimmed = merged.model.trim();

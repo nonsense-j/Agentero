@@ -46,7 +46,7 @@ export const commands = {
 	openAlexKeyGet: () => __TAURI_INVOKE<ApiResult<string | null>>("open_alex_key_get"),
 	/**
 	 *  Probe an OpenAI-compatible keyword-extraction LLM configuration (using either
-	 *  field overrides or stored settings) via a minimal `/chat/completions` call.
+	 *  field overrides or stored settings) via `GET /models` without issuing a chat completion.
 	 */
 	keywordLlmProbe: (args: {
 	baseUrl?: string | null,

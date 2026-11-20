@@ -248,7 +248,7 @@ describe("CollectionRefreshConfirmDialog", () => {
 		expect(mockOpenSettingsWindow).toHaveBeenNthCalledWith(2, "general");
 	});
 
-	it("probes Keyword LLM and OpenAlex independently with Ready / Unavailable and recheck support", async () => {
+	it("auto-probes OpenAlex while keeping Keyword LLM manual-check only until clicked", async () => {
 		mockKeywordLlm = {
 			...DEFAULT_KEYWORD_LLM_SETTINGS,
 			apiKey: "sk-live-key",
@@ -267,14 +267,27 @@ describe("CollectionRefreshConfirmDialog", () => {
 			targetLabel: "ASE 2026",
 		});
 
-		expect(mockProbeKeywordLlm).toHaveBeenCalledTimes(1);
+		// OpenAlex probes automatically; Keyword LLM only shows Configured until user clicks Check.
+		expect(mockProbeKeywordLlm).not.toHaveBeenCalled();
 		expect(mockProbeOpenAlexKey).toHaveBeenCalledTimes(1);
+		expect(document.body.textContent ?? "").toContain("Configured");
 		expect(document.body.textContent ?? "").toContain("Unavailable");
 		expect(buttonByText("Refresh anyway")).toBeDefined();
+
+		const checkKeywordBtn = document.body.querySelector(
+			'button[aria-label="Check · Keyword LLM"]',
+		);
+		expect(checkKeywordBtn).not.toBeNull();
+		await click(checkKeywordBtn ?? undefined);
+		await flushMicrotasks();
+
+		expect(mockProbeKeywordLlm).toHaveBeenCalledTimes(1);
+		expect(mockProbeOpenAlexKey).toHaveBeenCalledTimes(1);
 
 		const recheckKeywordBtn = document.body.querySelector(
 			'button[aria-label="Recheck · Keyword LLM"]',
 		);
+		expect(recheckKeywordBtn).not.toBeNull();
 		await click(recheckKeywordBtn ?? undefined);
 		await flushMicrotasks();
 

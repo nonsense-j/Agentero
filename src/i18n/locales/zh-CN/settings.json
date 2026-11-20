@@ -179,7 +179,9 @@
 			"openKeyPage": "获取免费 OpenRouter API Key（50 次/天）",
 			"refreshModels": "刷新模型列表",
 			"confirm": "确定",
+			"check": "检测",
 			"probeIdle": "可选（未配置）",
+			"probeConfigured": "已配置（点击检测）",
 			"probeOk": "可用",
 			"probeFail": "不可用或 Key 无效",
 			"probeProbing": "检测中…"

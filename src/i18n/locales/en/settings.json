@@ -179,7 +179,9 @@
 			"openKeyPage": "Get a free OpenRouter API key (50 / day)",
 			"refreshModels": "Refresh models",
 			"confirm": "Confirm",
+			"check": "Check",
 			"probeIdle": "Optional",
+			"probeConfigured": "Configured (click to check)",
 			"probeOk": "Available",
 			"probeFail": "Unavailable or invalid key",
 			"probeProbing": "Checking…"

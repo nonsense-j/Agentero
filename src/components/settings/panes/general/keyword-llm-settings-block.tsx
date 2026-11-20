@@ -1,4 +1,4 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { KeywordLlmModelPicker } from "@/components/settings/keyword-llm-model-picker";
@@ -118,24 +118,18 @@ export function KeywordLlmSettingsBlock({
 	}, [configured, savedApiKey, savedBaseUrl, savedModel]);
 
 	useEffect(() => {
-		void runProbe();
+		void configured;
+		void savedBaseUrl;
+		void savedApiKey;
+		void savedModel;
+		abortRef.current?.abort();
+		abortRef.current = null;
+		setStatus("idle");
 		return () => {
 			abortRef.current?.abort();
+			abortRef.current = null;
 		};
-	}, [runProbe]);
-
-	useEffect(() => {
-		if (!configured) return;
-		let cancelled = false;
-		void fetchKeywordLlmModels(normalizeDraft(saved)).then((list) => {
-			if (!cancelled && list.length > 0) {
-				setModels(list);
-			}
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [configured, saved]);
+	}, [configured, savedBaseUrl, savedApiKey, savedModel]);
 
 	const changed = useMemo(() => {
 		const a = normalizeDraft(saved);
@@ -188,7 +182,9 @@ export function KeywordLlmSettingsBlock({
 
 	const statusLabel = t(
 		status === "idle"
-			? "general.keywordLlm.probeIdle"
+			? configured
+				? "general.keywordLlm.probeConfigured"
+				: "general.keywordLlm.probeIdle"
 			: status === "probing"
 				? "general.keywordLlm.probeProbing"
 				: status === "ok"
@@ -253,15 +249,40 @@ export function KeywordLlmSettingsBlock({
 						</>
 					}
 					right={
-						<Button
-							type="button"
-							variant="outline"
-							size="xs"
-							disabled={!changed || saving || status === "probing"}
-							onClick={() => void handleConfirm()}
-						>
-							{t("general.keywordLlm.confirm")}
-						</Button>
+						<div className="flex shrink-0 items-center gap-1.5">
+							{configured ? (
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon-xs"
+											disabled={changed || saving || status === "probing"}
+											aria-label={t("general.keywordLlm.check")}
+											onClick={() => void runProbe()}
+										>
+											{status === "probing" ? (
+												<Loader2 className="size-3 animate-spin" />
+											) : (
+												<RefreshCw className="size-3" />
+											)}
+										</Button>
+									</TooltipTrigger>
+									<TooltipContent>
+										{t("general.keywordLlm.check")}
+									</TooltipContent>
+								</Tooltip>
+							) : null}
+							<Button
+								type="button"
+								variant="outline"
+								size="xs"
+								disabled={!changed || saving || status === "probing"}
+								onClick={() => void handleConfirm()}
+							>
+								{t("general.keywordLlm.confirm")}
+							</Button>
+						</div>
 					}
 				/>
 				<div className="grid gap-1.5">
