@@ -4600,4 +4600,179 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 		);
 		expect(backfilled[0]?.publishedAt).toBe("2026-09-22T00:00:00Z");
 	});
+
+	it("prefers papers.cool first with default show=2000 for NDSS/USENIX/ICLR/ACL while preserving exclusions and safe fallback on partial failures", async () => {
+		const usenix = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "usenix-sec-2026",
+		);
+		const ndss = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "ndss-2026");
+		const iclr = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "iclr-2026");
+		const acl = DEFAULT_COLLECTION_VENUES.find((v) => v.id === "acl-2026");
+		if (!usenix || !ndss || !iclr || !acl) {
+			throw new Error("Missing built-in venues");
+		}
+
+		// 1. Default pageSize=2000 & papers.cool-first skips ndss-symposium.org / OpenAlex when >= 100 items
+		const buildCoolPanels = (
+			count: number,
+			prefix: string,
+			subjectHref: string,
+			subjectText: string,
+			extraExcludedHtml = "",
+			remoteTotal = count,
+		) => `
+			<p class="info">Total ${remoteTotal} papers</p>
+			${extraExcludedHtml}
+			${Array.from(
+				{ length: count },
+				(_, idx) => `
+				<div id="${prefix}-${idx}@Venue" class="panel paper">
+					<h2 class="title"><a href="https://example.org/${prefix}/${idx}" title="${idx + 1}/${remoteTotal}"></a><a id="title-${prefix}-${idx}">${prefix} Main Track Paper ${idx}</a></h2>
+					<p class="metainfo authors"><a class="author">Author ${idx}</a></p>
+					<p class="metainfo subjects"><a href="${subjectHref}">${subjectText}</a></p>
+					<p id="summary-${prefix}-${idx}" class="summary">Abstract ${prefix} ${idx}.</p>
+				</div>`,
+			).join("\n")}`;
+
+		const ndssRequestedUrls: string[] = [];
+		const ndssBundle = await fetchMultiChannelVenuePapers(
+			ndss,
+			2026,
+			async <T>(url: string) => {
+				ndssRequestedUrls.push(url);
+				return { results: [] } as T;
+			},
+			async (url: string) => {
+				ndssRequestedUrls.push(url);
+				if (url.includes("papers.cool/venue/NDSS.2026")) {
+					return buildCoolPanels(
+						105,
+						"NDSS",
+						"/venue/NDSS.2026",
+						"NDSS.2026",
+						`<div id="ndss-ws@NDSS" class="panel paper">
+							<h2 class="title"><a href="https://example.org/ws"></a><a id="title-ws">NDSS Workshop Companion</a></h2>
+							<p class="metainfo subjects"><a href="/venue/NDSS.2026?group=Workshop">NDSS.2026 - Workshop</a></p>
+						</div>`,
+					);
+				}
+				return "";
+			},
+		);
+		expect(ndssRequestedUrls.some((u) => u.includes("show=2000"))).toBe(true);
+		expect(
+			ndssRequestedUrls.some((u) => u.includes("ndss-symposium.org")),
+		).toBe(false);
+		expect(ndssRequestedUrls.some((u) => u.includes("openalex.org"))).toBe(
+			false,
+		);
+		expect(ndssBundle.items).toHaveLength(105);
+		expect(ndssBundle.authoritativeMainTrack).toBe(true);
+		expect(
+			ndssBundle.items.some((p) => p.title.includes("Workshop Companion")),
+		).toBe(false);
+
+		// 2. USENIX Security 2026 goes straight to papers.cool first without scraping technical-sessions
+		const usenixRequestedUrls: string[] = [];
+		const usenixBundle = await fetchMultiChannelVenuePapers(
+			usenix,
+			2026,
+			async <T>(url: string) => {
+				usenixRequestedUrls.push(url);
+				return { results: [] } as T;
+			},
+			async (url: string) => {
+				usenixRequestedUrls.push(url);
+				if (url.includes("papers.cool/venue/USENIX-Sec.2026")) {
+					return buildCoolPanels(
+						105,
+						"USENIX",
+						"/venue/USENIX-Sec.2026",
+						"USENIX-Sec.2026",
+					);
+				}
+				return "";
+			},
+		);
+		expect(
+			usenixRequestedUrls.some((u) => u.includes("technical-sessions")),
+		).toBe(false);
+		expect(usenixBundle.items).toHaveLength(105);
+		expect(usenixBundle.authoritativeMainTrack).toBe(true);
+
+		// 3. ICLR 2026 uses papers.cool first and falls back cleanly to MiniConf when page 1 truncates
+		const iclrMiniconfUrls: string[] = [];
+		const iclrFallbackBundle = await fetchMultiChannelVenuePapers(
+			iclr,
+			2026,
+			async <T>(url: string) => {
+				iclrMiniconfUrls.push(url);
+				if (url.includes("iclr-2026-orals-posters.json")) {
+					return [
+						{
+							id: "iclr-fb-1",
+							name: "MiniConf Fallback Oral",
+							authors: [{ fullname: "Ada Lovelace" }],
+							decision: "Accept (oral)",
+							eventtype: "Oral",
+							sourceurl:
+								"https://openreview.net/group?id=ICLR.cc/2026/Conference",
+							paper_url: "https://openreview.net/forum?id=IclrFb1",
+						},
+					] as T;
+				}
+				if (url.includes("iclr-2026-abstracts.json")) {
+					return { "iclr-fb-1": "Recovered MiniConf fallback abstract." } as T;
+				}
+				return { results: [] } as T;
+			},
+			async (url: string) => {
+				if (
+					url.includes("papers.cool/venue/ICLR.2026") &&
+					url.includes("skip=2000")
+				) {
+					throw new Error("HTTP 504 Gateway Timeout");
+				}
+				if (
+					url.includes("papers.cool/venue/ICLR.2026") &&
+					url.includes("group=Oral") &&
+					url.includes("skip=0")
+				) {
+					return buildCoolPanels(
+						2000,
+						"ICLR",
+						"/venue/ICLR.2026?group=Oral",
+						"ICLR.2026 - Oral",
+						"",
+						2500,
+					);
+				}
+				return "";
+			},
+		);
+		expect(
+			iclrMiniconfUrls.some((u) => u.includes("iclr-2026-orals-posters.json")),
+		).toBe(true);
+		expect(iclrFallbackBundle.items.map((p) => p.title)).toEqual([
+			"MiniConf Fallback Oral",
+		]);
+
+		// 4. ACL Anthology volume helper does not return partial `acl-short` only when `acl-long` fails
+		const partialAclRes = await fetchAclAnthologyVenuePapers(
+			acl,
+			2026,
+			async (url: string) => {
+				if (url.includes("2026.acl-long")) {
+					throw new Error("HTTP 503 Service Unavailable");
+				}
+				if (url.includes("2026.acl-short")) {
+					return `<div class="d-sm-flex align-items-stretch mb-3">
+						<span class=d-block><strong><a href=/2026.acl-short.1/>Short Paper Only</a></strong></span>
+					</div>`;
+				}
+				return "";
+			},
+		);
+		expect(partialAclRes.items).toEqual([]);
+	});
 });

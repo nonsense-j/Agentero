@@ -922,7 +922,7 @@ export function parseCoolPapersVenueHtml(
 }
 
 /**
- * Multi-page `papers.cool/venue/{slug}?skip=...&show=500` fetcher (up to 8,000 papers).
+ * Multi-page `papers.cool/venue/{slug}?skip=...&show=2000` fetcher (up to 32,000 papers).
  * When a small explicit `coolPapersAllowedGroups` whitelist is configured (e.g. `ACL 2026`
  * `Long Papers` + `Short Papers`), queries those exact groups directly.
  */
@@ -939,7 +939,7 @@ export async function fetchCoolPapersVenuePapers(
 	const slug = spec?.coolPapersVenueSlug;
 	if (!slug) return { items: [], remoteTotalCount: 0 };
 
-	const pageSize = options?.pageSize ?? 500;
+	const pageSize = options?.pageSize ?? 2000;
 	const maxPages = options?.maxPages ?? 16;
 	const out: CollectionPaperItem[] = [];
 	const seenIds = new Set<string>();
@@ -960,13 +960,13 @@ export async function fetchCoolPapersVenuePapers(
 				html = await fetchText(url, "text/html,application/xhtml+xml,*/*");
 			} catch (err) {
 				if (isBackgroundTaskCancelledError(err)) throw err;
-				if (IS_TEST_ENV) break;
+				if (IS_TEST_ENV) throw err;
 				try {
 					await new Promise((resolve) => setTimeout(resolve, 1200));
 					html = await fetchText(url, "text/html,application/xhtml+xml,*/*");
 				} catch (retryErr) {
 					if (isBackgroundTaskCancelledError(retryErr)) throw retryErr;
-					break;
+					throw retryErr;
 				}
 			}
 
@@ -2446,6 +2446,7 @@ export async function fetchAclAnthologyVenuePapers(
 
 	const anthologyItems: CollectionPaperItem[] = [];
 	const seenAnthologyIds = new Set<string>();
+	const failedVolumes: string[] = [];
 	for (const volUrl of anthologyUrls) {
 		throwIfAborted(signal);
 		try {
@@ -2465,12 +2466,18 @@ export async function fetchAclAnthologyVenuePapers(
 				seenAnthologyIds.add(key);
 				anthologyItems.push(item);
 			}
-		} catch {
+		} catch (err) {
+			if (signal?.aborted || isBackgroundTaskCancelledError(err)) {
+				throw err;
+			}
 			// Volume may not be published yet; continue to remaining volume or fallback.
+			failedVolumes.push(volUrl);
 		}
 	}
 
-	if (anthologyItems.length === 0) {
+	const missingPrimaryLong =
+		anthologyUrls.length > 1 && failedVolumes.some((u) => u.includes("-long"));
+	if (anthologyItems.length === 0 || missingPrimaryLong) {
 		return {
 			items: [],
 			remoteTotalCount: acceptedRoster.length,
@@ -3725,11 +3732,13 @@ async function hydrateUsenixPresentationSubpages(
 
 /**
  * Fetch complete, multi-page 2026 venue papers (strict Main / Research / Technical Track):
+ * 0. Curated `papers.cool` primary channel whenever `coolPapersVenueSlug` is configured
+ *    (`AAAI`, `ACL`, `ICLR`, `ICML`, `NeurIPS`, `USENIX Sec`, `NDSS`), falling back cleanly
+ *    to official channels when unavailable, unindexed (`NeurIPS 2026`), or returning `< 100` items.
  * 1. Strict Official Track Roster (`trackRosterMode: "required"`: `NDSS`, `CCS`, `SAS`, `ASE`,
  *    `ICPC`, `RE`, `SANER`, `ICSME`, `ESEM`) intersected with OpenAlex / CSDL / DataCite / `papers.cool`.
  * 2. Official MiniConf Virtual JSON (`NeurIPS`, `ICLR`, `ICML`), Official ACL Anthology + `aclweb`,
- *    and USENIX Security `technical-sessions` (+ `papers.cool` & polite presentation subpages),
- *    falling back cleanly to `papers.cool` when official channels are unavailable.
+ *    and USENIX Security `technical-sessions` (+ `papers.cool` & polite presentation subpages).
  * 3. Publisher proceedings & journals (`ICSE`, `ISSTA`, `FSE`, `PLDI`, `POPL`, `OOPSLA`, `ECOOP`,
  *    `S&P`, `TSE`, `TOSEM`, `ASE (J)`, `ESE`) with strict issue/DOI/frontmatter/artifact filtering.
  * 4. Official conference accepted-papers fallback (`ISSRE 2026`, `S&P 2026`), Springer HTML
@@ -3804,12 +3813,24 @@ export async function fetchMultiChannelVenuePapers(
 	}) => {
 		if (!coolFetched && spec?.coolPapersVenueSlug) {
 			coolFetched = true;
-			coolRes = await fetchCoolPapersVenuePapers(
-				venue,
-				year,
-				fetchText,
-				coolOpts,
-			);
+			const prevErr = lastError;
+			try {
+				coolRes = await fetchCoolPapersVenuePapers(
+					venue,
+					year,
+					fetchText,
+					coolOpts,
+				);
+			} catch (err) {
+				if (options?.signal?.aborted || isBackgroundTaskCancelledError(err)) {
+					throw err;
+				}
+				// Graceful fallback when papers.cool is unindexed (404), unavailable, or truncated mid-pagination.
+				coolRes = { items: [], remoteTotalCount: 0 };
+				if (lastError === prevErr && err instanceof Error) {
+					lastError = err;
+				}
+			}
 		}
 		return coolRes;
 	};
@@ -3821,8 +3842,24 @@ export async function fetchMultiChannelVenuePapers(
 	let aclAcceptedRoster: CollectionPaperItem[] = [];
 	let handledPrimary = false;
 
+	// Tier 0: Curated papers.cool venue list first whenever configured (`AAAI`, `ACL`, `ICLR`, `ICML`,
+	// `NeurIPS`, `USENIX Sec`, `NDSS`) — falls back cleanly to official channels when <100 or unavailable.
+	if (spec?.coolPapersVenueSlug) {
+		await ensureCoolRes();
+		if (coolRes.items.length >= 100) {
+			const reconciled = reconcileFreshWithExisting(
+				dedupeVenueChannelItems([coolRes.items]),
+				existingLookup,
+				venue,
+			);
+			primaryItems = reconciled.items;
+			authoritativeMainTrack = true;
+			handledPrimary = true;
+		}
+	}
+
 	// Tier A: Strict authoritative main-track roster required (`NDSS`, `CCS`, `SAS`, `ASE`, `ICPC`, `RE`, `SANER`, `ICSME`, `ESEM`)
-	if (spec?.trackRosterMode === "required") {
+	if (!handledPrimary && spec?.trackRosterMode === "required") {
 		const roster = await fetchOfficialTrackRoster(venue, year, fetchText);
 		const rosterReconciled = reconcileFreshWithExisting(
 			roster.items,
@@ -3956,10 +3993,7 @@ export async function fetchMultiChannelVenuePapers(
 			);
 			if (needsCoolHydration && spec?.coolPapersVenueSlug) {
 				try {
-					const coolSupp = await ensureCoolRes({
-						maxPages: 1,
-						pageSize: 1000,
-					});
+					const coolSupp = await ensureCoolRes();
 					if (coolSupp.items.length > 0) {
 						usenixItems = backfillMissingMetadataFromChannel(
 							usenixItems,
@@ -3993,20 +4027,7 @@ export async function fetchMultiChannelVenuePapers(
 		}
 	}
 
-	// Tier 0: Curated papers.cool venue list (100% abstracts + PDFs for AI / fallback venues)
 	if (!handledPrimary) {
-		await ensureCoolRes();
-	}
-
-	if (!handledPrimary && coolRes.items.length >= 100) {
-		const reconciled = reconcileFreshWithExisting(
-			dedupeVenueChannelItems([coolRes.items]),
-			existingLookup,
-			venue,
-		);
-		primaryItems = reconciled.items;
-		authoritativeMainTrack = true;
-	} else if (!handledPrimary) {
 		// Publisher GraphQL / DataCite feeds + OpenAlex / Crossref structured proceedings & journals
 		const csdlRes = spec?.csdlIdPrefix
 			? await fetchCsdlVenuePapers(venue, year, fetchJson)
