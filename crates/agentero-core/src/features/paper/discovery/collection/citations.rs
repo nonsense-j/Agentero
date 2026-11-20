@@ -17,7 +17,7 @@ use crate::features::paper::scholar_api::client as scholar_client;
 
 use super::lineage::load_preferred_summaries_by_work_ids;
 use super::models::{CollectionCitationsOut, CollectionCitationsParams, SnowballPaperHit};
-use super::schema::ensure_collection_at;
+use super::schema::{ensure_collection_at, with_collection_write_conn};
 use super::search::summary_to_hit;
 use super::store::{
     clean_arxiv_key, clean_doi_key, clean_openalex_id, insert_work_raw_refs_tx,
@@ -225,30 +225,31 @@ pub async fn snowball_citations_at(
         if !backfills.is_empty() {
             let db_save = db_path.to_path_buf();
             tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-                let mut conn = ensure_collection_at(&db_save)?;
-                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let mut any_changed = false;
-                for (wid, pid, oa_id, refs) in backfills {
-                    if let Some(ref oa) = oa_id {
-                        tx.execute(
-                            "UPDATE canonical_works SET openalex_id = COALESCE(openalex_id, ?1) WHERE work_id = ?2",
-                            params![oa, wid],
-                        )?;
-                        tx.execute(
-                            "UPDATE papers SET openalex_id = COALESCE(openalex_id, ?1) WHERE id = ?2",
-                            params![oa, pid],
-                        )?;
-                        any_changed = true;
+                with_collection_write_conn(&db_save, |conn| {
+                    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let mut any_changed = false;
+                    for (wid, pid, oa_id, refs) in backfills {
+                        if let Some(ref oa) = oa_id {
+                            tx.execute(
+                                "UPDATE canonical_works SET openalex_id = COALESCE(openalex_id, ?1) WHERE work_id = ?2",
+                                params![oa, wid],
+                            )?;
+                            tx.execute(
+                                "UPDATE papers SET openalex_id = COALESCE(openalex_id, ?1) WHERE id = ?2",
+                                params![oa, pid],
+                            )?;
+                            any_changed = true;
+                        }
+                        if insert_work_raw_refs_tx(&tx, wid, &refs)? > 0 {
+                            any_changed = true;
+                        }
                     }
-                    if insert_work_raw_refs_tx(&tx, wid, &refs)? > 0 {
-                        any_changed = true;
+                    if any_changed {
+                        recompute_graph_and_citations_tx(&tx)?;
                     }
-                }
-                if any_changed {
-                    recompute_graph_and_citations_tx(&tx)?;
-                }
-                tx.commit()?;
-                Ok(())
+                    tx.commit()?;
+                    Ok(())
+                })
             })
             .await
             .map_err(|e| AppError::message(format!("snowball backfill join: {e}")))??;

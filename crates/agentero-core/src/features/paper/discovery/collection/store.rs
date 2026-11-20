@@ -18,7 +18,10 @@ use super::models::{
     CollectionStateSummary, CollectionUpsertPapersArgs, CollectionVenueInput,
     CollectionVenueRecord, CollectionVenueWatermarkUpdate,
 };
-use super::schema::{ensure_collection, ensure_collection_at};
+use super::schema::{
+    ensure_collection, ensure_collection_at, with_collection_write_conn,
+    with_default_collection_write_conn,
+};
 
 pub(crate) fn now_rfc3339() -> String {
     crate::time::now_rfc3339_millis()
@@ -1287,16 +1290,14 @@ fn sync_venues_list_tx(conn: &Connection, venues: &[CollectionVenueInput]) -> Re
 }
 
 pub fn config_update(args: CollectionConfigUpdateArgs) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection()?;
-    config_update_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| config_update_conn(conn, args))
 }
 
 pub fn config_update_at(
     db_path: &Path,
     args: CollectionConfigUpdateArgs,
 ) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    config_update_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| config_update_conn(conn, args))
 }
 
 pub(crate) fn config_update_conn(
@@ -2293,16 +2294,14 @@ pub(crate) fn upsert_single_paper_tx(
 }
 
 pub fn upsert_papers(args: CollectionUpsertPapersArgs) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection()?;
-    upsert_papers_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| upsert_papers_conn(conn, args))
 }
 
 pub fn upsert_papers_at(
     db_path: &Path,
     args: CollectionUpsertPapersArgs,
 ) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    upsert_papers_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| upsert_papers_conn(conn, args))
 }
 
 pub(crate) fn upsert_papers_conn(
@@ -2385,6 +2384,7 @@ pub(crate) fn upsert_papers_conn(
         upsert_single_paper_tx(&tx, item, &now)?;
     }
 
+    let mut deleted_stale = 0usize;
     if !existing_venue_ids.is_empty() {
         let kept_ids: HashSet<&str> = args
             .items
@@ -2403,7 +2403,7 @@ pub(crate) fn upsert_papers_conn(
             let sql = format!("DELETE FROM papers WHERE id IN ({ph})");
             let binds: Vec<rusqlite::types::Value> =
                 chunk.iter().cloned().map(Into::into).collect();
-            tx.execute(&sql, params_from_iter(binds))?;
+            deleted_stale += tx.execute(&sql, params_from_iter(binds))?;
         }
     }
 
@@ -2425,23 +2425,23 @@ pub(crate) fn upsert_papers_conn(
         apply_latest_arxiv_tx(&tx, latest)?;
     }
 
-    recompute_graph_and_citations_tx(&tx)?;
+    if !args.items.is_empty() || deleted_stale > 0 {
+        recompute_graph_and_citations_tx(&tx)?;
+    }
 
     tx.commit()?;
     read_state_summary_conn(conn)
 }
 
 pub fn patch_papers(args: CollectionPatchPapersArgs) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection()?;
-    patch_papers_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| patch_papers_conn(conn, args))
 }
 
 pub fn patch_papers_at(
     db_path: &Path,
     args: CollectionPatchPapersArgs,
 ) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    patch_papers_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| patch_papers_conn(conn, args))
 }
 
 pub(crate) fn patch_papers_conn(
@@ -2934,16 +2934,14 @@ pub(crate) fn append_ccf_ranks_clause(
 // ─── Atomic Reset / Clear ───
 
 pub fn clear_collection(args: &CollectionClearArgs) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection()?;
-    clear_collection_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| clear_collection_conn(conn, args))
 }
 
 pub fn clear_collection_at(
     db_path: &Path,
     args: &CollectionClearArgs,
 ) -> Result<CollectionStateSummary, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    clear_collection_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| clear_collection_conn(conn, args))
 }
 
 pub(crate) fn clear_collection_conn(

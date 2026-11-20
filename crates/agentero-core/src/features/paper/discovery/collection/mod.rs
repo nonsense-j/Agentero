@@ -2737,4 +2737,50 @@ mod tests {
             Some("ICSE 2026")
         );
     }
+
+    #[test]
+    fn concurrent_collection_writers_serialize_without_database_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+        // Seed schema once before spawning concurrent writers.
+        let _ = state_get_at(&db).unwrap();
+
+        let mut handles = Vec::new();
+        for worker_idx in 0..6usize {
+            let db_path = db.clone();
+            handles.push(std::thread::spawn(move || {
+                for batch in 0..3usize {
+                    let id_num = worker_idx * 100 + batch + 1;
+                    upsert_papers_at(
+                        &db_path,
+                        CollectionUpsertPapersArgs {
+                            items: vec![make_arxiv_input(
+                                id_num,
+                                "cs.SE",
+                                &format!("Concurrent Write Study #{id_num}"),
+                                vec!["Fuzzing"],
+                            )],
+                            ..Default::default()
+                        },
+                    )
+                    .expect("concurrent upsert should serialize cleanly");
+                }
+                config_update_at(
+                    &db_path,
+                    CollectionConfigUpdateArgs {
+                        last_refreshed_at: Some(format!("2026-11-20T16:50:{:02}Z", worker_idx)),
+                        ..Default::default()
+                    },
+                )
+                .expect("concurrent config_update should serialize cleanly");
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let summary = state_get_at(&db).unwrap();
+        assert_eq!(summary.arxiv_count, 18);
+    }
 }

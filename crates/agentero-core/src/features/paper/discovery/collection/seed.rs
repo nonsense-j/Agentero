@@ -31,7 +31,7 @@ use super::models::{
     CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionSeedSyncOut,
     CollectionVenueWatermarkUpdate,
 };
-use super::schema::{collection_db_path, ensure_collection_at};
+use super::schema::{collection_db_path, ensure_collection_at, with_collection_write_conn};
 use super::store::{
     apply_venue_watermark_update_tx, build_keywords_text, clean_arxiv_key, clean_doi_key,
     clean_openalex_id, clean_opt_str, clean_publisher_doi, clean_string_vec,
@@ -557,12 +557,13 @@ pub async fn seed_sync_at(
         if force && initial_state.seed_cleared {
             let db_clear_flag = db_path.to_path_buf();
             let state = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
-                let conn = ensure_collection_at(&db_clear_flag)?;
-                conn.execute(
-                    "UPDATE collection_config SET seed_cleared = 0 WHERE id = 1",
-                    [],
-                )?;
-                read_state_summary_conn(&conn)
+                with_collection_write_conn(&db_clear_flag, |conn| {
+                    conn.execute(
+                        "UPDATE collection_config SET seed_cleared = 0 WHERE id = 1",
+                        [],
+                    )?;
+                    read_state_summary_conn(conn)
+                })
             })
             .await
             .map_err(|e| AppError::message(format!("seed_sync reset join: {e}")))??;
@@ -591,139 +592,139 @@ pub async fn seed_sync_at(
 
     let db_import = db_path.to_path_buf();
     let out = tokio::task::spawn_blocking(move || -> Result<CollectionSeedSyncOut, AppError> {
-        let mut conn = ensure_collection_at(&db_import)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let now = now_rfc3339();
+        with_collection_write_conn(&db_import, |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let now = now_rfc3339();
 
-        let mut imported_papers = 0usize;
-        let mut applied_shards = Vec::with_capacity(local_shards.len());
-        let mut imported_core_or_delta = false;
+            let mut imported_papers = 0usize;
+            let mut applied_shards = Vec::with_capacity(local_shards.len());
+            let mut imported_core_or_delta = false;
 
-        for (shard, shard_path) in &local_shards {
-            let file = File::open(shard_path)?;
-            let gz = GzDecoder::new(file);
-            let reader = BufReader::with_capacity(128 * 1024, gz);
-            for (line_idx, line_res) in reader.lines().enumerate() {
-                let line = line_res.map_err(|e| {
-                    AppError::message(format!(
-                        "gunzip seed shard {} line {}: {e}",
-                        shard.filename,
-                        line_idx + 1
-                    ))
-                })?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
+            for (shard, shard_path) in &local_shards {
+                let file = File::open(shard_path)?;
+                let gz = GzDecoder::new(file);
+                let reader = BufReader::with_capacity(128 * 1024, gz);
+                for (line_idx, line_res) in reader.lines().enumerate() {
+                    let line = line_res.map_err(|e| {
+                        AppError::message(format!(
+                            "gunzip seed shard {} line {}: {e}",
+                            shard.filename,
+                            line_idx + 1
+                        ))
+                    })?;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let rec: SeedPaperRecord = serde_json::from_str(trimmed).map_err(|e| {
+                        AppError::message(format!(
+                            "parse seed shard {} line {}: {e}",
+                            shard.filename,
+                            line_idx + 1
+                        ))
+                    })?;
+                    let paper_id = rec.id.clone();
+                    let incoming_refs_checked_at = rec.refs_checked_at.clone();
+                    let input: CollectionPaperUpsertInput = rec.into();
+                    upsert_single_paper_tx(&tx, &input, &now)?;
+                    if let Some(checked_at) = incoming_refs_checked_at.as_deref() {
+                        apply_seed_refs_checked_at_tx(&tx, &paper_id, checked_at)?;
+                    }
+                    imported_papers += 1;
+                }
+                if matches!(
+                    shard.kind.trim().to_ascii_lowercase().as_str(),
+                    "core" | "delta"
+                ) {
+                    imported_core_or_delta = true;
+                }
+                applied_shards.push(shard.id.trim().to_string());
+            }
+
+            // Advance arXiv watermarks monotonically for enabled categories.
+            let enabled_cats = load_enabled_categories(&tx)?;
+            let cs_ai_enabled = enabled_cats.iter().any(|c| c.eq_ignore_ascii_case("cs.AI"));
+            let mut wm_updates: HashMap<String, CollectionArxivWatermarkInput> = HashMap::new();
+            for (cat, swm) in &manifest.arxiv_watermarks {
+                if cat.eq_ignore_ascii_case("cs.AI") && !cs_ai_enabled {
                     continue;
                 }
-                let rec: SeedPaperRecord = serde_json::from_str(trimmed).map_err(|e| {
-                    AppError::message(format!(
-                        "parse seed shard {} line {}: {e}",
-                        shard.filename,
-                        line_idx + 1
-                    ))
-                })?;
-                let paper_id = rec.id.clone();
-                let incoming_refs_checked_at = rec.refs_checked_at.clone();
-                let input: CollectionPaperUpsertInput = rec.into();
-                upsert_single_paper_tx(&tx, &input, &now)?;
-                if let Some(checked_at) = incoming_refs_checked_at.as_deref() {
-                    apply_seed_refs_checked_at_tx(&tx, &paper_id, checked_at)?;
-                }
-                imported_papers += 1;
-            }
-            if matches!(
-                shard.kind.trim().to_ascii_lowercase().as_str(),
-                "core" | "delta"
-            ) {
-                imported_core_or_delta = true;
-            }
-            applied_shards.push(shard.id.trim().to_string());
-        }
-
-        // Advance arXiv watermarks monotonically for enabled categories.
-        let enabled_cats = load_enabled_categories(&tx)?;
-        let cs_ai_enabled = enabled_cats.iter().any(|c| c.eq_ignore_ascii_case("cs.AI"));
-        let mut wm_updates: HashMap<String, CollectionArxivWatermarkInput> = HashMap::new();
-        for (cat, swm) in &manifest.arxiv_watermarks {
-            if cat.eq_ignore_ascii_case("cs.AI") && !cs_ai_enabled {
-                continue;
-            }
-            let existing_latest: Option<String> = tx
-                .query_row(
-                    "SELECT latest_published_at FROM arxiv_watermarks WHERE category = ?1",
-                    [cat.as_str()],
-                    |r| r.get(0),
-                )
-                .ok();
-            let should_advance = existing_latest
-                .as_deref()
-                .is_none_or(|cur| swm.latest_published_at.as_str() >= cur);
-            if should_advance {
-                wm_updates.insert(
-                    cat.clone(),
-                    CollectionArxivWatermarkInput {
-                        latest_published_at: swm.latest_published_at.clone(),
-                        latest_arxiv_id: swm.latest_arxiv_id.clone(),
-                        last_synced_at: swm.last_synced_at.clone(),
-                        oldest_synced_published_at: swm.oldest_synced_published_at.clone(),
-                        remote_total: swm.remote_total,
-                        history_complete: Some(swm.history_complete),
-                    },
-                );
-            }
-        }
-        if !wm_updates.is_empty() {
-            upsert_arxiv_watermarks_tx(&tx, &wm_updates)?;
-        }
-
-        // Advance venue watermarks monotonically when core/delta shards are applied.
-        if imported_core_or_delta {
-            for (vid, vwm) in &manifest.venue_watermarks {
-                let existing_fetched: Option<String> = tx
+                let existing_latest: Option<String> = tx
                     .query_row(
-                        "SELECT last_fetched_at FROM venues WHERE id = ?1",
-                        [vid.as_str()],
-                        |r| r.get::<_, Option<String>>(0),
+                        "SELECT latest_published_at FROM arxiv_watermarks WHERE category = ?1",
+                        [cat.as_str()],
+                        |r| r.get(0),
                     )
-                    .ok()
-                    .flatten();
-                let should_advance = match (&existing_fetched, &vwm.last_fetched_at) {
-                    (None, Some(_)) => true,
-                    (Some(cur), Some(inc)) => inc.as_str() >= cur.as_str(),
-                    (None, None) => vwm.remote_total_count.is_some(),
-                    _ => false,
-                };
+                    .ok();
+                let should_advance = existing_latest
+                    .as_deref()
+                    .is_none_or(|cur| swm.latest_published_at.as_str() >= cur);
                 if should_advance {
-                    apply_venue_watermark_update_tx(
-                        &tx,
-                        &CollectionVenueWatermarkUpdate {
-                            venue_id: vid.clone(),
-                            last_fetched_at: vwm.last_fetched_at.clone(),
-                            latest_published_at: vwm.latest_published_at.clone(),
-                            remote_total_count: vwm.remote_total_count,
+                    wm_updates.insert(
+                        cat.clone(),
+                        CollectionArxivWatermarkInput {
+                            latest_published_at: swm.latest_published_at.clone(),
+                            latest_arxiv_id: swm.latest_arxiv_id.clone(),
+                            last_synced_at: swm.last_synced_at.clone(),
+                            oldest_synced_published_at: swm.oldest_synced_published_at.clone(),
+                            remote_total: swm.remote_total,
+                            history_complete: Some(swm.history_complete),
                         },
-                    )?;
+                    );
                 }
             }
-        }
-
-        // Record applied_seed_ids, clear seed_cleared, and stamp last_refreshed_at if empty.
-        let prev_applied_raw: String = tx.query_row(
-            "SELECT applied_seed_ids_json FROM collection_config WHERE id = 1",
-            [],
-            |r| r.get(0),
-        )?;
-        let mut merged_applied: Vec<String> =
-            serde_json::from_str(&prev_applied_raw).unwrap_or_default();
-        for sid in &applied_shards {
-            if !merged_applied.iter().any(|x| x == sid) {
-                merged_applied.push(sid.clone());
+            if !wm_updates.is_empty() {
+                upsert_arxiv_watermarks_tx(&tx, &wm_updates)?;
             }
-        }
-        let merged_applied_json = serde_json::to_string(&clean_string_vec(&merged_applied))?;
-        let gen_ts = clean_opt_str(Some(manifest.generated_at.clone()));
-        tx.execute(
-            "UPDATE collection_config
+
+            // Advance venue watermarks monotonically when core/delta shards are applied.
+            if imported_core_or_delta {
+                for (vid, vwm) in &manifest.venue_watermarks {
+                    let existing_fetched: Option<String> = tx
+                        .query_row(
+                            "SELECT last_fetched_at FROM venues WHERE id = ?1",
+                            [vid.as_str()],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten();
+                    let should_advance = match (&existing_fetched, &vwm.last_fetched_at) {
+                        (None, Some(_)) => true,
+                        (Some(cur), Some(inc)) => inc.as_str() >= cur.as_str(),
+                        (None, None) => vwm.remote_total_count.is_some(),
+                        _ => false,
+                    };
+                    if should_advance {
+                        apply_venue_watermark_update_tx(
+                            &tx,
+                            &CollectionVenueWatermarkUpdate {
+                                venue_id: vid.clone(),
+                                last_fetched_at: vwm.last_fetched_at.clone(),
+                                latest_published_at: vwm.latest_published_at.clone(),
+                                remote_total_count: vwm.remote_total_count,
+                            },
+                        )?;
+                    }
+                }
+            }
+
+            // Record applied_seed_ids, clear seed_cleared, and stamp last_refreshed_at if empty.
+            let prev_applied_raw: String = tx.query_row(
+                "SELECT applied_seed_ids_json FROM collection_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )?;
+            let mut merged_applied: Vec<String> =
+                serde_json::from_str(&prev_applied_raw).unwrap_or_default();
+            for sid in &applied_shards {
+                if !merged_applied.iter().any(|x| x == sid) {
+                    merged_applied.push(sid.clone());
+                }
+            }
+            let merged_applied_json = serde_json::to_string(&clean_string_vec(&merged_applied))?;
+            let gen_ts = clean_opt_str(Some(manifest.generated_at.clone()));
+            tx.execute(
+                "UPDATE collection_config
              SET seed_cleared = 0,
                  applied_seed_ids_json = ?1,
                  last_refreshed_at = CASE
@@ -731,18 +732,19 @@ pub async fn seed_sync_at(
                    ELSE last_refreshed_at
                  END
              WHERE id = 1",
-            params![merged_applied_json, gen_ts],
-        )?;
+                params![merged_applied_json, gen_ts],
+            )?;
 
-        recompute_graph_and_citations_tx(&tx)?;
-        tx.commit()?;
+            recompute_graph_and_citations_tx(&tx)?;
+            tx.commit()?;
 
-        let state = read_state_summary_conn(&conn)?;
-        Ok(CollectionSeedSyncOut {
-            state,
-            applied_shards,
-            imported_papers,
-            skipped: false,
+            let state = read_state_summary_conn(conn)?;
+            Ok(CollectionSeedSyncOut {
+                state,
+                applied_shards,
+                imported_papers,
+                skipped: false,
+            })
         })
     })
     .await
@@ -1197,35 +1199,35 @@ fn persist_ref_batch(db_path: &Path, updates: &[WorkRefUpdate]) -> Result<usize,
     if updates.is_empty() {
         return Ok(0);
     }
-    let mut conn = ensure_collection_at(db_path)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut enriched = 0usize;
-    let mut aliases: HashMap<i64, i64> = HashMap::new();
+    with_collection_write_conn(db_path, |conn| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut enriched = 0usize;
+        let mut aliases: HashMap<i64, i64> = HashMap::new();
 
-    for u in updates {
-        let pub_doi = u.pub_doi.as_deref().and_then(clean_publisher_doi);
-        let arxiv_id = u.arxiv_id.as_deref().and_then(clean_arxiv_key);
-        let oa_id = u.openalex_id.as_deref().and_then(clean_openalex_id);
-        let primary_id = merge_canonical_works_on_ids_tx(
-            &tx,
-            &mut aliases,
-            u.work_id,
-            oa_id.as_deref(),
-            pub_doi.as_deref(),
-            arxiv_id.as_deref(),
-        )?;
+        for u in updates {
+            let pub_doi = u.pub_doi.as_deref().and_then(clean_publisher_doi);
+            let arxiv_id = u.arxiv_id.as_deref().and_then(clean_arxiv_key);
+            let oa_id = u.openalex_id.as_deref().and_then(clean_openalex_id);
+            let primary_id = merge_canonical_works_on_ids_tx(
+                &tx,
+                &mut aliases,
+                u.work_id,
+                oa_id.as_deref(),
+                pub_doi.as_deref(),
+                arxiv_id.as_deref(),
+            )?;
 
-        let mut touched = false;
-        if oa_id.is_some() || pub_doi.is_some() || arxiv_id.is_some() {
-            tx.execute(
-                "UPDATE canonical_works
+            let mut touched = false;
+            if oa_id.is_some() || pub_doi.is_some() || arxiv_id.is_some() {
+                tx.execute(
+                    "UPDATE canonical_works
                  SET openalex_id = COALESCE(openalex_id, ?1),
                      doi_norm = COALESCE(doi_norm, ?2),
                      arxiv_id_norm = COALESCE(arxiv_id_norm, ?3)
                  WHERE work_id = ?4",
-                params![oa_id, pub_doi, arxiv_id, primary_id],
-            )?;
-            tx.execute(
+                    params![oa_id, pub_doi, arxiv_id, primary_id],
+                )?;
+                tx.execute(
                 "UPDATE papers
                  SET openalex_id = COALESCE(openalex_id, ?1),
                      doi = CASE
@@ -1239,59 +1241,63 @@ fn persist_ref_batch(db_path: &Path, updates: &[WorkRefUpdate]) -> Result<usize,
                  WHERE work_id = ?4",
                 params![oa_id, pub_doi, arxiv_id, primary_id],
             )?;
-            touched = true;
-        }
-        if insert_work_raw_refs_tx(&tx, primary_id, &u.refs)? > 0 {
-            touched = true;
-        }
-        if let Some(ref abs) = u.abstract_text {
-            let clean_abs = collapse_whitespace(abs);
-            if !clean_abs.is_empty() && !is_roster_placeholder_abstract(&clean_abs, "") {
-                let candidates: Vec<(i64, String, String)> = {
-                    let mut stmt = tx.prepare_cached(
+                touched = true;
+            }
+            if insert_work_raw_refs_tx(&tx, primary_id, &u.refs)? > 0 {
+                touched = true;
+            }
+            if let Some(ref abs) = u.abstract_text {
+                let clean_abs = collapse_whitespace(abs);
+                if !clean_abs.is_empty() && !is_roster_placeholder_abstract(&clean_abs, "") {
+                    let candidates: Vec<(i64, String, String)> = {
+                        let mut stmt = tx.prepare_cached(
                         "SELECT row_id, abstract_text, source_label FROM papers WHERE work_id = ?1",
                     )?;
-                    let rows =
-                        stmt.query_map([primary_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-                    rows.collect::<Result<Vec<_>, _>>()?
-                };
-                for (row_id, ex_abs, src_label) in candidates {
-                    let ex_clean = collapse_whitespace(&ex_abs);
-                    if ex_clean.is_empty() || is_roster_placeholder_abstract(&ex_clean, &src_label)
-                    {
-                        tx.execute(
-                            "UPDATE papers SET abstract_text = ?1 WHERE row_id = ?2",
-                            params![clean_abs, row_id],
-                        )?;
-                        touched = true;
+                        let rows = stmt
+                            .query_map([primary_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                        rows.collect::<Result<Vec<_>, _>>()?
+                    };
+                    for (row_id, ex_abs, src_label) in candidates {
+                        let ex_clean = collapse_whitespace(&ex_abs);
+                        if ex_clean.is_empty()
+                            || is_roster_placeholder_abstract(&ex_clean, &src_label)
+                        {
+                            tx.execute(
+                                "UPDATE papers SET abstract_text = ?1 WHERE row_id = ?2",
+                                params![clean_abs, row_id],
+                            )?;
+                            touched = true;
+                        }
                     }
                 }
             }
+            if touched {
+                enriched += 1;
+            }
         }
-        if touched {
-            enriched += 1;
-        }
-    }
-    tx.commit()?;
-    Ok(enriched)
+        tx.commit()?;
+        Ok(enriched)
+    })
 }
 
 fn mark_works_refs_checked(db_path: &Path, work_ids: &[i64]) -> Result<(), AppError> {
     if work_ids.is_empty() {
         return Ok(());
     }
-    let mut conn = ensure_collection_at(db_path)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let now = now_rfc3339();
-    {
-        let mut stmt = tx
-            .prepare_cached("UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2")?;
-        for &wid in work_ids {
-            stmt.execute(params![now, wid])?;
+    with_collection_write_conn(db_path, |conn| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_rfc3339();
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2",
+            )?;
+            for &wid in work_ids {
+                stmt.execute(params![now, wid])?;
+            }
         }
-    }
-    tx.commit()?;
-    Ok(())
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 fn sanitize_title_for_openalex_search(raw: &str) -> Option<String> {
@@ -1790,13 +1796,17 @@ pub async fn backfill_missing_refs_at(
     let db_fin = db_path.to_path_buf();
     let should_recompute = enriched_works > 0;
     let state = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
-        let mut conn = ensure_collection_at(&db_fin)?;
         if should_recompute {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            recompute_graph_and_citations_tx(&tx)?;
-            tx.commit()?;
+            with_collection_write_conn(&db_fin, |conn| {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                recompute_graph_and_citations_tx(&tx)?;
+                tx.commit()?;
+                read_state_summary_conn(conn)
+            })
+        } else {
+            let conn = ensure_collection_at(&db_fin)?;
+            read_state_summary_conn(&conn)
         }
-        read_state_summary_conn(&conn)
     })
     .await
     .map_err(|e| AppError::message(format!("backfill_missing_refs finalize: {e}")))??;
@@ -2420,11 +2430,12 @@ async fn run_step_a_refs_backfill(
 
     let db_recomp = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = ensure_collection_at(&db_recomp)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        recompute_graph_and_citations_tx(&tx)?;
-        tx.commit()?;
-        Ok(())
+        with_collection_write_conn(&db_recomp, |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            recompute_graph_and_citations_tx(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
     })
     .await
     .map_err(|e| AppError::message(format!("seed_bake recompute graph: {e}")))??;
@@ -3435,58 +3446,59 @@ fn persist_maintainer_llm_batch(
     if batch.is_empty() {
         return Ok(0);
     }
-    let mut conn = ensure_collection_at(db_path)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let now = now_rfc3339();
-    let mut updated = 0usize;
+    with_collection_write_conn(db_path, |conn| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_rfc3339();
+        let mut updated = 0usize;
 
-    for (paper, kws) in batch {
-        let canon = canonicalize_keywords(kws);
-        if canon.is_empty() {
-            continue;
-        }
-        // Double-check row has not gained `author` keywords concurrently.
-        let cur_src: Option<String> = tx
-            .query_row(
-                "SELECT keyword_source FROM papers WHERE id = ?1",
-                [paper.id.as_str()],
-                |r| r.get(0),
-            )
-            .ok();
-        if cur_src
-            .as_deref()
-            .is_some_and(|s| s.eq_ignore_ascii_case("author"))
-        {
-            continue;
-        }
+        for (paper, kws) in batch {
+            let canon = canonicalize_keywords(kws);
+            if canon.is_empty() {
+                continue;
+            }
+            // Double-check row has not gained `author` keywords concurrently.
+            let cur_src: Option<String> = tx
+                .query_row(
+                    "SELECT keyword_source FROM papers WHERE id = ?1",
+                    [paper.id.as_str()],
+                    |r| r.get(0),
+                )
+                .ok();
+            if cur_src
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("author"))
+            {
+                continue;
+            }
 
-        let kws_json = serde_json::to_string(&canon)?;
-        let kw_text = build_keywords_text(&canon, &paper.categories, &paper.source_label);
-        tx.execute(
-            "UPDATE papers SET keywords_json = ?1, keyword_source = 'maintainer_llm', \
+            let kws_json = serde_json::to_string(&canon)?;
+            let kw_text = build_keywords_text(&canon, &paper.categories, &paper.source_label);
+            tx.execute(
+                "UPDATE papers SET keywords_json = ?1, keyword_source = 'maintainer_llm', \
                                keywords_text = ?2, updated_at = ?3 \
              WHERE id = ?4",
-            params![kws_json, kw_text, now, paper.id],
-        )?;
-        tx.execute(
-            "DELETE FROM paper_keywords WHERE paper_id = ?1",
-            [paper.id.as_str()],
-        )?;
-        for display in &canon {
-            let norm = normalize_keyword_key(display);
-            if !norm.is_empty() {
-                tx.execute(
-                    "INSERT OR IGNORE INTO paper_keywords (paper_id, normalized, display) \
+                params![kws_json, kw_text, now, paper.id],
+            )?;
+            tx.execute(
+                "DELETE FROM paper_keywords WHERE paper_id = ?1",
+                [paper.id.as_str()],
+            )?;
+            for display in &canon {
+                let norm = normalize_keyword_key(display);
+                if !norm.is_empty() {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO paper_keywords (paper_id, normalized, display) \
                      VALUES (?1, ?2, ?3)",
-                    params![paper.id, norm, display],
-                )?;
+                        params![paper.id, norm, display],
+                    )?;
+                }
             }
+            updated += 1;
         }
-        updated += 1;
-    }
 
-    tx.commit()?;
-    Ok(updated)
+        tx.commit()?;
+        Ok(updated)
+    })
 }
 
 async fn run_step_b_llm_bake(db_path: &Path, opts: &SeedBakeOptions) -> Result<usize, AppError> {

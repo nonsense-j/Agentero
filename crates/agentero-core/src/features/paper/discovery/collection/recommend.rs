@@ -16,7 +16,8 @@ use super::models::{
     WordCloudKeywordDto, WordCloudOut,
 };
 use super::schema::{
-    ensure_collection, ensure_collection_at, DEFAULT_WORD_CLOUD_TOP_N, MAX_WORD_CLOUD_TOP_N,
+    ensure_collection, ensure_collection_at, with_collection_write_conn,
+    with_default_collection_write_conn, DEFAULT_WORD_CLOUD_TOP_N, MAX_WORD_CLOUD_TOP_N,
     MIN_WORD_CLOUD_TOP_N,
 };
 use super::search::enrich_venue_summaries_from_arxiv_conn;
@@ -328,16 +329,14 @@ fn persist_recommend_state_tx(
 pub fn recommend_state_set(
     args: RecommendPoolStateInput,
 ) -> Result<RecommendPoolStateDto, AppError> {
-    let mut conn = ensure_collection()?;
-    recommend_state_set_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| recommend_state_set_conn(conn, args))
 }
 
 pub fn recommend_state_set_at(
     db_path: &Path,
     args: RecommendPoolStateInput,
 ) -> Result<RecommendPoolStateDto, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    recommend_state_set_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| recommend_state_set_conn(conn, args))
 }
 
 pub(crate) fn recommend_state_set_conn(
@@ -705,16 +704,14 @@ fn score_paper_against_prepared(
 }
 
 pub fn recommend_next(args: &RecommendNextArgs) -> Result<RecommendNextOut, AppError> {
-    let mut conn = ensure_collection()?;
-    recommend_next_conn(&mut conn, args)
+    with_default_collection_write_conn(|conn| recommend_next_conn(conn, args))
 }
 
 pub fn recommend_next_at(
     db_path: &Path,
     args: &RecommendNextArgs,
 ) -> Result<RecommendNextOut, AppError> {
-    let mut conn = ensure_collection_at(db_path)?;
-    recommend_next_conn(&mut conn, args)
+    with_collection_write_conn(db_path, |conn| recommend_next_conn(conn, args))
 }
 
 pub(crate) fn recommend_next_conn(

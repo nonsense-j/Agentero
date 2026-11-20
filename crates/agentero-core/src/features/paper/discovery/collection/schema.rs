@@ -1,7 +1,10 @@
 //! XDG `collection.sqlite` schema, migrations, and default seeds.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use rusqlite::{params, Connection};
 
@@ -956,6 +959,36 @@ pub fn collection_db_path() -> PathBuf {
     paths::collection_db_path()
 }
 
+const COLLECTION_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn normalize_write_lock_key(db_path: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    #[cfg(windows)]
+    {
+        PathBuf::from(resolved.to_string_lossy().to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        resolved
+    }
+}
+
+fn collection_write_mutex(db_path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let key = normalize_write_lock_key(db_path);
+    let mut map = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    map.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
 pub fn ensure_collection() -> Result<Connection, AppError> {
     ensure_collection_at(&collection_db_path())
 }
@@ -967,6 +1000,27 @@ pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
         }
     }
     let conn = crate::sqlite::open_standard(db_path, DbMsgs::COLLECTION)?;
+    let _ = conn.busy_timeout(COLLECTION_BUSY_TIMEOUT);
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Serialize in-process write transactions to the same `collection.sqlite` path so
+/// concurrent Venue/arXiv refresh workers, `backfill_refs`, and `seed_sync` queue
+/// cleanly instead of colliding on SQLite's `busy_timeout`.
+pub(crate) fn with_collection_write_conn<T, F>(db_path: &Path, f: F) -> Result<T, AppError>
+where
+    F: FnOnce(&mut Connection) -> Result<T, AppError>,
+{
+    let lock = collection_write_mutex(db_path);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut conn = ensure_collection_at(db_path)?;
+    f(&mut conn)
+}
+
+pub(crate) fn with_default_collection_write_conn<T, F>(f: F) -> Result<T, AppError>
+where
+    F: FnOnce(&mut Connection) -> Result<T, AppError>,
+{
+    with_collection_write_conn(&collection_db_path(), f)
 }
