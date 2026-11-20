@@ -530,14 +530,25 @@ pub async fn seed_sync_at(
     } else {
         initial_state.applied_seed_ids.iter().cloned().collect()
     };
+    let has_applied_core = !force
+        && initial_state.total_count > 0
+        && initial_state
+            .applied_seed_ids
+            .iter()
+            .any(|id| id.trim().to_ascii_lowercase().starts_with("core-"));
 
     let selected_shards: Vec<SeedShardEntry> = manifest
         .shards
         .iter()
         .filter(|s| {
-            !s.id.trim().is_empty()
-                && !already_applied.contains(s.id.trim())
-                && shard_matches_enabled_scope(s, &initial_state.categories)
+            let sid = s.id.trim();
+            if sid.is_empty() || already_applied.contains(sid) {
+                return false;
+            }
+            if has_applied_core && s.kind.trim().eq_ignore_ascii_case("core") {
+                return false;
+            }
+            shard_matches_enabled_scope(s, &initial_state.categories)
         })
         .cloned()
         .collect();
@@ -5323,5 +5334,180 @@ mod tests {
             )
             .unwrap();
         assert_eq!(merged_ts.as_deref(), Some(ts_new));
+    }
+
+    #[tokio::test]
+    async fn seed_sync_skips_rebuilt_core_shard_after_core_already_applied_unless_forced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst_db = tmp.path().join("collection.sqlite");
+        let seed_dir = tmp.path().join("seed");
+        fs::create_dir_all(&seed_dir).unwrap();
+
+        let write_shard = |filename: &str, records: &[SeedPaperRecord]| -> String {
+            let path = seed_dir.join(filename);
+            let file = File::create(&path).unwrap();
+            let mut enc = GzEncoder::new(file, Compression::default());
+            for rec in records {
+                writeln!(enc, "{}", serde_json::to_string(rec).unwrap()).unwrap();
+            }
+            enc.finish().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            hex::encode(Sha256::digest(&bytes))
+        };
+
+        let make_rec = |id: &str, title: &str| SeedPaperRecord {
+            id: id.to_string(),
+            title: title.to_string(),
+            authors: vec!["Alice Smith".into()],
+            abstract_text: "A full research abstract for seed sync verification testing.".into(),
+            published_at: "2026-09-22T00:00:00Z".into(),
+            year: 2026,
+            source_type: "arxiv".into(),
+            source_label: "cs.SE".into(),
+            categories: vec!["cs.SE".into()],
+            url: format!("https://arxiv.org/abs/{id}"),
+            pdf_url: None,
+            arxiv_id: Some(id.trim_start_matches("arxiv:").to_string()),
+            doi: None,
+            venue_id: None,
+            venue_kind: None,
+            venue_domain: None,
+            ccf_rank: None,
+            venue_full: None,
+            keywords: vec!["Fuzzing".into()],
+            keyword_source: Some("maintainer_llm".into()),
+            openalex_id: None,
+            raw_refs: Vec::new(),
+            refs_checked_at: None,
+            volume: None,
+            issue: None,
+            pages: None,
+            bibtex: None,
+            cool_papers_id: None,
+        };
+
+        let sha1 = write_shard(
+            "core-2026-v1.jsonl.gz",
+            &[make_rec("arxiv:2609.00001", "Initial Seed Paper")],
+        );
+        let manifest_v1 = seed_dir.join("manifest-v1.json");
+        fs::write(
+            &manifest_v1,
+            serde_json::to_vec(&SeedManifest {
+                version: 2,
+                generated_at: "2026-11-18T00:00:00Z".into(),
+                shards: vec![SeedShardEntry {
+                    id: "core-2026-v1".into(),
+                    kind: "core".into(),
+                    filename: "core-2026-v1.jsonl.gz".into(),
+                    sha256: sha1,
+                    paper_count: 1,
+                    categories: vec!["cs.SE".into()],
+                }],
+                arxiv_watermarks: HashMap::new(),
+                venue_watermarks: HashMap::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let sync1 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_v1.to_string_lossy().to_string()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sync1.skipped);
+        assert_eq!(sync1.imported_papers, 1);
+
+        // Rebuilt core shard (`core-2026-v2`) plus an incremental `delta` shard:
+        // non-forced sync must skip `core-2026-v2` (avoiding 40+ MB re-import) and apply only `delta`.
+        let sha2 = write_shard(
+            "core-2026-v2.jsonl.gz",
+            &[
+                make_rec("arxiv:2609.00001", "Initial Seed Paper"),
+                make_rec("arxiv:2609.00002", "Core V2 Only Paper"),
+            ],
+        );
+        let sha_delta = write_shard(
+            "delta-2026-1120.jsonl.gz",
+            &[make_rec("arxiv:2609.00003", "Delta Paper")],
+        );
+        let manifest_v2 = seed_dir.join("manifest-v2.json");
+        fs::write(
+            &manifest_v2,
+            serde_json::to_vec(&SeedManifest {
+                version: 2,
+                generated_at: "2026-11-20T00:00:00Z".into(),
+                shards: vec![
+                    SeedShardEntry {
+                        id: "core-2026-v2".into(),
+                        kind: "core".into(),
+                        filename: "core-2026-v2.jsonl.gz".into(),
+                        sha256: sha2,
+                        paper_count: 2,
+                        categories: vec!["cs.SE".into()],
+                    },
+                    SeedShardEntry {
+                        id: "delta-2026-1120".into(),
+                        kind: "delta".into(),
+                        filename: "delta-2026-1120.jsonl.gz".into(),
+                        sha256: sha_delta,
+                        paper_count: 1,
+                        categories: vec!["cs.SE".into()],
+                    },
+                ],
+                arxiv_watermarks: HashMap::new(),
+                venue_watermarks: HashMap::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let sync2 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_v2.to_string_lossy().to_string()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sync2.skipped);
+        assert_eq!(sync2.applied_shards, vec!["delta-2026-1120"]);
+        assert_eq!(sync2.imported_papers, 1);
+
+        // Subsequent non-forced sync with only rebuilt `core-2026-v2` unapplied skips immediately.
+        let sync3 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_v2.to_string_lossy().to_string()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(sync3.skipped);
+        assert_eq!(sync3.imported_papers, 0);
+
+        // Explicit `force: true` still re-applies `core-2026-v2`.
+        let sync4 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_v2.to_string_lossy().to_string()),
+                force: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!sync4.skipped);
+        assert_eq!(
+            sync4.applied_shards,
+            vec!["core-2026-v2", "delta-2026-1120"]
+        );
+        assert_eq!(sync4.imported_papers, 3);
     }
 }

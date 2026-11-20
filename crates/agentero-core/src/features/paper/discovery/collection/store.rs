@@ -1350,6 +1350,53 @@ pub(crate) fn config_update_conn(
 
 // ─── Paper Relations & Metadata-Preserving Upsert ───
 
+fn sync_paper_categories(
+    conn: &Connection,
+    paper_id: &str,
+    source_type: &str,
+    source_label: &str,
+    categories: &[String],
+) -> Result<(), AppError> {
+    conn.prepare_cached("DELETE FROM paper_categories WHERE paper_id = ?1")?
+        .execute([paper_id])?;
+    let mut ins = conn.prepare_cached(
+        "INSERT OR IGNORE INTO paper_categories (paper_id, category) VALUES (?1, ?2)",
+    )?;
+    let mut cat_seen = HashSet::new();
+    if source_type == "arxiv" && !source_label.trim().is_empty() {
+        let sl = source_label.trim();
+        if cat_seen.insert(sl.to_lowercase()) {
+            ins.execute(params![paper_id, sl])?;
+        }
+    }
+    for cat in categories {
+        let c = cat.trim();
+        if !c.is_empty() && cat_seen.insert(c.to_lowercase()) {
+            ins.execute(params![paper_id, c])?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_paper_keywords(
+    conn: &Connection,
+    paper_id: &str,
+    keywords: &[String],
+) -> Result<(), AppError> {
+    conn.prepare_cached("DELETE FROM paper_keywords WHERE paper_id = ?1")?
+        .execute([paper_id])?;
+    let mut ins = conn.prepare_cached(
+        "INSERT OR IGNORE INTO paper_keywords (paper_id, normalized, display) VALUES (?1, ?2, ?3)",
+    )?;
+    for display in canonicalize_keywords(keywords) {
+        let norm = normalize_keyword_key(&display);
+        if !norm.is_empty() {
+            ins.execute(params![paper_id, norm, display])?;
+        }
+    }
+    Ok(())
+}
+
 fn sync_paper_relations(
     conn: &Connection,
     paper_id: &str,
@@ -1358,40 +1405,8 @@ fn sync_paper_relations(
     categories: &[String],
     keywords: &[String],
 ) -> Result<(), AppError> {
-    conn.execute(
-        "DELETE FROM paper_categories WHERE paper_id = ?1",
-        [paper_id],
-    )?;
-    let mut cat_seen = HashSet::new();
-    if source_type == "arxiv" && !source_label.trim().is_empty() {
-        let sl = source_label.trim();
-        if cat_seen.insert(sl.to_lowercase()) {
-            conn.execute(
-                "INSERT OR IGNORE INTO paper_categories (paper_id, category) VALUES (?1, ?2)",
-                params![paper_id, sl],
-            )?;
-        }
-    }
-    for cat in categories {
-        let c = cat.trim();
-        if !c.is_empty() && cat_seen.insert(c.to_lowercase()) {
-            conn.execute(
-                "INSERT OR IGNORE INTO paper_categories (paper_id, category) VALUES (?1, ?2)",
-                params![paper_id, c],
-            )?;
-        }
-    }
-
-    conn.execute("DELETE FROM paper_keywords WHERE paper_id = ?1", [paper_id])?;
-    for display in canonicalize_keywords(keywords) {
-        let norm = normalize_keyword_key(&display);
-        if !norm.is_empty() {
-            conn.execute(
-                "INSERT OR IGNORE INTO paper_keywords (paper_id, normalized, display) VALUES (?1, ?2, ?3)",
-                params![paper_id, norm, display],
-            )?;
-        }
-    }
+    sync_paper_categories(conn, paper_id, source_type, source_label, categories)?;
+    sync_paper_keywords(conn, paper_id, keywords)?;
     Ok(())
 }
 
@@ -1900,6 +1915,7 @@ struct ExistingPaperRow {
     citation_count: u32,
     keywords_json: String,
     keyword_source: String,
+    keywords_text: String,
     volume: Option<String>,
     issue: Option<String>,
     pages: Option<String>,
@@ -1916,7 +1932,7 @@ fn load_existing_paper_by_id(
         "SELECT row_id, work_id, title, authors_json, abstract_text, published_at, year, source_type, \
                 source_label, categories_json, url, pdf_url, arxiv_id, doi, openalex_id, venue_id, \
                 venue_kind, venue_domain, ccf_rank, venue_full, citation_count, keywords_json, \
-                keyword_source, volume, issue, pages, bibtex, cool_papers_id, recommended_at \
+                keyword_source, keywords_text, volume, issue, pages, bibtex, cool_papers_id, recommended_at \
          FROM papers WHERE id = ?1",
     )?;
     let row = stmt
@@ -1946,12 +1962,13 @@ fn load_existing_paper_by_id(
                 citation_count: cites.max(0) as u32,
                 keywords_json: r.get(21)?,
                 keyword_source: r.get(22)?,
-                volume: r.get(23)?,
-                issue: r.get(24)?,
-                pages: r.get(25)?,
-                bibtex: r.get(26)?,
-                cool_papers_id: r.get(27)?,
-                recommended_at: r.get(28)?,
+                keywords_text: r.get(23)?,
+                volume: r.get(24)?,
+                issue: r.get(25)?,
+                pages: r.get(26)?,
+                bibtex: r.get(27)?,
+                cool_papers_id: r.get(28)?,
+                recommended_at: r.get(29)?,
             })
         })
         .optional()?;
@@ -1983,6 +2000,7 @@ pub(crate) fn upsert_single_paper_tx(
         let ex_cats: Vec<String> = serde_json::from_str(&ex.categories_json).unwrap_or_default();
         let ex_kws: Vec<String> = serde_json::from_str(&ex.keywords_json).unwrap_or_default();
 
+        let title_changed = !in_title.is_empty() && in_title != ex.title;
         let title = if !in_title.is_empty() {
             in_title.to_string()
         } else {
@@ -1993,11 +2011,14 @@ pub(crate) fn upsert_single_paper_tx(
         } else {
             ex_authors
         };
+        let source_type_changed = !in_source_type.is_empty() && in_source_type != ex.source_type;
         let source_type = if !in_source_type.is_empty() {
             in_source_type.to_string()
         } else {
             ex.source_type
         };
+        let source_label_changed =
+            !in_source_label.is_empty() && in_source_label != ex.source_label;
         let source_label = if !in_source_label.is_empty() {
             in_source_label.to_string()
         } else {
@@ -2071,64 +2092,119 @@ pub(crate) fn upsert_single_paper_tx(
         let keywords_json = serde_json::to_string(&keywords)?;
         let keywords_text = build_keywords_text(&keywords, &categories, &source_label);
 
-        let mut stmt = conn.prepare_cached(
-            "UPDATE papers SET
-                work_id = ?1, title = ?2, authors_json = ?3, abstract_text = ?4, published_at = ?5,
-                published_ymd = ?6, year = ?7, source_type = ?8, source_label = ?9,
-                categories_json = ?10, url = ?11, pdf_url = ?12, arxiv_id = ?13,
-                arxiv_id_norm = ?14, doi = ?15, doi_norm = ?16, openalex_id = ?17, title_norm = ?18,
-                venue_id = ?19, venue_kind = ?20, venue_domain = ?21, ccf_rank = ?22,
-                venue_full = ?23, citation_count = ?24, keywords_json = ?25, keyword_source = ?26,
-                keywords_text = ?27, volume = ?28, issue = ?29, pages = ?30, bibtex = ?31,
-                cool_papers_id = ?32, recommended_at = ?33, updated_at = ?34
-             WHERE row_id = ?35",
-        )?;
-        stmt.execute(params![
-            work_id,
-            title,
-            authors_json,
-            abstract_text,
-            published_at,
-            published_ymd,
-            year,
-            source_type,
-            source_label,
-            categories_json,
-            url,
-            pdf_url,
-            arxiv_id,
-            arxiv_id_norm,
-            doi,
-            doi_norm,
-            openalex_id,
-            title_norm,
-            venue_id,
-            venue_kind,
-            venue_domain,
-            ccf_rank,
-            venue_full,
-            ex.citation_count as i64,
-            keywords_json,
-            keyword_source,
-            keywords_text,
-            volume,
-            issue,
-            pages,
-            bibtex,
-            cool_papers_id,
-            recommended_at,
-            now,
-            ex.row_id,
-        ])?;
+        let fts_changed =
+            title_changed || abstract_text != ex.abstract_text || keywords_text != ex.keywords_text;
+        let cats_changed =
+            categories_json != ex.categories_json || source_type_changed || source_label_changed;
+        let kws_changed = keywords_json != ex.keywords_json;
 
-        sync_paper_relations(
-            conn,
-            id,
-            &source_type,
-            &source_label,
-            &categories,
-            &keywords,
-        )?;
+        if fts_changed {
+            let mut stmt = conn.prepare_cached(
+                "UPDATE papers SET
+                    work_id = ?1, title = ?2, authors_json = ?3, abstract_text = ?4, published_at = ?5,
+                    published_ymd = ?6, year = ?7, source_type = ?8, source_label = ?9,
+                    categories_json = ?10, url = ?11, pdf_url = ?12, arxiv_id = ?13,
+                    arxiv_id_norm = ?14, doi = ?15, doi_norm = ?16, openalex_id = ?17, title_norm = ?18,
+                    venue_id = ?19, venue_kind = ?20, venue_domain = ?21, ccf_rank = ?22,
+                    venue_full = ?23, citation_count = ?24, keywords_json = ?25, keyword_source = ?26,
+                    keywords_text = ?27, volume = ?28, issue = ?29, pages = ?30, bibtex = ?31,
+                    cool_papers_id = ?32, recommended_at = ?33, updated_at = ?34
+                 WHERE row_id = ?35",
+            )?;
+            stmt.execute(params![
+                work_id,
+                title,
+                authors_json,
+                abstract_text,
+                published_at,
+                published_ymd,
+                year,
+                source_type,
+                source_label,
+                categories_json,
+                url,
+                pdf_url,
+                arxiv_id,
+                arxiv_id_norm,
+                doi,
+                doi_norm,
+                openalex_id,
+                title_norm,
+                venue_id,
+                venue_kind,
+                venue_domain,
+                ccf_rank,
+                venue_full,
+                ex.citation_count as i64,
+                keywords_json,
+                keyword_source,
+                keywords_text,
+                volume,
+                issue,
+                pages,
+                bibtex,
+                cool_papers_id,
+                recommended_at,
+                now,
+                ex.row_id,
+            ])?;
+        } else {
+            // Omit unchanged FTS columns (`title`, `abstract_text`, `keywords_text`) so SQLite
+            // skips firing `papers_fts_au` (avoiding thousands of redundant FTS5 re-tokenizations).
+            let mut stmt = conn.prepare_cached(
+                "UPDATE papers SET
+                    work_id = ?1, authors_json = ?2, published_at = ?3,
+                    published_ymd = ?4, year = ?5, source_type = ?6, source_label = ?7,
+                    categories_json = ?8, url = ?9, pdf_url = ?10, arxiv_id = ?11,
+                    arxiv_id_norm = ?12, doi = ?13, doi_norm = ?14, openalex_id = ?15, title_norm = ?16,
+                    venue_id = ?17, venue_kind = ?18, venue_domain = ?19, ccf_rank = ?20,
+                    venue_full = ?21, citation_count = ?22, keywords_json = ?23, keyword_source = ?24,
+                    volume = ?25, issue = ?26, pages = ?27, bibtex = ?28,
+                    cool_papers_id = ?29, recommended_at = ?30, updated_at = ?31
+                 WHERE row_id = ?32",
+            )?;
+            stmt.execute(params![
+                work_id,
+                authors_json,
+                published_at,
+                published_ymd,
+                year,
+                source_type,
+                source_label,
+                categories_json,
+                url,
+                pdf_url,
+                arxiv_id,
+                arxiv_id_norm,
+                doi,
+                doi_norm,
+                openalex_id,
+                title_norm,
+                venue_id,
+                venue_kind,
+                venue_domain,
+                ccf_rank,
+                venue_full,
+                ex.citation_count as i64,
+                keywords_json,
+                keyword_source,
+                volume,
+                issue,
+                pages,
+                bibtex,
+                cool_papers_id,
+                recommended_at,
+                now,
+                ex.row_id,
+            ])?;
+        }
+
+        if cats_changed {
+            sync_paper_categories(conn, id, &source_type, &source_label, &categories)?;
+        }
+        if kws_changed {
+            sync_paper_keywords(conn, id, &keywords)?;
+        }
     } else {
         let published_ymd: String = in_pub.chars().take(10).collect();
         let abstract_text = clean_arxiv_abstract(&input.abstract_text);
