@@ -1790,9 +1790,69 @@ export function openAlexWorkToVenueItem(
 	};
 }
 
+export function isPlaceholderYearStartDate(
+	iso: string | null | undefined,
+): boolean {
+	if (!iso) return false;
+	return /^\d{4}-01-01(?:T00:00:00(?:\.000)?Z)?$/i.test(iso.trim());
+}
+
+function normalizePublishedAtIso(
+	iso: string | null | undefined,
+): string | undefined {
+	if (!iso) return undefined;
+	const trimmed = iso.trim();
+	if (!trimmed) return undefined;
+	if (Number.isNaN(Date.parse(trimmed))) return undefined;
+	return trimmed;
+}
+
+/**
+ * Pick the earliest valid publish timestamp between two candidates, always
+ * preferring a real date over a `YYYY-01-01T00:00:00Z` year-start placeholder.
+ */
+export function pickEarliestPublishedAt(
+	a: string | null | undefined,
+	b: string | null | undefined,
+): string {
+	const na = normalizePublishedAtIso(a);
+	const nb = normalizePublishedAtIso(b);
+	if (!na) return nb ?? "";
+	if (!nb) return na;
+	const aPlaceholder = isPlaceholderYearStartDate(na);
+	const bPlaceholder = isPlaceholderYearStartDate(nb);
+	if (aPlaceholder && !bPlaceholder) return nb;
+	if (bPlaceholder && !aPlaceholder) return na;
+	return Date.parse(na) <= Date.parse(nb) ? na : nb;
+}
+
+/**
+ * True when both arguments carry non-arXiv publisher DOIs that point to different
+ * published works (preventing fuzzy title matching from cross-pollinating distinct DOIs).
+ */
+export function hasDistinctPublisherDoi(
+	doiA?: string | null,
+	doiB?: string | null,
+): boolean {
+	const a = cleanDoi(doiA)?.toLowerCase();
+	const b = cleanDoi(doiB)?.toLowerCase();
+	if (!a || !b) return false;
+	if (a.startsWith("10.48550/arxiv.") || b.startsWith("10.48550/arxiv.")) {
+		return false;
+	}
+	return a !== b;
+}
+
+export type CrossrefUpdateTarget = {
+	DOI?: string;
+	type?: string;
+	label?: string;
+};
+
 export type CrossrefWorkRow = {
 	DOI?: string;
 	type?: string;
+	"update-to"?: CrossrefUpdateTarget[];
 	title?: string[];
 	abstract?: string;
 	subject?: string[];
@@ -1807,6 +1867,115 @@ export type CrossrefWorkRow = {
 	"published-print"?: { "date-parts"?: number[][] };
 };
 
+const REJECTED_CROSSREF_WORK_TYPE_RE =
+	/^(dataset|software|paratext|peer-review|erratum|corrigendum|retraction|editorial|letter|book-review|book|proceedings|journal-issue|journal-volume)$/i;
+
+const REJECTED_CROSSREF_UPDATE_TYPE_RE =
+	/^(?:correction|corrigendum|erratum|retraction|partial[-_ ]?retraction|withdrawal|removal|expression[-_ ]?of[-_ ]?concern|addendum|clarification|new[-_ ]?version|new[-_ ]?edition)$/i;
+
+/**
+ * Reject Crossref rows whose structured type is non-article (erratum/retraction/editorial/dataset/...)
+ * or that carry a Crossmark `update-to` notice (correction, corrigendum, retraction, withdrawal, etc.),
+ * or whose DOI points to an artifact/dataset repository.
+ */
+export function isRejectedCrossrefWork(
+	row: CrossrefWorkRow | null | undefined,
+): boolean {
+	if (!row) return true;
+	const rowType = (row.type ?? "").trim();
+	if (rowType && REJECTED_CROSSREF_WORK_TYPE_RE.test(rowType)) {
+		return true;
+	}
+	if (Array.isArray(row["update-to"]) && row["update-to"].length > 0) {
+		const isUpdateNotice = row["update-to"].some((u) => {
+			const ut = (u?.type ?? "").trim();
+			const ul = (u?.label ?? "").trim();
+			return (
+				(!ut && !ul) ||
+				(ut && REJECTED_CROSSREF_UPDATE_TYPE_RE.test(ut)) ||
+				(ul && REJECTED_CROSSREF_UPDATE_TYPE_RE.test(ul))
+			);
+		});
+		if (isUpdateNotice) {
+			return true;
+		}
+	}
+	if (isArtifactOrDatasetDoi(row.DOI)) {
+		return true;
+	}
+	return false;
+}
+
+type ParsedCrossrefDate = {
+	iso: string;
+	year: number;
+	month: number;
+	specificity: 1 | 2 | 3;
+};
+
+function parseCrossrefDateParts(
+	parts: readonly number[] | undefined,
+): ParsedCrossrefDate | null {
+	if (!Array.isArray(parts) || parts.length === 0) return null;
+	const rawYear = parts[0];
+	if (typeof rawYear !== "number" || !Number.isFinite(rawYear)) return null;
+	const year = Math.trunc(rawYear);
+	if (year < 1900 || year > 2100) return null;
+	const hasMonth =
+		typeof parts[1] === "number" &&
+		Number.isFinite(parts[1]) &&
+		parts[1] >= 1 &&
+		parts[1] <= 12;
+	const hasDay =
+		hasMonth &&
+		typeof parts[2] === "number" &&
+		Number.isFinite(parts[2]) &&
+		parts[2] >= 1 &&
+		parts[2] <= 31;
+	const month = hasMonth ? Math.trunc(parts[1] as number) : 1;
+	const day = hasDay ? Math.trunc(parts[2] as number) : 1;
+	return {
+		iso: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00Z`,
+		year,
+		month,
+		specificity: hasDay ? 3 : hasMonth ? 2 : 1,
+	};
+}
+
+function pickEarliestCrossrefDate(
+	candidates: readonly (ParsedCrossrefDate | null)[],
+): ParsedCrossrefDate | null {
+	let best: ParsedCrossrefDate | null = null;
+	for (const cand of candidates) {
+		if (!cand) continue;
+		if (!best) {
+			best = cand;
+			continue;
+		}
+		// Prefer a full date over a year-only YYYY-01-01 placeholder.
+		if (best.specificity === 1 && cand.specificity > 1) {
+			best = cand;
+			continue;
+		}
+		if (cand.specificity === 1 && best.specificity > 1) {
+			continue;
+		}
+		// Within the same year & month, prefer an exact Y-M-D over a coarse Y-M-01.
+		if (best.year === cand.year && best.month === cand.month) {
+			if (cand.specificity > best.specificity) {
+				best = cand;
+			} else if (cand.specificity === best.specificity && cand.iso < best.iso) {
+				best = cand;
+			}
+			continue;
+		}
+		if (cand.iso < best.iso) {
+			best = cand;
+		}
+	}
+	return best;
+}
+
 export function crossrefWorkToVenueItem(
 	row: CrossrefWorkRow,
 	venue: VenueConfig,
@@ -1814,18 +1983,7 @@ export function crossrefWorkToVenueItem(
 	targetYear: number,
 	requireDoiPrefix = false,
 ): CollectionPaperItem | null {
-	const rowType = (row.type ?? "").toLowerCase();
-	if (
-		rowType === "dataset" ||
-		rowType === "software" ||
-		rowType === "paratext" ||
-		rowType === "peer-review" ||
-		rowType === "erratum" ||
-		rowType === "book" ||
-		rowType === "proceedings" ||
-		rowType === "journal-issue" ||
-		rowType === "journal-volume"
-	) {
+	if (isRejectedCrossrefWork(row)) {
 		return null;
 	}
 	const doi = cleanDoi(row.DOI);
@@ -1892,21 +2050,35 @@ export function crossrefWorkToVenueItem(
 		if (!iss.startsWith(spec.pacmIssue.toUpperCase())) return null;
 	}
 
-	const onlineParts = row["published-online"]?.["date-parts"]?.[0];
-	const printParts = row["published-print"]?.["date-parts"]?.[0];
-	const pubParts = row.published?.["date-parts"]?.[0];
-	const parts = printParts ?? onlineParts ?? pubParts ?? [];
-	const maxYear = Math.max(
-		typeof onlineParts?.[0] === "number" ? onlineParts[0] : 0,
-		typeof printParts?.[0] === "number" ? printParts[0] : 0,
-		typeof pubParts?.[0] === "number" ? pubParts[0] : 0,
+	const onlineDate = parseCrossrefDateParts(
+		row["published-online"]?.["date-parts"]?.[0],
 	);
-	const y = maxYear > 0 ? maxYear : targetYear;
-	if (y < targetYear && !spec?.crossrefIsbns?.length && !requireDoiPrefix) {
+	const pubDate = parseCrossrefDateParts(row.published?.["date-parts"]?.[0]);
+	const printDate = parseCrossrefDateParts(
+		row["published-print"]?.["date-parts"]?.[0],
+	);
+	const maxYear = Math.max(
+		onlineDate?.year ?? 0,
+		pubDate?.year ?? 0,
+		printDate?.year ?? 0,
+	);
+	const scopeYear = maxYear > 0 ? maxYear : targetYear;
+	if (
+		scopeYear < targetYear &&
+		!spec?.crossrefIsbns?.length &&
+		!requireDoiPrefix
+	) {
 		return null;
 	}
-	const m = String(parts[1] ?? 1).padStart(2, "0");
-	const d = String(parts[2] ?? 1).padStart(2, "0");
+	// Prefer `published-online` / `published` over future print cover dates, picking the earliest publish date.
+	const chosenDate =
+		pickEarliestCrossrefDate([onlineDate, pubDate]) ?? printDate;
+	const publishedAt = chosenDate?.iso ?? `${targetYear}-01-01T00:00:00Z`;
+	const resolvedYear = chosenDate
+		? chosenDate.year >= targetYear
+			? chosenDate.year
+			: targetYear
+		: targetYear;
 	const authors = (row.author ?? [])
 		.map((a) => `${a.given ?? ""} ${a.family ?? ""}`.trim())
 		.filter(Boolean);
@@ -1932,8 +2104,8 @@ export function crossrefWorkToVenueItem(
 		title,
 		authors,
 		abstract: cleanAbs,
-		publishedAt: `${Math.max(y, targetYear)}-${m}-${d}T00:00:00Z`,
-		year: Math.max(y, targetYear),
+		publishedAt,
+		year: resolvedYear,
 		sourceType: "venue",
 		sourceLabel: venue.name,
 		categories,
@@ -1982,7 +2154,9 @@ export function semanticScholarWorkToVenueItem(
 ): CollectionPaperItem | null {
 	if (
 		row.publicationTypes?.some((pt) =>
-			/^(dataset|software|editorial|erratum)$/i.test(pt.trim()),
+			/^(dataset|software|editorial|erratum|corrigendum|retraction|letter|lettersandcomments|news|comment)$/i.test(
+				pt.trim(),
+			),
 		)
 	) {
 		return null;
@@ -2091,7 +2265,7 @@ export function semanticScholarWorkToVenueItem(
  * without public abstracts are retained with `abstract: ""` rather than discarded.
  */
 const CROSSREF_SELECT =
-	"DOI,title,type,author,abstract,container-title,published,published-online,published-print,volume,issue,page,reference";
+	"DOI,title,type,update-to,author,abstract,container-title,published,published-online,published-print,volume,issue,page,reference";
 
 export async function fetchVenueStructuredPapers(
 	venue: VenueConfig,
@@ -2115,6 +2289,13 @@ export async function fetchVenueStructuredPapers(
 	await ensureOpenAlexRuntimeKeyLoaded();
 	const out: CollectionPaperItem[] = [];
 	const seenIds = new Set<string>();
+	const rejectedDois = new Set<string>();
+	const recordRejectedDoi = (raw: string | null | undefined) => {
+		const d = cleanDoi(raw)?.toLowerCase();
+		if (d && !d.startsWith("10.48550/arxiv.")) {
+			rejectedDois.add(d);
+		}
+	};
 	const maxPages = Math.min(options?.maxPages ?? 25, 48);
 	const sinceDate = options?.sinceDate?.slice(0, 10) || null;
 	let remoteTotalCount: number | undefined;
@@ -2122,6 +2303,10 @@ export async function fetchVenueStructuredPapers(
 	let succeededRequests = 0;
 
 	const pushUnique = (item: CollectionPaperItem) => {
+		const itemDoi = cleanDoi(item.doi)?.toLowerCase();
+		if (itemDoi && rejectedDois.has(itemDoi)) {
+			return;
+		}
 		if (seenIds.has(item.id)) {
 			const idx = out.findIndex((x) => x.id === item.id);
 			const existing = idx >= 0 ? out[idx] : undefined;
@@ -2138,8 +2323,16 @@ export async function fetchVenueStructuredPapers(
 				);
 				const base = !existing.abstract && item.abstract ? item : existing;
 				const prevRec = existing.recommendedAt || item.recommendedAt;
+				const earliestPub = pickEarliestPublishedAt(
+					existing.publishedAt,
+					item.publishedAt,
+				);
 				out[idx] = {
 					...base,
+					publishedAt: earliestPub || base.publishedAt,
+					volume: existing.volume || item.volume,
+					issue: existing.issue || item.issue,
+					pages: existing.pages || item.pages,
 					keywords: mergedKw.keywords,
 					...(mergedKw.keywordSource
 						? { keywordSource: mergedKw.keywordSource }
@@ -2202,6 +2395,11 @@ export async function fetchVenueStructuredPapers(
 				}
 				const batch = data.results ?? [];
 				for (const row of batch) {
+					if (isRejectedOpenAlexWork(row)) {
+						recordRejectedDoi(row.doi);
+						recordRejectedDoi(row.ids?.doi);
+						continue;
+					}
 					const item = openAlexWorkToVenueItem(row, venue, spec, year);
 					if (item) {
 						pushUnique(item);
@@ -2287,8 +2485,18 @@ export async function fetchVenueStructuredPapers(
 					if (rows.length === 0) break;
 
 					for (const row of rows) {
+						if (isRejectedCrossrefWork(row)) {
+							recordRejectedDoi(row.DOI);
+							continue;
+						}
 						const candidate = convertCrossrefRow(row, false);
-						if (!candidate || seenIds.has(candidate.id)) continue;
+						if (!candidate) continue;
+						const candDoi = cleanDoi(candidate.doi)?.toLowerCase();
+						if (candDoi && rejectedDois.has(candDoi)) continue;
+						if (seenIds.has(candidate.id)) {
+							pushUnique(candidate);
+							continue;
+						}
 						rawCrossrefPendingEnrich.push(candidate);
 					}
 
@@ -2349,10 +2557,18 @@ export async function fetchVenueStructuredPapers(
 
 					let matchedOnPage = 0;
 					for (const row of rows) {
+						if (isRejectedCrossrefWork(row)) {
+							recordRejectedDoi(row.DOI);
+							continue;
+						}
 						const candidate = convertCrossrefRow(row, true);
 						if (!candidate) continue;
 						matchedOnPage += 1;
-						if (!seenIds.has(candidate.id)) {
+						const candDoi = cleanDoi(candidate.doi)?.toLowerCase();
+						if (candDoi && rejectedDois.has(candDoi)) continue;
+						if (seenIds.has(candidate.id)) {
+							pushUnique(candidate);
+						} else {
 							rawCrossrefPendingEnrich.push(candidate);
 						}
 					}
@@ -2379,6 +2595,7 @@ export async function fetchVenueStructuredPapers(
 				: out,
 			{
 				skipOpenAlexFilter: openAlexFailed,
+				rejectedDois,
 				signal: options?.signal,
 				onProgress: options?.onProgress,
 			},
@@ -2388,8 +2605,16 @@ export async function fetchVenueStructuredPapers(
 		}
 	}
 
+	const finalItems =
+		rejectedDois.size > 0
+			? out.filter((item) => {
+					const d = cleanDoi(item.doi)?.toLowerCase();
+					return !d || !rejectedDois.has(d);
+				})
+			: out;
+
 	return {
-		items: out,
+		items: finalItems,
 		remoteTotalCount,
 		hadSuccessfulResponse: attemptedRequests === 0 || succeededRequests > 0,
 	};
@@ -2419,6 +2644,7 @@ async function fetchOpenAlexSingletonsByDoi(
 	outMap: Map<string, OpenAlexWork>,
 	maxItems = 260,
 	options?: {
+		rejectedDois?: Set<string>;
 		signal?: AbortSignal;
 		onProgress?: (completed: number, total: number) => void;
 	},
@@ -2469,20 +2695,28 @@ async function fetchOpenAlexSingletonsByDoi(
 					}
 				}
 			}
-			if (
-				fetched &&
-				(fetched.id || fetched.doi || fetched.title) &&
-				!isRejectedOpenAlexWork(fetched)
-			) {
-				const clean = cleanDoi(fetched.doi)?.toLowerCase() || doi;
-				if (!isArtifactOrDatasetDoi(clean)) {
-					outMap.set(clean, fetched);
+			if (fetched && (fetched.id || fetched.doi || fetched.title)) {
+				if (isRejectedOpenAlexWork(fetched)) {
+					const rejectedDoi = cleanDoi(fetched.doi)?.toLowerCase();
+					const rejectedIdDoi = cleanDoi(fetched.ids?.doi)?.toLowerCase();
+					if (rejectedDoi) options?.rejectedDois?.add(rejectedDoi);
+					if (rejectedIdDoi) options?.rejectedDois?.add(rejectedIdDoi);
+					if (!doi.startsWith("10.48550/arxiv.")) {
+						options?.rejectedDois?.add(doi);
+					}
+					succeeded += 1;
+					consecutiveFailures = 0;
+				} else {
+					const clean = cleanDoi(fetched.doi)?.toLowerCase() || doi;
+					if (!isArtifactOrDatasetDoi(clean)) {
+						outMap.set(clean, fetched);
+					}
+					if (!isArtifactOrDatasetDoi(doi)) {
+						outMap.set(doi, fetched);
+					}
+					succeeded += 1;
+					consecutiveFailures = 0;
 				}
-				if (!isArtifactOrDatasetDoi(doi)) {
-					outMap.set(doi, fetched);
-				}
-				succeeded += 1;
-				consecutiveFailures = 0;
 			} else {
 				consecutiveFailures += 1;
 			}
@@ -2529,6 +2763,7 @@ export async function enrichVenueItemsBatch(
 		skipOpenAlexFilter?: boolean;
 		skipTitleSearch?: boolean;
 		maxDoiLessLookups?: number;
+		rejectedDois?: Set<string>;
 		signal?: AbortSignal;
 		onProgress?: (progress: { completed?: number; total?: number }) => void;
 	},
@@ -2538,6 +2773,13 @@ export async function enrichVenueItemsBatch(
 	const safeFetchJson = wrapFetchJsonWithAbort(fetchJson, options?.signal);
 	await ensureOpenAlexRuntimeKeyLoaded();
 	throwIfAborted(options?.signal);
+	const rejectedDois = options?.rejectedDois ?? new Set<string>();
+	const recordRejectedDoi = (raw: string | null | undefined) => {
+		const d = cleanDoi(raw)?.toLowerCase();
+		if (d && !d.startsWith("10.48550/arxiv.")) {
+			rejectedDois.add(d);
+		}
+	};
 
 	const preloadedByDoi = new Map<string, CollectionPaperItem>();
 	const preloadedByTitle = new Map<string, CollectionPaperItem>();
@@ -2613,7 +2855,11 @@ export async function enrichVenueItemsBatch(
 					break;
 				}
 				for (const row of res.results ?? []) {
-					if (isRejectedOpenAlexWork(row)) continue;
+					if (isRejectedOpenAlexWork(row)) {
+						recordRejectedDoi(row.doi);
+						recordRejectedDoi(row.ids?.doi);
+						continue;
+					}
 					const rowTitle = (row.title || row.display_name || "").trim();
 					if (rowTitle && isFrontmatterTitle(rowTitle)) continue;
 					const d = cleanDoi(row.doi)?.toLowerCase();
@@ -2647,6 +2893,7 @@ export async function enrichVenueItemsBatch(
 			byDoi,
 			260,
 			{
+				rejectedDois,
 				signal: options?.signal,
 				onProgress: (completed, total) =>
 					options?.onProgress?.({ completed, total }),
@@ -2760,13 +3007,25 @@ export async function enrichVenueItemsBatch(
 		if (isFrontmatterTitle(item.title)) continue;
 		const tKey = normTitleKey(item.title);
 		const lookupDoi = resolveLookupDoi(item);
+		const cleanItemDoi = cleanDoi(item.doi)?.toLowerCase();
+		if (
+			(lookupDoi && rejectedDois.has(lookupDoi)) ||
+			(cleanItemDoi && rejectedDois.has(cleanItemDoi))
+		) {
+			continue;
+		}
+		const exactTitlePre = tKey ? preloadedByTitle.get(tKey) : undefined;
 		let pre =
 			(item.doi && !isArtifactOrDatasetDoi(item.doi)
 				? preloadedByDoi.get(item.doi.toLowerCase())
-				: undefined) ?? (tKey ? preloadedByTitle.get(tKey) : undefined);
+				: undefined) ??
+			(exactTitlePre && !hasDistinctPublisherDoi(item.doi, exactTitlePre.doi)
+				? exactTitlePre
+				: undefined);
 		if (!pre && validPreloadedItems.length > 0) {
 			let bestPreScore = 0;
 			for (const cand of validPreloadedItems) {
+				if (hasDistinctPublisherDoi(item.doi, cand.doi)) continue;
 				const res = scoreCameraReadyCandidateMatch(
 					item.title,
 					item.authors,
@@ -2779,13 +3038,17 @@ export async function enrichVenueItemsBatch(
 				}
 			}
 		}
+		const exactTitleRow = tKey ? byTitle.get(tKey) : undefined;
 		let row =
 			(lookupDoi ? byDoi.get(lookupDoi) : undefined) ??
-			(tKey ? byTitle.get(tKey) : undefined);
+			(exactTitleRow && !hasDistinctPublisherDoi(item.doi, exactTitleRow.doi)
+				? exactTitleRow
+				: undefined);
 		if (!row && titleSearchRows.length > 0) {
 			let bestRowScore = 0;
 			for (const cand of titleSearchRows) {
 				if (isRejectedOpenAlexWork(cand)) continue;
+				if (hasDistinctPublisherDoi(item.doi, cand.doi)) continue;
 				const candTitle = cand.title || cand.display_name || "";
 				if (!candTitle || isFrontmatterTitle(candTitle)) continue;
 				const res = scoreCameraReadyCandidateMatch(
@@ -2852,12 +3115,8 @@ export async function enrichVenueItemsBatch(
 			pdfUrl = pdfUrl || pre.pdfUrl;
 			coolPapersId = coolPapersId || pre.coolPapersId;
 			recommendedAt = recommendedAt || pre.recommendedAt;
-			if (
-				pre.publishedAt &&
-				(publishedAt.endsWith("-01-01T00:00:00Z") ||
-					pre.publishedAt > publishedAt)
-			) {
-				publishedAt = pre.publishedAt;
+			if (pre.publishedAt) {
+				publishedAt = pickEarliestPublishedAt(publishedAt, pre.publishedAt);
 			}
 		}
 
@@ -2906,7 +3165,10 @@ export async function enrichVenueItemsBatch(
 				oaPdf ||
 				(arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : undefined);
 			if (row.publication_date) {
-				publishedAt = `${row.publication_date}T00:00:00Z`;
+				publishedAt = pickEarliestPublishedAt(
+					publishedAt,
+					`${row.publication_date}T00:00:00Z`,
+				);
 			}
 		}
 
@@ -3107,11 +3369,17 @@ function mergeOpenAlexRowIntoMap(
 					]),
 				)
 			: undefined;
+	const mergedPubDate = pickEarliestPublishedAt(
+		prev.publication_date ? `${prev.publication_date}T00:00:00Z` : undefined,
+		next.publication_date ? `${next.publication_date}T00:00:00Z` : undefined,
+	);
 	map.set(key, {
 		...prev,
 		id: prev.id || next.id,
 		doi: preferredDoi,
-		publication_date: prev.publication_date || next.publication_date,
+		publication_date: mergedPubDate
+			? mergedPubDate.slice(0, 10)
+			: prev.publication_date || next.publication_date,
 		referenced_works: mergedRefs,
 		abstract_inverted_index:
 			prev.abstract_inverted_index ?? next.abstract_inverted_index,

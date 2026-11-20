@@ -916,7 +916,21 @@ async fn fetch_openalex_json(client: &reqwest::Client, url: &str) -> OpenAlexFet
 fn is_rejected_openalex_work(work: &Value) -> bool {
     if let Some(wtype) = work.get("type").and_then(Value::as_str) {
         let t = wtype.trim().to_ascii_lowercase();
-        if matches!(t.as_str(), "dataset" | "software" | "paratext" | "erratum") {
+        if matches!(
+            t.as_str(),
+            "dataset"
+                | "software"
+                | "paratext"
+                | "peer-review"
+                | "erratum"
+                | "letter"
+                | "editorial"
+                | "grant"
+                | "retraction"
+                | "book"
+                | "proceedings"
+                | "journal-issue"
+        ) {
             return true;
         }
     }

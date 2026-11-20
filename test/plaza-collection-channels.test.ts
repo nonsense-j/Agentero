@@ -64,12 +64,14 @@ import {
 	extractArxivDoiFromAtomEntry,
 	isArtifactOrDatasetDoi,
 	isNonMainTrackPrefixedTitle,
+	isRejectedCrossrefWork,
 	isWorkshopOrCompanionVenue,
 	mergeKeywordMetadata,
 	normalizeOpenAlexId,
 	normalizeRawRefs,
 	OPENALEX_SELECT,
 	openAlexWorkToVenueItem,
+	pickEarliestPublishedAt,
 	semanticScholarWorkToVenueItem,
 	wrapFetchJsonWithAbort,
 	wrapFetchTextWithAbort,
@@ -4314,5 +4316,288 @@ describe("Plaza Paper Collection incremental arXiv & full multi-channel Venue sy
 			setCachedOpenAlexApiKeyForTests(undefined);
 			resetCollectionMemoryForTests();
 		}
+	});
+
+	it("rejects Crossref update-to notices and OpenAlex erratum vetoes without title false positives, and prefers earliest published-online dates", async () => {
+		const aseJournal = DEFAULT_COLLECTION_VENUES.find(
+			(v) => v.id === "ase-journal-2026",
+		);
+		const aseSpec = VENUE_SPEC_BY_ID.get("ase-journal-2026");
+		if (!aseJournal || !aseSpec) throw new Error("Missing ase-journal-2026");
+
+		// 1. Crossref `update-to` correction notice is rejected even when Crossref `type` is `journal-article`
+		const springerCorrectionRow = {
+			DOI: "10.1007/s10515-026-00711-z",
+			type: "journal-article",
+			"update-to": [
+				{
+					DOI: "10.1007/s10515-026-00684-z",
+					type: "correction",
+					label: "Correction",
+				},
+			],
+			title: ["Correction: Security smell detection in dockerfiles"],
+			author: [
+				{ given: "Wenbo", family: "Zhang" },
+				{ given: "Inah", family: "Omoronyia" },
+			],
+			"published-online": { "date-parts": [[2026, 11, 17]] },
+			published: { "date-parts": [[2026, 11, 17]] },
+			"published-print": { "date-parts": [[2027, 3]] },
+		};
+		expect(isRejectedCrossrefWork(springerCorrectionRow)).toBe(true);
+		expect(
+			crossrefWorkToVenueItem(springerCorrectionRow, aseJournal, aseSpec, 2026),
+		).toBeNull();
+
+		// 2. Research paper whose title starts with "Correction:" but has NO `update-to` / erratum type is retained
+		const legitResearchItem = crossrefWorkToVenueItem(
+			{
+				DOI: "10.1007/s10515-026-00684-z",
+				type: "journal-article",
+				title: ["Correction: A Study of Automated Bug Fixing in Dockerfiles"],
+				author: [
+					{ given: "Wenbo", family: "Zhang" },
+					{ given: "Inah", family: "Omoronyia" },
+				],
+				"published-online": { "date-parts": [[2026, 9, 22]] },
+				published: { "date-parts": [[2026, 9, 25]] },
+				"published-print": { "date-parts": [[2026, 12]] },
+			},
+			aseJournal,
+			aseSpec,
+			2026,
+		);
+		expect(legitResearchItem).not.toBeNull();
+		// Prefers earliest of `published-online` / `published` over future `published-print` cover date
+		expect(legitResearchItem?.publishedAt).toBe("2026-09-22T00:00:00Z");
+		expect(legitResearchItem?.year).toBe(2026);
+
+		// 3. Cross-year online/print dates never mix year from print with month/day from online or coerce 2025-12 into 2026-12
+		const crossYearItem = crossrefWorkToVenueItem(
+			{
+				DOI: "10.1007/s10515-025-00999-1",
+				type: "journal-article",
+				title: ["Cross-Year Online First Verification Study"],
+				author: [{ given: "Alice", family: "Smith" }],
+				"published-online": { "date-parts": [[2025, 12, 20]] },
+				published: { "date-parts": [[2025, 12, 20]] },
+				"published-print": { "date-parts": [[2026, 2]] },
+			},
+			aseJournal,
+			aseSpec,
+			2026,
+		);
+		expect(crossYearItem?.publishedAt).toBe("2025-12-20T00:00:00Z");
+		expect(crossYearItem?.year).toBe(2026);
+
+		// 4. Multi-source veto & earliest date reconciliation in fetchVenueStructuredPapers:
+		//    - OpenAlex reports `erratum` for DOI B -> Crossref copy (even without `update-to`) is vetoed
+		//    - Crossref reports `update-to` for DOI C -> OpenAlex copy (even if marked `article`) is vetoed
+		//    - For genuine article DOI A, OpenAlex has future print date 2026-12-01 while Crossref has 2026-09-22 -> earliest wins
+		const mockFetchJson = async <T = unknown>(url: string): Promise<T> => {
+			if (url.includes("api.openalex.org/works")) {
+				return {
+					meta: { count: 3 },
+					results: [
+						{
+							id: "https://openalex.org/W100",
+							type: "article",
+							title: "Security smell detection in Dockerfiles",
+							publication_year: 2026,
+							publication_date: "2026-12-01",
+							doi: "https://doi.org/10.1007/s10515-026-00684-z",
+							authorships: [
+								{ author: { display_name: "Wenbo Zhang" } },
+								{ author: { display_name: "Inah Omoronyia" } },
+							],
+							abstract_inverted_index: {
+								Dockerfiles: [0],
+								are: [1],
+								a: [2],
+								widely: [3],
+								adopted: [4],
+								format: [5],
+								for: [6],
+								specifying: [7],
+								Infrastructure: [8],
+								as: [9],
+								Code: [10],
+							},
+						},
+						{
+							id: "https://openalex.org/W101",
+							type: "erratum",
+							title: "Correction: Security smell detection in dockerfiles",
+							publication_year: 2026,
+							publication_date: "2026-11-17",
+							doi: "https://doi.org/10.1007/s10515-026-00711-z",
+							authorships: [
+								{ author: { display_name: "Wenbo Zhang" } },
+								{ author: { display_name: "Inah Omoronyia" } },
+							],
+						},
+						{
+							id: "https://openalex.org/W102",
+							type: "article",
+							title:
+								"Correction: Leveraging text generation for enhanced user story quality",
+							publication_year: 2026,
+							publication_date: "2026-09-21",
+							doi: "https://doi.org/10.1007/s10515-026-00672-3",
+							authorships: [
+								{ author: { display_name: "Carlos Alberto dos Santos" } },
+								{ author: { display_name: "Kevin Bouchard" } },
+							],
+						},
+					],
+				} as T;
+			}
+			if (url.includes("api.crossref.org/works")) {
+				return {
+					message: {
+						"total-results": 3,
+						"next-cursor": null,
+						items: [
+							{
+								DOI: "10.1007/s10515-026-00684-z",
+								type: "journal-article",
+								title: ["Security smell detection in Dockerfiles"],
+								author: [
+									{ given: "Wenbo", family: "Zhang" },
+									{ given: "Inah", family: "Omoronyia" },
+								],
+								"published-online": { "date-parts": [[2026, 9, 22]] },
+								published: { "date-parts": [[2026, 9, 22]] },
+								"published-print": { "date-parts": [[2026, 12]] },
+							},
+							{
+								// Even if Crossref omitted `update-to`, OpenAlex's `erratum` vetoes it
+								DOI: "10.1007/s10515-026-00711-z",
+								type: "journal-article",
+								title: ["Correction: Security smell detection in dockerfiles"],
+								author: [
+									{ given: "Wenbo", family: "Zhang" },
+									{ given: "Inah", family: "Omoronyia" },
+								],
+								"published-online": { "date-parts": [[2026, 11, 17]] },
+								"published-print": { "date-parts": [[2027, 3]] },
+							},
+							{
+								// Crossref `update-to` vetoes OpenAlex's misclassified `article`
+								DOI: "10.1007/s10515-026-00672-3",
+								type: "journal-article",
+								"update-to": [
+									{
+										DOI: "10.1007/s10515-026-00641-w",
+										type: "correction",
+										label: "Correction",
+									},
+								],
+								title: [
+									"Correction: Leveraging text generation for enhanced user story quality",
+								],
+								author: [
+									{ given: "Carlos Alberto", family: "dos Santos" },
+									{ given: "Kevin", family: "Bouchard" },
+								],
+								"published-online": { "date-parts": [[2026, 9, 21]] },
+								"published-print": { "date-parts": [[2026, 12]] },
+							},
+						],
+					},
+				} as T;
+			}
+			return { results: [] } as T;
+		};
+
+		const structured = await fetchVenueStructuredPapers(
+			aseJournal,
+			2026,
+			mockFetchJson,
+		);
+		expect(structured.items).toHaveLength(1);
+		expect(structured.items[0]?.doi).toBe("10.1007/s10515-026-00684-z");
+		expect(structured.items[0]?.publishedAt).toBe("2026-09-22T00:00:00Z");
+
+		// 5. enrichVenueItemsBatch drops items when OpenAlex reports `erratum`, and never cross-copies
+		//    abstracts between distinct publisher DOIs via fuzzy title matching.
+		const origArticle: CollectionPaperItem = {
+			id: "venue:ase-journal-2026:doi:10.1007/s10515-026-00684-z",
+			title: "Security smell detection in Dockerfiles",
+			authors: ["Wenbo Zhang", "Inah Omoronyia"],
+			abstract:
+				"Dockerfiles are a widely adopted format for specifying Infrastructure-as-Code with LLM security detection.",
+			publishedAt: "2026-09-22T00:00:00Z",
+			year: 2026,
+			sourceType: "venue",
+			sourceLabel: aseJournal.name,
+			categories: [aseJournal.name],
+			url: "https://doi.org/10.1007/s10515-026-00684-z",
+			doi: "10.1007/s10515-026-00684-z",
+			venueId: aseJournal.id,
+		};
+		const sisterArticleWithDistinctDoi: CollectionPaperItem = {
+			...origArticle,
+			id: "venue:ase-journal-2026:doi:10.1007/s10515-026-00999-z",
+			title: "Security smell detection in Dockerfiles Revisited",
+			abstract: "",
+			publishedAt: "2026-10-15T00:00:00Z",
+			url: "https://doi.org/10.1007/s10515-026-00999-z",
+			doi: "10.1007/s10515-026-00999-z",
+		};
+		const erratumCandidate: CollectionPaperItem = {
+			...origArticle,
+			id: "venue:ase-journal-2026:doi:10.1007/s10515-026-00711-z",
+			title: "Correction: Security smell detection in dockerfiles",
+			abstract: "",
+			publishedAt: "2026-11-17T00:00:00Z",
+			url: "https://doi.org/10.1007/s10515-026-00711-z",
+			doi: "10.1007/s10515-026-00711-z",
+		};
+
+		const enriched = await enrichVenueItemsBatch(
+			[erratumCandidate, sisterArticleWithDistinctDoi],
+			aseJournal,
+			async <T = unknown>(url: string): Promise<T> => {
+				if (url.includes("api.openalex.org/works")) {
+					return {
+						results: [
+							{
+								id: "https://openalex.org/W101",
+								type: "erratum",
+								doi: "https://doi.org/10.1007/s10515-026-00711-z",
+								title: "Correction: Security smell detection in dockerfiles",
+							},
+						],
+					} as T;
+				}
+				return { results: [] } as T;
+			},
+			[origArticle],
+		);
+		expect(enriched).toHaveLength(1);
+		expect(enriched[0]?.doi).toBe("10.1007/s10515-026-00999-z");
+		expect(enriched[0]?.abstract).toBe("");
+
+		// 6. pickEarliestPublishedAt, mergeCollectionItems, and backfillMissingMetadataFromChannel
+		//    pick earliest real date over future dates while preferring real dates over YYYY-01-01 placeholders
+		expect(
+			pickEarliestPublishedAt("2026-01-01T00:00:00Z", "2026-09-22T00:00:00Z"),
+		).toBe("2026-09-22T00:00:00Z");
+		expect(
+			pickEarliestPublishedAt("2026-12-01T00:00:00Z", "2026-09-22T00:00:00Z"),
+		).toBe("2026-09-22T00:00:00Z");
+		const merged = mergeCollectionItems([
+			[{ ...origArticle, publishedAt: "2026-12-01T00:00:00Z" }],
+			[{ ...origArticle, publishedAt: "2026-09-22T00:00:00Z" }],
+		]);
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.publishedAt).toBe("2026-09-22T00:00:00Z");
+		const backfilled = backfillMissingMetadataFromChannel(
+			[{ ...origArticle, publishedAt: "2026-12-01T00:00:00Z" }],
+			[{ ...origArticle, publishedAt: "2026-09-22T00:00:00Z" }],
+		);
+		expect(backfilled[0]?.publishedAt).toBe("2026-09-22T00:00:00Z");
 	});
 });

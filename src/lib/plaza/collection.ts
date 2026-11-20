@@ -60,6 +60,7 @@ import {
 	isWorkshopOrCompanionVenue,
 	type KeywordSource,
 	normalizePaperKeywords,
+	pickEarliestPublishedAt,
 	raceWithAbort,
 	reconstructOpenAlexAbstract,
 	sleepWithAbort,
@@ -3130,6 +3131,9 @@ export function mergeCollectionItems(
 					map.set(existingKey, {
 						...prev,
 						abstract: bestAbstract,
+						publishedAt:
+							pickEarliestPublishedAt(prev.publishedAt, item.publishedAt) ||
+							prev.publishedAt,
 						pdfUrl: prev.pdfUrl || item.pdfUrl,
 						doi: prev.doi || item.doi,
 						arxivId: prev.arxivId || item.arxivId,

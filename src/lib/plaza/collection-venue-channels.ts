@@ -20,6 +20,7 @@ import {
 	type FetchJsonFn,
 	type FetchTextFn,
 	fetchVenueStructuredPapers,
+	hasDistinctPublisherDoi,
 	hasPriorConferenceYearSpillover,
 	inferVenueKind,
 	isArtifactOrDatasetDoi,
@@ -34,6 +35,7 @@ import {
 	normalizeOpenAlexId,
 	normalizePaperKeywords,
 	normalizeRawRefs,
+	pickEarliestPublishedAt,
 	raceWithAbort,
 	type S2BulkPaper,
 	scoreCameraReadyCandidateMatch,
@@ -680,7 +682,7 @@ export async function fetchSemanticScholarVenuePapers(
 			? `&token=${encodeURIComponent(token)}`
 			: "";
 		const fields =
-			"title,abstract,authors,year,publicationDate,externalIds,venue,url,openAccessPdf";
+			"title,abstract,authors,year,publicationDate,publicationTypes,externalIds,venue,url,openAccessPdf";
 		const s2Url: string = `https://api.semanticscholar.org/graph/v1/paper/search/bulk?venue=${encodeURIComponent(primaryVenueParam)}${dateQuery}&fields=${fields}${tokenQuery}`;
 
 		try {
@@ -2940,9 +2942,8 @@ function dedupeVenueChannelItems(
 				pages: prev.pages || item.pages,
 				venueFull: prev.venueFull || item.venueFull,
 				publishedAt:
-					prev.publishedAt >= item.publishedAt
-						? prev.publishedAt
-						: item.publishedAt,
+					pickEarliestPublishedAt(prev.publishedAt, item.publishedAt) ||
+					prev.publishedAt,
 				citationCount: Math.max(
 					prev.citationCount ?? 0,
 					item.citationCount ?? 0,
@@ -3029,6 +3030,9 @@ export function backfillMissingMetadataFromChannel(
 		return {
 			...itemClean,
 			abstract: bestAbstract,
+			publishedAt:
+				pickEarliestPublishedAt(itemClean.publishedAt, match.publishedAt) ||
+				itemClean.publishedAt,
 			doi: bestDoi,
 			arxivId: bestArxivId,
 			coolPapersId: itemClean.coolPapersId || match.coolPapersId,
@@ -3120,14 +3124,18 @@ function buildExistingVenueLookup(
 			const d = cleanDoi(item.doi)?.toLowerCase();
 			const aid = stripVenueArxivVersion(item.arxivId);
 			const tk = normVenueTitleKey(item.title);
+			const titleMatch = tk ? byTitle.get(tk) : undefined;
 			let matched =
 				byId.get(item.id) ??
 				(d && !isArxivDoi(d) ? byDoi.get(d) : undefined) ??
 				(aid ? byArxiv.get(aid) : undefined) ??
-				(tk ? byTitle.get(tk) : undefined);
+				(titleMatch && !hasDistinctPublisherDoi(item.doi, titleMatch.doi)
+					? titleMatch
+					: undefined);
 			if (!matched && existingList.length > 0 && item.authors.length > 0) {
 				let bestScore = 0;
 				for (const ex of existingList) {
+					if (hasDistinctPublisherDoi(item.doi, ex.doi)) continue;
 					const res = scoreCameraReadyCandidateMatch(
 						item.title,
 						item.authors,
@@ -3179,11 +3187,9 @@ function mergeExistingIntoFreshVenueItem(
 	const bestDoi = pickPreferredDoi(fresh.doi, existingClean.doi);
 	const bestArxivId = fresh.arxivId || existingClean.arxivId;
 	const bestPublishedAt =
-		fresh.publishedAt.endsWith("-01-01T00:00:00Z") &&
-		existingClean.publishedAt &&
-		!existingClean.publishedAt.endsWith("-01-01T00:00:00Z")
-			? existingClean.publishedAt
-			: fresh.publishedAt || existingClean.publishedAt;
+		pickEarliestPublishedAt(fresh.publishedAt, existingClean.publishedAt) ||
+		fresh.publishedAt ||
+		existingClean.publishedAt;
 
 	const bestTitle =
 		existingClean.title &&
@@ -3491,6 +3497,7 @@ async function mergePublisherIntoTrackRoster(
 			if (usedPubIndices.has(pIdx)) continue;
 			const p = pubList[pIdx];
 			if (!p || p.authors.length === 0) continue;
+			if (hasDistinctPublisherDoi(r.doi, p.doi)) continue;
 			const res = scoreCameraReadyCandidateMatch(
 				r.title,
 				r.authors,
@@ -3549,9 +3556,8 @@ async function mergePublisherIntoTrackRoster(
 					authors: pub.authors.length > 0 ? pub.authors : r.authors,
 					abstract: bestAbstract,
 					publishedAt:
-						pub.publishedAt && pub.publishedAt !== `${r.year}-01-01T00:00:00Z`
-							? pub.publishedAt
-							: r.publishedAt,
+						pickEarliestPublishedAt(pub.publishedAt, r.publishedAt) ||
+						r.publishedAt,
 					url: bestDoi ? `https://doi.org/${bestDoi}` : pub.url || r.url,
 					pdfUrl:
 						pub.pdfUrl ||
