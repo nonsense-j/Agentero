@@ -280,6 +280,7 @@
 				"modeIncremental": "Incremental",
 				"modeFullVenue": "Full re-fetch · Skip advised",
 				"keywordLlm": "Keyword LLM",
+				"openAlex": "OpenAlex",
 				"keywordChecking": "Checking…",
 				"keywordReady": "Ready",
 				"keywordUnconfigured": "Not configured",

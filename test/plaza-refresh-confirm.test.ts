@@ -21,9 +21,11 @@ import type { AppSettings, KeywordLlmSettings } from "@/lib/settings/types";
 
 const mockHasBuiltinKey = vi.fn(async () => false);
 const mockProbeKeywordLlm = vi.fn(async () => true);
+const mockProbeOpenAlexKey = vi.fn(async () => true);
 const mockOpenSettingsWindow = vi.fn();
 
 let mockKeywordLlm: KeywordLlmSettings = { ...DEFAULT_KEYWORD_LLM_SETTINGS };
+let mockOpenAlexKey = "";
 const settingsListeners = new Set<(next: AppSettings) => void>();
 
 vi.mock("@/lib/keyword-llm", async (importOriginal) => {
@@ -38,11 +40,23 @@ vi.mock("@/lib/keyword-llm", async (importOriginal) => {
 	};
 });
 
+vi.mock("@/lib/openalex", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@/lib/openalex")>();
+	return {
+		...actual,
+		probeOpenAlexKey: (...args: Parameters<typeof actual.probeOpenAlexKey>) => {
+			void args;
+			return mockProbeOpenAlexKey();
+		},
+	};
+});
+
 vi.mock("@/lib/settings", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/lib/settings")>();
 	const buildSnapshot = (): AppSettings => ({
 		...actual.loadSettings(),
 		keywordLlm: { ...mockKeywordLlm },
+		openAlexKey: mockOpenAlexKey,
 	});
 	return {
 		...actual,
@@ -118,8 +132,10 @@ beforeEach(async () => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	await i18n.changeLanguage("en");
 	mockKeywordLlm = { ...DEFAULT_KEYWORD_LLM_SETTINGS };
+	mockOpenAlexKey = "";
 	mockHasBuiltinKey.mockReset().mockResolvedValue(false);
 	mockProbeKeywordLlm.mockReset().mockResolvedValue(true);
+	mockProbeOpenAlexKey.mockReset().mockResolvedValue(true);
 	mockOpenSettingsWindow.mockReset();
 	settingsListeners.clear();
 
@@ -209,24 +225,39 @@ describe("CollectionRefreshConfirmDialog", () => {
 		);
 	});
 
-	it("shows Keyword LLM unconfigured state and opens general settings", async () => {
+	it("shows Keyword LLM and OpenAlex unconfigured states and opens general settings", async () => {
 		await renderDialog({ scope: "arxiv", targetLabel: "cs.SE" });
 
 		const text = document.body.textContent ?? "";
 		expect(text).toContain("Refresh cs.SE");
+		expect(text).toContain("Keyword LLM");
+		expect(text).toContain("OpenAlex");
 		expect(text).toContain("Not configured");
 		expect(mockProbeKeywordLlm).not.toHaveBeenCalled();
+		expect(mockProbeOpenAlexKey).not.toHaveBeenCalled();
 
-		await click(buttonByText("Settings"));
-		expect(mockOpenSettingsWindow).toHaveBeenCalledWith("general");
+		const settingsBtns = buttons().filter(
+			(btn) => btn.textContent?.trim() === "Settings",
+		);
+		expect(settingsBtns).toHaveLength(2);
+
+		await click(settingsBtns[0]);
+		await click(settingsBtns[1]);
+		expect(mockOpenSettingsWindow).toHaveBeenCalledTimes(2);
+		expect(mockOpenSettingsWindow).toHaveBeenNthCalledWith(1, "general");
+		expect(mockOpenSettingsWindow).toHaveBeenNthCalledWith(2, "general");
 	});
 
-	it("probes Keyword LLM and reflects Ready / Unavailable with recheck support", async () => {
+	it("probes Keyword LLM and OpenAlex independently with Ready / Unavailable and recheck support", async () => {
 		mockKeywordLlm = {
 			...DEFAULT_KEYWORD_LLM_SETTINGS,
 			apiKey: "sk-live-key",
 		};
+		mockOpenAlexKey = "oa-live-key";
 		mockProbeKeywordLlm
+			.mockResolvedValueOnce(false)
+			.mockResolvedValueOnce(true);
+		mockProbeOpenAlexKey
 			.mockResolvedValueOnce(false)
 			.mockResolvedValueOnce(true);
 
@@ -237,16 +268,27 @@ describe("CollectionRefreshConfirmDialog", () => {
 		});
 
 		expect(mockProbeKeywordLlm).toHaveBeenCalledTimes(1);
+		expect(mockProbeOpenAlexKey).toHaveBeenCalledTimes(1);
 		expect(document.body.textContent ?? "").toContain("Unavailable");
 		expect(buttonByText("Refresh anyway")).toBeDefined();
 
-		const recheckBtn = document.body.querySelector(
-			'button[aria-label="Recheck"]',
+		const recheckKeywordBtn = document.body.querySelector(
+			'button[aria-label="Recheck · Keyword LLM"]',
 		);
-		await click(recheckBtn ?? undefined);
+		await click(recheckKeywordBtn ?? undefined);
 		await flushMicrotasks();
 
 		expect(mockProbeKeywordLlm).toHaveBeenCalledTimes(2);
+		expect(mockProbeOpenAlexKey).toHaveBeenCalledTimes(1);
+
+		const recheckOpenAlexBtn = document.body.querySelector(
+			'button[aria-label="Recheck · OpenAlex"]',
+		);
+		await click(recheckOpenAlexBtn ?? undefined);
+		await flushMicrotasks();
+
+		expect(mockProbeOpenAlexKey).toHaveBeenCalledTimes(2);
+		expect(document.body.textContent ?? "").not.toContain("Unavailable");
 		expect(document.body.textContent ?? "").toContain("Ready");
 	});
 });

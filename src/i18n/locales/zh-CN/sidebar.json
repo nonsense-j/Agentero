@@ -280,6 +280,7 @@
 				"modeIncremental": "增量刷新",
 				"modeFullVenue": "全量重刷 · 建议跳过",
 				"keywordLlm": "关键词模型",
+				"openAlex": "OpenAlex",
 				"keywordChecking": "检测中…",
 				"keywordReady": "就绪",
 				"keywordUnconfigured": "未配置",

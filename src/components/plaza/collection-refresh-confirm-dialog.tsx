@@ -18,6 +18,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { hasSecret } from "@/lib/core/secret-mask";
 import { cn } from "@/lib/core/utils";
 import {
 	DEFAULT_KEYWORD_LLM_MODEL,
@@ -27,6 +28,7 @@ import {
 	type KeywordLlmProbeStatus,
 	probeKeywordLlm,
 } from "@/lib/keyword-llm";
+import { type OpenAlexProbeStatus, probeOpenAlexKey } from "@/lib/openalex";
 import {
 	ensureSettingsLoaded,
 	type KeywordLlmSettings,
@@ -34,6 +36,7 @@ import {
 	subscribeSettings,
 } from "@/lib/settings";
 import { openSettingsWindow } from "@/lib/shell/settings-window";
+import type { ProbeStatus } from "@/lib/ui/probe-status";
 
 export type CollectionRefreshRequest =
 	| { scope: "all" }
@@ -65,6 +68,96 @@ function ModeBadge({ variant }: { variant: "incremental" | "fullVenue" }) {
 	);
 }
 
+function ServiceReadinessRow({
+	label,
+	status,
+	configured,
+	readyTitle,
+	onRecheck,
+	onOpenSettings,
+}: {
+	label: string;
+	status: ProbeStatus;
+	configured: boolean;
+	readyTitle?: string;
+	onRecheck: () => void;
+	onOpenSettings: () => void;
+}) {
+	const { t } = useTranslation("sidebar");
+	const statusText =
+		status === "probing"
+			? t("plaza.collection.refreshConfirm.keywordChecking")
+			: status === "ok"
+				? t("plaza.collection.refreshConfirm.keywordReady")
+				: status === "fail"
+					? t("plaza.collection.refreshConfirm.keywordUnavailable")
+					: t("plaza.collection.refreshConfirm.keywordUnconfigured");
+
+	const showSettingsAction = status === "idle" || status === "fail";
+
+	return (
+		<div className="flex items-center justify-between gap-3 px-3 py-2.5">
+			<span className="flex min-w-0 items-center gap-2">
+				<ProbeDot status={status} configured={configured} label={statusText} />
+				<span className="truncate font-medium text-foreground text-xs">
+					{label}
+				</span>
+			</span>
+
+			<div className="flex shrink-0 items-center gap-1.5">
+				<span
+					title={status === "ok" && readyTitle ? readyTitle : undefined}
+					className={cn(
+						"inline-flex items-center gap-1 text-xs",
+						status === "ok" &&
+							"font-medium text-emerald-600 dark:text-emerald-400",
+						status === "probing" && "text-muted-foreground",
+						status === "idle" &&
+							"font-medium text-amber-600 dark:text-amber-400",
+						status === "fail" && "font-medium text-destructive",
+					)}
+				>
+					{status === "probing" ? (
+						<Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
+					) : null}
+					<span>{statusText}</span>
+				</span>
+
+				{status === "fail" ? (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-xs"
+								aria-label={`${t("plaza.collection.refreshConfirm.keywordRecheck")} · ${label}`}
+								onClick={onRecheck}
+							>
+								<RefreshCw className="size-3" />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>
+							{t("plaza.collection.refreshConfirm.keywordRecheck")}
+						</TooltipContent>
+					</Tooltip>
+				) : null}
+
+				{showSettingsAction ? (
+					<Button
+						type="button"
+						variant="outline"
+						size="xs"
+						onClick={onOpenSettings}
+					>
+						<Settings data-icon="inline-start" className="size-3" />
+						{t("plaza.collection.refreshConfirm.keywordSettings")}
+					</Button>
+				) : null}
+			</div>
+		</div>
+	);
+}
+
 export function CollectionRefreshConfirmDialog({
 	request,
 	onOpenChange,
@@ -88,12 +181,19 @@ export function CollectionRefreshConfirmDialog({
 	const [keywordLlm, setKeywordLlm] = useState<KeywordLlmSettings>(
 		() => loadSettings().keywordLlm,
 	);
+	const [openAlexKey, setOpenAlexKey] = useState<string>(
+		() => loadSettings().openAlexKey,
+	);
 	const [hasBuiltinKey, setHasBuiltinKey] = useState(false);
 	const [builtinChecked, setBuiltinChecked] = useState(false);
-	const [probeStatus, setProbeStatus] =
+	const [keywordProbeStatus, setKeywordProbeStatus] =
 		useState<KeywordLlmProbeStatus>("probing");
-	const [recheckSeq, setRecheckSeq] = useState(0);
-	const probeAbortRef = useRef<AbortController | null>(null);
+	const [openAlexProbeStatus, setOpenAlexProbeStatus] =
+		useState<OpenAlexProbeStatus>("idle");
+	const [keywordRecheckSeq, setKeywordRecheckSeq] = useState(0);
+	const [openAlexRecheckSeq, setOpenAlexRecheckSeq] = useState(0);
+	const keywordAbortRef = useRef<AbortController | null>(null);
+	const openAlexAbortRef = useRef<AbortController | null>(null);
 
 	// Reset toggle defaults whenever a new refresh confirmation opens.
 	useEffect(() => {
@@ -102,16 +202,22 @@ export function CollectionRefreshConfirmDialog({
 		setIncludeVenue(request.scope === "venue");
 	}, [request]);
 
-	// Keep Keyword LLM settings synced while open (e.g. after editing in Settings window).
+	// Keep Keyword LLM and OpenAlex settings synced while open.
 	useEffect(() => {
 		if (!open) return;
 		let cancelled = false;
-		setKeywordLlm(loadSettings().keywordLlm);
+		const initial = loadSettings();
+		setKeywordLlm(initial.keywordLlm);
+		setOpenAlexKey(initial.openAlexKey);
 		void ensureSettingsLoaded().then((loaded) => {
-			if (!cancelled) setKeywordLlm(loaded.keywordLlm);
+			if (!cancelled) {
+				setKeywordLlm(loaded.keywordLlm);
+				setOpenAlexKey(loaded.openAlexKey);
+			}
 		});
 		const unsubscribe = subscribeSettings((next) => {
 			setKeywordLlm(next.keywordLlm);
+			setOpenAlexKey(next.openAlexKey);
 		});
 		setBuiltinChecked(false);
 		void hasBuiltinKeywordLlmKey().then((ok) => {
@@ -129,39 +235,40 @@ export function CollectionRefreshConfirmDialog({
 	const keywordConfigured =
 		isKeywordLlmConfigured(keywordLlm) ||
 		(isDefaultKeywordLlmBaseUrl(keywordLlm.baseUrl) && hasBuiltinKey);
+	const openAlexConfigured = hasSecret(openAlexKey);
 
 	// Probe Keyword LLM readiness whenever dialog opens or config changes.
 	useEffect(() => {
 		if (!open) {
-			probeAbortRef.current?.abort();
-			probeAbortRef.current = null;
+			keywordAbortRef.current?.abort();
+			keywordAbortRef.current = null;
 			return;
 		}
 		if (!builtinChecked) {
-			setProbeStatus("probing");
+			setKeywordProbeStatus("probing");
 			return;
 		}
 		if (!keywordConfigured) {
-			probeAbortRef.current?.abort();
-			probeAbortRef.current = null;
-			setProbeStatus("idle");
+			keywordAbortRef.current?.abort();
+			keywordAbortRef.current = null;
+			setKeywordProbeStatus("idle");
 			return;
 		}
 
-		probeAbortRef.current?.abort();
+		keywordAbortRef.current?.abort();
 		const ac = new AbortController();
-		probeAbortRef.current = ac;
-		setProbeStatus("probing");
+		keywordAbortRef.current = ac;
+		setKeywordProbeStatus("probing");
 
 		// Dependencies intentionally include key/base/model/recheckSeq so saved edits re-probe.
-		void recheckSeq;
+		void keywordRecheckSeq;
 		void keywordLlm.baseUrl;
 		void keywordLlm.apiKey;
 		void keywordLlm.model;
 
 		void probeKeywordLlm(null, ac.signal).then((ok) => {
 			if (ac.signal.aborted) return;
-			setProbeStatus(ok ? "ok" : "fail");
+			setKeywordProbeStatus(ok ? "ok" : "fail");
 		});
 
 		return () => {
@@ -174,8 +281,40 @@ export function CollectionRefreshConfirmDialog({
 		keywordLlm.baseUrl,
 		keywordLlm.apiKey,
 		keywordLlm.model,
-		recheckSeq,
+		keywordRecheckSeq,
 	]);
+
+	// Probe OpenAlex API key readiness whenever dialog opens or key changes.
+	useEffect(() => {
+		if (!open) {
+			openAlexAbortRef.current?.abort();
+			openAlexAbortRef.current = null;
+			return;
+		}
+		if (!openAlexConfigured) {
+			openAlexAbortRef.current?.abort();
+			openAlexAbortRef.current = null;
+			setOpenAlexProbeStatus("idle");
+			return;
+		}
+
+		openAlexAbortRef.current?.abort();
+		const ac = new AbortController();
+		openAlexAbortRef.current = ac;
+		setOpenAlexProbeStatus("probing");
+
+		void openAlexRecheckSeq;
+		void openAlexKey;
+
+		void probeOpenAlexKey(null, ac.signal).then((ok) => {
+			if (ac.signal.aborted) return;
+			setOpenAlexProbeStatus(ok ? "ok" : "fail");
+		});
+
+		return () => {
+			ac.abort();
+		};
+	}, [open, openAlexConfigured, openAlexKey, openAlexRecheckSeq]);
 
 	const handleConfirm = useCallback(() => {
 		if (!request) return;
@@ -189,6 +328,10 @@ export function CollectionRefreshConfirmDialog({
 		onOpenChange(false);
 		onConfirm(request, selection);
 	}, [includeArxiv, includeVenue, onConfirm, onOpenChange, request]);
+
+	const openGeneralSettings = useCallback(() => {
+		openSettingsWindow("general");
+	}, []);
 
 	const title = !request
 		? ""
@@ -214,17 +357,6 @@ export function CollectionRefreshConfirmDialog({
 			? DEFAULT_KEYWORD_LLM_MODEL
 			: "");
 
-	const keywordStatusText =
-		probeStatus === "probing"
-			? t("plaza.collection.refreshConfirm.keywordChecking")
-			: probeStatus === "ok"
-				? t("plaza.collection.refreshConfirm.keywordReady")
-				: probeStatus === "fail"
-					? t("plaza.collection.refreshConfirm.keywordUnavailable")
-					: t("plaza.collection.refreshConfirm.keywordUnconfigured");
-
-	const showSettingsAction = probeStatus === "idle" || probeStatus === "fail";
-
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent aria-describedby={undefined} className="sm:max-w-[25rem]">
@@ -233,145 +365,91 @@ export function CollectionRefreshConfirmDialog({
 				</DialogHeader>
 
 				{request ? (
-					<div className="divide-y divide-border/60 overflow-hidden rounded-lg border bg-muted/25">
-						{request.scope === "all" ? (
-							<>
-								<label
-									htmlFor={arxivCheckboxId}
-									className={cn(
-										"flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 transition-opacity",
-										!includeArxiv && "opacity-60",
-									)}
-								>
-									<span className="flex min-w-0 items-center gap-2">
-										<Checkbox
-											id={arxivCheckboxId}
-											checked={includeArxiv}
-											onCheckedChange={(checked) =>
-												setIncludeArxiv(checked === true)
-											}
-										/>
-										<span className="font-medium text-foreground text-xs">
-											arXiv
-										</span>
-									</span>
-									<ModeBadge variant="incremental" />
-								</label>
-
-								<label
-									htmlFor={venueCheckboxId}
-									className={cn(
-										"flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 transition-colors",
-										includeVenue ? "bg-amber-500/[0.07]" : "opacity-80",
-									)}
-								>
-									<span className="flex min-w-0 items-center gap-2">
-										<Checkbox
-											id={venueCheckboxId}
-											checked={includeVenue}
-											onCheckedChange={(checked) =>
-												setIncludeVenue(checked === true)
-											}
-										/>
-										<span className="font-medium text-foreground text-xs">
-											{t("plaza.collection.source.venue")}
-										</span>
-									</span>
-									<ModeBadge variant="fullVenue" />
-								</label>
-							</>
-						) : request.scope === "arxiv" ? (
-							<div className="flex items-center justify-between gap-3 px-3 py-2.5">
-								<PlazaSourceBadge
-									source="arxiv"
-									label={request.targetLabel ?? "arXiv"}
-								/>
-								<ModeBadge variant="incremental" />
-							</div>
-						) : (
-							<div className="flex items-center justify-between gap-3 bg-amber-500/[0.07] px-3 py-2.5">
-								<PlazaSourceBadge
-									source="venue"
-									label={
-										request.targetLabel ?? t("plaza.collection.source.venue")
-									}
-								/>
-								<ModeBadge variant="fullVenue" />
-							</div>
-						)}
-
-						{/* Keyword LLM readiness row */}
-						<div className="flex items-center justify-between gap-3 px-3 py-2.5">
-							<span className="flex min-w-0 items-center gap-2">
-								<ProbeDot
-									status={probeStatus}
-									configured={keywordConfigured}
-									label={keywordStatusText}
-								/>
-								<span className="truncate font-medium text-foreground text-xs">
-									{t("plaza.collection.refreshConfirm.keywordLlm")}
-								</span>
-							</span>
-
-							<div className="flex shrink-0 items-center gap-1.5">
-								<span
-									title={
-										probeStatus === "ok" && activeModel
-											? activeModel
-											: undefined
-									}
-									className={cn(
-										"inline-flex items-center gap-1 text-xs",
-										probeStatus === "ok" &&
-											"font-medium text-emerald-600 dark:text-emerald-400",
-										probeStatus === "probing" && "text-muted-foreground",
-										probeStatus === "idle" &&
-											"font-medium text-amber-600 dark:text-amber-400",
-										probeStatus === "fail" && "font-medium text-destructive",
-									)}
-								>
-									{probeStatus === "probing" ? (
-										<Loader2
-											className="size-3 shrink-0 animate-spin"
-											aria-hidden
-										/>
-									) : null}
-									<span>{keywordStatusText}</span>
-								</span>
-
-								{probeStatus === "fail" ? (
-									<Tooltip>
-										<TooltipTrigger asChild>
-											<Button
-												type="button"
-												variant="ghost"
-												size="icon-xs"
-												aria-label={t(
-													"plaza.collection.refreshConfirm.keywordRecheck",
-												)}
-												onClick={() => setRecheckSeq((n) => n + 1)}
-											>
-												<RefreshCw className="size-3" />
-											</Button>
-										</TooltipTrigger>
-										<TooltipContent>
-											{t("plaza.collection.refreshConfirm.keywordRecheck")}
-										</TooltipContent>
-									</Tooltip>
-								) : null}
-
-								{showSettingsAction ? (
-									<Button
-										type="button"
-										variant="outline"
-										size="xs"
-										onClick={() => openSettingsWindow("general")}
+					<div className="flex flex-col gap-2.5">
+						<div className="divide-y divide-border/60 overflow-hidden rounded-lg border bg-muted/25">
+							{request.scope === "all" ? (
+								<>
+									<label
+										htmlFor={arxivCheckboxId}
+										className={cn(
+											"flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 transition-opacity",
+											!includeArxiv && "opacity-60",
+										)}
 									>
-										<Settings data-icon="inline-start" className="size-3" />
-										{t("plaza.collection.refreshConfirm.keywordSettings")}
-									</Button>
-								) : null}
-							</div>
+										<span className="flex min-w-0 items-center gap-2">
+											<Checkbox
+												id={arxivCheckboxId}
+												checked={includeArxiv}
+												onCheckedChange={(checked) =>
+													setIncludeArxiv(checked === true)
+												}
+											/>
+											<span className="font-medium text-foreground text-xs">
+												arXiv
+											</span>
+										</span>
+										<ModeBadge variant="incremental" />
+									</label>
+
+									<label
+										htmlFor={venueCheckboxId}
+										className={cn(
+											"flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 transition-colors",
+											includeVenue ? "bg-amber-500/[0.07]" : "opacity-80",
+										)}
+									>
+										<span className="flex min-w-0 items-center gap-2">
+											<Checkbox
+												id={venueCheckboxId}
+												checked={includeVenue}
+												onCheckedChange={(checked) =>
+													setIncludeVenue(checked === true)
+												}
+											/>
+											<span className="font-medium text-foreground text-xs">
+												{t("plaza.collection.source.venue")}
+											</span>
+										</span>
+										<ModeBadge variant="fullVenue" />
+									</label>
+								</>
+							) : request.scope === "arxiv" ? (
+								<div className="flex items-center justify-between gap-3 px-3 py-2.5">
+									<PlazaSourceBadge
+										source="arxiv"
+										label={request.targetLabel ?? "arXiv"}
+									/>
+									<ModeBadge variant="incremental" />
+								</div>
+							) : (
+								<div className="flex items-center justify-between gap-3 bg-amber-500/[0.07] px-3 py-2.5">
+									<PlazaSourceBadge
+										source="venue"
+										label={
+											request.targetLabel ?? t("plaza.collection.source.venue")
+										}
+									/>
+									<ModeBadge variant="fullVenue" />
+								</div>
+							)}
+						</div>
+
+						<div className="divide-y divide-border/60 overflow-hidden rounded-lg border bg-muted/25">
+							<ServiceReadinessRow
+								label={t("plaza.collection.refreshConfirm.keywordLlm")}
+								status={keywordProbeStatus}
+								configured={keywordConfigured}
+								readyTitle={activeModel || undefined}
+								onRecheck={() => setKeywordRecheckSeq((n) => n + 1)}
+								onOpenSettings={openGeneralSettings}
+							/>
+							<ServiceReadinessRow
+								label={t("plaza.collection.refreshConfirm.openAlex")}
+								status={openAlexProbeStatus}
+								configured={openAlexConfigured}
+								onRecheck={() => setOpenAlexRecheckSeq((n) => n + 1)}
+								onOpenSettings={openGeneralSettings}
+							/>
 						</div>
 					</div>
 				) : null}
