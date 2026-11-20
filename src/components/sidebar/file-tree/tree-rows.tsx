@@ -439,6 +439,7 @@ export function PlazaSourceRow({
 	source: PlazaSource;
 	style?: CSSProperties;
 }) {
+	useTranslation("sidebar");
 	const Icon = PLAZA_SOURCE_ICONS[source.icon];
 	const label = plazaSourceLabel(source);
 	return (

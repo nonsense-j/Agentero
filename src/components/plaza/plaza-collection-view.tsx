@@ -51,6 +51,11 @@ import {
 	CollectionPortalHub,
 	type VenueKindFilter,
 } from "@/components/plaza/collection-portal-hub";
+import {
+	CollectionRefreshConfirmDialog,
+	type CollectionRefreshRequest,
+	type CollectionRefreshSelection,
+} from "@/components/plaza/collection-refresh-confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -177,6 +182,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	);
 	const [pendingDetailPeer, setPendingDetailPeer] =
 		useState<CollectionLinkedPeer | null>(null);
+	const [pendingRefresh, setPendingRefresh] =
+		useState<CollectionRefreshRequest | null>(null);
 	const linkedPeerReqSeqRef = useRef(0);
 
 	// Hydrate lightweight SQLite summary on open; never auto-fetch arXiv or Venue
@@ -336,6 +343,30 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 			skipLoadedVenues: false,
 		});
 	}, []);
+
+	const handleConfirmRefresh = useCallback(
+		(
+			request: CollectionRefreshRequest,
+			selection: CollectionRefreshSelection,
+		) => {
+			if (request.scope === "arxiv") {
+				void handleRefreshArxiv(request.categories);
+				return;
+			}
+			if (request.scope === "venue") {
+				void handleRefreshVenue(request.venueIds);
+				return;
+			}
+			if (selection.arxiv && selection.venue) {
+				void handleRefreshAll();
+			} else if (selection.arxiv) {
+				void handleRefreshArxiv();
+			} else if (selection.venue) {
+				void handleRefreshVenue();
+			}
+		},
+		[handleRefreshAll, handleRefreshArxiv, handleRefreshVenue],
+	);
 
 	const handleEnterArxiv = useCallback(
 		(category: string | null) => {
@@ -573,23 +604,31 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const handleScopedListRefresh = useCallback(() => {
 		if (activeSource === "arxiv") {
-			void handleRefreshArxiv(
-				selectedCategory ? [selectedCategory] : undefined,
-			);
+			setPendingRefresh({
+				scope: "arxiv",
+				categories: selectedCategory ? [selectedCategory] : undefined,
+				targetLabel: selectedCategory ?? undefined,
+			});
 			return;
 		}
 		if (selectedVenueId) {
-			void handleRefreshVenue([selectedVenueId]);
+			setPendingRefresh({
+				scope: "venue",
+				venueIds: [selectedVenueId],
+				targetLabel: selectedVenueName ?? undefined,
+			});
 			return;
 		}
-		void handleRefreshVenue(filteredVenuesForBar.map((v) => v.id));
+		setPendingRefresh({
+			scope: "venue",
+			venueIds: filteredVenuesForBar.map((v) => v.id),
+		});
 	}, [
 		activeSource,
 		filteredVenuesForBar,
-		handleRefreshArxiv,
-		handleRefreshVenue,
 		selectedCategory,
 		selectedVenueId,
+		selectedVenueName,
 	]);
 
 	const toggleSelect = useCallback((id: string) => {
@@ -688,7 +727,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										variant="ghost"
 										size="icon-sm"
 										disabled={refreshingArxiv || refreshingVenue}
-										onClick={() => void handleRefreshAll()}
+										onClick={() => setPendingRefresh({ scope: "all" })}
 										aria-label={t("plaza.collection.refresh")}
 										className={cn(
 											"group/refresh-btn",
@@ -740,8 +779,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							refreshedCategories={refreshedCategories}
 							refreshingVenueIds={activeRefreshingVenueIds}
 							refreshedVenueIds={refreshedVenueIds}
-							onRefreshArxiv={() => void handleRefreshArxiv()}
-							onRefreshVenue={() => void handleRefreshVenue()}
+							onRefreshArxiv={() => setPendingRefresh({ scope: "arxiv" })}
+							onRefreshVenue={() => setPendingRefresh({ scope: "venue" })}
 							onEnterArxiv={handleEnterArxiv}
 							onEnterVenue={handleEnterVenue}
 						/>
@@ -1227,6 +1266,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 						prev.map((it) => (it.id === updated.id ? updated : it)),
 					);
 				}}
+			/>
+
+			<CollectionRefreshConfirmDialog
+				request={pendingRefresh}
+				onOpenChange={(open) => {
+					if (!open) setPendingRefresh(null);
+				}}
+				onConfirm={handleConfirmRefresh}
 			/>
 		</div>
 	);

@@ -52,7 +52,7 @@ import { notifyError } from "@/lib/core/notify";
 import { displayPath } from "@/lib/core/path";
 import { cn } from "@/lib/core/utils";
 import { isLibraryVirtualPath, isTrashVirtualPath } from "@/lib/paper/api";
-import { isPlazaVirtualPath } from "@/lib/plaza/sources";
+import { isPlazaVirtualPath, plazaTitleForPath } from "@/lib/plaza/sources";
 import { moveDocToWindow } from "@/lib/shell/leaf";
 import { formatShortcutById } from "@/lib/shell/shortcuts";
 import { setLayoutMode, uiStore } from "@/lib/shell/ui-store";
@@ -229,11 +229,13 @@ function WorkspaceTab({
 	tabLocation: _tabLocation,
 	...rest
 }: ComponentProps<typeof DockviewDefaultTab>) {
-	const { t } = useTranslation("app");
+	const { t } = useTranslation(["app", "sidebar"]);
 	const { tabsById, onToggleHtmlMode, onClosePanel } = useWorkspace();
 	const [title, setTitle] = useState(api.title);
 	const middleClickRef = useRef(false);
 	const tab = tabsById.get(api.id) ?? null;
+	const displayTitle =
+		tab?.kind === "plaza" && tab.path ? plazaTitleForPath(tab.path) : title;
 	// Library is the resident tab — no close affordance.
 	const isLibrary = Boolean(tab && isLibraryVirtualPath(tab.path));
 	const canToggleHtml =
@@ -261,12 +263,12 @@ function WorkspaceTab({
 			{...rest}
 			title={
 				tab?.paperMeta ? (
-					<PaperTitle text={title ?? ""} />
+					<PaperTitle text={displayTitle ?? ""} />
 				) : (
-					<MathText text={title ?? ""} />
+					<MathText text={displayTitle ?? ""} />
 				)
 			}
-			closeLabel={t("tabs.close", { title })}
+			closeLabel={t("tabs.close", { title: displayTitle })}
 			onClose={isLibrary ? undefined : close}
 			trailing={
 				canToggleHtml ? (

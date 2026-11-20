@@ -28,6 +28,11 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
+import {
+	CollectionRefreshConfirmDialog,
+	type CollectionRefreshRequest,
+	type CollectionRefreshSelection,
+} from "@/components/plaza/collection-refresh-confirm-dialog";
 import { DiscoverDeepView } from "@/components/plaza/discover-deep-view";
 import { DiscoverFastView } from "@/components/plaza/discover-fast-view";
 import { Button } from "@/components/ui/button";
@@ -51,6 +56,8 @@ import {
 import { importCollectionPapers } from "@/lib/plaza/collection-import";
 import {
 	refreshAllInBackground,
+	refreshArxivInBackground,
+	refreshVenueInBackground,
 	useCollectionRefreshStore,
 } from "@/lib/plaza/collection-refresh";
 import {
@@ -85,6 +92,8 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	const [detailPaper, setDetailPaper] = useState<CollectionPaperItem | null>(
 		null,
 	);
+	const [pendingRefresh, setPendingRefresh] =
+		useState<CollectionRefreshRequest | null>(null);
 
 	const observedPapersRef = useRef<Map<string, CollectionPaperItem>>(new Map());
 	const manualImportedIdsRef = useRef<Set<string>>(new Set());
@@ -131,10 +140,29 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		});
 	}, [syncObservedImported]);
 
-	const handleRefreshPool = useCallback(async () => {
+	const handleRefreshPool = useCallback(() => {
 		if (refreshing || preloading) return;
-		await refreshAllInBackground();
+		setPendingRefresh({ scope: "all" });
 	}, [preloading, refreshing]);
+
+	const handleConfirmRefresh = useCallback(
+		(
+			_request: CollectionRefreshRequest,
+			selection: CollectionRefreshSelection,
+		) => {
+			if (selection.arxiv && selection.venue) {
+				void refreshAllInBackground({
+					incrementalArxiv: true,
+					skipLoadedVenues: false,
+				});
+			} else if (selection.arxiv) {
+				void refreshArxivInBackground({ incremental: true });
+			} else if (selection.venue) {
+				void refreshVenueInBackground({ skipLoaded: false });
+			}
+		},
+		[],
+	);
 
 	const importBatchPapers = useCallback(
 		async (papers: CollectionPaperItem[]) => {
@@ -222,7 +250,7 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 										variant="outline"
 										size="icon-sm"
 										disabled={refreshing || preloading}
-										onClick={() => void handleRefreshPool()}
+										onClick={handleRefreshPool}
 										aria-label={t("plaza.collection.refresh")}
 									>
 										<RefreshCw
@@ -385,6 +413,14 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 				}}
 				onImport={importSinglePaper}
 				onPaperUpdated={handlePaperUpdated}
+			/>
+
+			<CollectionRefreshConfirmDialog
+				request={pendingRefresh}
+				onOpenChange={(open) => {
+					if (!open) setPendingRefresh(null);
+				}}
+				onConfirm={handleConfirmRefresh}
 			/>
 		</div>
 	);

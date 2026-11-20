@@ -1,6 +1,6 @@
 # 广场 · Paper Survey
 
-虚拟路径 `agentero:plaza/survey`，注册于 `src/lib/plaza/sources.ts`（`panel: "survey"`，图标 `PlazaSurveyIcon`，中英文侧栏标签统一为 `Paper Survey`）。用户从论文库选出种子论文、给定具体主题、选择输出格式，由 ACP Agent 阅读种子论文核心内容并在本地论文集（`agentero-collection` MCP）中检索相关工作后撰写结果。
+虚拟路径 `agentero:plaza/survey`，注册于 `src/lib/plaza/sources.ts`（`panel: "survey"`，图标 `PlazaSurveyIcon`，英文侧栏标签 `Paper Survey`，中文侧栏标签 `论文综述`）。用户从论文库选出种子论文、给定具体主题、选择输出格式，由 ACP Agent 阅读种子论文核心内容并在本地论文集（`agentero-collection` MCP）中检索相关工作后撰写结果。
 
 ## 入口与布局
 
