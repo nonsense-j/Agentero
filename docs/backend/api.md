@@ -73,6 +73,7 @@ Host 通过 Tauri event 向前端推送事件。文件系统、任务和菜单�
 | `job:completed`（已实现） | job 状态机真实迁移到 `Succeeded` 时由 `job:changed` 单点派生 | `{ jobId, kind, vaultId, paperId?, timestamp }`（`vaultId` = `JobSnapshot.vault_id`：**发起方传入的 vault 路径串**。前端直连的流程与 `getVaultPath()` 逐字一致；经 offer 中继或 Host 内部发起的流程为 Host 持有的形式（通常 canonical）—— Windows 上带 `\\?\` 前缀，消费端比较需容忍两种拼写，见 [../development/lifecycle-events.md](../development/lifecycle-events.md) 已知限制） |
 | `job:failed`（已实现） | job 状态机真实迁移到 `Failed` 时由 `job:changed` 单点派生 | `{ jobId, kind, vaultId, paperId?, error?, timestamp }`（`vaultId` 同上） |
 | `window:closed`（已实现） | 子窗口销毁（`on_window_event(Destroyed)`）。经 lifecycle bridge 转发进前端 bus，消费者集中在 `lifecycle/register.ts` | `{ kind: 'settings' \| 'feature', view? }`（无 `timestamp`） |
+| `plaza-collection:seed-progress`（已实现） | `plaza_collection_seed_sync` 拉取 manifest、断点续传下载分片、批量写入 SQLite、构建 FTS5/引文索引及终态（~120ms 节流，阶段切换与终态立即发送） | `{ phase: 'fetching_manifest' \| 'downloading' \| 'importing' \| 'indexing' \| 'done' \| 'skipped' \| 'error' \| 'cancelled', shardIndex, shardCount, downloadedBytes, totalBytes?, bytesPerSec?, importedPapers, totalPapers, error? }`；可由 `plaza_collection_seed_cancel` 协作取消（保留 `.part` 文件并回滚未提交事务） |
 
 #### `agent_warm`
 
@@ -105,7 +106,7 @@ Host 通过 Tauri event 向前端推送事件。文件系统、任务和菜单�
 
 - **覆盖范围**
   - **命令**：desktop 注册的全部 192 个 `#[tauri::command]`（`app/handlers.rs` 的 `common_commands!` + desktop-only extras）逐一 collect 于 `src-tauri/src/app/bindings_test.rs`。iOS-only 的 5 个 bridge client 命令（`bridge_connect` / `bridge_resume` / `bridge_disconnect` / `bridge_rpc` / client 版 `bridge_status`）不进 desktop bindings。
-  - **事件**：desktop 侧 emit 的 42 个事件（`job:*`（含 `job:progress` 字节/计数进度）、`agent:*`、`vault:file-changed`、`settings:changed`、`bridge:host-status`/`bridge:pair-request`、`connector:*`、`mcp:*`、`sync:*`、`paper:*` 等），声明于 `src-tauri/src/app/events_contract.rs`（wrapper/mirror + `#[tauri_specta(event_name = "…")]`，事件名与 emit 字面量一致，emit 调用点不改造）。iOS-only bridge client 事件（`bridge:status` / `bridge:progress` / `bridge:pair-pending`）不在其中。
+  - **事件**：desktop 侧 emit 的 43 个事件（`job:*`（含 `job:progress` 字节/计数进度）、`agent:*`、`vault:file-changed`、`settings:changed`、`bridge:host-status`/`bridge:pair-request`、`connector:*`、`mcp:*`、`sync:*`、`paper:*`、`plaza-collection:seed-progress` 等），声明于 `src-tauri/src/app/events_contract.rs`（wrapper/mirror + `#[tauri_specta(event_name = "…")]`，事件名与 emit 字面量一致，emit 调用点不改造）。iOS-only bridge client 事件（`bridge:status` / `bridge:progress` / `bridge:pair-pending`）不在其中。
 - **再生成 / 防漂移**
 
   ```bash
