@@ -9,7 +9,9 @@
 import { createStore } from "zustand/vanilla";
 import {
 	type CollectionOverviewOut,
+	type CollectionSeedProgress,
 	type CollectionSeedSyncOut,
+	type CollectionSeedSyncPhase,
 	type CollectionVaultPaperMatch,
 	commands,
 } from "@/lib/core/bindings";
@@ -164,6 +166,28 @@ export type CollectionSeedSyncResult = {
 	appliedShards: string[];
 	importedPapers: number;
 	skipped: boolean;
+};
+
+export type CollectionSeedPhase = "idle" | CollectionSeedSyncPhase;
+
+export type CollectionSeedProgressPayload = CollectionSeedProgress;
+
+export type CollectionSeedSyncState = {
+	/** True while a collection seed sync is actively in flight. */
+	active: boolean;
+	phase: CollectionSeedPhase;
+	shardIndex: number;
+	shardCount: number;
+	downloadedBytes: number;
+	totalBytes: number | null;
+	bytesPerSec: number | null;
+	importedPapers: number;
+	totalPapers: number | null;
+	error: string | null;
+	/** Epoch ms when the current downloading stage began (drives slow-network proxy hint). */
+	downloadStartedAt: number | null;
+	/** Session-only overlay dismissal (Skip); never writes `seed_cleared` to SQLite. */
+	sessionDismissed: boolean;
 };
 
 export type CollectionBackfillRefsInput = {
@@ -667,11 +691,156 @@ export function subscribePreloadingCollection(
 	});
 }
 
+function createDefaultSeedSyncState(): CollectionSeedSyncState {
+	return {
+		active: false,
+		phase: "idle",
+		shardIndex: 0,
+		shardCount: 0,
+		downloadedBytes: 0,
+		totalBytes: null,
+		bytesPerSec: null,
+		importedPapers: 0,
+		totalPapers: null,
+		error: null,
+		downloadStartedAt: null,
+		sessionDismissed: false,
+	};
+}
+
+/**
+ * Dedicated reactive store for high-frequency Collection Seed progress updates
+ * (~8 Hz during download/import) so Plaza Hub/List cards do not re-render on
+ * every chunk tick.
+ */
+export const collectionSeedStore = createStore<CollectionSeedSyncState>(() =>
+	createDefaultSeedSyncState(),
+);
+
+export function getCollectionSeedSyncSnapshot(): CollectionSeedSyncState {
+	return collectionSeedStore.getState();
+}
+
+export function subscribeCollectionSeedSync(
+	listener: (state: CollectionSeedSyncState) => void,
+): () => void {
+	return collectionSeedStore.subscribe((state) => {
+		listener(state);
+	});
+}
+
+export function patchCollectionSeedSyncState(
+	patch: Partial<CollectionSeedSyncState>,
+): void {
+	collectionSeedStore.setState((prev) => ({ ...prev, ...patch }));
+}
+
+const ACTIVE_SEED_PHASES = new Set<CollectionSeedPhase>([
+	"fetching_manifest",
+	"downloading",
+	"importing",
+	"indexing",
+]);
+
+export function applyCollectionSeedProgress(
+	payload: CollectionSeedProgressPayload,
+): void {
+	const isActive = ACTIVE_SEED_PHASES.has(payload.phase);
+	collectionSeedStore.setState((prev) => ({
+		...prev,
+		active: isActive,
+		phase: payload.phase,
+		shardIndex: payload.shardIndex,
+		shardCount: payload.shardCount,
+		downloadedBytes: payload.downloadedBytes,
+		totalBytes: payload.totalBytes,
+		bytesPerSec: payload.bytesPerSec,
+		importedPapers: payload.importedPapers,
+		totalPapers: payload.totalPapers > 0 ? payload.totalPapers : null,
+		error: payload.error,
+		downloadStartedAt:
+			payload.phase === "downloading"
+				? (prev.downloadStartedAt ?? Date.now())
+				: null,
+	}));
+}
+
+/** Session-only Skip: hides the first-launch overlay without persisting `seed_cleared`. */
+export function dismissCollectionSeedOverlayForSession(): void {
+	collectionSeedStore.setState({ sessionDismissed: true });
+}
+
+/**
+ * Zero-flicker first-launch gate: strictly waits for `summary.hydrated === true`
+ * and never re-blurs once `totalCount > 0` (e.g. later optional `cs.AI` opt-in).
+ */
+export function shouldShowCollectionSeedOverlay(
+	summary: Pick<
+		CollectionSummarySnapshot,
+		"hydrated" | "totalCount" | "seedCleared" | "appliedSeedIds"
+	>,
+	seedSync: Pick<CollectionSeedSyncState, "phase" | "sessionDismissed">,
+): boolean {
+	if (!summary.hydrated) return false;
+	if (summary.totalCount > 0) return false;
+	if (summary.seedCleared) return false;
+	if (summary.appliedSeedIds.length > 0) return false;
+	if (seedSync.sessionDismissed) return false;
+	if (seedSync.phase === "skipped" || seedSync.phase === "done") return false;
+	return true;
+}
+
+const SLOW_DOWNLOAD_THRESHOLD_MS = 10_000;
+const SLOW_DOWNLOAD_MIN_BYTES_PER_SEC = 50 * 1024;
+
+export function isSeedDownloadSlow(
+	seedSync: Pick<
+		CollectionSeedSyncState,
+		| "active"
+		| "phase"
+		| "downloadStartedAt"
+		| "downloadedBytes"
+		| "totalBytes"
+		| "bytesPerSec"
+	>,
+	nowMs = Date.now(),
+): boolean {
+	if (
+		!seedSync.active ||
+		seedSync.phase !== "downloading" ||
+		seedSync.downloadStartedAt == null
+	) {
+		return false;
+	}
+	if (nowMs - seedSync.downloadStartedAt < SLOW_DOWNLOAD_THRESHOLD_MS) {
+		return false;
+	}
+	if (
+		seedSync.bytesPerSec != null &&
+		seedSync.bytesPerSec < SLOW_DOWNLOAD_MIN_BYTES_PER_SEC
+	) {
+		return true;
+	}
+	if (
+		seedSync.totalBytes != null &&
+		seedSync.totalBytes > 0 &&
+		seedSync.downloadedBytes / seedSync.totalBytes < 0.05
+	) {
+		return true;
+	}
+	return (
+		seedSync.bytesPerSec == null &&
+		seedSync.totalBytes == null &&
+		seedSync.downloadedBytes < SLOW_DOWNLOAD_MIN_BYTES_PER_SEC * 10
+	);
+}
+
 let inFlightInitialHydration: Promise<CollectionStateSummary> | null = null;
 
 export function resetCollectionStoreForTests(): void {
 	inFlightInitialHydration = null;
 	collectionStore.setState(createDefaultSummarySnapshot(), true);
+	collectionSeedStore.setState(createDefaultSeedSyncState(), true);
 }
 
 // ─── Async IPC Wrappers (`commands.plazaCollection*`) ───
@@ -900,6 +1069,12 @@ export async function syncCollectionSeed(
 		importedPapers: dto.importedPapers,
 		skipped: dto.skipped,
 	};
+}
+
+export async function cancelCollectionSeedSyncRemote(): Promise<boolean> {
+	return callApi(() => commands.plazaCollectionSeedCancel(), {
+		fallback: "Failed to cancel paper collection seed sync",
+	});
 }
 
 export async function backfillCollectionMissingRefs(

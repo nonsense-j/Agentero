@@ -242,6 +242,15 @@
 		box-shadow: none;
 		border-bottom: 1px solid var(--border);
 	}
+	[data-seed-overlay-card] {
+		background-color: var(--card);
+		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
+	}
+	[data-seed-blur-backdrop] {
+		filter: none;
+		opacity: 0.35;
+	}
 }
 
 /* Settings pane enter: short opacity cross-fade (respects reduced-motion). */

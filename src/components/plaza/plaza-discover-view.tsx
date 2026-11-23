@@ -27,12 +27,14 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useStore } from "zustand";
 import { CollectionPaperDetailDialog } from "@/components/plaza/collection-paper-detail-dialog";
 import {
 	CollectionRefreshConfirmDialog,
 	type CollectionRefreshRequest,
 	type CollectionRefreshSelection,
 } from "@/components/plaza/collection-refresh-confirm-dialog";
+import { CollectionSeedStatusBanner } from "@/components/plaza/collection-seed-overlay";
 import { DiscoverDeepView } from "@/components/plaza/discover-deep-view";
 import { DiscoverFastView } from "@/components/plaza/discover-fast-view";
 import { Button } from "@/components/ui/button";
@@ -47,9 +49,11 @@ import { cn } from "@/lib/core/utils";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionPaperItem,
+	collectionSeedStore,
 	ensureCollectionSummaryHydrated,
 	getCollectionSummarySnapshot,
 	isPreloadingCollection,
+	shouldShowCollectionSeedOverlay,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
@@ -80,6 +84,17 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 		subscribePreloadingCollection,
 		isPreloadingCollection,
 	);
+	const seedSyncActive = useStore(collectionSeedStore, (s) => s.active);
+	const seedPhase = useStore(collectionSeedStore, (s) => s.phase);
+	const seedSessionDismissed = useStore(
+		collectionSeedStore,
+		(s) => s.sessionDismissed,
+	);
+	const seedBusy = preloading || seedSyncActive;
+	const showSeedBanner = shouldShowCollectionSeedOverlay(summary, {
+		phase: seedPhase,
+		sessionDismissed: seedSessionDismissed,
+	});
 
 	const [stage, setStage] = useState<DiscoverStage>("hub");
 	const [visitedFast, setVisitedFast] = useState(false);
@@ -141,9 +156,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 	}, [syncObservedImported]);
 
 	const handleRefreshPool = useCallback(() => {
-		if (refreshing || preloading) return;
+		if (refreshing || seedBusy || showSeedBanner) return;
 		setPendingRefresh({ scope: "all" });
-	}, [preloading, refreshing]);
+	}, [refreshing, seedBusy, showSeedBanner]);
 
 	const handleConfirmRefresh = useCallback(
 		(
@@ -249,14 +264,14 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 										type="button"
 										variant="outline"
 										size="icon-sm"
-										disabled={refreshing || preloading}
+										disabled={refreshing || seedBusy || showSeedBanner}
 										onClick={handleRefreshPool}
 										aria-label={t("plaza.collection.refresh")}
 									>
 										<RefreshCw
 											className={cn(
 												"size-3.5",
-												(refreshing || preloading) && "animate-spin",
+												(refreshing || seedBusy) && "animate-spin",
 											)}
 										/>
 									</Button>
@@ -267,7 +282,9 @@ export function PlazaDiscoverView({ className }: { className?: string }) {
 							</Tooltip>
 						</div>
 
-						{preloading && summary.totalCount === 0 ? (
+						{showSeedBanner ? (
+							<CollectionSeedStatusBanner />
+						) : preloading && summary.totalCount === 0 ? (
 							<div className="magpie-card flex items-center gap-2 rounded-xl px-4 py-3 text-muted-foreground text-xs">
 								<Loader2 className="size-3.5 shrink-0 animate-spin" />
 								<span>{t("plaza.collection.preloading")}</span>

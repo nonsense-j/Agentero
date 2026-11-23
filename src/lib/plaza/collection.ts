@@ -12,15 +12,23 @@
 import i18n from "@/i18n";
 import { listenAgentCompleted, listenAgentFailed, runOnce } from "@/lib/agent";
 import {
+	BACKGROUND_TASK_CANCELLED_MESSAGE,
 	BackgroundTaskCancelledError,
 	backgroundTasksStore,
+	cancelBackgroundTask,
 	completeBackgroundTask,
+	failBackgroundTask,
+	formatBytes,
 	isBackgroundTaskCancelledError,
 	registerBackgroundTaskCancelHandler,
 	releaseBackgroundTaskCancelHandler,
 	startBackgroundTask,
+	updateBackgroundTask,
 } from "@/lib/core/background-tasks";
-import { commands } from "@/lib/core/bindings";
+import { commands, events } from "@/lib/core/bindings";
+import { errorText } from "@/lib/core/error";
+import { reportNetworkFailureIfLikely } from "@/lib/core/notify";
+import { listenEventSafe } from "@/lib/core/tauri-events";
 import {
 	getKeywordLlmConfigSignature,
 	getKeywordLlmExecutionConfig,
@@ -78,6 +86,7 @@ import {
 import {
 	type ArxivCategoryWatermark,
 	type ArxivLatestRecord,
+	applyCollectionSeedProgress,
 	backfillCollectionMissingRefs,
 	bumpCollectionRevision,
 	type CollectionBackfillRefsInput,
@@ -91,8 +100,11 @@ import {
 	type CollectionPaperLineageResult,
 	type CollectionPaperPatchInput,
 	type CollectionPapersPageResult,
+	type CollectionSeedPhase,
+	type CollectionSeedProgressPayload,
 	type CollectionSeedSyncInput,
 	type CollectionSeedSyncResult,
+	type CollectionSeedSyncState,
 	type CollectionSharedRefEdge,
 	type CollectionSharedRefPeerResult,
 	type CollectionStateSummary,
@@ -101,24 +113,32 @@ import {
 	type CollectionUpsertPapersInput,
 	type CollectionVaultPaperMatch,
 	type CollectionVenueWatermarkUpdate,
+	cancelCollectionSeedSyncRemote,
 	clearCollection,
+	collectionSeedStore,
 	collectionStore,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
+	dismissCollectionSeedOverlayForSession,
 	fetchCollectionOverview,
 	fetchCollectionStateSummary,
 	getCollectionPaperDetail,
 	getCollectionPaperLineage,
 	getCollectionPapersByIds,
+	getCollectionSeedSyncSnapshot,
 	getCollectionSubgraph,
 	getCollectionSummarySnapshot,
 	isPreloadingCollection,
+	isSeedDownloadSlow,
 	listCollectionPapers,
 	patchCollectionPapers,
+	patchCollectionSeedSyncState,
 	setPreloadingCollectionFlag,
+	shouldShowCollectionSeedOverlay,
 	ensureCollectionSummaryHydrated as storeEnsureCollectionSummaryHydrated,
 	resetCollectionStoreForTests as storeResetCollectionStoreForTests,
 	updateCollectionConfig as storeUpdateCollectionConfig,
+	subscribeCollectionSeedSync,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 	syncCollectionSeed,
@@ -140,6 +160,7 @@ import {
 	parseOfficialVenueProgramHtml,
 	parseResearchrHtml,
 } from "@/lib/plaza/collection-venue-channels";
+import { loadSettings, subscribeSettings } from "@/lib/settings";
 import { resolveConfiguredTranslateAgent } from "@/lib/translate/resolve-agent";
 import { getVaultPath } from "@/lib/vault/store";
 import { webViewProxyUrl } from "@/lib/web-view/proxy-url";
@@ -160,8 +181,11 @@ export type {
 	CollectionPaperLineageResult,
 	CollectionPaperPatchInput,
 	CollectionPapersPageResult,
+	CollectionSeedPhase,
+	CollectionSeedProgressPayload,
 	CollectionSeedSyncInput,
 	CollectionSeedSyncResult,
+	CollectionSeedSyncState,
 	CollectionSharedRefEdge,
 	CollectionSharedRefPeerResult,
 	CollectionSourceType,
@@ -182,14 +206,17 @@ export type {
 };
 export {
 	ARXIV_CATEGORY_SUBTITLES,
+	applyCollectionSeedProgress,
 	backfillCollectionMissingRefs,
 	backfillSpringerAbstracts,
 	bumpCollectionRevision,
 	clearCollection,
+	collectionSeedStore,
 	collectionStore,
 	DEFAULT_ARXIV_CATEGORIES,
 	DEFAULT_COLLECTION_VENUES,
 	derivePaperKeywords,
+	dismissCollectionSeedOverlayForSession,
 	enrichArxivItemsBatch,
 	enrichSinglePaperOnDemand,
 	enrichVenueItemsBatch,
@@ -212,6 +239,7 @@ export {
 	getCollectionPaperDetail,
 	getCollectionPaperLineage,
 	getCollectionPapersByIds,
+	getCollectionSeedSyncSnapshot,
 	getCollectionSubgraph,
 	getCollectionSummarySnapshot,
 	inferVenueKind,
@@ -222,6 +250,7 @@ export {
 	isPlaceholderAbstract,
 	isPositionPaperTitle,
 	isPreloadingCollection,
+	isSeedDownloadSlow,
 	isWorkshopOrCompanionVenue,
 	listCollectionPapers,
 	normalizePaperKeywords,
@@ -231,6 +260,8 @@ export {
 	parseResearchrHtml,
 	patchCollectionPapers,
 	reconstructOpenAlexAbstract,
+	shouldShowCollectionSeedOverlay,
+	subscribeCollectionSeedSync,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 	syncCollectionSeed,
@@ -245,15 +276,174 @@ const attemptedDetailEnrichIds = new Set<string>();
 const completedArxivEnrichIds = new Set<string>();
 const sessionAttemptedArxivEnrichIds = new Set<string>();
 let lastObservedKeywordLlmConfigSig = "";
+type SeedSyncOutcome =
+	| { ok: true; result: CollectionSeedSyncResult }
+	| { ok: false; cancelled: boolean; error: string };
+
 let attemptedColdSeedWarmup = false;
-let inFlightSeedSync: Promise<CollectionSeedSyncResult | null> | null = null;
+let inFlightSeedSync: Promise<SeedSyncOutcome> | null = null;
+let inFlightSeedBackgroundTask: Promise<CollectionSeedSyncResult | null> | null =
+	null;
+let inFlightSeedRetry: Promise<CollectionSeedSyncResult | null> | null = null;
+let activeSeedTaskId: string | null = null;
+let activeSeedCancelController: AbortController | null = null;
+let seedCancelRequested = false;
+let backendCancelDispatched = false;
+let pendingFollowupSeedSync = false;
+let pendingProxyRestartSeedSync = false;
 let activePreloadDepth = 0;
 let activeSeedSyncDepth = 0;
+let disposeSeedProxyWatcher: (() => void) | null = null;
+let disposeSeedProgressListener: (() => void) | null = null;
+let lastObservedProxySig = "";
 
 function syncPreloadingFlag(): void {
 	setPreloadingCollectionFlag(
 		activePreloadDepth > 0 || activeSeedSyncDepth > 0,
 	);
+}
+
+function isSeedCancelledError(err: unknown): boolean {
+	if (seedCancelRequested || isBackgroundTaskCancelledError(err)) return true;
+	const code =
+		err && typeof err === "object" && "code" in err
+			? String((err as { code?: unknown }).code ?? "")
+			: "";
+	const upper = code.toUpperCase();
+	if (upper === "CANCELLED" || upper === "SEED_SYNC_CANCELLED") return true;
+	const msg = errorText(err);
+	return /\bcancell?ed\b/i.test(msg);
+}
+
+function invokeBackendSeedCancel(): void {
+	if (backendCancelDispatched) return;
+	backendCancelDispatched = true;
+	void cancelCollectionSeedSyncRemote().catch(() => undefined);
+}
+
+function ensureSeedProgressListener(): void {
+	if (disposeSeedProgressListener) return;
+	disposeSeedProgressListener = listenEventSafe(
+		events.plazaCollectionSeedProgress,
+		(payload) => {
+			if (
+				seedCancelRequested &&
+				payload.phase !== "cancelled" &&
+				payload.phase !== "error" &&
+				payload.phase !== "done" &&
+				payload.phase !== "skipped"
+			) {
+				return;
+			}
+			if (
+				inFlightSeedSync &&
+				(payload.phase === "done" || payload.phase === "skipped")
+			) {
+				// Let `runDedupedSeedSync` apply the terminal phase right after
+				// `syncCollectionSeed()` commits updated summary counts so the
+				// overlay never unblurs onto a stale 0-paper Hub.
+				return;
+			}
+			applyCollectionSeedProgress(payload);
+		},
+	);
+}
+
+function computeSeedTaskOverallProgress(
+	state: CollectionSeedSyncState,
+): number | null {
+	switch (state.phase) {
+		case "downloading": {
+			if (state.totalBytes && state.totalBytes > 0) {
+				const ratio = Math.min(1, state.downloadedBytes / state.totalBytes);
+				return Math.min(75, Math.max(0, Math.round(ratio * 75)));
+			}
+			return null;
+		}
+		case "importing": {
+			if (state.totalPapers && state.totalPapers > 0) {
+				const ratio = Math.min(1, state.importedPapers / state.totalPapers);
+				return 75 + Math.min(20, Math.max(0, Math.round(ratio * 20)));
+			}
+			return 75;
+		}
+		case "indexing":
+			return 96;
+		case "done":
+			return 100;
+		default:
+			return null;
+	}
+}
+
+function formatSeedTaskDetail(
+	state: CollectionSeedSyncState,
+): string | undefined {
+	switch (state.phase) {
+		case "fetching_manifest":
+			return i18n.t("sidebar:plaza.collection.seed.fetchingManifest");
+		case "downloading": {
+			const shardPrefix =
+				state.shardCount > 1 && state.shardIndex > 0
+					? `${state.shardIndex}/${state.shardCount} · `
+					: "";
+			if (state.totalBytes && state.totalBytes > 0) {
+				const speed =
+					state.bytesPerSec && state.bytesPerSec > 0
+						? ` · ${formatBytes(state.bytesPerSec)}/s`
+						: "";
+				return `${shardPrefix}${formatBytes(state.downloadedBytes)} / ${formatBytes(state.totalBytes)}${speed}`;
+			}
+			if (state.downloadedBytes > 0) {
+				return `${shardPrefix}${formatBytes(state.downloadedBytes)}`;
+			}
+			return i18n.t("sidebar:plaza.collection.seed.stepDownloading");
+		}
+		case "importing": {
+			if (state.totalPapers && state.totalPapers > 0) {
+				return `${state.importedPapers.toLocaleString()} / ${state.totalPapers.toLocaleString()}`;
+			}
+			return i18n.t("sidebar:plaza.collection.seed.stepImporting");
+		}
+		case "indexing":
+			return i18n.t("sidebar:plaza.collection.seed.indexing");
+		default:
+			return undefined;
+	}
+}
+
+function proxySignature(): string {
+	const s = loadSettings();
+	return `${s.networkProxyEnabled ? "1" : "0"}|${s.networkProxyUrl.trim()}`;
+}
+
+function ensureSeedProxyWatcher(): void {
+	if (disposeSeedProxyWatcher) return;
+	lastObservedProxySig = proxySignature();
+	disposeSeedProxyWatcher = subscribeSettings((next) => {
+		const sig = `${next.networkProxyEnabled ? "1" : "0"}|${next.networkProxyUrl.trim()}`;
+		if (sig === lastObservedProxySig) return;
+		lastObservedProxySig = sig;
+		const summary = getCollectionSummarySnapshot();
+		const seed = getCollectionSeedSyncSnapshot();
+		if (
+			!summary.hydrated ||
+			summary.totalCount > 0 ||
+			summary.seedCleared ||
+			summary.appliedSeedIds.length > 0 ||
+			seed.sessionDismissed
+		) {
+			return;
+		}
+		if (seed.phase === "error" || seed.phase === "cancelled") {
+			void retryCollectionSeedSync();
+			return;
+		}
+		if (seed.active && isSeedDownloadSlow(seed)) {
+			pendingProxyRestartSeedSync = true;
+			cancelCollectionSeedSync();
+		}
+	});
 }
 
 function dismissSilentSeedTask(taskId: string): void {
@@ -269,78 +459,300 @@ function dismissSilentSeedTask(taskId: string): void {
 	});
 }
 
+/** True while a `#1 Sync collection seed` background task or seed IPC is running. */
+export function isSeedSyncActive(): boolean {
+	return (
+		Boolean(inFlightSeedBackgroundTask) ||
+		Boolean(inFlightSeedSync) ||
+		activeSeedSyncDepth > 0 ||
+		getCollectionSeedSyncSnapshot().active
+	);
+}
+
+/**
+ * Cancel an active Collection Seed sync cleanly (used by both `<CollectionSeedOverlay>`
+ * and the bottom-left `BackgroundTasksPanel`).
+ */
+export function cancelCollectionSeedSync(): void {
+	if (!isSeedSyncActive()) return;
+	seedCancelRequested = true;
+	invokeBackendSeedCancel();
+	const taskId = activeSeedTaskId;
+	const controller = activeSeedCancelController;
+	if (controller && !controller.signal.aborted) {
+		controller.abort();
+	}
+	if (taskId) {
+		const existing = backgroundTasksStore
+			.getState()
+			.tasks.find((t) => t.id === taskId);
+		if (
+			existing &&
+			(existing.status === "queued" || existing.status === "running")
+		) {
+			cancelBackgroundTask(taskId);
+		}
+	}
+	patchCollectionSeedSyncState({
+		active: false,
+		phase: "cancelled",
+		error: null,
+		downloadStartedAt: null,
+	});
+}
+
 function runDedupedSeedSync(
 	args?: CollectionSeedSyncInput,
-): Promise<CollectionSeedSyncResult | null> {
+): Promise<SeedSyncOutcome> {
+	ensureSeedProgressListener();
 	if (inFlightSeedSync) return inFlightSeedSync;
-	const p = syncCollectionSeed(args)
-		.catch(() => null)
+	seedCancelRequested = false;
+	backendCancelDispatched = false;
+	patchCollectionSeedSyncState({
+		active: true,
+		phase: "fetching_manifest",
+		shardIndex: 0,
+		shardCount: 0,
+		downloadedBytes: 0,
+		totalBytes: null,
+		bytesPerSec: null,
+		importedPapers: 0,
+		totalPapers: null,
+		error: null,
+		downloadStartedAt: null,
+	});
+	const p: Promise<SeedSyncOutcome> = syncCollectionSeed(args)
+		.then((result): SeedSyncOutcome => {
+			if (seedCancelRequested) {
+				patchCollectionSeedSyncState({
+					active: false,
+					phase: "cancelled",
+					error: null,
+					downloadStartedAt: null,
+				});
+				return {
+					ok: false,
+					cancelled: true,
+					error: BACKGROUND_TASK_CANCELLED_MESSAGE,
+				};
+			}
+			patchCollectionSeedSyncState({
+				active: false,
+				phase: result.skipped ? "skipped" : "done",
+				importedPapers: result.importedPapers,
+				error: null,
+				downloadStartedAt: null,
+			});
+			return { ok: true, result };
+		})
+		.catch((err): SeedSyncOutcome => {
+			if (isSeedCancelledError(err)) {
+				patchCollectionSeedSyncState({
+					active: false,
+					phase: "cancelled",
+					error: null,
+					downloadStartedAt: null,
+				});
+				return {
+					ok: false,
+					cancelled: true,
+					error: BACKGROUND_TASK_CANCELLED_MESSAGE,
+				};
+			}
+			const message = errorText(err);
+			patchCollectionSeedSyncState({
+				active: false,
+				phase: "error",
+				error: message,
+				downloadStartedAt: null,
+			});
+			reportNetworkFailureIfLikely(message);
+			return { ok: false, cancelled: false, error: message };
+		})
 		.finally(() => {
 			inFlightSeedSync = null;
+			seedCancelRequested = false;
+			backendCancelDispatched = false;
 		});
 	inFlightSeedSync = p;
 	return p;
 }
 
 /**
- * Run `syncCollectionSeed` in the background with a bottom-left task status row.
- * Silently degrades without error toasts or failure banners when the remote seed
- * bundle is not yet published (`skipped: true`) or the client is offline.
+ * Run `syncCollectionSeed` in the background with a single deduplicated
+ * bottom-left task row and live phase/progress updates.
  */
 export async function syncCollectionSeedInBackground(
 	args?: CollectionSeedSyncInput,
 ): Promise<CollectionSeedSyncResult | null> {
-	const controller = new AbortController();
-	const taskId = startBackgroundTask({
-		kind: "downloadAssets",
-		icon: "download",
-		title: i18n.t("app:tasks.plazaSeedSync"),
-	});
-	registerBackgroundTaskCancelHandler(taskId, () => {
-		controller.abort();
-	});
-	activeSeedSyncDepth += 1;
-	syncPreloadingFlag();
-	try {
-		const res = await raceWithAbort(
-			runDedupedSeedSync(args),
-			controller.signal,
-		);
-		if (controller.signal.aborted) return null;
-		if (!res || res.skipped) {
-			dismissSilentSeedTask(taskId);
-			return res;
-		}
-		completeBackgroundTask(
-			taskId,
-			res.importedPapers > 0
-				? i18n.t("sidebar:plaza.collection.papersCount", {
-						count: res.importedPapers,
-					})
-				: undefined,
-		);
-		return res;
-	} catch (err) {
-		if (controller.signal.aborted || isBackgroundTaskCancelledError(err)) {
-			return null;
-		}
-		throw err;
-	} finally {
-		releaseBackgroundTaskCancelHandler(taskId);
-		activeSeedSyncDepth = Math.max(0, activeSeedSyncDepth - 1);
-		syncPreloadingFlag();
+	ensureSeedProgressListener();
+	ensureSeedProxyWatcher();
+	if (inFlightSeedBackgroundTask) {
+		return inFlightSeedBackgroundTask;
 	}
+	const run = (async (): Promise<CollectionSeedSyncResult | null> => {
+		const controller = new AbortController();
+		const taskId = startBackgroundTask({
+			kind: "downloadAssets",
+			icon: "download",
+			title: i18n.t("app:tasks.plazaSeedSync"),
+		});
+		activeSeedTaskId = taskId;
+		activeSeedCancelController = controller;
+		registerBackgroundTaskCancelHandler(taskId, () => {
+			seedCancelRequested = true;
+			invokeBackendSeedCancel();
+			controller.abort();
+			patchCollectionSeedSyncState({
+				active: false,
+				phase: "cancelled",
+				error: null,
+				downloadStartedAt: null,
+			});
+		});
+		const unsubProgress = subscribeCollectionSeedSync((state) => {
+			if (controller.signal.aborted) return;
+			if (!state.active) return;
+			updateBackgroundTask(
+				taskId,
+				{
+					progress: computeSeedTaskOverallProgress(state),
+					detail: formatSeedTaskDetail(state),
+				},
+				{ absoluteProgress: true },
+			);
+		});
+		activeSeedSyncDepth += 1;
+		syncPreloadingFlag();
+		try {
+			const outcome = await raceWithAbort(
+				runDedupedSeedSync(args),
+				controller.signal,
+			);
+			if (controller.signal.aborted || (!outcome.ok && outcome.cancelled)) {
+				patchCollectionSeedSyncState({
+					active: false,
+					phase: "cancelled",
+					error: null,
+					downloadStartedAt: null,
+				});
+				return null;
+			}
+			if (!outcome.ok) {
+				failBackgroundTask(taskId, outcome.error);
+				return null;
+			}
+			if (outcome.result.skipped) {
+				dismissSilentSeedTask(taskId);
+				return outcome.result;
+			}
+			completeBackgroundTask(
+				taskId,
+				outcome.result.importedPapers > 0
+					? i18n.t("sidebar:plaza.collection.papersCount", {
+							count: outcome.result.importedPapers,
+						})
+					: undefined,
+			);
+			return outcome.result;
+		} catch (err) {
+			if (controller.signal.aborted || isBackgroundTaskCancelledError(err)) {
+				patchCollectionSeedSyncState({
+					active: false,
+					phase: "cancelled",
+					error: null,
+					downloadStartedAt: null,
+				});
+				return null;
+			}
+			const msg = errorText(err);
+			failBackgroundTask(taskId, msg);
+			patchCollectionSeedSyncState({
+				active: false,
+				phase: "error",
+				error: msg,
+				downloadStartedAt: null,
+			});
+			return null;
+		} finally {
+			unsubProgress();
+			releaseBackgroundTaskCancelHandler(taskId);
+			if (activeSeedTaskId === taskId) activeSeedTaskId = null;
+			if (activeSeedCancelController === controller) {
+				activeSeedCancelController = null;
+			}
+			inFlightSeedBackgroundTask = null;
+			activeSeedSyncDepth = Math.max(0, activeSeedSyncDepth - 1);
+			syncPreloadingFlag();
+
+			if (pendingProxyRestartSeedSync) {
+				pendingProxyRestartSeedSync = false;
+				void retryCollectionSeedSync(args);
+			} else if (
+				pendingFollowupSeedSync &&
+				!getCollectionSummarySnapshot().seedCleared
+			) {
+				pendingFollowupSeedSync = false;
+				void syncCollectionSeedInBackground();
+			}
+		}
+	})();
+	inFlightSeedBackgroundTask = run;
+	return run;
+}
+
+/**
+ * Retry initial Collection Seed sync cleanly (used by overlay Retry button and
+ * proxy-change recovery). Clears session dismissal and resets cold warmup state.
+ */
+export async function retryCollectionSeedSync(
+	args?: CollectionSeedSyncInput,
+): Promise<CollectionSeedSyncResult | null> {
+	if (inFlightSeedRetry) return inFlightSeedRetry;
+	const run = (async () => {
+		// Wait for any cancelling in-flight IPC to finish releasing its backend
+		// single-flight guard before starting a fresh sync run.
+		const prev = inFlightSeedSync;
+		if (prev) {
+			await prev.catch(() => undefined);
+		}
+		attemptedColdSeedWarmup = true;
+		patchCollectionSeedSyncState({
+			sessionDismissed: false,
+			error: null,
+		});
+		return syncCollectionSeedInBackground(args);
+	})().finally(() => {
+		inFlightSeedRetry = null;
+	});
+	inFlightSeedRetry = run;
+	return run;
 }
 
 export function resetCollectionStoreForTests(): void {
 	attemptedColdSeedWarmup = false;
 	inFlightSeedSync = null;
+	inFlightSeedBackgroundTask = null;
+	inFlightSeedRetry = null;
+	activeSeedTaskId = null;
+	activeSeedCancelController = null;
+	seedCancelRequested = false;
+	backendCancelDispatched = false;
+	pendingFollowupSeedSync = false;
+	pendingProxyRestartSeedSync = false;
 	activeSeedSyncDepth = 0;
 	activePreloadDepth = 0;
+	disposeSeedProxyWatcher?.();
+	disposeSeedProxyWatcher = null;
+	disposeSeedProgressListener?.();
+	disposeSeedProgressListener = null;
+	lastObservedProxySig = "";
 	storeResetCollectionStoreForTests();
 }
 
 export async function ensureCollectionSummaryHydrated(): Promise<CollectionStateSummary> {
+	ensureSeedProgressListener();
+	ensureSeedProxyWatcher();
 	if (!collectionStore.getState().hydrated) {
 		attemptedColdSeedWarmup = false;
 	}
@@ -348,6 +760,7 @@ export async function ensureCollectionSummaryHydrated(): Promise<CollectionState
 	if (
 		summary.totalCount === 0 &&
 		!summary.seedCleared &&
+		summary.appliedSeedIds.length === 0 &&
 		!attemptedColdSeedWarmup
 	) {
 		attemptedColdSeedWarmup = true;
@@ -366,17 +779,37 @@ export async function updateCollectionConfig(
 		!prevCategories.includes("cs.AI");
 	const nextSummary = await storeUpdateCollectionConfig(args);
 	if (addedCsAi && !nextSummary.seedCleared) {
-		void syncCollectionSeedInBackground();
+		if (inFlightSeedBackgroundTask) {
+			pendingFollowupSeedSync = true;
+		} else {
+			void syncCollectionSeedInBackground();
+		}
 	}
 	return nextSummary;
 }
 
 async function trySyncSeedBeforeManualRefresh(
 	signal?: AbortSignal,
-): Promise<void> {
+): Promise<CollectionSeedSyncResult | null> {
 	throwIfAborted(signal);
-	await raceWithAbort(runDedupedSeedSync(), signal);
+	const before = getCollectionSummarySnapshot();
+	const seedSnap = getCollectionSeedSyncSnapshot();
+	const wasColdUnseeded =
+		before.totalCount === 0 &&
+		!before.seedCleared &&
+		before.appliedSeedIds.length === 0;
+	const outcome = await raceWithAbort(runDedupedSeedSync(), signal);
 	throwIfAborted(signal);
+	if (!outcome.ok) {
+		if (outcome.cancelled) {
+			throw new BackgroundTaskCancelledError();
+		}
+		if (wasColdUnseeded && !seedSnap.sessionDismissed) {
+			throw new Error(outcome.error);
+		}
+		return null;
+	}
+	return outcome.result;
 }
 
 function syncEnrichmentSessionWithKeywordLlmConfig(): void {
@@ -3812,7 +4245,8 @@ export async function refreshVenueCollection(options?: {
 	) => void;
 }): Promise<CollectionStateSummary> {
 	throwIfAborted(options?.signal);
-	await trySyncSeedBeforeManualRefresh(options?.signal);
+	const beforeVenueCount = getCollectionSummarySnapshot().venueCount;
+	const seedResult = await trySyncSeedBeforeManualRefresh(options?.signal);
 	let current = await fetchCollectionStateSummary();
 	throwIfAborted(options?.signal);
 	if (options?.venues !== undefined) {
@@ -3841,13 +4275,38 @@ export async function refreshVenueCollection(options?: {
 		options?.venueIds && options.venueIds.length > 0
 			? new Set(options.venueIds)
 			: null;
+	const isSingleVenueTarget = Boolean(
+		options?.venueIds && options.venueIds.length === 1,
+	);
+	const coldSeedPopulatedVenues =
+		beforeVenueCount === 0 &&
+		Boolean(
+			seedResult && !seedResult.skipped && seedResult.importedPapers > 0,
+		) &&
+		current.venueCount > 0;
+	const effectiveSkipLoaded =
+		Boolean(options?.skipLoaded) ||
+		(!isSingleVenueTarget && coldSeedPopulatedVenues);
+
+	const skippedSeededVenues: VenueConfig[] = [];
 	const targets = baseVenues.filter((v) => {
 		if (idSet && !idSet.has(v.id)) return false;
-		if (options?.skipLoaded && isVenueAlreadyLoaded(v)) {
+		if (effectiveSkipLoaded && isVenueAlreadyLoaded(v)) {
+			if (coldSeedPopulatedVenues) skippedSeededVenues.push(v);
 			return false;
 		}
 		return true;
 	});
+
+	if (skippedSeededVenues.length > 0 && options?.onVenueStatus) {
+		const totalSeeded = skippedSeededVenues.length + targets.length;
+		for (let i = 0; i < skippedSeededVenues.length; i++) {
+			const seededVenue = skippedSeededVenues[i];
+			if (seededVenue) {
+				options.onVenueStatus(seededVenue, "done", i + 1, totalSeeded);
+			}
+		}
+	}
 
 	if (targets.length === 0) {
 		options?.onProgress?.({

@@ -15,6 +15,7 @@ import { notifyError } from "@/lib/core/notify";
 import { runLocalActivity } from "@/lib/core/tasks";
 import {
 	type ArxivRefreshProgress,
+	isSeedSyncActive,
 	refreshArxivCollection,
 	refreshVenueCollection,
 	type VenueRefreshProgress,
@@ -196,6 +197,7 @@ export async function refreshArxivInBackground(options?: {
 	incremental?: boolean;
 }): Promise<void> {
 	if (inflightArxivRefresh) return inflightArxivRefresh;
+	if (isSeedSyncActive()) return;
 
 	const summary = getCollectionSummarySnapshot();
 	const targetCats = options?.categories ?? summary.categories;
@@ -301,6 +303,7 @@ export async function refreshVenueInBackground(options?: {
 	skipLoaded?: boolean;
 }): Promise<void> {
 	if (inflightVenueRefresh) return inflightVenueRefresh;
+	if (isSeedSyncActive()) return;
 
 	const summary = getCollectionSummarySnapshot();
 	const idSet =

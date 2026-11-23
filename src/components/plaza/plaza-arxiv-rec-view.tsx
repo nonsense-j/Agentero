@@ -42,11 +42,13 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useStore } from "zustand";
 import { PlazaSourceBadge } from "@/components/icons/plaza-icons";
 import {
 	COLLECTION_PRIMARY_BTN_CLASS,
 	CollectionPaperDetailDialog,
 } from "@/components/plaza/collection-paper-detail-dialog";
+import { CollectionSeedStatusBanner } from "@/components/plaza/collection-seed-overlay";
 import { SelectionSurface } from "@/components/selection/selection-surface";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -63,9 +65,11 @@ import { cn } from "@/lib/core/utils";
 import { libraryStore } from "@/lib/paper/library-store";
 import {
 	type CollectionPaperItem,
+	collectionSeedStore,
 	ensureCollectionSummaryHydrated,
 	getCollectionSummarySnapshot,
 	isPreloadingCollection,
+	shouldShowCollectionSeedOverlay,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 } from "@/lib/plaza/collection";
@@ -127,6 +131,15 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 		subscribePreloadingCollection,
 		isPreloadingCollection,
 	);
+	const seedPhase = useStore(collectionSeedStore, (s) => s.phase);
+	const seedSessionDismissed = useStore(
+		collectionSeedStore,
+		(s) => s.sessionDismissed,
+	);
+	const showSeedBanner = shouldShowCollectionSeedOverlay(summary, {
+		phase: seedPhase,
+		sessionDismissed: seedSessionDismissed,
+	});
 	const vaultPath = useSyncExternalStore(vaultStore.subscribe, getVaultPath);
 
 	const [poolState, setPoolState] = useState<RecommendPoolState>(
@@ -822,8 +835,10 @@ export function PlazaArxivRecView({ className }: { className?: string }) {
 								) : null}
 							</div>
 
-							{(preloading || !summary.hydrated || wordCloudLoading) &&
-							visibleCloudKeywords.length === 0 ? (
+							{showSeedBanner ? (
+								<CollectionSeedStatusBanner />
+							) : (preloading || !summary.hydrated || wordCloudLoading) &&
+								visibleCloudKeywords.length === 0 ? (
 								<div className="flex items-center justify-center gap-2 py-10 text-muted-foreground text-xs">
 									<Loader2 className="size-4 animate-spin" />
 									<span>

@@ -38,6 +38,7 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useStore } from "zustand";
 import {
 	PlazaSourceBadge,
 	PlazaSourceJumpButton,
@@ -56,6 +57,7 @@ import {
 	type CollectionRefreshRequest,
 	type CollectionRefreshSelection,
 } from "@/components/plaza/collection-refresh-confirm-dialog";
+import { CollectionSeedOverlay } from "@/components/plaza/collection-seed-overlay";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -80,6 +82,7 @@ import {
 	type CollectionPaperItem,
 	type CollectionSourceType,
 	clearCollection,
+	collectionSeedStore,
 	DEFAULT_ARXIV_CATEGORIES,
 	ensureCollectionSummaryHydrated,
 	fetchMoreArxivCollection,
@@ -88,7 +91,9 @@ import {
 	getCollectionSummarySnapshot,
 	inferVenueKind,
 	isPreloadingCollection,
+	isSeedSyncActive,
 	listCollectionPapers,
+	shouldShowCollectionSeedOverlay,
 	subscribeCollectionSummary,
 	subscribePreloadingCollection,
 	updateCollectionConfig,
@@ -136,6 +141,17 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 		subscribePreloadingCollection,
 		isPreloadingCollection,
 	);
+	const seedSyncActive = useStore(collectionSeedStore, (s) => s.active);
+	const seedPhase = useStore(collectionSeedStore, (s) => s.phase);
+	const seedSessionDismissed = useStore(
+		collectionSeedStore,
+		(s) => s.sessionDismissed,
+	);
+	const seedBusy = preloading || seedSyncActive;
+	const showSeedOverlay = shouldShowCollectionSeedOverlay(summary, {
+		phase: seedPhase,
+		sessionDismissed: seedSessionDismissed,
+	});
 
 	const [viewStage, setViewStage] = useState<ViewStage>("hub");
 	const [activeSource, setActiveSource] =
@@ -457,6 +473,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 
 	const handleRemoveVenue = useCallback(
 		(venueId: string) => {
+			if (isSeedSyncActive()) return;
 			if (selectedVenueId === venueId) {
 				setSelectedVenueId(null);
 				resetPagination();
@@ -517,7 +534,14 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [selectedCategory, summary.arxivWatermarks, summary.categories]);
 
 	const handlePullDeeperRemoteArxiv = useCallback(async () => {
-		if (loadingMoreRemote || refreshingArxiv) return;
+		if (
+			loadingMoreRemote ||
+			refreshingArxiv ||
+			seedBusy ||
+			isSeedSyncActive()
+		) {
+			return;
+		}
 		setLoadingMoreRemote(true);
 		try {
 			const targetCats = selectedCategory
@@ -536,6 +560,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [
 		loadingMoreRemote,
 		refreshingArxiv,
+		seedBusy,
 		selectedCategory,
 		summary.categories,
 	]);
@@ -603,6 +628,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [activeSource, selectedCategory, selectedVenueName, t]);
 
 	const handleScopedListRefresh = useCallback(() => {
+		if (seedBusy || showSeedOverlay || isSeedSyncActive()) return;
 		if (activeSource === "arxiv") {
 			setPendingRefresh({
 				scope: "arxiv",
@@ -626,9 +652,11 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 	}, [
 		activeSource,
 		filteredVenuesForBar,
+		seedBusy,
 		selectedCategory,
 		selectedVenueId,
 		selectedVenueName,
+		showSeedOverlay,
 	]);
 
 	const toggleSelect = useCallback((id: string) => {
@@ -726,15 +754,23 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 										type="button"
 										variant="ghost"
 										size="icon-sm"
-										disabled={refreshingArxiv || refreshingVenue}
-										onClick={() => setPendingRefresh({ scope: "all" })}
+										disabled={
+											refreshingArxiv ||
+											refreshingVenue ||
+											seedBusy ||
+											showSeedOverlay
+										}
+										onClick={() => {
+											if (seedBusy || showSeedOverlay) return;
+											setPendingRefresh({ scope: "all" });
+										}}
 										aria-label={t("plaza.collection.refresh")}
 										className={cn(
 											"group/refresh-btn",
 											COLLECTION_ICON_BTN_CLASS,
 										)}
 									>
-										{refreshingArxiv || refreshingVenue ? (
+										{refreshingArxiv || refreshingVenue || seedBusy ? (
 											<Loader2 className="size-3.5 animate-spin text-brand" />
 										) : isHubArxivRefreshed && isHubVenueRefreshed ? (
 											<>
@@ -752,6 +788,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 							<CollectionConfigPopover
 								arxivCategories={summary.categories}
 								venues={summary.venues}
+								disabled={showSeedOverlay}
+								destructiveDisabled={seedBusy}
 								onChangeCategories={handleCategoriesChange}
 								onChangeVenues={handleVenuesChange}
 								onRemoveVenue={handleRemoveVenue}
@@ -760,30 +798,49 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					</div>
 
 					{/* Two-Card Portal Hub */}
-					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto">
-						<CollectionPortalHub
-							categories={summary.categories}
-							venues={summary.venues}
-							arxivCount={summary.arxivCount}
-							venueCount={summary.venueCount}
-							conferenceCount={summary.conferenceCount}
-							journalCount={summary.journalCount}
-							categoryCounts={summary.categoryCounts}
-							arxivWatermarks={summary.arxivWatermarks}
-							preloadingArxiv={preloading}
-							refreshingArxiv={refreshingArxiv}
-							refreshedArxiv={isHubArxivRefreshed}
-							refreshingVenue={refreshingVenue}
-							refreshedVenue={isHubVenueRefreshed}
-							refreshingCategories={refreshingCategories}
-							refreshedCategories={refreshedCategories}
-							refreshingVenueIds={activeRefreshingVenueIds}
-							refreshedVenueIds={refreshedVenueIds}
-							onRefreshArxiv={() => setPendingRefresh({ scope: "arxiv" })}
-							onRefreshVenue={() => setPendingRefresh({ scope: "venue" })}
-							onEnterArxiv={handleEnterArxiv}
-							onEnterVenue={handleEnterVenue}
-						/>
+					<div className="relative min-h-0 flex-1 overflow-hidden">
+						<div
+							data-seed-blur-backdrop={showSeedOverlay ? "" : undefined}
+							aria-hidden={showSeedOverlay || undefined}
+							inert={showSeedOverlay || undefined}
+							className={cn(
+								"agentero-scroll h-full overflow-y-auto transition-[filter,opacity] duration-200 motion-reduce:transition-none",
+								showSeedOverlay &&
+									"pointer-events-none select-none opacity-60 blur-[3px]",
+							)}
+						>
+							<CollectionPortalHub
+								categories={summary.categories}
+								venues={summary.venues}
+								arxivCount={summary.arxivCount}
+								venueCount={summary.venueCount}
+								conferenceCount={summary.conferenceCount}
+								journalCount={summary.journalCount}
+								categoryCounts={summary.categoryCounts}
+								arxivWatermarks={summary.arxivWatermarks}
+								preloadingArxiv={preloading && !showSeedOverlay}
+								seedSyncing={seedBusy || showSeedOverlay}
+								refreshingArxiv={refreshingArxiv}
+								refreshedArxiv={isHubArxivRefreshed}
+								refreshingVenue={refreshingVenue}
+								refreshedVenue={isHubVenueRefreshed}
+								refreshingCategories={refreshingCategories}
+								refreshedCategories={refreshedCategories}
+								refreshingVenueIds={activeRefreshingVenueIds}
+								refreshedVenueIds={refreshedVenueIds}
+								onRefreshArxiv={() => {
+									if (seedBusy || showSeedOverlay) return;
+									setPendingRefresh({ scope: "arxiv" });
+								}}
+								onRefreshVenue={() => {
+									if (seedBusy || showSeedOverlay) return;
+									setPendingRefresh({ scope: "venue" });
+								}}
+								onEnterArxiv={handleEnterArxiv}
+								onEnterVenue={handleEnterVenue}
+							/>
+						</div>
+						<CollectionSeedOverlay open={showSeedOverlay} />
 					</div>
 				</>
 			) : (
@@ -966,6 +1023,8 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 								<CollectionConfigPopover
 									arxivCategories={summary.categories}
 									venues={summary.venues}
+									disabled={showSeedOverlay}
+									destructiveDisabled={seedBusy}
 									onChangeCategories={handleCategoriesChange}
 									onChangeVenues={handleVenuesChange}
 									onRemoveVenue={handleRemoveVenue}
@@ -977,7 +1036,9 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 											type="button"
 											variant="ghost"
 											size="icon-sm"
-											disabled={isCurrentViewRefreshing}
+											disabled={
+												isCurrentViewRefreshing || seedBusy || showSeedOverlay
+											}
 											onClick={handleScopedListRefresh}
 											aria-label={scopedRefreshLabel}
 											className={cn(
@@ -985,7 +1046,7 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 												COLLECTION_ICON_BTN_CLASS,
 											)}
 										>
-											{isCurrentViewRefreshing ? (
+											{isCurrentViewRefreshing || seedBusy ? (
 												<Loader2 className="size-3.5 animate-spin text-brand" />
 											) : isCurrentViewRefreshed ? (
 												<>
@@ -1118,127 +1179,145 @@ export function PlazaCollectionView({ className }: { className?: string }) {
 					</div>
 
 					{/* Main Paper List (50 initial, +50 per Load More from SQLite) */}
-					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto p-3">
-						{(isCurrentViewRefreshing || loadingPage) &&
-						pageItems.length === 0 ? (
-							<div className="grid gap-2.5" data-collection-list-skeleton>
-								{SKELETON_CARD_KEYS.map((key) => (
-									<CollectionPaperCardSkeleton key={key} />
-								))}
-							</div>
-						) : pageItems.length === 0 ? (
-							<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
-								<p className="text-muted-foreground text-xs">
-									{summary.totalCount === 0
-										? t("plaza.collection.empty")
-										: t("plaza.collection.emptyFiltered")}
-								</p>
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									disabled={isCurrentViewRefreshing}
-									onClick={handleScopedListRefresh}
-									className={COLLECTION_OUTLINE_BTN_CLASS}
-								>
-									{isCurrentViewRefreshing ? (
-										<Loader2 className="size-3.5 animate-spin text-brand" />
-									) : isCurrentViewRefreshed ? (
-										<Check className="size-3.5 text-emerald-500" />
-									) : (
-										<RefreshCw className="size-3.5" />
-									)}
-									{scopedRefreshLabel}
-								</Button>
-							</div>
-						) : (
-							<div className="grid gap-2.5">
-								{pageItems.map((paper) => (
-									<CollectionPaperCard
-										key={paper.id}
-										paper={paper}
-										orderedCategories={summary.categories}
-										selected={selectedIds.has(paper.id)}
-										imported={checkPaperImported(paper, importedIds)}
-										onToggleSelect={toggleSelect}
-										onImport={handleImportSinglePaper}
-										onOpenDetail={handleOpenDetailPaper}
-										onJumpToVenue={handleJumpToLinkedVenue}
-										onOpenLinkedArxiv={handleOpenLinkedArxiv}
-									/>
-								))}
-
-								{/* Paginated Footer (+50 per click) */}
-								<div className="flex flex-col items-center justify-center gap-2 py-3">
-									{pageHasMore && pageItems.length < pageTotal ? (
-										<Button
-											type="button"
-											variant="outline"
-											size="sm"
-											disabled={loadingMorePage || loadingPage}
-											onClick={() => void handleLoadMorePage()}
-											className={cn(
-												"h-8 gap-1.5 px-4 text-xs",
-												COLLECTION_OUTLINE_BTN_CLASS,
-											)}
-										>
-											{loadingMorePage ? (
-												<Loader2 className="size-3.5 animate-spin" />
-											) : (
-												<ChevronDown className="size-3.5" />
-											)}
-											<span>
-												{t("plaza.collection.loadMoreStep", {
-													step: Math.min(
-														LOAD_MORE_STEP,
-														Math.max(1, pageTotal - pageItems.length),
-													),
-													shown: pageItems.length,
-													total: pageTotal,
-												})}
-											</span>
-										</Button>
-									) : (
-										<div className="flex flex-wrap items-center justify-center gap-2">
-											<span className="text-muted-foreground text-xs tabular-nums">
-												{t("plaza.collection.showingAll", {
-													total: Math.max(pageTotal, pageItems.length),
-												})}
-											</span>
-											{activeSource === "arxiv" &&
-											timeRange === "all" &&
-											!isActiveArxivHistoryComplete ? (
-												<Button
-													type="button"
-													variant="outline"
-													size="sm"
-													disabled={loadingMoreRemote || refreshingArxiv}
-													onClick={() => void handlePullDeeperRemoteArxiv()}
-													className={cn(
-														"h-7 gap-1.5 text-xs",
-														COLLECTION_OUTLINE_BTN_CLASS,
-													)}
-												>
-													{loadingMoreRemote ? (
-														<>
-															<Loader2 className="size-3.5 animate-spin" />
-															<span>
-																{t("plaza.collection.loadingMoreArxiv")}
-															</span>
-														</>
-													) : (
-														<>
-															<RefreshCw className="size-3.5" />
-															<span>{t("plaza.collection.loadMoreArxiv")}</span>
-														</>
-													)}
-												</Button>
-											) : null}
-										</div>
-									)}
+					<div className="relative min-h-0 flex-1 overflow-hidden">
+						<div
+							data-seed-blur-backdrop={showSeedOverlay ? "" : undefined}
+							aria-hidden={showSeedOverlay || undefined}
+							inert={showSeedOverlay || undefined}
+							className={cn(
+								"agentero-scroll h-full overflow-y-auto p-3 transition-[filter,opacity] duration-200 motion-reduce:transition-none",
+								showSeedOverlay &&
+									"pointer-events-none select-none opacity-60 blur-[3px]",
+							)}
+						>
+							{(isCurrentViewRefreshing || loadingPage) &&
+							pageItems.length === 0 ? (
+								<div className="grid gap-2.5" data-collection-list-skeleton>
+									{SKELETON_CARD_KEYS.map((key) => (
+										<CollectionPaperCardSkeleton key={key} />
+									))}
 								</div>
-							</div>
-						)}
+							) : pageItems.length === 0 ? (
+								<div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
+									<p className="text-muted-foreground text-xs">
+										{summary.totalCount === 0
+											? t("plaza.collection.empty")
+											: t("plaza.collection.emptyFiltered")}
+									</p>
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										disabled={
+											isCurrentViewRefreshing || seedBusy || showSeedOverlay
+										}
+										onClick={handleScopedListRefresh}
+										className={COLLECTION_OUTLINE_BTN_CLASS}
+									>
+										{isCurrentViewRefreshing || seedBusy ? (
+											<Loader2 className="size-3.5 animate-spin text-brand" />
+										) : isCurrentViewRefreshed ? (
+											<Check className="size-3.5 text-emerald-500" />
+										) : (
+											<RefreshCw className="size-3.5" />
+										)}
+										{scopedRefreshLabel}
+									</Button>
+								</div>
+							) : (
+								<div className="grid gap-2.5">
+									{pageItems.map((paper) => (
+										<CollectionPaperCard
+											key={paper.id}
+											paper={paper}
+											orderedCategories={summary.categories}
+											selected={selectedIds.has(paper.id)}
+											imported={checkPaperImported(paper, importedIds)}
+											onToggleSelect={toggleSelect}
+											onImport={handleImportSinglePaper}
+											onOpenDetail={handleOpenDetailPaper}
+											onJumpToVenue={handleJumpToLinkedVenue}
+											onOpenLinkedArxiv={handleOpenLinkedArxiv}
+										/>
+									))}
+
+									{/* Paginated Footer (+50 per click) */}
+									<div className="flex flex-col items-center justify-center gap-2 py-3">
+										{pageHasMore && pageItems.length < pageTotal ? (
+											<Button
+												type="button"
+												variant="outline"
+												size="sm"
+												disabled={loadingMorePage || loadingPage}
+												onClick={() => void handleLoadMorePage()}
+												className={cn(
+													"h-8 gap-1.5 px-4 text-xs",
+													COLLECTION_OUTLINE_BTN_CLASS,
+												)}
+											>
+												{loadingMorePage ? (
+													<Loader2 className="size-3.5 animate-spin" />
+												) : (
+													<ChevronDown className="size-3.5" />
+												)}
+												<span>
+													{t("plaza.collection.loadMoreStep", {
+														step: Math.min(
+															LOAD_MORE_STEP,
+															Math.max(1, pageTotal - pageItems.length),
+														),
+														shown: pageItems.length,
+														total: pageTotal,
+													})}
+												</span>
+											</Button>
+										) : (
+											<div className="flex flex-wrap items-center justify-center gap-2">
+												<span className="text-muted-foreground text-xs tabular-nums">
+													{t("plaza.collection.showingAll", {
+														total: Math.max(pageTotal, pageItems.length),
+													})}
+												</span>
+												{activeSource === "arxiv" &&
+												timeRange === "all" &&
+												!isActiveArxivHistoryComplete ? (
+													<Button
+														type="button"
+														variant="outline"
+														size="sm"
+														disabled={
+															loadingMoreRemote || refreshingArxiv || seedBusy
+														}
+														onClick={() => void handlePullDeeperRemoteArxiv()}
+														className={cn(
+															"h-7 gap-1.5 text-xs",
+															COLLECTION_OUTLINE_BTN_CLASS,
+														)}
+													>
+														{loadingMoreRemote ? (
+															<>
+																<Loader2 className="size-3.5 animate-spin" />
+																<span>
+																	{t("plaza.collection.loadingMoreArxiv")}
+																</span>
+															</>
+														) : (
+															<>
+																<RefreshCw className="size-3.5" />
+																<span>
+																	{t("plaza.collection.loadMoreArxiv")}
+																</span>
+															</>
+														)}
+													</Button>
+												) : null}
+											</div>
+										)}
+									</div>
+								</div>
+							)}
+						</div>
+						<CollectionSeedOverlay open={showSeedOverlay} />
 					</div>
 				</>
 			)}
@@ -1531,12 +1610,16 @@ function parseTracksInput(raw: string): string[] {
 function CollectionConfigPopover({
 	arxivCategories,
 	venues,
+	disabled = false,
+	destructiveDisabled = false,
 	onChangeCategories,
 	onChangeVenues,
 	onRemoveVenue,
 }: {
 	arxivCategories: string[];
 	venues: VenueConfig[];
+	disabled?: boolean;
+	destructiveDisabled?: boolean;
 	onChangeCategories: (next: string[]) => void;
 	onChangeVenues: (next: VenueConfig[]) => void;
 	onRemoveVenue: (venueId: string) => void;
@@ -1653,6 +1736,7 @@ function CollectionConfigPopover({
 							type="button"
 							variant="ghost"
 							size="icon-sm"
+							disabled={disabled}
 							aria-label={t("plaza.collection.configureSources")}
 							className={COLLECTION_ICON_BTN_CLASS}
 						>
@@ -1757,11 +1841,13 @@ function CollectionConfigPopover({
 									</button>
 									<button
 										type="button"
+										disabled={destructiveDisabled}
 										onClick={() => {
+											if (destructiveDisabled) return;
 											if (editingVenueId === v.id) resetVenueForm();
 											onRemoveVenue(v.id);
 										}}
-										className="text-muted-foreground hover:text-destructive"
+										className="text-muted-foreground hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
 										aria-label={t("plaza.feeds.remove")}
 									>
 										<Trash2 className="size-3" />

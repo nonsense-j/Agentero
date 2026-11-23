@@ -96,6 +96,7 @@ export function CollectionPortalHub({
 	categoryCounts,
 	arxivWatermarks,
 	preloadingArxiv = false,
+	seedSyncing = false,
 	refreshingArxiv = false,
 	refreshedArxiv = false,
 	refreshingVenue = false,
@@ -118,6 +119,7 @@ export function CollectionPortalHub({
 	categoryCounts: Readonly<Record<string, number>>;
 	arxivWatermarks?: Record<string, ArxivCategoryWatermark>;
 	preloadingArxiv?: boolean;
+	seedSyncing?: boolean;
 	refreshingArxiv?: boolean;
 	refreshedArxiv?: boolean;
 	refreshingVenue?: boolean;
@@ -186,12 +188,12 @@ export function CollectionPortalHub({
 									type="button"
 									variant="ghost"
 									size="icon-sm"
-									disabled={refreshingArxiv}
+									disabled={refreshingArxiv || seedSyncing}
 									onClick={onRefreshArxiv}
 									aria-label={`${t("plaza.collection.refresh")} · arXiv`}
 									className={`group/refresh-btn ${HUB_ICON_BTN_CLASS}`}
 								>
-									{refreshingArxiv ? (
+									{refreshingArxiv || seedSyncing ? (
 										<Loader2 className="size-3.5 animate-spin text-brand" />
 									) : refreshedArxiv ? (
 										<>
@@ -298,12 +300,12 @@ export function CollectionPortalHub({
 									type="button"
 									variant="ghost"
 									size="icon-sm"
-									disabled={refreshingVenue}
+									disabled={refreshingVenue || seedSyncing}
 									onClick={onRefreshVenue}
 									aria-label={`${t("plaza.collection.refresh")} · ${t("plaza.collection.source.venue")}`}
 									className={`group/refresh-btn ${HUB_ICON_BTN_CLASS}`}
 								>
-									{refreshingVenue ? (
+									{refreshingVenue || seedSyncing ? (
 										<Loader2 className="size-3.5 animate-spin text-brand" />
 									) : refreshedVenue ? (
 										<>

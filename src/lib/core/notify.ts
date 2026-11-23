@@ -186,7 +186,7 @@ export function setNetworkFailureReporter(fn: (() => void) | null): void {
 	networkFailureReporter = fn;
 }
 
-function reportNetworkFailureIfLikely(
+export function reportNetworkFailureIfLikely(
 	message: string,
 	description?: string,
 ): void {

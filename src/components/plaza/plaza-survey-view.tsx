@@ -30,10 +30,12 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useStore } from "zustand";
 import {
 	PlazaCollectionIcon,
 	PlazaSurveyIcon,
 } from "@/components/icons/plaza-icons";
+import { CollectionSeedStatusBanner } from "@/components/plaza/collection-seed-overlay";
 import { SurveyAgentPicker } from "@/components/plaza/survey-agent-picker";
 import { SurveyPaperPicker } from "@/components/plaza/survey-paper-picker";
 import {
@@ -63,8 +65,10 @@ import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import { cn } from "@/lib/core/utils";
 import {
+	collectionSeedStore,
 	ensureCollectionSummaryHydrated,
 	getCollectionSummarySnapshot,
+	shouldShowCollectionSeedOverlay,
 	subscribeCollectionSummary,
 } from "@/lib/plaza/collection";
 import {
@@ -231,6 +235,15 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 		subscribeCollectionSummary,
 		getCollectionSummarySnapshot,
 	);
+	const seedPhase = useStore(collectionSeedStore, (s) => s.phase);
+	const seedSessionDismissed = useStore(
+		collectionSeedStore,
+		(s) => s.sessionDismissed,
+	);
+	const showSeedBanner = shouldShowCollectionSeedOverlay(summary, {
+		phase: seedPhase,
+		sessionDismissed: seedSessionDismissed,
+	});
 
 	const [topic, setTopic] = useState(lastDraft.topic);
 	const [format, setFormat] = useState<SurveyFormat>(lastDraft.format);
@@ -491,9 +504,11 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 								)}
 								{t("plaza.survey.start")}
 							</Button>
-							{summary.hydrated &&
-							!summary.preloading &&
-							summary.totalCount === 0 ? (
+							{showSeedBanner ? (
+								<CollectionSeedStatusBanner compact />
+							) : summary.hydrated &&
+								!summary.preloading &&
+								summary.totalCount === 0 ? (
 								<p className="text-[0.6875rem] text-muted-foreground leading-snug">
 									{t("plaza.discover.poolEmptyHint")}
 								</p>

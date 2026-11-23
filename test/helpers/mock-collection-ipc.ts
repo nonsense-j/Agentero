@@ -1166,6 +1166,14 @@ export function installMockCollectionIpc(initial?: MockCollectionDbSeed) {
 			}),
 
 		vi
+			.spyOn(commands, "plazaCollectionSeedCancel")
+			.mockImplementation(async () => ({
+				ok: true,
+				data: true,
+				error: null,
+			})),
+
+		vi
 			.spyOn(commands, "plazaCollectionBackfillRefs")
 			.mockImplementation(async () => ({
 				ok: true,
