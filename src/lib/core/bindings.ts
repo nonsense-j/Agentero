@@ -499,8 +499,16 @@ export const commands = {
 	plazaCollectionPaperLineage: (args: CollectionPaperLineageArgs) => __TAURI_INVOKE<ApiResult<CollectionPaperLineageOut_Serialize>>("plaza_collection_paper_lineage", { args }),
 	/**  Resolve direct citation edges, shared-reference edges, and unexpanded pool neighbor counts across a set of paper IDs. */
 	plazaCollectionSubgraph: (args: CollectionSubgraphArgs) => __TAURI_INVOKE<ApiResult<CollectionSubgraphOut>>("plaza_collection_subgraph", { args }),
-	/**  Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path). */
+	/**
+	 *  Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path),
+	 *  emitting throttled `plaza-collection:seed-progress` events across fetch, download, import, and indexing phases.
+	 */
 	plazaCollectionSeedSync: (args: CollectionSeedSyncArgs) => __TAURI_INVOKE<ApiResult<CollectionSeedSyncOut>>("plaza_collection_seed_sync", { args }),
+	/**
+	 *  Cancel an in-flight Paper Collection seed sync, preserving partial `.part` download files for resume
+	 *  and atomically rolling back any uncommitted SQLite import transaction.
+	 */
+	plazaCollectionSeedCancel: () => __TAURI_INVOKE<ApiResult<boolean>>("plaza_collection_seed_cancel"),
 	/**
 	 *  Backfill missing OpenAlex `raw_refs` locally using the unified TTL/age policy
 	 *  (arXiv-only: 7d TTL & <=60d old; Venue: 14d TTL, no age cutoff) and recompute citations.
@@ -752,6 +760,7 @@ export const events = {
 	paperAssetsReady: makeEvent<PaperAssetsReadyEvent>("paper:assets-ready"),
 	paperImported: makeEvent<PaperImportedEvent>("paper:imported"),
 	paperRenamed: makeEvent<PaperRenamedEventPayload>("paper:renamed"),
+	plazaCollectionSeedProgress: makeEvent<PlazaCollectionSeedProgressEvent>("plaza-collection:seed-progress"),
 	settingsChanged: makeEvent<SettingsChangedEvent_Deserialize>("settings:changed"),
 	settingsSectionRequested: makeEvent<SettingsSectionRequestedEvent>("settings:section-requested"),
 	syncProgress: makeEvent<SyncProgressEvent>("sync:progress"),
@@ -2841,6 +2850,22 @@ export type CollectionSearchResult_Serialize = {
 	totalMatched: number,
 };
 
+/**
+ *  Real-time progress snapshot emitted on `plaza-collection:seed-progress`.
+ *  `shard_index` is 1-based during active shard work (`0` during `fetching_manifest`).
+ */
+export type CollectionSeedProgress = {
+	phase: CollectionSeedSyncPhase,
+	shardIndex: number,
+	shardCount: number,
+	downloadedBytes: number,
+	totalBytes: number | null,
+	bytesPerSec: number | null,
+	importedPapers: number,
+	totalPapers: number,
+	error: string | null,
+};
+
 export type CollectionSeedSyncArgs = {
 	manifestUrl?: string | null,
 	force?: boolean | null,
@@ -2852,6 +2877,9 @@ export type CollectionSeedSyncOut = {
 	importedPapers: number,
 	skipped: boolean,
 };
+
+/**  Coarse lifecycle phase of a Collection seed sync run. */
+export type CollectionSeedSyncPhase = "fetching_manifest" | "downloading" | "importing" | "indexing" | "done" | "skipped" | "error" | "cancelled";
 
 export type CollectionSharedRefEdgeDto = {
 	sourceId: string,
@@ -4933,6 +4961,8 @@ export type PiProjectTrustStatus = {
 	 */
 	trusted: boolean,
 };
+
+export type PlazaCollectionSeedProgressEvent = CollectionSeedProgress;
 
 /**  Per-id outcome: one failed paper never blocks the rest of the turn. */
 export type PlazaScratchEntry = {

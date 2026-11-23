@@ -300,6 +300,12 @@ pub struct PaperRenamedEventPayload {
     pub timestamp: i64,
 }
 
+#[derive(specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "plaza-collection:seed-progress")]
+pub struct PlazaCollectionSeedProgressEvent(
+    pub agentero_core::features::paper::discovery::collection::CollectionSeedProgress,
+);
+
 /// Anti-drift: event names registered here must equal the literals/constants
 /// used by the emit sites.
 #[test]
@@ -350,6 +356,10 @@ fn event_names_match_emit_literals() {
     assert_eq!(
         McpStatusEvent::NAME,
         crate::integration::mcp::MCP_STATUS_EVENT
+    );
+    assert_eq!(
+        PlazaCollectionSeedProgressEvent::NAME,
+        agentero_core::features::paper::discovery::collection::COLLECTION_SEED_PROGRESS_EVENT
     );
 }
 
@@ -432,6 +442,7 @@ fn registered_event_names() -> BTreeSet<String> {
         PaperImportedEvent::NAME,
         PaperAssetsReadyEvent::NAME,
         PaperRenamedEventPayload::NAME,
+        PlazaCollectionSeedProgressEvent::NAME,
     ];
     let set: BTreeSet<String> = names.iter().map(|n| n.to_string()).collect();
     assert_eq!(set.len(), names.len(), "duplicate NAME in registered list");

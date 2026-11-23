@@ -845,7 +845,8 @@ fn dedupe_candidates_prefer_venue(
             let ph = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut sql_where = format!("{v_where} AND p.title_norm IN ({ph})");
+            let mut sql_where =
+                format!("{v_where} AND p.title_norm != '' AND p.title_norm IN ({ph})");
             let mut b = v_binds.clone();
             for t in chunk {
                 b.push((*t).clone().into());
@@ -1015,7 +1016,7 @@ pub(crate) fn enrich_venue_summaries_from_arxiv_conn(
             .join(", ");
         let sql = format!(
             "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
-             WHERE p.source_type = 'arxiv' AND p.title_norm IN ({ph})"
+             WHERE p.source_type = 'arxiv' AND p.title_norm != '' AND p.title_norm IN ({ph})"
         );
         let binds: Vec<rusqlite::types::Value> =
             chunk.iter().map(|s| (*s).clone().into()).collect();
@@ -1560,7 +1561,7 @@ pub(crate) fn curate_collection_conn(
                 .join(", ");
             let sql = format!(
                 "SELECT {PAPER_SUMMARY_SELECT_COLS} FROM papers p \
-                 WHERE p.source_type = 'venue' AND p.title_norm IN ({ph})"
+                 WHERE p.source_type = 'venue' AND p.title_norm != '' AND p.title_norm IN ({ph})"
             );
             let binds: Vec<rusqlite::types::Value> =
                 chunk.iter().map(|s| (*s).clone().into()).collect();

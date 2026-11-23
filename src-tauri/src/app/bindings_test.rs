@@ -181,6 +181,7 @@ pub(crate) fn export_typescript_bindings() {
             crate::features::paper::discovery::collection_commands::plaza_collection_paper_lineage,
             crate::features::paper::discovery::collection_commands::plaza_collection_subgraph,
             crate::features::paper::discovery::collection_commands::plaza_collection_seed_sync,
+            crate::features::paper::discovery::collection_commands::plaza_collection_seed_cancel,
             crate::features::paper::discovery::collection_commands::plaza_collection_backfill_refs,
             crate::features::paper::discovery::feeds::commands::feeds_set_pinned,
             crate::features::paper::discovery::feeds::commands::feeds_resolve_body,
@@ -290,6 +291,7 @@ pub(crate) fn export_typescript_bindings() {
             crate::app::events_contract::PaperImportedEvent,
             crate::app::events_contract::PaperAssetsReadyEvent,
             crate::app::events_contract::PaperRenamedEventPayload,
+            crate::app::events_contract::PlazaCollectionSeedProgressEvent,
         ])
         // Tauri IPC serializes `i64`/`u64`/`usize` through serde_json as JSON
         // numbers, which the frontend already parses as JS `number` via the

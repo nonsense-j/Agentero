@@ -82,6 +82,11 @@ pub fn configure_proxy(enabled: bool, url: &str) -> Result<(), AppError> {
             *cached = None;
         }
     }
+    if let Some(slot) = SYSTEM_PROXY.get() {
+        if let Ok(mut cached) = slot.write() {
+            *cached = (None, None);
+        }
+    }
     Ok(())
 }
 
@@ -89,35 +94,153 @@ fn cached_slot() -> &'static RwLock<Option<CachedClient>> {
     SHARED_CLIENT.get_or_init(|| RwLock::new(None))
 }
 
-/// The Windows system proxy selected by Agentero's fallback policy.
+fn parse_env_proxy_value(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = with_proxy_scheme(trimmed, "http");
+    reqwest::Proxy::all(&normalized).ok()?;
+    Some(normalized)
+}
+
+fn env_proxy_url() -> Option<String> {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            if let Some(parsed) = parse_env_proxy_value(&val) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn windows_wininet_proxy_url() -> Option<String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            KEY_READ,
+        )
+        .ok()?;
+    let enabled: u32 = key.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let server: String = key.get_value("ProxyServer").ok()?;
+    parse_windows_proxy_server(&server)
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn parse_macos_scutil_proxy(output: &str) -> Option<String> {
+    let mut http_enabled = false;
+    let mut http_host: Option<&str> = None;
+    let mut http_port: Option<&str> = None;
+    let mut https_enabled = false;
+    let mut https_host: Option<&str> = None;
+    let mut https_port: Option<&str> = None;
+    let mut socks_enabled = false;
+    let mut socks_host: Option<&str> = None;
+    let mut socks_port: Option<&str> = None;
+
+    for line in output.lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        match k {
+            "HTTPEnable" => http_enabled = v == "1",
+            "HTTPProxy" => http_host = Some(v),
+            "HTTPPort" => http_port = Some(v),
+            "HTTPSEnable" => https_enabled = v == "1",
+            "HTTPSProxy" => https_host = Some(v),
+            "HTTPSPort" => https_port = Some(v),
+            "SOCKSEnable" => socks_enabled = v == "1",
+            "SOCKSProxy" => socks_host = Some(v),
+            "SOCKSPort" => socks_port = Some(v),
+            _ => {}
+        }
+    }
+
+    let format_host_port = |scheme: &str, host: &str, port: Option<&str>| -> Option<String> {
+        let addr = match port.filter(|p| !p.is_empty() && *p != "0") {
+            Some(p) => format!("{host}:{p}"),
+            None => host.to_string(),
+        };
+        let url = with_proxy_scheme(&addr, scheme);
+        reqwest::Proxy::all(&url).ok()?;
+        Some(url)
+    };
+
+    if http_enabled {
+        if let Some(h) = http_host {
+            if let Some(url) = format_host_port("http", h, http_port) {
+                return Some(url);
+            }
+        }
+    }
+    if https_enabled {
+        if let Some(h) = https_host {
+            if let Some(url) = format_host_port("http", h, https_port) {
+                return Some(url);
+            }
+        }
+    }
+    if socks_enabled {
+        if let Some(h) = socks_host {
+            if let Some(url) = format_host_port("socks5h", h, socks_port) {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_scutil_proxy_url() -> Option<String> {
+    let output = std::process::Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    parse_macos_scutil_proxy(&text)
+}
+
+/// The OS / environment proxy selected by Agentero's fallback policy.
 ///
 /// Reqwest 0.12 also offers native discovery through `system-proxy`, but its
 /// matcher does not expose the selected URL for settings or child processes.
 /// Keep this small adapter for those consumers and our dynamic TTL; delegate
-/// URL validation and HTTP routing to `reqwest::Proxy::all`. Enabling native
-/// discovery here would also change macOS and per-scheme bypass behavior.
+/// URL validation and HTTP routing to `reqwest::Proxy::all`.
 pub fn system_proxy_url() -> Option<String> {
     #[cfg(windows)]
     {
-        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
-        use winreg::RegKey;
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let key = hkcu
-            .open_subkey_with_flags(
-                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                KEY_READ,
-            )
-            .ok()?;
-        let enabled: u32 = key.get_value("ProxyEnable").ok()?;
-        if enabled == 0 {
-            return None;
-        }
-        let server: String = key.get_value("ProxyServer").ok()?;
-        parse_windows_proxy_server(&server)
+        windows_wininet_proxy_url().or_else(env_proxy_url)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        None
+        macos_scutil_proxy_url().or_else(env_proxy_url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        env_proxy_url()
     }
 }
 
@@ -458,5 +581,76 @@ mod tests {
         assert!(!is_direct_github_api_url(
             "https://codeload.github.com/o/r/tar.gz/main"
         ));
+    }
+
+    #[test]
+    fn configure_proxy_clears_system_proxy_cache() {
+        let slot = SYSTEM_PROXY.get_or_init(|| RwLock::new((None, None)));
+        {
+            let mut guard = slot.write().unwrap();
+            *guard = (
+                Some("http://127.0.0.1:7890".to_string()),
+                Some(Instant::now()),
+            );
+        }
+        configure_proxy(false, "").expect("disable proxy");
+        let guard = slot.read().unwrap();
+        assert!(guard.0.is_none());
+        assert!(guard.1.is_none());
+    }
+
+    #[test]
+    fn parses_env_proxy_values() {
+        assert_eq!(
+            parse_env_proxy_value("  http://127.0.0.1:7890 ").as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            parse_env_proxy_value("127.0.0.1:7890").as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            parse_env_proxy_value("socks5h://127.0.0.1:1080").as_deref(),
+            Some("socks5h://127.0.0.1:1080")
+        );
+        assert_eq!(parse_env_proxy_value("   "), None);
+    }
+
+    #[test]
+    fn parses_macos_scutil_proxy_output() {
+        let sample = "\
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+}
+";
+        assert_eq!(
+            parse_macos_scutil_proxy(sample).as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        let socks_only = "\
+<dictionary> {
+  HTTPEnable : 0
+  SOCKSEnable : 1
+  SOCKSPort : 1080
+  SOCKSProxy : 127.0.0.1
+}
+";
+        assert_eq!(
+            parse_macos_scutil_proxy(socks_only).as_deref(),
+            Some("socks5h://127.0.0.1:1080")
+        );
+        let disabled = "\
+<dictionary> {
+  HTTPEnable : 0
+  HTTPSEnable : 0
+  SOCKSEnable : 0
+}
+";
+        assert_eq!(parse_macos_scutil_proxy(disabled), None);
     }
 }

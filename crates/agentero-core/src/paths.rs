@@ -90,6 +90,12 @@ pub fn collection_db_path() -> PathBuf {
     agentero_data_dir().join("collection.sqlite")
 }
 
+/// Resumable `.part` download cache for Collection seed shards:
+/// `…/agentero/collection-seed`.
+pub fn collection_seed_cache_dir() -> PathBuf {
+    agentero_cache_dir().join("collection-seed")
+}
+
 /// App settings file: `…/agentero/settings.json`.
 pub fn settings_path() -> PathBuf {
     agentero_config_dir().join("settings.json")

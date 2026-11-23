@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 # (import mutexes, PDF worker subprocess, download/parse timeouts);
 # `macros` for join!/select! in import assets, parse and title_search.
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 dirs = { workspace = true }
 dunce = "1.0.5"
 log = { workspace = true }

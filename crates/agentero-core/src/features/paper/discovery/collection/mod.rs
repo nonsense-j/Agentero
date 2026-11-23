@@ -36,11 +36,13 @@ pub use search::{
     curate_collection_at, overview, overview_at, search_collection_at, search_fast, search_fast_at,
 };
 pub use seed::{
-    backfill_missing_refs, backfill_missing_refs_at, seed_bake_at, seed_sync, seed_sync_at,
-    SeedBakeOptions, SeedBakeReport, SeedManifest, SeedPaperRecord, SeedShardEntry,
-    ARXIV_OA_REFS_CHECK_TTL_DAYS, ARXIV_OA_REFS_MAX_AGE_DAYS, DEFAULT_BAKE_LLM_BASE_URL,
-    DEFAULT_BAKE_LLM_BATCH_SIZE, DEFAULT_BAKE_LLM_CONCURRENCY, DEFAULT_BAKE_LLM_MODEL,
-    DEFAULT_BAKE_LLM_RPM, DEFAULT_SEED_MANIFEST_URL, VENUE_OA_REFS_CHECK_TTL_DAYS,
+    backfill_missing_refs, backfill_missing_refs_at, cancel_seed_sync, cancel_seed_sync_at,
+    seed_bake_at, seed_sync, seed_sync_at, seed_sync_at_with_progress, seed_sync_with_progress,
+    SeedBakeOptions, SeedBakeReport, SeedManifest, SeedPaperRecord, SeedProgressCallback,
+    SeedShardEntry, ARXIV_OA_REFS_CHECK_TTL_DAYS, ARXIV_OA_REFS_MAX_AGE_DAYS,
+    DEFAULT_BAKE_LLM_BASE_URL, DEFAULT_BAKE_LLM_BATCH_SIZE, DEFAULT_BAKE_LLM_CONCURRENCY,
+    DEFAULT_BAKE_LLM_MODEL, DEFAULT_BAKE_LLM_RPM, DEFAULT_SEED_MANIFEST_URL,
+    VENUE_OA_REFS_CHECK_TTL_DAYS,
 };
 pub use store::{
     clear_collection, clear_collection_at, config_update, config_update_at,

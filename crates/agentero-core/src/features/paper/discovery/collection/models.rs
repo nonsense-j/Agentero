@@ -641,6 +641,39 @@ pub struct CollectionSubgraphOut {
     pub unexpanded_counts: HashMap<String, u32>,
 }
 
+/// Wire event name emitted during `plaza_collection_seed_sync`.
+pub const COLLECTION_SEED_PROGRESS_EVENT: &str = "plaza-collection:seed-progress";
+
+/// Coarse lifecycle phase of a Collection seed sync run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionSeedSyncPhase {
+    FetchingManifest,
+    Downloading,
+    Importing,
+    Indexing,
+    Done,
+    Skipped,
+    Error,
+    Cancelled,
+}
+
+/// Real-time progress snapshot emitted on `plaza-collection:seed-progress`.
+/// `shard_index` is 1-based during active shard work (`0` during `fetching_manifest`).
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSeedProgress {
+    pub phase: CollectionSeedSyncPhase,
+    pub shard_index: usize,
+    pub shard_count: usize,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub bytes_per_sec: Option<u64>,
+    pub imported_papers: usize,
+    pub total_papers: usize,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionSeedSyncArgs {

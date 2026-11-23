@@ -11,7 +11,8 @@ use agentero_core::features::paper::discovery::collection::{
     RecommendNextOut, RecommendPoolStateDto, RecommendPoolStateInput, WordCloudOut,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::error::{map_err, ApiResult, AppError};
 use crate::features::system::settings::AppSettingsStore;
@@ -209,16 +210,30 @@ pub async fn plaza_collection_subgraph(
     .await
 }
 
-/// Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path).
+/// Stream-import static/delta Paper Collection seed shards from GitHub Releases (or a custom manifest URL/path),
+/// emitting throttled `plaza-collection:seed-progress` events across fetch, download, import, and indexing phases.
 #[tauri::command]
 #[specta::specta]
 pub async fn plaza_collection_seed_sync(
+    app: AppHandle,
     args: CollectionSeedSyncArgs,
 ) -> ApiResult<CollectionSeedSyncOut> {
-    match collection::seed_sync(args).await {
+    let app_emit = app.clone();
+    let on_progress: collection::SeedProgressCallback = Arc::new(move |progress| {
+        let _ = app_emit.emit(collection::COLLECTION_SEED_PROGRESS_EVENT, progress);
+    });
+    match collection::seed_sync_with_progress(args, Some(on_progress)).await {
         Ok(value) => ApiResult::ok(value),
         Err(err) => map_err(err),
     }
+}
+
+/// Cancel an in-flight Paper Collection seed sync, preserving partial `.part` download files for resume
+/// and atomically rolling back any uncommitted SQLite import transaction.
+#[tauri::command]
+#[specta::specta]
+pub async fn plaza_collection_seed_cancel() -> ApiResult<bool> {
+    ApiResult::ok(collection::cancel_seed_sync())
 }
 
 /// Backfill missing OpenAlex `raw_refs` locally using the unified TTL/age policy

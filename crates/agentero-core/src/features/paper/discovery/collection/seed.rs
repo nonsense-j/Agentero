@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
@@ -14,10 +14,12 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures_util::stream::{self, StreamExt};
 use reqwest::StatusCode;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::AppError;
 use crate::openai_compat::{
@@ -28,17 +30,20 @@ use crate::openai_compat::{
 use super::keywords::{canonicalize_keywords, normalize_keyword_key, SYNONYM_GROUPS};
 use super::models::{
     CollectionArxivWatermarkInput, CollectionBackfillRefsArgs, CollectionBackfillRefsOut,
-    CollectionPaperUpsertInput, CollectionSeedSyncArgs, CollectionSeedSyncOut,
-    CollectionVenueWatermarkUpdate,
+    CollectionPaperUpsertInput, CollectionSeedProgress, CollectionSeedSyncArgs,
+    CollectionSeedSyncOut, CollectionSeedSyncPhase, CollectionVenueWatermarkUpdate,
 };
-use super::schema::{collection_db_path, ensure_collection_at, with_collection_write_conn};
+use super::schema::{
+    collection_db_path, ensure_collection_at, normalize_write_lock_key, with_collection_write_conn,
+};
 use super::store::{
     apply_venue_watermark_update_tx, build_keywords_text, clean_arxiv_key, clean_doi_key,
     clean_openalex_id, clean_opt_str, clean_publisher_doi, clean_string_vec,
     insert_work_raw_refs_tx, is_artifact_or_dataset_doi, is_publisher_doi, load_enabled_categories,
     newer_refs_checked_at, norm_title_key, normalize_ref_key, normalize_refs_checked_at,
     now_rfc3339, read_state_summary_conn, recompute_graph_and_citations_tx,
-    same_work_by_title_and_authors, upsert_arxiv_watermarks_tx, upsert_single_paper_tx,
+    same_work_by_title_and_authors, upsert_arxiv_watermarks_tx,
+    upsert_single_paper_with_options_tx,
 };
 
 pub const DEFAULT_SEED_MANIFEST_URL: &str =
@@ -252,9 +257,185 @@ impl From<SeedPaperRecord> for CollectionPaperUpsertInput {
 
 // ─── Client / CLI Streaming Seed Sync ───
 
+pub type SeedProgressCallback = Arc<dyn Fn(CollectionSeedProgress) + Send + Sync>;
+
+pub const SEED_SYNC_CANCELLED_CODE: &str = "seed_sync_cancelled";
+const SEED_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
+const SEED_IMPORT_CANCEL_CHECK_STRIDE: usize = 200;
+const MAX_SHARD_DOWNLOAD_RETRIES: usize = 2;
+const SHARD_RETRY_BACKOFF_SECS: [u64; 2] = [1, 3];
+const SHARD_WRITE_BUF_BYTES: usize = 256 * 1024;
+
+fn seed_sync_cancelled_err() -> AppError {
+    AppError::domain(SEED_SYNC_CANCELLED_CODE, "Collection seed sync cancelled")
+}
+
+fn is_seed_sync_cancelled(err: &AppError) -> bool {
+    err.code() == SEED_SYNC_CANCELLED_CODE
+}
+
+#[derive(Clone)]
+struct SeedSyncWatchErr {
+    domain_code: Option<&'static str>,
+    message: String,
+}
+
+impl SeedSyncWatchErr {
+    fn from_app_error(err: &AppError) -> Self {
+        let domain_code = match err {
+            AppError::Domain { code, .. } => Some(*code),
+            _ => None,
+        };
+        Self {
+            domain_code,
+            message: err.to_string(),
+        }
+    }
+
+    fn into_app_error(self) -> AppError {
+        match self.domain_code {
+            Some(code) => AppError::domain(code, self.message),
+            None => AppError::message(self.message),
+        }
+    }
+}
+
+type SeedSyncOutcome = Result<CollectionSeedSyncOut, SeedSyncWatchErr>;
+
+struct ActiveSeedSync {
+    cancel: CancellationToken,
+    done_tx: tokio::sync::watch::Sender<Option<SeedSyncOutcome>>,
+    done_rx: tokio::sync::watch::Receiver<Option<SeedSyncOutcome>>,
+}
+
+fn active_seed_syncs() -> &'static StdMutex<HashMap<PathBuf, Arc<ActiveSeedSync>>> {
+    static ACTIVE: OnceLock<StdMutex<HashMap<PathBuf, Arc<ActiveSeedSync>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+struct ActiveSeedSyncGuard {
+    key: PathBuf,
+    entry: Arc<ActiveSeedSync>,
+    published: bool,
+}
+
+impl ActiveSeedSyncGuard {
+    fn finish(mut self, outcome: SeedSyncOutcome) {
+        {
+            let mut map = active_seed_syncs()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if map
+                .get(&self.key)
+                .is_some_and(|cur| Arc::ptr_eq(cur, &self.entry))
+            {
+                map.remove(&self.key);
+            }
+        }
+        let _ = self.entry.done_tx.send(Some(outcome));
+        self.published = true;
+    }
+}
+
+impl Drop for ActiveSeedSyncGuard {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        {
+            let mut map = active_seed_syncs()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if map
+                .get(&self.key)
+                .is_some_and(|cur| Arc::ptr_eq(cur, &self.entry))
+            {
+                map.remove(&self.key);
+            }
+        }
+        let _ = self.entry.done_tx.send(Some(Err(SeedSyncWatchErr {
+            domain_code: Some(SEED_SYNC_CANCELLED_CODE),
+            message: "Collection seed sync interrupted".to_string(),
+        })));
+    }
+}
+
+/// Signal cancellation of any active Collection seed sync running against the default DB.
+/// Returns `true` if an active sync was found and signalled.
+pub fn cancel_seed_sync() -> bool {
+    cancel_seed_sync_at(&collection_db_path())
+}
+
+/// Signal cancellation of any active Collection seed sync running against `db_path`.
+/// Returns `true` if an active sync was found and signalled.
+pub fn cancel_seed_sync_at(db_path: &Path) -> bool {
+    let key = normalize_write_lock_key(db_path);
+    let entry = active_seed_syncs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .cloned();
+    if let Some(active) = entry {
+        active.cancel.cancel();
+        true
+    } else {
+        false
+    }
+}
+
+struct ProgressEmitter {
+    cb: Option<SeedProgressCallback>,
+    last_emit: Option<Instant>,
+}
+
+impl ProgressEmitter {
+    fn new(cb: Option<SeedProgressCallback>) -> Self {
+        Self {
+            cb,
+            last_emit: None,
+        }
+    }
+
+    fn emit_immediate(&mut self, progress: CollectionSeedProgress) {
+        if let Some(ref cb) = self.cb {
+            cb(progress);
+            self.last_emit = Some(Instant::now());
+        }
+    }
+
+    fn emit_throttled(&mut self, progress: CollectionSeedProgress) {
+        let should_emit = self
+            .last_emit
+            .is_none_or(|t| t.elapsed() >= SEED_PROGRESS_EMIT_INTERVAL);
+        if should_emit {
+            self.emit_immediate(progress);
+        }
+    }
+}
+
+fn progress_phase(phase: CollectionSeedSyncPhase) -> CollectionSeedProgress {
+    CollectionSeedProgress {
+        phase,
+        shard_index: 0,
+        shard_count: 0,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        bytes_per_sec: None,
+        imported_papers: 0,
+        total_papers: 0,
+        error: None,
+    }
+}
+
 enum ManifestLocation {
     Http(url::Url),
     Local(PathBuf),
+}
+
+struct PreparedShard {
+    shard: SeedShardEntry,
+    path: PathBuf,
+    delete_after_commit: bool,
 }
 
 fn parse_manifest_location(raw: &str) -> Result<ManifestLocation, AppError> {
@@ -279,30 +460,70 @@ fn parse_manifest_location(raw: &str) -> Result<ManifestLocation, AppError> {
     Ok(ManifestLocation::Local(path))
 }
 
-fn seed_manifest_http_client() -> Result<reqwest::Client, AppError> {
-    crate::http::client_builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
-        .user_agent(crate::http::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|e| AppError::message(format!("http client: {e}")))
-}
-
 fn seed_http_client() -> Result<reqwest::Client, AppError> {
     crate::http::client_builder()
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(180))
+        .read_timeout(Duration::from_secs(30))
         .user_agent(crate::http::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| AppError::message(format!("http client: {e}")))
 }
 
+fn seed_cache_dir_for(db_path: &Path) -> PathBuf {
+    if normalize_write_lock_key(db_path) == normalize_write_lock_key(&collection_db_path()) {
+        crate::paths::collection_seed_cache_dir()
+    } else {
+        db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join(".seed-cache")
+    }
+}
+
+fn parse_content_range_total(header_val: &str) -> Option<u64> {
+    let (_, total_part) = header_val.rsplit_once('/')?;
+    let trimmed = total_part.trim();
+    if trimmed == "*" || trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+fn sanitize_shard_filename(raw: &str) -> Result<&str, AppError> {
+    Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| {
+            !n.is_empty() && !n.contains('/') && !n.contains('\\') && *n != "." && *n != ".."
+        })
+        .ok_or_else(|| AppError::message(format!("invalid seed shard filename: {raw}")))
+}
+
+fn is_transient_http_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+async fn sleep_cancellable(dur: Duration, cancel: &CancellationToken) -> Result<(), AppError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(seed_sync_cancelled_err()),
+        _ = tokio::time::sleep(dur) => Ok(()),
+    }
+}
+
 async fn fetch_manifest(
+    client: &reqwest::Client,
     loc: &ManifestLocation,
     force: bool,
+    cancel: &CancellationToken,
 ) -> Result<Option<SeedManifest>, AppError> {
+    if cancel.is_cancelled() {
+        return Err(seed_sync_cancelled_err());
+    }
     match loc {
         ManifestLocation::Local(path) => {
             if !path.is_file() {
@@ -321,12 +542,13 @@ async fn fetch_manifest(
             Ok(Some(manifest))
         }
         ManifestLocation::Http(url) => {
-            let client = seed_manifest_http_client()?;
-            let resp = client
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(|e| AppError::message(format!("fetch seed manifest {url}: {e}")))?;
+            let resp = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(seed_sync_cancelled_err()),
+                res = client.get(url.clone()).timeout(Duration::from_secs(15)).send() => {
+                    res.map_err(|e| AppError::message(format!("fetch seed manifest {url}: {e}")))?
+                }
+            };
             if resp.status() == StatusCode::NOT_FOUND {
                 if !force {
                     return Ok(None);
@@ -341,10 +563,13 @@ async fn fetch_manifest(
                     resp.status()
                 )));
             }
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| AppError::message(format!("read seed manifest body: {e}")))?;
+            let bytes = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(seed_sync_cancelled_err()),
+                res = resp.bytes() => {
+                    res.map_err(|e| AppError::message(format!("read seed manifest body: {e}")))?
+                }
+            };
             let manifest: SeedManifest = serde_json::from_slice(&bytes)
                 .map_err(|e| AppError::message(format!("parse seed manifest JSON: {e}")))?;
             Ok(Some(manifest))
@@ -352,11 +577,21 @@ async fn fetch_manifest(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_or_locate_shard(
+    client: &reqwest::Client,
     loc: &ManifestLocation,
     shard: &SeedShardEntry,
-    temp_dir: &Path,
-) -> Result<PathBuf, AppError> {
+    cache_dir: &Path,
+    shard_index: usize,
+    shard_count: usize,
+    total_papers: usize,
+    cancel: &CancellationToken,
+    progress: &mut ProgressEmitter,
+) -> Result<PreparedShard, AppError> {
+    if cancel.is_cancelled() {
+        return Err(seed_sync_cancelled_err());
+    }
     match loc {
         ManifestLocation::Local(manifest_path) => {
             let parent = manifest_path.parent().unwrap_or_else(|| Path::new("."));
@@ -367,45 +602,267 @@ async fn download_or_locate_shard(
                     shard_path.display()
                 )));
             }
-            verify_file_sha256(&shard_path, &shard.sha256)?;
-            Ok(shard_path)
+            let file_len = tokio::fs::metadata(&shard_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            progress.emit_immediate(CollectionSeedProgress {
+                shard_index,
+                shard_count,
+                downloaded_bytes: file_len,
+                total_bytes: Some(file_len),
+                total_papers,
+                ..progress_phase(CollectionSeedSyncPhase::Downloading)
+            });
+            let verify_path = shard_path.clone();
+            let expected = shard.sha256.clone();
+            tokio::task::spawn_blocking(move || verify_file_sha256(&verify_path, &expected))
+                .await
+                .map_err(|e| AppError::message(format!("verify seed shard join: {e}")))??;
+            Ok(PreparedShard {
+                shard: shard.clone(),
+                path: shard_path,
+                delete_after_commit: false,
+            })
         }
         ManifestLocation::Http(manifest_url) => {
             let shard_url = manifest_url.join(&shard.filename).map_err(|e| {
                 AppError::message(format!("resolve shard url {}: {e}", shard.filename))
             })?;
-            let client = seed_http_client()?;
-            let mut resp =
-                client.get(shard_url.clone()).send().await.map_err(|e| {
-                    AppError::message(format!("download seed shard {shard_url}: {e}"))
-                })?;
-            if !resp.status().is_success() {
-                return Err(AppError::message(format!(
-                    "seed shard HTTP {} at {shard_url}",
-                    resp.status()
-                )));
+            let safe_name = sanitize_shard_filename(&shard.filename)?;
+            tokio::fs::create_dir_all(cache_dir).await?;
+            let part_path = cache_dir.join(format!("{safe_name}.part"));
+
+            // Reuse a previously verified `.part` file (e.g. cancelled during import) without re-downloading.
+            let expected_sha = shard.sha256.trim().to_ascii_lowercase();
+            if !expected_sha.is_empty() {
+                if let Ok(meta) = tokio::fs::metadata(&part_path).await {
+                    let cached_len = meta.len();
+                    if cached_len > 0 {
+                        let verify_path = part_path.clone();
+                        let sha_clone = expected_sha.clone();
+                        let verified = tokio::task::spawn_blocking(move || {
+                            verify_file_sha256(&verify_path, &sha_clone).is_ok()
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if verified {
+                            progress.emit_immediate(CollectionSeedProgress {
+                                shard_index,
+                                shard_count,
+                                downloaded_bytes: cached_len,
+                                total_bytes: Some(cached_len),
+                                total_papers,
+                                ..progress_phase(CollectionSeedSyncPhase::Downloading)
+                            });
+                            return Ok(PreparedShard {
+                                shard: shard.clone(),
+                                path: part_path,
+                                delete_after_commit: true,
+                            });
+                        }
+                    }
+                }
             }
 
-            let dest = temp_dir.join(&shard.filename);
-            let mut file = File::create(&dest)?;
-            let mut hasher = Sha256::new();
-            while let Some(chunk) = resp.chunk().await.map_err(|e| {
-                AppError::message(format!("stream seed shard {}: {e}", shard.filename))
-            })? {
-                hasher.update(&chunk);
-                file.write_all(&chunk)?;
+            let mut attempt = 0usize;
+            let mut reset_416_used = false;
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(seed_sync_cancelled_err());
+                }
+
+                let existing_len = tokio::fs::metadata(&part_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+
+                let mut req = client.get(shard_url.clone());
+                if existing_len > 0 {
+                    req = req.header(reqwest::header::RANGE, format!("bytes={existing_len}-"));
+                }
+
+                let send_res = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(seed_sync_cancelled_err()),
+                    res = req.send() => res,
+                };
+
+                let mut resp = match send_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if attempt < MAX_SHARD_DOWNLOAD_RETRIES {
+                            let wait = Duration::from_secs(SHARD_RETRY_BACKOFF_SECS[attempt]);
+                            attempt += 1;
+                            sleep_cancellable(wait, cancel).await?;
+                            continue;
+                        }
+                        return Err(AppError::message(format!(
+                            "download seed shard {shard_url}: {e}"
+                        )));
+                    }
+                };
+
+                let status = resp.status();
+                if status == StatusCode::RANGE_NOT_SATISFIABLE
+                    && existing_len > 0
+                    && !reset_416_used
+                {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    reset_416_used = true;
+                    continue;
+                }
+                if !status.is_success() {
+                    if is_transient_http_status(status) && attempt < MAX_SHARD_DOWNLOAD_RETRIES {
+                        let wait = Duration::from_secs(SHARD_RETRY_BACKOFF_SECS[attempt]);
+                        attempt += 1;
+                        sleep_cancellable(wait, cancel).await?;
+                        continue;
+                    }
+                    return Err(AppError::message(format!(
+                        "seed shard HTTP {status} at {shard_url}"
+                    )));
+                }
+
+                let resumed = status == StatusCode::PARTIAL_CONTENT && existing_len > 0;
+                let (mut downloaded_bytes, total_bytes, file) = if resumed {
+                    let total = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_content_range_total)
+                        .or_else(|| resp.content_length().map(|rem| existing_len + rem));
+                    let f = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&part_path)
+                        .await?;
+                    (existing_len, total, f)
+                } else {
+                    let total = resp.content_length();
+                    let f = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(true)
+                        .open(&part_path)
+                        .await?;
+                    (0u64, total, f)
+                };
+
+                let mut writer = tokio::io::BufWriter::with_capacity(SHARD_WRITE_BUF_BYTES, file);
+                let started = Instant::now();
+                let mut session_bytes = 0u64;
+
+                progress.emit_immediate(CollectionSeedProgress {
+                    shard_index,
+                    shard_count,
+                    downloaded_bytes,
+                    total_bytes,
+                    total_papers,
+                    ..progress_phase(CollectionSeedSyncPhase::Downloading)
+                });
+
+                let mut stream_err: Option<String> = None;
+                loop {
+                    let next_chunk = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            let _ = writer.flush().await;
+                            return Err(seed_sync_cancelled_err());
+                        }
+                        chunk = resp.chunk() => chunk,
+                    };
+                    match next_chunk {
+                        Ok(Some(chunk)) => {
+                            writer.write_all(&chunk).await?;
+                            let n = chunk.len() as u64;
+                            downloaded_bytes = downloaded_bytes.saturating_add(n);
+                            session_bytes = session_bytes.saturating_add(n);
+                            let elapsed = started.elapsed();
+                            let bps = if elapsed >= Duration::from_millis(250) {
+                                Some(((session_bytes as f64) / elapsed.as_secs_f64()) as u64)
+                            } else {
+                                None
+                            };
+                            progress.emit_throttled(CollectionSeedProgress {
+                                shard_index,
+                                shard_count,
+                                downloaded_bytes,
+                                total_bytes,
+                                bytes_per_sec: bps,
+                                total_papers,
+                                ..progress_phase(CollectionSeedSyncPhase::Downloading)
+                            });
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            stream_err = Some(e.to_string());
+                            break;
+                        }
+                    }
+                }
+
+                writer.flush().await?;
+                drop(writer);
+
+                if let Some(err_msg) = stream_err {
+                    if attempt < MAX_SHARD_DOWNLOAD_RETRIES {
+                        let wait = Duration::from_secs(SHARD_RETRY_BACKOFF_SECS[attempt]);
+                        attempt += 1;
+                        sleep_cancellable(wait, cancel).await?;
+                        continue;
+                    }
+                    return Err(AppError::message(format!(
+                        "stream seed shard {}: {err_msg}",
+                        shard.filename
+                    )));
+                }
+
+                // Verify complete file SHA-256 on blocking pool.
+                let verify_path = part_path.clone();
+                let expected = shard.sha256.clone();
+                let sha_res = tokio::task::spawn_blocking(move || {
+                    verify_file_sha256(&verify_path, &expected)
+                })
+                .await
+                .map_err(|e| AppError::message(format!("verify seed shard join: {e}")))?;
+
+                match sha_res {
+                    Ok(_) => {
+                        let elapsed = started.elapsed();
+                        let bps = if elapsed >= Duration::from_millis(100) && session_bytes > 0 {
+                            Some(((session_bytes as f64) / elapsed.as_secs_f64()) as u64)
+                        } else {
+                            None
+                        };
+                        progress.emit_immediate(CollectionSeedProgress {
+                            shard_index,
+                            shard_count,
+                            downloaded_bytes,
+                            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+                            bytes_per_sec: bps,
+                            total_papers,
+                            ..progress_phase(CollectionSeedSyncPhase::Downloading)
+                        });
+                        return Ok(PreparedShard {
+                            shard: shard.clone(),
+                            path: part_path,
+                            delete_after_commit: true,
+                        });
+                    }
+                    Err(e) => {
+                        // Delete corrupted/stale `.part` file cleanly before retry or error.
+                        let _ = tokio::fs::remove_file(&part_path).await;
+                        if attempt < MAX_SHARD_DOWNLOAD_RETRIES {
+                            let wait = Duration::from_secs(SHARD_RETRY_BACKOFF_SECS[attempt]);
+                            attempt += 1;
+                            sleep_cancellable(wait, cancel).await?;
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                }
             }
-            file.flush()?;
-            let actual_hex = hex::encode(hasher.finalize());
-            let expected = shard.sha256.trim().to_ascii_lowercase();
-            if !expected.is_empty() && actual_hex != expected {
-                let _ = fs::remove_file(&dest);
-                return Err(AppError::message(format!(
-                    "SHA-256 mismatch for {}: expected {expected}, got {actual_hex}",
-                    shard.filename
-                )));
-            }
-            Ok(dest)
         }
     }
 }
@@ -449,46 +906,137 @@ fn shard_matches_enabled_scope(shard: &SeedShardEntry, enabled_cats: &[String]) 
     }
 }
 
-fn apply_seed_refs_checked_at_tx(
-    conn: &rusqlite::Connection,
-    paper_id: &str,
-    raw_checked_at: &str,
-) -> Result<(), AppError> {
-    let trimmed_id = paper_id.trim();
-    if trimmed_id.is_empty() {
-        return Ok(());
-    }
-    let Some(norm_incoming) = normalize_refs_checked_at(raw_checked_at) else {
-        return Ok(());
-    };
-    let row: Option<(i64, Option<String>)> = conn
-        .prepare_cached(
-            "SELECT cw.work_id, cw.refs_checked_at
-             FROM papers p
-             JOIN canonical_works cw ON cw.work_id = p.work_id
-             WHERE p.id = ?1",
-        )?
-        .query_row([trimmed_id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
-    let Some((work_id, existing)) = row else {
-        return Ok(());
-    };
-    let merged = newer_refs_checked_at(existing.clone(), Some(norm_incoming));
-    if merged != existing {
-        conn.prepare_cached("UPDATE canonical_works SET refs_checked_at = ?1 WHERE work_id = ?2")?
-            .execute(params![merged, work_id])?;
-    }
-    Ok(())
+pub async fn seed_sync(args: CollectionSeedSyncArgs) -> Result<CollectionSeedSyncOut, AppError> {
+    seed_sync_with_progress(args, None).await
 }
 
-pub async fn seed_sync(args: CollectionSeedSyncArgs) -> Result<CollectionSeedSyncOut, AppError> {
+pub async fn seed_sync_with_progress(
+    args: CollectionSeedSyncArgs,
+    on_progress: Option<SeedProgressCallback>,
+) -> Result<CollectionSeedSyncOut, AppError> {
     let db_path = collection_db_path();
-    seed_sync_at(&db_path, args).await
+    seed_sync_at_with_progress(&db_path, args, on_progress).await
 }
 
 pub async fn seed_sync_at(
     db_path: &Path,
     args: CollectionSeedSyncArgs,
+) -> Result<CollectionSeedSyncOut, AppError> {
+    seed_sync_at_with_progress(db_path, args, None).await
+}
+
+pub async fn seed_sync_at_with_progress(
+    db_path: &Path,
+    args: CollectionSeedSyncArgs,
+    on_progress: Option<SeedProgressCallback>,
+) -> Result<CollectionSeedSyncOut, AppError> {
+    let key = normalize_write_lock_key(db_path);
+    let force = args.force.unwrap_or(false);
+
+    loop {
+        enum Role {
+            Leader(ActiveSeedSyncGuard),
+            Follower(tokio::sync::watch::Receiver<Option<SeedSyncOutcome>>),
+        }
+
+        let role = {
+            let mut map = active_seed_syncs()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = map.get(&key) {
+                Role::Follower(existing.done_rx.clone())
+            } else {
+                let (done_tx, done_rx) = tokio::sync::watch::channel(None);
+                let entry = Arc::new(ActiveSeedSync {
+                    cancel: CancellationToken::new(),
+                    done_tx,
+                    done_rx,
+                });
+                map.insert(key.clone(), Arc::clone(&entry));
+                Role::Leader(ActiveSeedSyncGuard {
+                    key: key.clone(),
+                    entry,
+                    published: false,
+                })
+            }
+        };
+
+        match role {
+            Role::Follower(mut rx) => {
+                let _ = rx.wait_for(|v| v.is_some()).await;
+                let outcome = rx.borrow().clone().unwrap_or_else(|| {
+                    Err(SeedSyncWatchErr {
+                        domain_code: None,
+                        message: "Collection seed sync channel closed".to_string(),
+                    })
+                });
+                match outcome {
+                    Ok(out) => {
+                        if force && out.skipped {
+                            continue;
+                        }
+                        return Ok(out);
+                    }
+                    Err(err) => return Err(err.into_app_error()),
+                }
+            }
+            Role::Leader(guard) => {
+                let cancel = guard.entry.cancel.clone();
+                let res = run_seed_sync_leader(db_path, args, cancel, on_progress.clone()).await;
+                let watch_res = res
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(SeedSyncWatchErr::from_app_error);
+                guard.finish(watch_res);
+                return res;
+            }
+        }
+    }
+}
+
+async fn run_seed_sync_leader(
+    db_path: &Path,
+    args: CollectionSeedSyncArgs,
+    cancel: CancellationToken,
+    on_progress: Option<SeedProgressCallback>,
+) -> Result<CollectionSeedSyncOut, AppError> {
+    let mut progress = ProgressEmitter::new(on_progress.clone());
+    let result =
+        run_seed_sync_leader_inner(db_path, args, cancel, on_progress, &mut progress).await;
+    match &result {
+        Ok(out) => {
+            let phase = if out.skipped {
+                CollectionSeedSyncPhase::Skipped
+            } else {
+                CollectionSeedSyncPhase::Done
+            };
+            progress.emit_immediate(CollectionSeedProgress {
+                shard_index: out.applied_shards.len(),
+                shard_count: out.applied_shards.len(),
+                imported_papers: out.imported_papers,
+                total_papers: out.imported_papers,
+                ..progress_phase(phase)
+            });
+        }
+        Err(err) if is_seed_sync_cancelled(err) => {
+            progress.emit_immediate(progress_phase(CollectionSeedSyncPhase::Cancelled));
+        }
+        Err(err) => {
+            progress.emit_immediate(CollectionSeedProgress {
+                error: Some(err.to_string()),
+                ..progress_phase(CollectionSeedSyncPhase::Error)
+            });
+        }
+    }
+    result
+}
+
+async fn run_seed_sync_leader_inner(
+    db_path: &Path,
+    args: CollectionSeedSyncArgs,
+    cancel: CancellationToken,
+    on_progress: Option<SeedProgressCallback>,
+    progress: &mut ProgressEmitter,
 ) -> Result<CollectionSeedSyncOut, AppError> {
     let force = args.force.unwrap_or(false);
     let db_check = db_path.to_path_buf();
@@ -508,6 +1056,10 @@ pub async fn seed_sync_at(
         });
     }
 
+    if cancel.is_cancelled() {
+        return Err(seed_sync_cancelled_err());
+    }
+
     let raw_url = args
         .manifest_url
         .as_deref()
@@ -516,7 +1068,10 @@ pub async fn seed_sync_at(
         .unwrap_or(DEFAULT_SEED_MANIFEST_URL);
     let loc = parse_manifest_location(raw_url)?;
 
-    let Some(manifest) = fetch_manifest(&loc, force).await? else {
+    progress.emit_immediate(progress_phase(CollectionSeedSyncPhase::FetchingManifest));
+
+    let client = seed_http_client()?;
+    let Some(manifest) = fetch_manifest(&client, &loc, force, &cancel).await? else {
         return Ok(CollectionSeedSyncOut {
             state: initial_state,
             applied_shards: Vec::new(),
@@ -582,29 +1137,146 @@ pub async fn seed_sync_at(
         });
     }
 
-    let temp_dir = tempfile::tempdir()?;
-    let mut local_shards: Vec<(SeedShardEntry, PathBuf)> =
-        Vec::with_capacity(selected_shards.len());
-    for shard in &selected_shards {
-        let local_path = download_or_locate_shard(&loc, shard, temp_dir.path()).await?;
-        local_shards.push((shard.clone(), local_path));
+    let cache_dir = seed_cache_dir_for(db_path);
+    let shard_count = selected_shards.len();
+    let total_papers_planned: usize = selected_shards.iter().map(|s| s.paper_count).sum();
+    let mut prepared_shards: Vec<PreparedShard> = Vec::with_capacity(shard_count);
+    for (idx, shard) in selected_shards.iter().enumerate() {
+        let prepared = download_or_locate_shard(
+            &client,
+            &loc,
+            shard,
+            &cache_dir,
+            idx + 1,
+            shard_count,
+            total_papers_planned,
+            &cancel,
+            progress,
+        )
+        .await?;
+        prepared_shards.push(prepared);
     }
 
+    if cancel.is_cancelled() {
+        return Err(seed_sync_cancelled_err());
+    }
+
+    let cleanup_paths: Vec<PathBuf> = prepared_shards
+        .iter()
+        .filter(|s| s.delete_after_commit)
+        .map(|s| s.path.clone())
+        .collect();
+
     let db_import = db_path.to_path_buf();
+    let cancel_import = cancel.clone();
     let out = tokio::task::spawn_blocking(move || -> Result<CollectionSeedSyncOut, AppError> {
+        let mut import_progress = ProgressEmitter::new(on_progress);
         with_collection_write_conn(&db_import, |conn| {
+            let _ = conn.execute_batch("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;");
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+            // Re-check `seed_cleared`, `applied_seed_ids`, and `papers` count inside the write
+            // lock so a concurrent `clear_collection` or duplicate sync cannot be clobbered.
+            let (fresh_seed_cleared_raw, prev_applied_raw): (i64, String) = tx.query_row(
+                "SELECT seed_cleared, applied_seed_ids_json FROM collection_config WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let fresh_seed_cleared = fresh_seed_cleared_raw != 0;
+            if fresh_seed_cleared && !force {
+                drop(tx);
+                let state = read_state_summary_conn(conn)?;
+                return Ok(CollectionSeedSyncOut {
+                    state,
+                    applied_shards: Vec::new(),
+                    imported_papers: 0,
+                    skipped: true,
+                });
+            }
+
+            let existing_paper_count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM papers", [], |r| r.get(0))?;
+            let prev_applied_vec: Vec<String> =
+                serde_json::from_str(&prev_applied_raw).unwrap_or_default();
+            let fresh_already_applied: HashSet<String> = if force {
+                HashSet::new()
+            } else {
+                prev_applied_vec.iter().cloned().collect()
+            };
+            let fresh_has_applied_core = !force
+                && existing_paper_count > 0
+                && prev_applied_vec
+                    .iter()
+                    .any(|id| id.trim().to_ascii_lowercase().starts_with("core-"));
+
+            let shards_to_apply: Vec<&PreparedShard> = prepared_shards
+                .iter()
+                .filter(|ps| {
+                    let sid = ps.shard.id.trim();
+                    if sid.is_empty() || fresh_already_applied.contains(sid) {
+                        return false;
+                    }
+                    if fresh_has_applied_core && ps.shard.kind.trim().eq_ignore_ascii_case("core") {
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+
+            if shards_to_apply.is_empty() {
+                drop(tx);
+                let state = read_state_summary_conn(conn)?;
+                return Ok(CollectionSeedSyncOut {
+                    state,
+                    applied_shards: Vec::new(),
+                    imported_papers: 0,
+                    skipped: true,
+                });
+            }
+
+            let is_empty_db = existing_paper_count == 0;
+            if is_empty_db {
+                // Defer FTS5 insert trigger and `idx_raw_refs_key` inside this transaction;
+                // SQLite DDL is transactional, so rollback restores both cleanly on cancel/error.
+                tx.execute_batch(
+                    "DROP TRIGGER IF EXISTS papers_fts_ai;
+                     DROP INDEX IF EXISTS idx_raw_refs_key;",
+                )?;
+            }
+
             let now = now_rfc3339();
-
+            let apply_shard_count = shards_to_apply.len();
+            let total_papers: usize = shards_to_apply.iter().map(|s| s.shard.paper_count).sum();
             let mut imported_papers = 0usize;
-            let mut applied_shards = Vec::with_capacity(local_shards.len());
+            let mut applied_shards = Vec::with_capacity(apply_shard_count);
             let mut imported_core_or_delta = false;
+            let mut imported_cs_ai_addon = false;
+            let mut seen_paper_ids: HashSet<String> = if is_empty_db {
+                HashSet::with_capacity(total_papers)
+            } else {
+                HashSet::new()
+            };
 
-            for (shard, shard_path) in &local_shards {
-                let file = File::open(shard_path)?;
+            for (idx, ps) in shards_to_apply.iter().enumerate() {
+                let shard = &ps.shard;
+                let shard_idx = idx + 1;
+                import_progress.emit_immediate(CollectionSeedProgress {
+                    shard_index: shard_idx,
+                    shard_count: apply_shard_count,
+                    imported_papers,
+                    total_papers: total_papers.max(imported_papers),
+                    ..progress_phase(CollectionSeedSyncPhase::Importing)
+                });
+
+                let file = File::open(&ps.path)?;
                 let gz = GzDecoder::new(file);
                 let reader = BufReader::with_capacity(128 * 1024, gz);
                 for (line_idx, line_res) in reader.lines().enumerate() {
+                    if line_idx.is_multiple_of(SEED_IMPORT_CANCEL_CHECK_STRIDE)
+                        && cancel_import.is_cancelled()
+                    {
+                        return Err(seed_sync_cancelled_err());
+                    }
                     let line = line_res.map_err(|e| {
                         AppError::message(format!(
                             "gunzip seed shard {} line {}: {e}",
@@ -623,30 +1295,71 @@ pub async fn seed_sync_at(
                             line_idx + 1
                         ))
                     })?;
-                    let paper_id = rec.id.clone();
                     let incoming_refs_checked_at = rec.refs_checked_at.clone();
+                    let assume_new =
+                        is_empty_db && seen_paper_ids.insert(rec.id.trim().to_string());
                     let input: CollectionPaperUpsertInput = rec.into();
-                    upsert_single_paper_tx(&tx, &input, &now)?;
-                    if let Some(checked_at) = incoming_refs_checked_at.as_deref() {
-                        apply_seed_refs_checked_at_tx(&tx, &paper_id, checked_at)?;
-                    }
+                    upsert_single_paper_with_options_tx(
+                        &tx,
+                        &input,
+                        &now,
+                        incoming_refs_checked_at.as_deref(),
+                        assume_new,
+                    )?;
                     imported_papers += 1;
+                    if imported_papers.is_multiple_of(SEED_IMPORT_CANCEL_CHECK_STRIDE) {
+                        if cancel_import.is_cancelled() {
+                            return Err(seed_sync_cancelled_err());
+                        }
+                        import_progress.emit_throttled(CollectionSeedProgress {
+                            shard_index: shard_idx,
+                            shard_count: apply_shard_count,
+                            imported_papers,
+                            total_papers: total_papers.max(imported_papers),
+                            ..progress_phase(CollectionSeedSyncPhase::Importing)
+                        });
+                    }
                 }
-                if matches!(
-                    shard.kind.trim().to_ascii_lowercase().as_str(),
-                    "core" | "delta"
-                ) {
+                let kind_lower = shard.kind.trim().to_ascii_lowercase();
+                if matches!(kind_lower.as_str(), "core" | "delta") {
                     imported_core_or_delta = true;
+                }
+                if kind_lower == "addon-cs-ai" {
+                    imported_cs_ai_addon = true;
                 }
                 applied_shards.push(shard.id.trim().to_string());
             }
 
-            // Advance arXiv watermarks monotonically for enabled categories.
+            if cancel_import.is_cancelled() {
+                return Err(seed_sync_cancelled_err());
+            }
+
+            import_progress.emit_immediate(CollectionSeedProgress {
+                shard_index: apply_shard_count,
+                shard_count: apply_shard_count,
+                imported_papers,
+                total_papers: total_papers.max(imported_papers),
+                ..progress_phase(CollectionSeedSyncPhase::Indexing)
+            });
+
+            if is_empty_db {
+                tx.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_raw_refs_key ON paper_raw_refs(ref_key);
+                     INSERT INTO papers_fts(papers_fts) VALUES('rebuild');
+                     CREATE TRIGGER IF NOT EXISTS papers_fts_ai AFTER INSERT ON papers BEGIN
+                       INSERT INTO papers_fts(rowid, title, keywords_text, abstract_text)
+                       VALUES (new.row_id, new.title, new.keywords_text, new.abstract_text);
+                     END;",
+                )?;
+            }
+
+            // Advance arXiv watermarks monotonically for enabled categories; never advance
+            // `cs.AI` unless `addon-cs-ai` was actually applied in this run.
             let enabled_cats = load_enabled_categories(&tx)?;
             let cs_ai_enabled = enabled_cats.iter().any(|c| c.eq_ignore_ascii_case("cs.AI"));
             let mut wm_updates: HashMap<String, CollectionArxivWatermarkInput> = HashMap::new();
             for (cat, swm) in &manifest.arxiv_watermarks {
-                if cat.eq_ignore_ascii_case("cs.AI") && !cs_ai_enabled {
+                if cat.eq_ignore_ascii_case("cs.AI") && (!cs_ai_enabled || !imported_cs_ai_addon) {
                     continue;
                 }
                 let existing_latest: Option<String> = tx
@@ -709,13 +1422,7 @@ pub async fn seed_sync_at(
             }
 
             // Record applied_seed_ids, clear seed_cleared, and stamp last_refreshed_at if empty.
-            let prev_applied_raw: String = tx.query_row(
-                "SELECT applied_seed_ids_json FROM collection_config WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )?;
-            let mut merged_applied: Vec<String> =
-                serde_json::from_str(&prev_applied_raw).unwrap_or_default();
+            let mut merged_applied = prev_applied_vec;
             for sid in &applied_shards {
                 if !merged_applied.iter().any(|x| x == sid) {
                     merged_applied.push(sid.clone());
@@ -725,17 +1432,20 @@ pub async fn seed_sync_at(
             let gen_ts = clean_opt_str(Some(manifest.generated_at.clone()));
             tx.execute(
                 "UPDATE collection_config
-             SET seed_cleared = 0,
-                 applied_seed_ids_json = ?1,
-                 last_refreshed_at = CASE
-                   WHEN last_refreshed_at IS NULL OR last_refreshed_at = '' THEN ?2
-                   ELSE last_refreshed_at
-                 END
-             WHERE id = 1",
+                 SET seed_cleared = 0,
+                     applied_seed_ids_json = ?1,
+                     last_refreshed_at = CASE
+                       WHEN last_refreshed_at IS NULL OR last_refreshed_at = '' THEN ?2
+                       ELSE last_refreshed_at
+                     END
+                 WHERE id = 1",
                 params![merged_applied_json, gen_ts],
             )?;
 
             recompute_graph_and_citations_tx(&tx)?;
+            if cancel_import.is_cancelled() {
+                return Err(seed_sync_cancelled_err());
+            }
             tx.commit()?;
 
             let state = read_state_summary_conn(conn)?;
@@ -750,7 +1460,13 @@ pub async fn seed_sync_at(
     .await
     .map_err(|e| AppError::message(format!("seed_sync import join: {e}")))??;
 
-    drop(temp_dir);
+    // Delete `.part` files only after verified commit.
+    if !out.skipped {
+        for part_path in cleanup_paths {
+            let _ = tokio::fs::remove_file(&part_path).await;
+        }
+    }
+
     Ok(out)
 }
 
@@ -5521,5 +6237,488 @@ mod tests {
             vec!["core-2026-v2", "delta-2026-1120"]
         );
         assert_eq!(sync4.imported_papers, 3);
+    }
+
+    #[test]
+    fn title_norm_queries_use_partial_indexes_in_query_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("collection.sqlite");
+        let conn = ensure_collection_at(&db).unwrap();
+
+        let cw_plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT work_id, COALESCE(author_norm, '') FROM canonical_works \
+                 WHERE title_norm IS NOT NULL AND title_norm != '' AND title_norm = ?1",
+            )
+            .unwrap()
+            .query_map(["sampletitle"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            cw_plan.iter().any(|d| d.contains("idx_cw_title")),
+            "expected idx_cw_title in query plan, got: {cw_plan:?}"
+        );
+
+        let papers_plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT id FROM papers p WHERE p.title_norm != '' AND p.title_norm = ?1",
+            )
+            .unwrap()
+            .query_map(["sampletitle"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            papers_plan
+                .iter()
+                .any(|d| d.contains("idx_papers_title_norm")),
+            "expected idx_papers_title_norm in query plan, got: {papers_plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_sync_empty_db_fast_path_rebuilds_fts_and_guards_cs_ai_watermark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed_dir = tmp.path().join("seed");
+        fs::create_dir_all(&seed_dir).unwrap();
+        let dst_db = tmp.path().join("collection.sqlite");
+
+        // Enable cs.AI BEFORE seed sync, but provide only a `core` shard (no `addon-cs-ai`).
+        super::super::store::config_update_at(
+            &dst_db,
+            super::super::models::CollectionConfigUpdateArgs {
+                categories: Some(vec![
+                    "cs.SE".into(),
+                    "cs.CR".into(),
+                    "cs.PL".into(),
+                    "cs.AI".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let shard_path = seed_dir.join("core-2026-fast.jsonl.gz");
+        let rec = SeedPaperRecord {
+            id: "arxiv:2610.00001".into(),
+            title: "Quantum Fuzzing Verification Pipeline".into(),
+            authors: vec!["Alice Smith".into()],
+            abstract_text: "A full abstract proving FTS5 rebuild after empty DB bulk import."
+                .into(),
+            published_at: "2026-10-01T00:00:00Z".into(),
+            year: 2026,
+            source_type: "arxiv".into(),
+            source_label: "cs.SE".into(),
+            categories: vec!["cs.SE".into()],
+            url: "https://arxiv.org/abs/2610.00001".into(),
+            pdf_url: None,
+            arxiv_id: Some("2610.00001".into()),
+            doi: None,
+            venue_id: None,
+            venue_kind: None,
+            venue_domain: None,
+            ccf_rank: None,
+            venue_full: None,
+            keywords: vec!["Fuzzing".into()],
+            keyword_source: Some("author".into()),
+            openalex_id: None,
+            raw_refs: vec!["arxiv:2610.00002".into()],
+            refs_checked_at: Some("2026-11-20T00:00:00Z".into()),
+            volume: None,
+            issue: None,
+            pages: None,
+            bibtex: None,
+            cool_papers_id: None,
+        };
+        {
+            let f = File::create(&shard_path).unwrap();
+            let mut gz = GzEncoder::new(f, Compression::default());
+            writeln!(gz, "{}", serde_json::to_string(&rec).unwrap()).unwrap();
+            gz.finish().unwrap();
+        }
+        let sha = verify_file_sha256(&shard_path, "").unwrap();
+
+        let mut arxiv_wms = HashMap::new();
+        arxiv_wms.insert(
+            "cs.SE".to_string(),
+            SeedArxivWatermark {
+                latest_published_at: "2026-10-01T00:00:00Z".into(),
+                latest_arxiv_id: "2610.00001".into(),
+                last_synced_at: "2026-11-20T00:00:00Z".into(),
+                oldest_synced_published_at: None,
+                remote_total: Some(1),
+                history_complete: true,
+            },
+        );
+        arxiv_wms.insert(
+            "cs.AI".to_string(),
+            SeedArxivWatermark {
+                latest_published_at: "2026-10-01T00:00:00Z".into(),
+                latest_arxiv_id: "2610.99999".into(),
+                last_synced_at: "2026-11-20T00:00:00Z".into(),
+                oldest_synced_published_at: None,
+                remote_total: Some(500),
+                history_complete: true,
+            },
+        );
+
+        let manifest_path = seed_dir.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&SeedManifest {
+                version: 2,
+                generated_at: "2026-11-20T00:00:00Z".into(),
+                shards: vec![SeedShardEntry {
+                    id: "core-2026-fast".into(),
+                    kind: "core".into(),
+                    filename: "core-2026-fast.jsonl.gz".into(),
+                    sha256: sha,
+                    paper_count: 1,
+                    categories: vec!["cs.SE".into()],
+                }],
+                arxiv_watermarks: arxiv_wms,
+                venue_watermarks: HashMap::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let out = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(manifest_path.to_string_lossy().to_string()),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!out.skipped);
+        assert_eq!(out.imported_papers, 1);
+        assert!(out.state.arxiv_watermarks.contains_key("cs.SE"));
+        // cs.AI watermark must NOT advance when `addon-cs-ai` was not applied.
+        assert!(!out.state.arxiv_watermarks.contains_key("cs.AI"));
+
+        // Verify FTS5 rebuild indexed the bulk-imported paper.
+        let hit1 = super::super::search::search_fast_at(
+            &dst_db,
+            &super::super::models::CollectionSearchArgs {
+                query: Some("Quantum".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hit1.total_matched, 1);
+
+        // Verify `papers_fts_ai` trigger was restored for subsequent inserts.
+        super::super::store::upsert_papers_at(
+            &dst_db,
+            super::super::models::CollectionUpsertPapersArgs {
+                items: vec![CollectionPaperUpsertInput {
+                    id: "arxiv:2610.00002".into(),
+                    title: "Nebula Symbolic Execution Engine".into(),
+                    authors: vec!["Bob Chen".into()],
+                    abstract_text: "A subsequent insert verifying restored FTS5 trigger.".into(),
+                    published_at: "2026-10-02T00:00:00Z".into(),
+                    year: 2026,
+                    source_type: "arxiv".into(),
+                    source_label: "cs.SE".into(),
+                    categories: vec!["cs.SE".into()],
+                    arxiv_id: Some("2610.00002".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hit2 = super::super::search::search_fast_at(
+            &dst_db,
+            &super::super::models::CollectionSearchArgs {
+                query: Some("Nebula".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hit2.total_matched, 1);
+    }
+
+    #[tokio::test]
+    async fn seed_sync_http_resumes_part_file_coalesces_single_flight_and_cleans_up() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dst_db = tmp.path().join("collection.sqlite");
+
+        let mut shard_buf = Vec::new();
+        {
+            let mut gz = GzEncoder::new(&mut shard_buf, Compression::default());
+            for i in 1..=2 {
+                let rec = SeedPaperRecord {
+                    id: format!("arxiv:2611.0000{i}"),
+                    title: format!("Resumable Single Flight Paper {i}"),
+                    authors: vec!["Alice Smith".into()],
+                    abstract_text: "Testing HTTP Range resume and single-flight coalescing.".into(),
+                    published_at: "2026-11-01T00:00:00Z".into(),
+                    year: 2026,
+                    source_type: "arxiv".into(),
+                    source_label: "cs.SE".into(),
+                    categories: vec!["cs.SE".into()],
+                    url: format!("https://arxiv.org/abs/2611.0000{i}"),
+                    pdf_url: None,
+                    arxiv_id: Some(format!("2611.0000{i}")),
+                    doi: None,
+                    venue_id: None,
+                    venue_kind: None,
+                    venue_domain: None,
+                    ccf_rank: None,
+                    venue_full: None,
+                    keywords: vec!["Fuzzing".into()],
+                    keyword_source: Some("author".into()),
+                    openalex_id: None,
+                    raw_refs: Vec::new(),
+                    refs_checked_at: None,
+                    volume: None,
+                    issue: None,
+                    pages: None,
+                    bibtex: None,
+                    cool_papers_id: None,
+                };
+                writeln!(gz, "{}", serde_json::to_string(&rec).unwrap()).unwrap();
+            }
+            gz.finish().unwrap();
+        }
+        let sha = hex::encode(Sha256::digest(&shard_buf));
+        let manifest_bytes = serde_json::to_vec(&SeedManifest {
+            version: 2,
+            generated_at: "2026-11-23T00:00:00Z".into(),
+            shards: vec![SeedShardEntry {
+                id: "core-2026-http".into(),
+                kind: "core".into(),
+                filename: "core-2026-http.jsonl.gz".into(),
+                sha256: sha,
+                paper_count: 2,
+                categories: vec!["cs.SE".into()],
+            }],
+            arxiv_watermarks: HashMap::new(),
+            venue_watermarks: HashMap::new(),
+        })
+        .unwrap();
+
+        // Pre-seed the first half of the shard into `.seed-cache/core-2026-http.jsonl.gz.part`.
+        let split_at = shard_buf.len() / 2;
+        let cache_dir = seed_cache_dir_for(&dst_db);
+        fs::create_dir_all(&cache_dir).unwrap();
+        let part_path = cache_dir.join("core-2026-http.jsonl.gz.part");
+        fs::write(&part_path, &shard_buf[..split_at]).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shard_hits = Arc::new(AtomicUsize::new(0));
+        let range_hits = Arc::new(AtomicUsize::new(0));
+        let shard_hits_srv = Arc::clone(&shard_hits);
+        let range_hits_srv = Arc::clone(&range_hits);
+        let manifest_srv = manifest_bytes.clone();
+        let shard_srv = shard_buf.clone();
+
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut req_buf = [0u8; 4096];
+                let n = socket.read(&mut req_buf).await.unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&req_buf[..n]);
+                let first_line = req_str.lines().next().unwrap_or("");
+                if first_line.contains("/manifest.json") {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        manifest_srv.len()
+                    );
+                    let _ = socket.write_all(hdr.as_bytes()).await;
+                    let _ = socket.write_all(&manifest_srv).await;
+                } else if first_line.contains("/core-2026-http.jsonl.gz") {
+                    shard_hits_srv.fetch_add(1, Ordering::SeqCst);
+                    let range_start = req_str
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split_once("bytes="))
+                        .and_then(|(_, rest)| rest.split('-').next())
+                        .and_then(|s| s.trim().parse::<usize>().ok());
+                    if let Some(start) = range_start {
+                        range_hits_srv.fetch_add(1, Ordering::SeqCst);
+                        let slice = &shard_srv[start..];
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            start,
+                            shard_srv.len() - 1,
+                            shard_srv.len(),
+                            slice.len()
+                        );
+                        let _ = socket.write_all(hdr.as_bytes()).await;
+                        let _ = socket.write_all(slice).await;
+                    } else {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            shard_srv.len()
+                        );
+                        let _ = socket.write_all(hdr.as_bytes()).await;
+                        let _ = socket.write_all(&shard_srv).await;
+                    }
+                }
+            }
+        });
+
+        let phases: Arc<StdMutex<Vec<CollectionSeedSyncPhase>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let phases_cb = Arc::clone(&phases);
+        let cb: SeedProgressCallback = Arc::new(move |p| {
+            phases_cb.lock().unwrap().push(p.phase);
+        });
+
+        let url = format!("http://{addr}/manifest.json");
+        let f1 = seed_sync_at_with_progress(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(url.clone()),
+                force: Some(false),
+            },
+            Some(cb),
+        );
+        let f2 = seed_sync_at(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(url),
+                force: Some(false),
+            },
+        );
+
+        let (r1, r2) = tokio::join!(f1, f2);
+        server.abort();
+        let o1 = r1.unwrap();
+        let o2 = r2.unwrap();
+
+        assert!(!o1.skipped);
+        assert_eq!(o1.imported_papers, 2);
+        assert_eq!(o2.imported_papers, 2);
+        // Single-flight coalesced the shard download into exactly 1 HTTP Range request.
+        assert_eq!(shard_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(range_hits.load(Ordering::SeqCst), 1);
+        // `.part` file was removed after verified commit.
+        assert!(!part_path.exists());
+
+        let recorded = phases.lock().unwrap().clone();
+        assert!(recorded.contains(&CollectionSeedSyncPhase::FetchingManifest));
+        assert!(recorded.contains(&CollectionSeedSyncPhase::Downloading));
+        assert!(recorded.contains(&CollectionSeedSyncPhase::Importing));
+        assert!(recorded.contains(&CollectionSeedSyncPhase::Indexing));
+        assert_eq!(recorded.last(), Some(&CollectionSeedSyncPhase::Done));
+    }
+
+    #[tokio::test]
+    async fn seed_sync_cancel_preserves_part_file_and_rolls_back() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dst_db = tmp.path().join("collection.sqlite");
+        let payload = vec![b'x'; 8192];
+        let manifest_bytes = serde_json::to_vec(&SeedManifest {
+            version: 2,
+            generated_at: "2026-11-23T00:00:00Z".into(),
+            shards: vec![SeedShardEntry {
+                id: "core-2026-cancel".into(),
+                kind: "core".into(),
+                filename: "core-2026-cancel.jsonl.gz".into(),
+                sha256: "deadbeef".into(),
+                paper_count: 10,
+                categories: vec!["cs.SE".into()],
+            }],
+            arxiv_watermarks: HashMap::new(),
+            venue_watermarks: HashMap::new(),
+        })
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let manifest_srv = manifest_bytes.clone();
+        let payload_srv = payload.clone();
+        let (chunk_sent_tx, chunk_sent_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut chunk_sent_tx = Some(chunk_sent_tx);
+
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut req_buf = [0u8; 4096];
+                let n = socket.read(&mut req_buf).await.unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&req_buf[..n]);
+                let first_line = req_str.lines().next().unwrap_or("");
+                if first_line.contains("/manifest.json") {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        manifest_srv.len()
+                    );
+                    let _ = socket.write_all(hdr.as_bytes()).await;
+                    let _ = socket.write_all(&manifest_srv).await;
+                } else {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload_srv.len()
+                    );
+                    let _ = socket.write_all(hdr.as_bytes()).await;
+                    // Send first chunk, wait past the 120ms progress throttle, send second chunk, then stall.
+                    let _ = socket.write_all(&payload_srv[..2048]).await;
+                    let _ = socket.flush().await;
+                    if let Some(tx) = chunk_sent_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        });
+
+        let phases: Arc<StdMutex<Vec<CollectionSeedSyncPhase>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let phases_cb = Arc::clone(&phases);
+        let cb: SeedProgressCallback = Arc::new(move |p| {
+            phases_cb.lock().unwrap().push(p.phase);
+        });
+
+        let db_for_cancel = dst_db.clone();
+        let cancel_driver = tokio::spawn(async move {
+            let _ = chunk_sent_rx.await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            assert!(cancel_seed_sync_at(&db_for_cancel));
+        });
+
+        let url = format!("http://{addr}/manifest.json");
+        let err = seed_sync_at_with_progress(
+            &dst_db,
+            CollectionSeedSyncArgs {
+                manifest_url: Some(url),
+                force: Some(false),
+            },
+            Some(cb),
+        )
+        .await
+        .expect_err("cancelled seed sync must return error");
+        let _ = cancel_driver.await;
+        server.abort();
+
+        assert_eq!(err.code(), SEED_SYNC_CANCELLED_CODE);
+        let recorded = phases.lock().unwrap().clone();
+        assert_eq!(recorded.last(), Some(&CollectionSeedSyncPhase::Cancelled));
+
+        // Partial `.part` file stays cached for resume; DB remains cleanly empty.
+        let part_path = seed_cache_dir_for(&dst_db).join("core-2026-cancel.jsonl.gz.part");
+        assert!(part_path.is_file());
+        assert!(fs::metadata(&part_path).unwrap().len() >= 2048);
+        let state = super::super::store::state_get_at(&dst_db).unwrap();
+        assert_eq!(state.total_count, 0);
+        assert!(state.applied_seed_ids.is_empty());
     }
 }

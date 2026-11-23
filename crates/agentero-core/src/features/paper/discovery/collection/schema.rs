@@ -961,8 +961,16 @@ pub fn collection_db_path() -> PathBuf {
 
 const COLLECTION_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn normalize_write_lock_key(db_path: &Path) -> PathBuf {
-    let resolved = fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+pub(crate) fn normalize_write_lock_key(db_path: &Path) -> PathBuf {
+    let resolved = dunce::canonicalize(db_path).unwrap_or_else(|_| {
+        match (db_path.parent(), db_path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                let p = dunce::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                p.join(name)
+            }
+            _ => db_path.to_path_buf(),
+        }
+    });
     #[cfg(windows)]
     {
         PathBuf::from(resolved.to_string_lossy().to_ascii_lowercase())
@@ -989,11 +997,7 @@ fn collection_write_mutex(db_path: &Path) -> Arc<Mutex<()>> {
     lock
 }
 
-pub fn ensure_collection() -> Result<Connection, AppError> {
-    ensure_collection_at(&collection_db_path())
-}
-
-pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
+fn open_collection_conn_raw(db_path: &Path) -> Result<Connection, AppError> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -1001,6 +1005,32 @@ pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
     }
     let conn = crate::sqlite::open_standard(db_path, DbMsgs::COLLECTION)?;
     let _ = conn.busy_timeout(COLLECTION_BUSY_TIMEOUT);
+    Ok(conn)
+}
+
+fn ensure_collection_at_locked(db_path: &Path) -> Result<Connection, AppError> {
+    let conn = open_collection_conn_raw(db_path)?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+pub fn ensure_collection() -> Result<Connection, AppError> {
+    ensure_collection_at(&collection_db_path())
+}
+
+pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
+    if !db_path.is_file() {
+        let lock = collection_write_mutex(db_path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        return ensure_collection_at_locked(db_path);
+    }
+    let conn = open_collection_conn_raw(db_path)?;
+    let version = crate::sqlite::read_schema_version(&conn, DbMsgs::COLLECTION).unwrap_or(0);
+    if version == SCHEMA_VERSION {
+        return Ok(conn);
+    }
+    let lock = collection_write_mutex(db_path);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     migrate(&conn)?;
     Ok(conn)
 }
@@ -1014,7 +1044,7 @@ where
 {
     let lock = collection_write_mutex(db_path);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let mut conn = ensure_collection_at(db_path)?;
+    let mut conn = ensure_collection_at_locked(db_path)?;
     f(&mut conn)
 }
 
