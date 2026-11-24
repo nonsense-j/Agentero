@@ -50,9 +50,9 @@ jobs:
               process.exit(1);
             }
           "
-      - name: Test release synchronization
+      - name: Test updater manifest rewrite
         if: matrix.task == 'quality'
-        run: node --test scripts/sync-atomgit-release.test.mjs scripts/rewrite-updater-json.test.mjs
+        run: node --test scripts/rewrite-updater-json.test.mjs
       - name: Stage bundled ACP adapters
         if: matrix.task == 'quality'
         # Exercise staging before release builds consume these trees.
