@@ -711,14 +711,10 @@ fn should_dedupe_cross_portal(filters: &StructuralFilters<'_>) -> bool {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    if !non_empty_ranks.is_empty()
-        && non_empty_ranks
+    non_empty_ranks.is_empty()
+        || non_empty_ranks
             .iter()
-            .all(|r| r.eq_ignore_ascii_case("arxiv") || r.eq_ignore_ascii_case("preprint"))
-    {
-        return false;
-    }
-    true
+            .any(|r| !r.eq_ignore_ascii_case("arxiv") && !r.eq_ignore_ascii_case("preprint"))
 }
 
 fn ccf_priority(rank: Option<&str>) -> u8 {

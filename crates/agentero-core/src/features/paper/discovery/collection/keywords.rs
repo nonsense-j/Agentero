@@ -1296,10 +1296,7 @@ fn is_rejected_cleaned_surface(cleaned: &str) -> bool {
         return true;
     }
     let lower = cleaned.to_lowercase();
-    if NON_KEYWORD_STOPLIST.contains(lower.as_str()) {
-        return true;
-    }
-    false
+    NON_KEYWORD_STOPLIST.contains(lower.as_str())
 }
 
 /// Conservative English head-noun singularizer tailored for CS/SE/CR/AI terminology.

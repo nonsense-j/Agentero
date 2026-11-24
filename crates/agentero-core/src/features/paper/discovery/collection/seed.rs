@@ -1216,10 +1216,7 @@ async fn run_seed_sync_leader_inner(
                     if sid.is_empty() || fresh_already_applied.contains(sid) {
                         return false;
                     }
-                    if fresh_has_applied_core && ps.shard.kind.trim().eq_ignore_ascii_case("core") {
-                        return false;
-                    }
-                    true
+                    !(fresh_has_applied_core && ps.shard.kind.trim().eq_ignore_ascii_case("core"))
                 })
                 .collect();
 

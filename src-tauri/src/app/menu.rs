@@ -74,10 +74,7 @@ fn valid_menu_binding(binding: &ShortcutBinding) -> bool {
     if meta && (key == "Tab" || (alt && key == "Escape")) {
         return false;
     }
-    if meta && ctrl && !alt && !shift && key.eq_ignore_ascii_case("f") {
-        return false;
-    }
-    true
+    !(meta && ctrl && !alt && !shift && key.eq_ignore_ascii_case("f"))
 }
 
 /// Convert valid DOM chords to the physical key names accepted by Tauri's accelerator parser.

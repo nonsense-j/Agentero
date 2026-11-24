@@ -386,10 +386,7 @@ pub(crate) fn is_placeholder_abstract(abstract_text: &str, venue_label: Option<&
             return true;
         }
     }
-    if trimmed.contains(" · ") && trimmed.chars().count() <= 84 {
-        return true;
-    }
-    false
+    trimmed.contains(" · ") && trimmed.chars().count() <= 84
 }
 
 pub(crate) fn choose_better_abstract(existing: &str, incoming: &str, source_label: &str) -> String {

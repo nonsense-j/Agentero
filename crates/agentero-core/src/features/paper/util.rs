@@ -187,10 +187,7 @@ fn author_pair_compatible(a: &(String, String), b: &(String, String)) -> bool {
     if a.0.len() == 1 && b.0.starts_with(&a.0) {
         return true;
     }
-    if b.0.len() == 1 && a.0.starts_with(&b.0) {
-        return true;
-    }
-    false
+    b.0.len() == 1 && a.0.starts_with(&b.0)
 }
 
 /// True when two papers share the same normalized title and compatible first 2 authors
