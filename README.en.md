@@ -7,7 +7,7 @@
 <h3 align="center">A Focused, Local-First Desktop Research Workbench for Paper Discovery, Reading & Agent Collaboration</h3>
 
 <p align="center">
-  Bringing the latest papers to your desk like an origami messenger dove — a streamlined, locally redesigned community fork of <a href="https://github.com/poco-ai/Agentero"><b>poco-ai/Agentero</b></a>: preserving comfortable PDF reading and bi-directional Markdown notes while expanding local Paper Collection discovery, citation lineage, survey generation, and CARSI institutional access — lean, zero-account, and 100% local-first.
+  Bringing the latest papers to your desk like an origami messenger dove — a streamlined, locally redesigned community fork of <a href="https://github.com/poco-ai/Agentero"><b>poco-ai/Agentero</b></a>: preserving comfortable PDF reading and bi-directional Markdown notes while expanding local paper-pool discovery, citation lineage, survey generation, and CARSI institutional access — lean, zero-account, and 100% local-first.
 </p>
 
 <p align="center">
@@ -20,62 +20,80 @@
   <a href="https://github.com/poco-ai/Agentero"><img alt="upstream" src="https://img.shields.io/badge/Forked_from-poco--ai%2FAgentero-5319E7?style=for-the-badge&logo=github&logoColor=white&labelColor=20242D"></a>
 </p>
 
-> **Fork Notice & Acknowledgements**: **Dovero** is an independent community fork of **[poco-ai/Agentero](https://github.com/poco-ai/Agentero)** (not an official upstream distribution). The foundational local-first Vault/Catalog architecture, EmbedPDF viewer and layout-analysis pipeline, Plate bi-directional Markdown editor, ACP local agent client, and built-in MCP server all originate from the upstream Agentero team. We selectively sync upstream bug fixes and curated improvements — our sincere thanks to the original authors and all upstream contributors!
+> **Fork Notice & Acknowledgements**: **Dovero** is an independent community fork of **[poco-ai/Agentero](https://github.com/poco-ai/Agentero)** (not an official upstream release). The local-first library foundation, PDF viewer and layout pipeline, bi-directional Markdown editor, and local Agent protocol all originate from the upstream Agentero team. Dovero streamlines the scope around paper discovery and reading while selectively adopting upstream fixes — our sincere thanks to the original authors and contributors!
 
 ---
 
-## Differences from Upstream Agentero
+## Screenshots
 
-**Dovero** focuses on a **lean, local-first desktop paper discovery and scholarly reading workbench**, pruning non-core heavy subsystems while redesigning key discovery and institutional workflows:
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-pdf-agent.png" alt="Annotated PDF Reading and Local Agent" /><br />
+      <sub><b>Annotated PDF Reading &amp; Local Agent</b> · Multi-color highlights, margin comments &amp; context-aware Q&amp;A</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-plaza-collection.png" alt="Paper Collection Local Pool" /><br />
+      <sub><b>Paper Collection</b> · 28 top-venue main tracks &amp; arXiv preprints indexed locally</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-plaza-discover.png" alt="Paper Discover Citation Lineage Graph" /><br />
+      <sub><b>Paper Discover · Citation Lineage</b> · Instant local search with interactive citation &amp; shared-ref graphs</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-plaza-survey.png" alt="Paper Survey Generation" /><br />
+      <sub><b>Paper Survey</b> · Cited Related Work generation from your library &amp; paper pool with LaTeX export</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-plaza-recommend.png" alt="Paper Recommend" /><br />
+      <sub><b>Paper Recommend</b> · Keyword-driven recommendations matched across the local paper pool</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/assets/dovero-plaza-ccf.png" alt="CCF Deadlines" /><br />
+      <sub><b>CCF Deadlines</b> · Filterable CCF-ranked conference submission countdowns</sub>
+    </td>
+  </tr>
+</table>
 
-| Area | Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero) | **Dovero** ([nonsense-j/Dovero](https://github.com/nonsense-j/Dovero)) |
+---
+
+## Key Differences from Upstream Agentero
+
+| Area | Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero) | **Dovero** |
 |---|---|---|
-| **Product Focus** | Broad all-in-one platform (reading, LaTeX writing/compiling, mobile apps, hosted cloud services, plugins, etc.) | Streamlined **desktop-only workbench** focused on paper discovery, scholarly reading, literature survey, and local Agent collaboration |
-| **Plaza & Paper Discovery** | External browsing feeds (Cool Papers, ModelScope, Papers with Code, RSS, arXiv recs) | Redesigned around a local `collection.sqlite` paper pool into five native panels: **Paper Collection** (28 official main-track venues + arXiv pool, pre-baked Seed sync, LLM keyword enrichment), **Paper Discover** (fast FTS5 search, in-pool citation lineage graph, Deep Search), **Paper Survey** (cited Related Work & HTML report generation), **Paper Recommend**, and **CCF Deadline** |
-| **Institutional Access** | Generic Institution Proxy Gateway auto-detection | Built-in university **CARSI SSO** login and WebView session probing for publisher access detection (IEEE, ACM, etc.) and authenticated PDF ingestion |
-| **Subsystem & Dependency Pruning** | Includes TeX/Writing compilation, iOS/Android mobile & Bridge, Remote Vault / SSH tunnels, Account & Cloud Credits, Word/Zhihu/Telemetry integrations, PDF Reflow, local layout model assets, and Tesseract OCR | Removes all non-core heavy subsystems listed on the left plus `@excalidraw/excalidraw` whiteboard support — zero accounts, zero telemetry, smaller bundle and maintenance surface |
-| **UI & Interaction Philosophy** | Rapidly evolving into Zen multi-session workspace, offline dictionary overhaul, click-to-select layout elements, fullscreen immersive mode, and rail-peek comment trays | Emphasizes restraint, typography, and reading stability: unified styling for PDF margin notes, selection cards, Markdown note typography, Streamdown and Deep Search reports; retains visual-region framing and fixed gutter layout while selectively adopting focused upstream wins (400% zoom, copy rendered formula as LaTeX, expanded local citation previews, optional outside-click dismissal for translation cards) |
-| **Translation & LLM Setup** | Drops Google Translate / DeepLX in favor of hosted/commercial flows | Keeps zero-key Google Translate / DeepLX options alongside enhanced **OpenAI-compatible** support (configurable 1–8 full-text concurrency, simplified 3-field OpenAI-compatible keyword LLM settings with model picker) |
-| **Side-by-Side Isolation** | Bundle ID `com.poco-ai.agentero`, app config/data under `agentero/` | Independent bundle ID `io.github.nonsense-j.dovero`, `dovero://` deep-link scheme, and `dovero/` config & paper-pool directories (with automatic non-destructive migration from legacy `agentero/` on first launch), while keeping Vault `.agentero/catalog.sqlite` compatible with upstream |
-| **Build & Release Flow** | Full cross-platform desktop + standalone CLI + iOS TestFlight + Homebrew Tap | Split per-platform GitHub Actions desktop builds (Windows x64 NSIS, macOS Apple Silicon & Intel) supporting unsigned fork builds out of the box |
+| **Product Focus** | All-in-one research platform (reading, LaTeX writing/compiling, mobile apps, hosted cloud services, plugins) | Lean **desktop-only workbench** focused on paper discovery, reading, literature survey, and local Agent collaboration — zero accounts, zero telemetry |
+| **Paper Plaza** | External paper feeds and recommendation browsing | Redesigned around five core panels: **Local Top-Venue & arXiv Paper Pool**, **Paper Discover** (fast search, citation lineage graph, Deep Search), **Paper Survey** (cited Related Work & HTML reports), **Recommendations**, and **CCF Deadlines** |
+| **Institutional Access** | Generic institutional proxy gateway | Built-in university **CARSI SSO** login for publisher access detection and authenticated PDF ingestion |
+| **Reading & Translation** | Broad multi-platform UX evolution and hosted translation flows | Prunes non-core subsystems, retains free zero-key and custom LLM translation options, and focuses on a calm, consistent split-view PDF reading, visual-region annotation, and bi-directional note-taking experience |
 
 ---
 
 ## Core Features
 
-### 1. Redesigned Plaza: Paper Collection, Discovery & Survey
-- **Paper Collection**: Local `collection.sqlite` pool covering 28 official main-track venues and arXiv feeds, with one-click GitHub Release Seed sync, cancellable background refreshes, synonym-canonicalized search, and OpenAlex / Semantic Scholar / LLM keyword enrichment.
-- **Paper Discover**: Instant local FTS5 Fast Search, interactive in-pool **Citation Lineage Graph** view, and multi-step **Deep Search** research synthesis.
-- **Paper Survey**: Combines your local Vault, paper pool, and the `plaza_survey` MCP workflow (with TeX Introduction extraction) to produce cited Related Work drafts and exportable HTML survey reports.
-- **Paper Recommend & CCF Deadline**: Local-library-based paper recommendations and upcoming CCF conference deadline tracking.
+### 1. Paper Plaza: Discovery, Citation Lineage & Surveys
+- **Paper Collection**: Aggregates 28 top-venue main tracks and arXiv papers locally with one-click seed sync, incremental background refreshes, and automatic keyword enrichment.
+- **Paper Discover**: Instant local search, interactive **Citation Lineage Graph**, and multi-turn **Deep Search** research reports.
+- **Paper Survey**: Combines your local library and paper pool to draft cited Related Work sections and exportable HTML survey reports.
+- **Paper Recommend & CCF Deadline**: Personalized recommendations based on your local library plus an up-to-date CCF conference deadline tracker.
 
-### 2. Structured PDF Reading, Annotations & Bi-Directional Notes
-- **PDF Reading & Annotation**: True-scale EmbedPDF rendering up to **400% zoom**, outline navigation, full-text search, smooth text selection, multi-color highlights, margin comment cards, and **visual region framing** (annotate figures, tables, algorithms, and equations or ask your Agent directly).
-- **Layout Analysis & Citation Previews**: Connects to remote or self-hosted layout providers (Paddle, MinerU 4.1, OpenAI-compatible) for structured figure/table/formula indexing; parses grouped text citations and local references with expandable local-paper preview cards, plus one-click arXiv and DOI links in the sidebar.
-- **Multi-Mode Translation**: Selection translation (with optional outside-click dismissal), single-page/dual-pane and full-document layout translation across free zero-key engines, DeepL, Azure, Google Cloud, OpenAI-compatible endpoints (configurable 1–8 concurrency), and Agent translation.
-- **Bi-Directional Markdown Notes**: Built-in Plate WYSIWYG editor paired side-by-side with PDFs (`⌘\` / `Ctrl+\` toggles the split and remembers width), supporting `[[wikilinks]]`, Obsidian Callouts, interactive pan/zoom Mermaid diagrams, `==highlight==` (including CJK-adjacent input) and `<u>underline</u>`, single-line `$$`/`\[`/`\(` and `\tag` block math normalization, and **one-click / context-menu LaTeX source copy** on rendered formulas.
+### 2. Structured PDF Reading, Translation & Bi-Directional Notes
+- **PDF Reading & Annotation**: Crisp scaling, outline navigation, full-text search, multi-color highlights, margin comments, and **visual region framing** for figures, tables, algorithms, and equations.
+- **Layout Analysis & Citation Previews**: Connects to remote or self-hosted layout parsers to index figures, tables, and formulas; click in-text citations to preview matching local papers inline.
+- **Multi-Mode Translation**: Selection, side-by-side page, and full-document translation across free zero-key engines, standard translation APIs, OpenAI-compatible models, and Agent translation.
+- **Bi-Directional Markdown Notes**: Split-view WYSIWYG notes linked with your PDF, supporting `[[wikilinks]]`, Callouts, interactive Mermaid diagrams, highlights/underlines, math rendering, and one-click LaTeX copy.
 
-<p align="center">
-  <img src="docs/assets/agent.png" alt="PDF reading with agent assistance" width="90%" />
-  <br/>
-  <sub>Split-view reading and analysis: PDF highlights and annotations on the left, local Agent reasoning over structured context on the right</sub>
-</p>
+### 3. Local Agent Collaboration & Open Ecosystem
+- **BYOA Local Agents**: Connects directly to locally installed agents such as Claude Code, Codex, OpenCode, and Antigravity CLI with selection quotes, in-page Quick Chat, and permission prompts — keeping your research context local.
+- **Built-in MCP Server & CLI**: Optional local MCP server and headless CLI for integrating your library and notes with external AI tools and scripts.
 
-<p align="center">
-  <img src="docs/assets/translate.png" alt="Selection translation linked to notes" width="90%" />
-  <br/>
-  <sub>Selection translation and note capture: key insights flow straight into local Markdown notes</sub>
-</p>
-
-### 3. Open Agent Protocol (ACP) & Local MCP Server
-- **BYOA Local Agents (ACP)**: Built on the Agent Client Protocol to connect local agents such as Claude Code, Codex, OpenCode, and Antigravity CLI (`agy` with official installer lifecycle), supporting inline selection chips, in-page Quick Chat, structured ask-user cards, queued turns, and granular permissions — all with local context.
-- **Built-in MCP Server**: Optional loopback Streamable HTTP MCP server (`127.0.0.1:8765/mcp`) letting external AI clients query your Vault, read notes, and import papers.
-- **Headless CLI (`agentero-cli`)**: Command-line interface for headless Vault/Catalog operations, paper tag management, BibTeX import/export, and collection seed baking/importing.
-
-### 4. Institutional Access, Zotero Compatibility & Transparent Local Storage
-- **CARSI SSO & Flexible Ingestion**: Import papers via DOI / arXiv / title magic wand, PDF drag-and-drop, university CARSI SSO session support, or the local `127.0.0.1:23119` Zotero Connector browser extension.
-- **Zotero Migration & BibTeX**: Import existing local Zotero libraries and export BibTeX / BibLaTeX.
-- **Plain-File Local Storage & Self-Hosted Sync**: PDFs, Markdown notes, marks (`marks/`), and layout sidecars (`source/`) live as standard files in your Vault alongside `.agentero/catalog.sqlite` (kept compatible with upstream Vaults), readable by any external tool. Sync across devices using your own **S3-compatible storage, WebDAV, or Git** with nested paper-scope controls.
+### 4. Flexible Ingestion, Zotero Compatibility & Self-Hosted Sync
+- **Effortless Import & CARSI**: Import via DOI / arXiv / title lookup, drag-and-drop PDFs, university CARSI SSO downloads, or the Zotero Connector browser extension.
+- **Zotero Migration & BibTeX**: Migrate existing local Zotero libraries and export BibTeX / BibLaTeX.
+- **Open Files & Multi-Device Sync**: Papers, notes, and annotations stay as open local files compatible with upstream vaults; sync across devices with your own **S3, WebDAV, or Git** backend.
 
 ---
 
@@ -84,11 +102,11 @@
 ### 1. Download Desktop Installers (Windows / macOS)
 
 Download prebuilt installers from **[GitHub Releases](https://github.com/nonsense-j/Dovero/releases)**:
-- **Windows (x64)**: `*-setup.exe` (NSIS installer)
+- **Windows (x64)**: `*-setup.exe`
 - **macOS (Apple Silicon)**: `*_aarch64.dmg`
 - **macOS (Intel)**: `*_x64.dmg`
 
-> **Upgrading from earlier fork builds**: On first launch, Dovero automatically copies existing settings and `collection.sqlite` from legacy `agentero/` app directories into `dovero/` without modifying your Vault folders.
+> **Upgrading from earlier fork builds**: On first launch, Dovero automatically migrates existing settings and your local paper pool into its own app directory without modifying your vaults, allowing side-by-side use with upstream Agentero.
 
 ### 2. Run & Build from Source
 
@@ -98,25 +116,19 @@ Prerequisites: Node.js 24+, pnpm, and the Rust stable toolchain (MSVC Build Tool
 # Install frontend dependencies
 pnpm install
 
-# Launch desktop app in dev mode (Frontend + Rust Host)
+# Launch desktop app in dev mode
 pnpm tauri dev
 
 # Build desktop installer bundle
 pnpm tauri build
-
-# Optional: build headless CLI
-cargo build -p agentero-cli --release
 ```
 
 For architecture and developer documentation, see [docs/architecture.md](docs/architecture.md), [docs/frontend/](docs/frontend/index.md), and [docs/backend/](docs/backend/index.md).
 
 ---
 
-## Acknowledgements
+## Acknowledgements & License
 
-- **Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero)**: Deepest thanks to the original Agentero team and all upstream contributors for designing and open-sourcing the local-first research workbench architecture and open protocol stack. Dovero builds upon their work with streamlined scope and local redesigns while honoring upstream licensing and attribution.
-- Thanks to the open-source projects and scholarly data services powering this workbench, including Tauri, React, EmbedPDF, Plate, Dockview, shadcn/ui, Streamdown, OpenAlex, Semantic Scholar, and CCF Deadlines.
-
-## License
-
-Licensed under the [MIT License](LICENSE). Third-party components and licenses are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
+- **Upstream [poco-ai/Agentero](https://github.com/poco-ai/Agentero)**: Deepest thanks to the original Agentero team and community contributors for designing and open-sourcing the local-first research workbench foundation. Dovero builds on their work while honoring upstream licensing and attribution.
+- Thanks to Tauri, React, EmbedPDF, Plate, Dockview, OpenAlex, Semantic Scholar, and CCF Deadlines.
+- Licensed under the [MIT License](LICENSE). Third-party notices are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
