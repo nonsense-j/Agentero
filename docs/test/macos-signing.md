@@ -181,7 +181,7 @@ src-tauri/target/release/bundle/dmg/…
 
 | 项目 | 说明 |
 |------|------|
-| Bundle ID | `com.poco-ai.agentero`（`src-tauri/tauri.conf.json` → `identifier`） |
+| Bundle ID | `io.github.nonsense-j.dovero`（`src-tauri/tauri.conf.json` → `identifier`） |
 | Entitlements | `src-tauri/Entitlements.plist`（Hardened Runtime：JIT 等；**无** App Sandbox） |
 | Info.plist | `src-tauri/Info.plist`（`ITSAppUsesNonExemptEncryption=false`） |
 | 最低系统 | macOS 12.0（`bundle.macOS.minimumSystemVersion`） |

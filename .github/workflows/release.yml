@@ -43,11 +43,11 @@ jobs:
           IS_PRERELEASE: ${{ contains(env.RELEASE_TAG, '-') }}
         run: |
           set -euo pipefail
-          NOTES="Desktop installers for Agentero ${RELEASE_TAG} (AI & SE Plaza Overhaul + Magpie UI)."
+          NOTES="Desktop installers for Dovero ${RELEASE_TAG}."
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --title "Agentero ${RELEASE_TAG}" \
+              --title "Dovero ${RELEASE_TAG}" \
               --notes "${NOTES}" \
               --draft=false \
               --prerelease="${IS_PRERELEASE}"
@@ -55,7 +55,7 @@ jobs:
             args=(
               release create "${RELEASE_TAG}"
               --repo "${GITHUB_REPOSITORY}"
-              --title "Agentero ${RELEASE_TAG}"
+              --title "Dovero ${RELEASE_TAG}"
               --notes "${NOTES}"
               --target "${GITHUB_SHA}"
             )
@@ -132,7 +132,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Agentero ${{ env.RELEASE_TAG }}
+          releaseName: Dovero ${{ env.RELEASE_TAG }}
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
@@ -142,7 +142,7 @@ jobs:
       - name: Upload Windows Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Agentero-Windows-x64-Installer
+          name: Dovero-Windows-x64-Installer
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
@@ -205,7 +205,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Agentero ${{ env.RELEASE_TAG }}
+          releaseName: Dovero ${{ env.RELEASE_TAG }}
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
@@ -268,7 +268,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Agentero ${{ env.RELEASE_TAG }}
+          releaseName: Dovero ${{ env.RELEASE_TAG }}
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
@@ -341,7 +341,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Agentero ${{ env.RELEASE_TAG }}
+          releaseName: Dovero ${{ env.RELEASE_TAG }}
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}
@@ -414,7 +414,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Agentero ${{ env.RELEASE_TAG }}
+          releaseName: Dovero ${{ env.RELEASE_TAG }}
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           uploadUpdaterJson: ${{ env.HAS_UPDATER_KEY == 'true' }}

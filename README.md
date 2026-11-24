@@ -1,11 +1,13 @@
 <p align="center">
-  <img src="docs/assets/hero.png" alt="Agentero" width="100%" />
+  <img src="docs/assets/agentero-app-icon.svg" alt="Dovero" width="112" />
 </p>
 
-<h3 align="center">聚焦科研阅读、论文发现与 Agent 协作的本地优先桌面工作台</h3>
+<h1 align="center">Dovero</h1>
+
+<h3 align="center">聚焦论文发现、结构化阅读与 Agent 协作的本地优先科研桌面工作台</h3>
 
 <p align="center">
-  基于 <a href="https://github.com/poco-ai/Agentero"><b>poco-ai/Agentero</b></a> 深度裁剪与局部重设计的分叉版本：保留人类舒适的 PDF 阅读与双链笔记体验，强化论文池发现、引文谱系、综述生成与 CARSI 机构访问，保持轻量纯粹与完全本地存储。
+  像折纸信鸽把最新研究送到案头——基于开源项目 <a href="https://github.com/poco-ai/Agentero"><b>poco-ai/Agentero</b></a> 深度裁剪与局部重设计的社区分叉版本：保留舒适的 PDF 阅读与双链笔记体验，强化本地论文池发现、引文谱系、综述生成与 CARSI 机构访问，保持轻量纯粹与完全本地存储。
 </p>
 
 <p align="center">
@@ -13,27 +15,28 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/nonsense-j/Agentero/releases"><img alt="release" src="https://img.shields.io/github/v/release/nonsense-j/Agentero?include_prereleases&style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
-  <a href="https://github.com/nonsense-j/Agentero/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/nonsense-j/Agentero?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
-  <a href="https://github.com/poco-ai/Agentero"><img alt="upstream" src="https://img.shields.io/badge/Upstream-poco--ai%2FAgentero-5319E7?style=for-the-badge&logo=github&logoColor=white&labelColor=20242D"></a>
+  <a href="https://github.com/nonsense-j/Dovero/releases"><img alt="release" src="https://img.shields.io/github/v/release/nonsense-j/Dovero?include_prereleases&style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
+  <a href="https://github.com/nonsense-j/Dovero/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/nonsense-j/Dovero?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
+  <a href="https://github.com/poco-ai/Agentero"><img alt="upstream" src="https://img.shields.io/badge/Forked_from-poco--ai%2FAgentero-5319E7?style=for-the-badge&logo=github&logoColor=white&labelColor=20242D"></a>
 </p>
 
-> **致谢原项目**：本仓库是开源项目 **[poco-ai/Agentero](https://github.com/poco-ai/Agentero)** 的社区分叉版本。核心的本地优先 Vault/Catalog 架构、EmbedPDF 阅读与版面分析框架、Plate 双链 Markdown 编辑器、ACP 本地 Agent 与 MCP 服务基础均源自原版 Agentero 团队的卓越设计。我们定期通过选择性同步机制吸收上游的 Bug 修复与精选改进，衷心感谢原作者与所有上游贡献者！
+> **Fork 说明与致谢**：**Dovero** 是基于开源项目 **[poco-ai/Agentero](https://github.com/poco-ai/Agentero)** 分叉衍生的独立定制版本（非官方发行版）。核心的本地优先 Vault/Catalog 架构、EmbedPDF 阅读与版面分析框架、Plate 双链 Markdown 编辑器、ACP 本地 Agent 与 MCP 服务基础均源自原版 Agentero 团队的卓越设计。我们在其基础上做了大量子系统精简与论文发现工作流重设计，并持续通过选择性同步机制吸收上游 Bug 修复与精选改进，衷心感谢原作者与所有上游贡献者！
 
 ---
 
 ## 与原版 Agentero 的区别
 
-本分叉围绕「**本地优先、轻量聚焦、桌面端科研阅读与论文发现主线**」对原版进行了架构裁剪与核心能力重设计：
+**Dovero** 围绕「**本地优先、轻量聚焦、桌面端论文发现与科研阅读主线**」对原版进行了架构裁剪与核心能力重设计：
 
-| 维度 | 原版 [poco-ai/Agentero](https://github.com/poco-ai/Agentero) | 本仓库（[nonsense-j/Agentero](https://github.com/nonsense-j/Agentero)） |
+| 维度 | 原版 [poco-ai/Agentero](https://github.com/poco-ai/Agentero) | **Dovero**（[nonsense-j/Dovero](https://github.com/nonsense-j/Dovero)） |
 |---|---|---|
-| **产品定位** | 全功能科研平台（覆盖阅读、LaTeX 写作编译、移动端、云服务、插件生态等） | 聚焦**桌面端科研阅读、论文发现、综述整理与 Agent 协作**的轻量本地工作台 |
+| **产品定位** | 全功能科研平台（覆盖阅读、LaTeX 写作编译、移动端、云服务、插件生态等） | 聚焦**桌面端论文发现、科研阅读、综述整理与本地 Agent 协作**的轻量本地工作台 |
 | **广场（Plaza）与论文发现** | 侧重 Cool Papers / ModelScope / Papers with Code / RSS / arXiv 推荐等外部浏览流 | 基于本地 `collection.sqlite` 深度重写为五大原生面板：**Paper Collection**（28 顶会主轨 + arXiv 论文池、Seed 预热同步、LLM 关键词补全）、**Paper Discover**（快速检索 + 池内引文谱系图 + Deep Search）、**Paper Survey**（带引用 Related Work 与 HTML 综述报告生成）、**Paper Recommend**、**CCF Deadline** |
 | **机构文献访问** | 通用机构代理网关（Institution Proxy Gateway）自动探测 | 内置高校 **CARSI 机构单点登录（SSO）** 与 WebView 会话探测，支持 IEEE / ACM 等出版商访问检测与登录后入库 |
 | **子系统与依赖精简** | 包含 TeX/Writing 编译、iOS/Android 移动端与 Bridge、Remote Vault / SSH 隧道、账号与云额度、Word/知乎/遥测集成、PDF Reflow、本地布局模型资产、Tesseract OCR 等 | 全面裁剪上述非主线重型子系统与 Excalidraw 白板依赖（零账号绑定、零遥测上报、无重型原生 OCR/排版模型资产），保持仓库与安装包精简 |
 | **交互与 UI 设计** | 持续演进 Zen 多会话工作区、离线词典、版面元素点选替代框选、全屏沉浸模式、评论栏弹出（Rail Peek）等新交互 | 以克制、稳定的阅读排版为主：统一打磨 PDF 边注与选区卡片视觉、Markdown 笔记排版、Streamdown 与 Deep Search 报告样式；保留传统框选视觉批注与固定边注槽位，并选择性吸收上游高价值小改进（如 400% 缩放、公式复制 LaTeX、引用预览展开、划词翻译卡外部点击关闭等） |
 | **翻译与模型配置** | 移除 Google Translate / DeepLX，配套官方托管能力 | 保留 Google Translate / DeepLX 等零配置免费翻译源，同时强化 **OpenAI 兼容接口**（全文翻译并发数 1–8 可配置、3 字段精简关键词 LLM 配置与模型选择器） |
+| **本机隔离与共存** | 应用标识 `com.poco-ai.agentero`，配置/数据位于 `agentero/` | 独立应用标识 `io.github.nonsense-j.dovero`、`dovero://` 协议与 `dovero/` 配置/论文池目录（首次启动自动无损迁移旧 `agentero/` 配置与论文池），同时保留 Vault 内 `.agentero/catalog.sqlite` 格式，可与原版共存并互通论文库 |
 | **构建与发布流** | 全平台桌面 + 独立 CLI + iOS TestFlight + Homebrew Tap | 按平台拆分的轻量 GitHub Actions 桌面安装包构建（Windows x64 NSIS、macOS Apple Silicon & Intel，支持 Fork 无签名密钥直接构建） |
 
 ---
@@ -72,7 +75,7 @@
 ### 4. 机构访问、Zotero 兼容与透明本地存储
 - **CARSI 机构认证与多途径入库**：支持 DOI / arXiv / 标题魔棒入库、PDF 拖拽入库、高校 CARSI 单点登录辅助下载，以及本地 `127.0.0.1:23119` Zotero Connector 浏览器扩展一键抓取。
 - **Zotero 迁移与 BibTeX 互通**：支持导入本地 Zotero 数据库与导出 BibTeX / BibLaTeX。
-- **纯文件透明存储与自主同步**：Vault 中的 PDF、Markdown 笔记、标注（`marks/`）、版面索引（`source/`）均以开放文件存放，结构化元数据存于 `.agentero/catalog.sqlite`，离开应用依然可由任意外部工具读写；支持通过 **S3 兼容对象存储 / WebDAV / Git** 进行多端自主同步（支持按嵌套论文目录配置同步作用域）。
+- **纯文件透明存储与自主同步**：Vault 中的 PDF、Markdown 笔记、标注（`marks/`）、版面索引（`source/`）均以开放文件存放，结构化元数据沿用 `.agentero/catalog.sqlite` 以保持与原版 Vault 完全互通，离开应用依然可由任意外部工具读写；支持通过 **S3 兼容对象存储 / WebDAV / Git** 进行多端自主同步（支持按嵌套论文目录配置同步作用域）。
 
 ---
 
@@ -80,10 +83,12 @@
 
 ### 1. 下载桌面安装包（Windows / macOS）
 
-前往本仓库的 **[GitHub Releases](https://github.com/nonsense-j/Agentero/releases)** 下载对应平台的预编译安装包：
+前往本仓库的 **[GitHub Releases](https://github.com/nonsense-j/Dovero/releases)** 下载对应平台的预编译安装包：
 - **Windows (x64)**：`*-setup.exe`（NSIS 安装包）
 - **macOS (Apple Silicon)**：`*_aarch64.dmg`
 - **macOS (Intel)**：`*_x64.dmg`
+
+> **从旧分叉版本升级提示**：Dovero 首次启动时会自动将旧 `agentero/` 配置目录与 `collection.sqlite` 论文池无损复制到 `dovero/`，原有 Vault 论文库无需任何改动即可直接打开。
 
 ### 2. 从源码运行与构建
 
@@ -109,7 +114,7 @@ cargo build -p agentero-cli --release
 
 ## 致谢
 
-- **核心致谢 [poco-ai/Agentero](https://github.com/poco-ai/Agentero)**：感谢原版 Agentero 团队与社区贡献者打造了这套优秀的本地优先科研工作台底座与开放协议设计。本分叉在原仓库基础上进行精简定制与功能探索，并持续尊重与保留上游的开源协议与贡献记录。
+- **核心致谢 [poco-ai/Agentero](https://github.com/poco-ai/Agentero)**：感谢原版 Agentero 团队与社区贡献者打造了这套优秀的本地优先科研工作台底座与开放协议设计。Dovero 在原仓库基础上进行精简定制与功能探索，并持续尊重与保留上游的开源协议与贡献记录。
 - 感谢 Tauri、React、EmbedPDF、Plate、Dockview、shadcn/ui、Streamdown、OpenAlex、Semantic Scholar、CCF Deadlines 等开源项目与开放学术数据源。
 
 ## 开源许可证

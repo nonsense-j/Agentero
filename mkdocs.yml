@@ -1,7 +1,7 @@
-site_name: Agentero 文档
-site_description: Agentero 本地优先 Agent 科研工作台文档
-repo_url: https://github.com/nonsense-j/Agentero
-repo_name: nonsense-j/Agentero
+site_name: Dovero 文档
+site_description: Dovero 本地优先科研阅读、论文发现与 Agent 协作工作台文档
+repo_url: https://github.com/nonsense-j/Dovero
+repo_name: nonsense-j/Dovero
 edit_uri: edit/main/docs/
 
 theme:

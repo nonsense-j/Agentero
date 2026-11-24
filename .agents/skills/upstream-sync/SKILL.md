@@ -9,7 +9,7 @@ description: >-
 
 # Upstream Sync
 
-将上游 `poco-ai/Agentero` 的增量改进安全、可控地选择性同步到本分叉仓库（`nonsense-j/Agentero`），在不复活已裁剪子系统、不破坏本地重设计功能（Plaza、CARSI、Windows 构建流）的前提下持续吸收修复与特性。
+将上游 `poco-ai/Agentero` 的增量改进安全、可控地选择性同步到本分叉仓库（`nonsense-j/Dovero`），在不复活已裁剪子系统、不破坏本地重设计功能（Plaza、CARSI、Windows 构建流）的前提下持续吸收修复与特性。
 
 ---
 

@@ -1,13 +1,13 @@
 # 参与贡献
 
-感谢关注 Agentero！无论是 Issue、文档还是代码 PR，都欢迎。本文介绍参与贡献需要遵守的流程与检查要求。
+感谢关注 Dovero！无论是 Issue、文档还是代码 PR，都欢迎。本文介绍参与贡献需要遵守的流程与检查要求。
 
 > 面向 Agent 与开发者的仓库级开发约定见 [AGENTS.md](AGENTS.md)，与本文互补；两者冲突时以更严格者为准。
 
 ## 开始之前
 
-- **功能修改请先开 Issue 讨论**：新功能、交互调整、涉及数据模型或协议的改动，请先通过[功能建议](https://github.com/nonsense-j/Agentero/issues/new?template=feature_request.yml)模板描述问题场景与期望方案，与维护者对齐范围后再动手，避免做完发现方向不符。较大的想法请先开 issue 对齐。
-- **Bug 修复**可以直接进行：建议先通过[Bug 反馈](https://github.com/nonsense-j/Agentero/issues/new?template=bug_report.yml)附上可复现步骤，并在 PR 中引用对应 issue（`Closes #123`）。
+- **功能修改请先开 Issue 讨论**：新功能、交互调整、涉及数据模型或协议的改动，请先通过[功能建议](https://github.com/nonsense-j/Dovero/issues/new?template=feature_request.yml)模板描述问题场景与期望方案，与维护者对齐范围后再动手，避免做完发现方向不符。较大的想法请先开 issue 对齐。
+- **Bug 修复**可以直接进行：建议先通过[Bug 反馈](https://github.com/nonsense-j/Dovero/issues/new?template=bug_report.yml)附上可复现步骤，并在 PR 中引用对应 issue（`Closes #123`）。
 - 文档、翻译、明显的小修正可直接提 PR。
 
 ## 开发环境
@@ -20,7 +20,7 @@
 | 平台依赖 | — | Linux 需 `webkit2gtk 4.1`（Ubuntu 22.04+）；Windows 需 WebView2；macOS 需 Xcode Command Line Tools |
 
 ```bash
-git clone https://github.com/nonsense-j/Agentero.git
+git clone https://github.com/nonsense-j/Dovero.git
 cd agentero
 pnpm install    # 自动通过 husky 安装 Git hooks
 ```
@@ -117,8 +117,8 @@ cargo test -p agentero-core -p agentero-cli
 
 ## Issue 模板
 
-- [Bug 反馈](https://github.com/nonsense-j/Agentero/issues/new?template=bug_report.yml)：请提供可复现步骤、期望/实际行为、环境信息与日志。
-- [功能建议](https://github.com/nonsense-j/Agentero/issues/new?template=feature_request.yml)：请描述问题或场景、期望方案与替代方案。
+- [Bug 反馈](https://github.com/nonsense-j/Dovero/issues/new?template=bug_report.yml)：请提供可复现步骤、期望/实际行为、环境信息与日志。
+- [功能建议](https://github.com/nonsense-j/Dovero/issues/new?template=feature_request.yml)：请描述问题或场景、期望方案与替代方案。
 
 ## License
 

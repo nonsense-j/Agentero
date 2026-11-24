@@ -282,6 +282,6 @@ GitHub 也会根据 `pnpm-lock.yaml` 与 `Cargo.lock` 自动生成依赖图，�
 
 ## 7. 更正与咨询
 
-如果发现遗漏、版本不一致或许可证标注错误，欢迎提交 Issue：<https://github.com/nonsense-j/Agentero/issues>。
+如果发现遗漏、版本不一致或许可证标注错误，欢迎提交 Issue：<https://github.com/nonsense-j/Dovero/issues>。
 
 本文件不构成法律意见。对外分发二进制前，建议由维护者或法务确认许可证义务是否满足（尤其是 AGPL-3.0-or-later 与 MPL-2.0 组件）。

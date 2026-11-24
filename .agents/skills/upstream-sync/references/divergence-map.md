@@ -1,6 +1,6 @@
-# Upstream Divergence Map (`poco-ai/Agentero` vs `nonsense-j/Agentero`)
+# Upstream Divergence Map (`poco-ai/Agentero` vs `nonsense-j/Dovero`)
 
-本文件记录本分叉仓库（`nonsense-j/Agentero`）相对上游（`poco-ai/Agentero`）的子系统裁剪边界、重设计分叉区、契约热点与历史同步水位线，作为 `triage-upstream.mjs` 与人工选择性移植的权威依据。
+本文件记录本分叉仓库（`nonsense-j/Dovero`）相对上游（`poco-ai/Agentero`）的子系统裁剪边界、重设计分叉区、契约热点与历史同步水位线，作为 `triage-upstream.mjs` 与人工选择性移植的权威依据。
 
 ## Current Sync Watermark
 

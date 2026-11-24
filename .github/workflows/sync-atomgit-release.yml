@@ -80,7 +80,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
           ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
-          ATOMGIT_REPOSITORY: ${{ vars.ATOMGIT_REPOSITORY || 'nonsense-j/Agentero' }}
+          ATOMGIT_REPOSITORY: ${{ vars.ATOMGIT_REPOSITORY || 'nonsense-j/Dovero' }}
           ATOMGIT_GIT_HOST: ${{ vars.ATOMGIT_GIT_HOST || 'atomgit.com' }}
           ATOMGIT_GIT_USERNAME: ${{ vars.ATOMGIT_GIT_USERNAME }}
         run: |
@@ -164,6 +164,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
-          ATOMGIT_REPOSITORY: ${{ vars.ATOMGIT_REPOSITORY || 'nonsense-j/Agentero' }}
+          ATOMGIT_REPOSITORY: ${{ vars.ATOMGIT_REPOSITORY || 'nonsense-j/Dovero' }}
           RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: node scripts/sync-atomgit-release.mjs

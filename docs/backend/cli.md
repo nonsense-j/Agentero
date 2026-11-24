@@ -266,7 +266,7 @@ agentero collection upsert-file --file batch.json --json
 agentero collection seed-bake --out-dir dist/seed \
   --llm-base-url https://x666.me/v1 --llm-model ernie-5.5-flash-preview --llm-concurrency 1 --llm-batch-size 8 --json
 agentero collection seed-import --manifest dist/seed/manifest.json --json
-agentero collection seed-import --manifest https://github.com/nonsense-j/Agentero/releases/download/collection-seed-2026/manifest.json --force --json
+agentero collection seed-import --manifest https://github.com/nonsense-j/Dovero/releases/download/collection-seed-2026/manifest.json --force --json
 ```
 
 | 子命令 | 说明 |
