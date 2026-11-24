@@ -136,6 +136,7 @@ export function DiscoverGraphView({
 		width: 840,
 		height: 540,
 	});
+	const [containerHidden, setContainerHidden] = useState(false);
 
 	const [expandedBySeed, setExpandedBySeed] = useState<
 		Map<string, CollectionPaperItem[]>
@@ -164,7 +165,7 @@ export function DiscoverGraphView({
 		new Map(),
 	);
 	const needsAutoFitRef = useRef(true);
-	const pendingFitAfterSubgraphRef = useRef(false);
+	const pendingFitAfterSubgraphRef = useRef(true);
 	const graphEpochRef = useRef(0);
 	const prevResetKeyRef = useRef(resetKey);
 	const subgraphReqSeqRef = useRef(0);
@@ -182,7 +183,7 @@ export function DiscoverGraphView({
 		if (prevResetKeyRef.current === resetKey) return;
 		prevResetKeyRef.current = resetKey;
 		graphEpochRef.current += 1;
-		pendingFitAfterSubgraphRef.current = false;
+		pendingFitAfterSubgraphRef.current = true;
 		setExpandedBySeed(new Map());
 		setExpandingIds(new Set());
 		setExpandingAll(false);
@@ -198,12 +199,16 @@ export function DiscoverGraphView({
 		const updateSize = () => {
 			const rect = el.getBoundingClientRect();
 			if (rect.width > 0 && rect.height > 0) {
+				setContainerHidden(false);
 				setViewport((prev) =>
 					Math.abs(prev.width - rect.width) < 1 &&
 					Math.abs(prev.height - rect.height) < 1
 						? prev
 						: { width: rect.width, height: rect.height },
 				);
+			} else {
+				setContainerHidden(true);
+				setHoveredId(null);
 			}
 		};
 		updateSize();
@@ -871,25 +876,27 @@ export function DiscoverGraphView({
 										</span>
 									</button>
 								</TooltipTrigger>
-								<TooltipContent
-									side="top"
-									className="max-w-xs space-y-1 py-1.5"
-								>
-									<p className="font-medium text-xs leading-snug">
-										{node.paper.title}
-									</p>
-									<p className="flex flex-wrap items-center gap-1.5 font-mono text-[0.625rem] opacity-80">
-										<span>{node.paper.sourceLabel}</span>
-										{node.paper.ccfRank ? (
-											<span>· {node.paper.ccfRank}</span>
-										) : null}
-										{node.inLibrary ? (
-											<span className="text-emerald-400">
-												· {t("plaza.collection.lineage.inVault")}
-											</span>
-										) : null}
-									</p>
-								</TooltipContent>
+								{!containerHidden ? (
+									<TooltipContent
+										side="top"
+										className="max-w-xs space-y-1 py-1.5"
+									>
+										<p className="font-medium text-xs leading-snug">
+											{node.paper.title}
+										</p>
+										<p className="flex flex-wrap items-center gap-1.5 font-mono text-[0.625rem] opacity-80">
+											<span>{node.paper.sourceLabel}</span>
+											{node.paper.ccfRank ? (
+												<span>· {node.paper.ccfRank}</span>
+											) : null}
+											{node.inLibrary ? (
+												<span className="text-emerald-400">
+													· {t("plaza.collection.lineage.inVault")}
+												</span>
+											) : null}
+										</p>
+									</TooltipContent>
+								) : null}
 							</Tooltip>
 
 							{showExpandBtn ? (
@@ -929,11 +936,13 @@ export function DiscoverGraphView({
 											)}
 										</button>
 									</TooltipTrigger>
-									<TooltipContent side="top">
-										{isExpanded
-											? t("plaza.discover.graphCollapseNode")
-											: `${t("plaza.discover.graphExpandNode")}${unexpandedCount > 0 ? ` (+${unexpandedCount})` : ""}`}
-									</TooltipContent>
+									{!containerHidden ? (
+										<TooltipContent side="top">
+											{isExpanded
+												? t("plaza.discover.graphCollapseNode")
+												: `${t("plaza.discover.graphExpandNode")}${unexpandedCount > 0 ? ` (+${unexpandedCount})` : ""}`}
+										</TooltipContent>
+									) : null}
 								</Tooltip>
 							) : null}
 						</div>

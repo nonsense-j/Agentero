@@ -197,7 +197,7 @@ function EmptyHero({
 					{t("plaza.survey.emptyDesc")}
 				</p>
 			</div>
-			<ol className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+			<ol className="grid grid-cols-1 gap-2 @md:grid-cols-3">
 				{EMPTY_STEPS.map((step, i) => (
 					<li
 						key={step.key}
@@ -412,7 +412,7 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 							e.preventDefault();
 							void start();
 						}}
-						className="agentero-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-muted/15 p-4"
+						className="agentero-scroll @container flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-muted/15 p-4"
 					>
 						<SurveyPaperPicker
 							selected={papers}
@@ -447,7 +447,7 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 							/>
 						</div>
 
-						<fieldset className="grid shrink-0 grid-cols-2 gap-2">
+						<fieldset className="grid shrink-0 grid-cols-1 gap-2 @[15rem]:grid-cols-2">
 							<legend className="sr-only">{t("plaza.survey.format")}</legend>
 							{FORMAT_OPTIONS.map((opt) => {
 								const checked = format === opt.id;
@@ -524,7 +524,7 @@ export function PlazaSurveyView({ className }: { className?: string }) {
 					minSize={360}
 					className="flex min-h-0 min-w-0 flex-col overflow-hidden"
 				>
-					<div className="agentero-scroll min-h-0 flex-1 overflow-y-auto px-6 py-5">
+					<div className="agentero-scroll @container min-h-0 flex-1 overflow-y-auto px-6 py-5">
 						{activeRun ? (
 							<SurveyRunView
 								key={activeRun.id}

@@ -216,6 +216,7 @@ type SimNode = {
 function resolveCapsuleCollisions(nodes: SimNode[], passes: number): void {
 	if (nodes.length < 2) return;
 	for (let pass = 0; pass < passes; pass += 1) {
+		let moved = false;
 		for (let i = 0; i < nodes.length; i += 1) {
 			const a = nodes[i];
 			for (let j = i + 1; j < nodes.length; j += 1) {
@@ -233,6 +234,7 @@ function resolveCapsuleCollisions(nodes: SimNode[], passes: number): void {
 				const overlapY = minDy - Math.abs(dy);
 				if (overlapX <= 0 || overlapY <= 0) continue;
 
+				moved = true;
 				// Push apart along axis of smaller normalized penetration
 				if (overlapX / minDx < overlapY / minDy) {
 					const sign = dx >= 0 ? 1 : -1;
@@ -247,6 +249,7 @@ function resolveCapsuleCollisions(nodes: SimNode[], passes: number): void {
 				}
 			}
 		}
+		if (!moved) break;
 	}
 }
 
@@ -483,7 +486,7 @@ export function computePaperGraphLayout(
 			}
 		}
 
-		resolveCapsuleCollisions(simNodes, 8);
+		resolveCapsuleCollisions(simNodes, 28);
 
 		for (const s of simNodes) {
 			positions.set(s.id, {
