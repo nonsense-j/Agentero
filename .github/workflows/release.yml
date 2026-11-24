@@ -17,9 +17,9 @@ on:
           - linux-arm64
           - all
       tag:
-        description: "Release tag name (e.g. v0.16.0)"
+        description: "Release tag name (e.g. v0.1.0)"
         required: false
-        default: "v0.16.0"
+        default: "v0.1.0"
         type: string
   push:
     tags:
@@ -29,7 +29,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ github.event.inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v0.16.0' }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'v0.1.0' }}
   TARGET_PLATFORM: ${{ github.event.inputs.platform || 'desktop' }}
 
 jobs:
