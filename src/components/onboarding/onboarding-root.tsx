@@ -117,9 +117,15 @@ export function OnboardingRoot() {
 			isTauri() &&
 			!perfActive() &&
 			!settings.onboardingDone &&
+			!settings.featureTourDone &&
 			!vaultPath &&
 			recentVaults.length === 0,
-		[settings.onboardingDone, vaultPath, recentVaults.length],
+		[
+			settings.onboardingDone,
+			settings.featureTourDone,
+			vaultPath,
+			recentVaults.length,
+		],
 	);
 
 	// Auto-show for fresh installs; close once completed or vault active.

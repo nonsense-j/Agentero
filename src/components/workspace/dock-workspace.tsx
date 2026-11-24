@@ -234,10 +234,17 @@ function WorkspaceTab({
 	const [title, setTitle] = useState(api.title);
 	const middleClickRef = useRef(false);
 	const tab = tabsById.get(api.id) ?? null;
-	const displayTitle =
-		tab?.kind === "plaza" && tab.path ? plazaTitleForPath(tab.path) : title;
 	// Library is the resident tab — no close affordance.
 	const isLibrary = Boolean(tab && isLibraryVirtualPath(tab.path));
+	const isTrash = Boolean(tab && isTrashVirtualPath(tab.path));
+	const displayTitle =
+		tab?.kind === "plaza" && tab.path
+			? plazaTitleForPath(tab.path)
+			: isLibrary
+				? t("sidebar:papersLibrary.title")
+				: isTrash
+					? t("sidebar:recycleBin.title")
+					: title;
 	const canToggleHtml =
 		tab?.paperMeta?.type !== "html" &&
 		Boolean(tab?.htmlUrl) &&
