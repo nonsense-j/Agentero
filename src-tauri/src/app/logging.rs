@@ -43,8 +43,16 @@ pub fn build_log_plugin() -> tauri_plugin_log::Builder {
         }));
 
     // Dev: also mirror into the webview console (frontend calls attachConsole).
+    // Never feed `tauri_runtime_wry` / `wry` errors back into `TargetKind::Webview`:
+    // if a secondary WebView2 window enters an invalid state (e.g. JS `window.close()`
+    // or teardown race → HRESULT 0x8007139F), `app.emit("log://log", ...)` logs a
+    // `tauri_runtime_wry` error that re-enters `TargetKind::Webview` in an unbounded
+    // self-amplifying loop. They still go to `Stdout` and `LogDir` once per real event.
     if cfg!(debug_assertions) {
-        builder = builder.target(Target::new(TargetKind::Webview));
+        builder = builder.target(
+            Target::new(TargetKind::Webview)
+                .filter(|metadata| should_forward_to_webview(metadata.target())),
+        );
     }
 
     // Frontend spans are `PERF {json}` info lines. Copy them into the trace
@@ -106,6 +114,13 @@ pub fn clear_log_dir(dir: &Path) -> Result<u64, AppError> {
         }
     }
     Ok(cleared)
+}
+
+fn should_forward_to_webview(target: &str) -> bool {
+    target != "tauri_runtime_wry"
+        && !target.starts_with("tauri_runtime_wry::")
+        && target != "wry"
+        && !target.starts_with("wry::")
 }
 
 fn is_agentero_log_file(name: &str) -> bool {
@@ -214,5 +229,15 @@ mod tests {
         if path.exists() {
             assert_eq!(fs::metadata(&path).unwrap().len(), 0);
         }
+    }
+
+    #[test]
+    fn webview_log_filter_blocks_wry_recursion() {
+        assert!(!should_forward_to_webview("tauri_runtime_wry"));
+        assert!(!should_forward_to_webview("tauri_runtime_wry::webview"));
+        assert!(!should_forward_to_webview("wry"));
+        assert!(!should_forward_to_webview("wry::webview2"));
+        assert!(should_forward_to_webview("agentero::op"));
+        assert!(should_forward_to_webview("agentero::agent"));
     }
 }
