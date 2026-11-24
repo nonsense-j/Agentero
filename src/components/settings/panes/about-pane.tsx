@@ -50,9 +50,9 @@ import {
 
 /** Same as README / homebrew-agentero Formula (headless CLI, not the desktop cask). */
 const CLI_BREW_INSTALL_COMMAND =
-	"brew tap nonsense-j/agentero\nbrew install agentero";
+	"brew tap nonsense-j/dovero\nbrew install dovero";
 
-const GITHUB_REPO_URL = "https://github.com/nonsense-j/Agentero";
+const GITHUB_REPO_URL = "https://github.com/nonsense-j/Dovero";
 
 export function AboutPane() {
 	const { t } = useTranslation("settings");
@@ -256,9 +256,7 @@ export function AboutPane() {
 							className="size-10 shrink-0 rounded-lg"
 						/>
 						<div className="min-w-0 space-y-0.5">
-							<p className="font-semibold text-base text-foreground">
-								Agentero
-							</p>
+							<p className="font-semibold text-base text-foreground">Dovero</p>
 							{version && (
 								<p className="flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
 									<span>{t("about.version", { version })}</span>

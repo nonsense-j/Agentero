@@ -33,7 +33,7 @@ const API_BASE: &str = "https://paperswithcode.co/api/v1";
 const USER_AGENT: &str = concat!(
     "Agentero/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/nonsense-j/Agentero; mailto:agentero@users.noreply.github.com)"
+    " (+https://github.com/nonsense-j/Dovero; mailto:dovero@users.noreply.github.com)"
 );
 const TIMEOUT: Duration = Duration::from_secs(12);
 

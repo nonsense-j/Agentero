@@ -260,7 +260,7 @@ async function resilientFetchText(
 				headers: {
 					Accept: accept,
 					"User-Agent":
-						"Mozilla/5.0 (compatible; AgenteroSeedBot/0.1; +https://github.com/nonsense-j/Agentero)",
+						"Mozilla/5.0 (compatible; DoveroSeedBot/0.1; +https://github.com/nonsense-j/Dovero)",
 				},
 				signal: AbortSignal.timeout(60_000),
 			});
@@ -1022,7 +1022,7 @@ async function uploadReleaseAssetsViaRestApi(
 		Authorization: `Bearer ${token}`,
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
-		"User-Agent": "AgenteroSeedPublisher",
+		"User-Agent": "DoveroSeedPublisher",
 	};
 
 	let release = null;
@@ -1320,30 +1320,33 @@ async function publishSeedToGitHubRelease({
 
 function resolveAgenteroSettingsCandidates() {
 	const candidates = [];
+	const appDirs = ["dovero", "agentero"];
 	const xdg = process.env.XDG_CONFIG_HOME?.trim();
-	if (xdg) {
-		candidates.push(path.join(xdg, "agentero", "settings.json"));
-	}
-	if (process.platform === "win32") {
-		const appData =
-			process.env.APPDATA?.trim() ||
-			path.join(os.homedir(), "AppData", "Roaming");
-		candidates.push(path.join(appData, "agentero", "settings.json"));
-	} else if (process.platform === "darwin") {
-		candidates.push(
-			path.join(os.homedir(), ".config", "agentero", "settings.json"),
-			path.join(
-				os.homedir(),
-				"Library",
-				"Application Support",
-				"agentero",
-				"settings.json",
-			),
-		);
-	} else {
-		candidates.push(
-			path.join(os.homedir(), ".config", "agentero", "settings.json"),
-		);
+	for (const appDir of appDirs) {
+		if (xdg) {
+			candidates.push(path.join(xdg, appDir, "settings.json"));
+		}
+		if (process.platform === "win32") {
+			const appData =
+				process.env.APPDATA?.trim() ||
+				path.join(os.homedir(), "AppData", "Roaming");
+			candidates.push(path.join(appData, appDir, "settings.json"));
+		} else if (process.platform === "darwin") {
+			candidates.push(
+				path.join(os.homedir(), ".config", appDir, "settings.json"),
+				path.join(
+					os.homedir(),
+					"Library",
+					"Application Support",
+					appDir,
+					"settings.json",
+				),
+			);
+		} else {
+			candidates.push(
+				path.join(os.homedir(), ".config", appDir, "settings.json"),
+			);
+		}
 	}
 	return Array.from(new Set(candidates));
 }

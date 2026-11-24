@@ -256,9 +256,14 @@ fn normalize_opt_rel(value: Option<String>) -> Result<Option<String>, AppError> 
     }
 }
 
-/// Build the `agentero://ui?action=…` deep link for a UI request.
+/// Supported deep-link URL schemes (`dovero` primary, legacy `agentero` accepted).
+fn is_supported_scheme(scheme: &str) -> bool {
+    scheme.eq_ignore_ascii_case("dovero") || scheme.eq_ignore_ascii_case("agentero")
+}
+
+/// Build the `dovero://ui?action=…` deep link for a UI request.
 pub fn ui_deep_link_url(req: &UiRequestPayload) -> String {
-    let mut url = Url::parse("agentero://ui").expect("static ui url");
+    let mut url = Url::parse("dovero://ui").expect("static ui url");
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("action", &req.action);
@@ -284,10 +289,10 @@ pub fn ui_deep_link_url(req: &UiRequestPayload) -> String {
     url.to_string()
 }
 
-/// Parse `agentero://ui?action=…` into a validated [`UiRequestPayload`].
+/// Parse `dovero://ui?action=…` (or legacy `agentero://ui?action=…`) into a validated [`UiRequestPayload`].
 pub fn parse_ui_url(raw: &str) -> Result<UiRequestPayload, AppError> {
     let url = Url::parse(raw).map_err(|e| AppError::message(format!("invalid ui URL: {e}")))?;
-    if url.scheme() != "agentero" {
+    if !is_supported_scheme(url.scheme()) {
         return Err(AppError::message(format!(
             "unsupported URL scheme: {}",
             url.scheme()
@@ -297,7 +302,7 @@ pub fn parse_ui_url(raw: &str) -> Result<UiRequestPayload, AppError> {
     let path_seg = url.path().trim_matches('/');
     if !(host.eq_ignore_ascii_case("ui") || path_seg.eq_ignore_ascii_case("ui")) {
         return Err(AppError::message(format!(
-            "unsupported agentero URL action: {}",
+            "unsupported dovero URL action: {}",
             if host.is_empty() { path_seg } else { host }
         )));
     }
@@ -347,22 +352,22 @@ pub fn normalize_vault_rel(rel: &str) -> Result<String, AppError> {
     Ok(parts.join("/"))
 }
 
-/// Parse `agentero://open?path=` (or `agentero:open?path=` variants).
+/// Parse `dovero://open?path=` (or legacy `agentero://open?path=` / `:` variants).
 pub fn parse_open_url(raw: &str) -> Result<PathBuf, AppError> {
     let url = Url::parse(raw).map_err(|e| AppError::message(format!("invalid open URL: {e}")))?;
     let scheme = url.scheme();
-    if scheme != "agentero" {
+    if !is_supported_scheme(scheme) {
         return Err(AppError::message(format!(
             "unsupported URL scheme: {scheme}"
         )));
     }
-    // `agentero://open?path=` → host "open"
+    // `dovero://open?path=` → host "open"
     let host = url.host_str().unwrap_or("");
     let path_seg = url.path().trim_matches('/');
     let is_open = host.eq_ignore_ascii_case("open") || path_seg.eq_ignore_ascii_case("open");
     if !is_open {
         return Err(AppError::message(format!(
-            "unsupported agentero URL action: {}",
+            "unsupported dovero URL action: {}",
             if host.is_empty() { path_seg } else { host }
         )));
     }
@@ -419,7 +424,11 @@ pub fn collect_open_args(argv: &[String]) -> (Vec<String>, Option<PathBuf>) {
         if idx == 0 {
             continue;
         }
-        if arg.starts_with("agentero://") || arg.starts_with("agentero:") {
+        if arg.starts_with("dovero://")
+            || arg.starts_with("dovero:")
+            || arg.starts_with("agentero://")
+            || arg.starts_with("agentero:")
+        {
             urls.push(arg.clone());
             continue;
         }
@@ -593,19 +602,23 @@ mod tests {
 
     #[test]
     fn parses_open_query() {
-        let p = parse_open_url("agentero://open?path=%2Ftmp%2Fresearch").unwrap();
+        let p = parse_open_url("dovero://open?path=%2Ftmp%2Fresearch").unwrap();
         assert_eq!(p, PathBuf::from("/tmp/research"));
+        let legacy = parse_open_url("agentero://open?path=%2Ftmp%2Fresearch").unwrap();
+        assert_eq!(legacy, PathBuf::from("/tmp/research"));
     }
 
     #[test]
     fn parses_open_path_form() {
-        let p = parse_open_url("agentero:open?path=%2Ftmp%2Fresearch").unwrap();
+        let p = parse_open_url("dovero:open?path=%2Ftmp%2Fresearch").unwrap();
         assert_eq!(p, PathBuf::from("/tmp/research"));
+        let legacy = parse_open_url("agentero:open?path=%2Ftmp%2Fresearch").unwrap();
+        assert_eq!(legacy, PathBuf::from("/tmp/research"));
     }
 
     #[test]
     fn rejects_missing_path() {
-        assert!(parse_open_url("agentero://open").is_err());
+        assert!(parse_open_url("dovero://open").is_err());
     }
 
     #[test]
@@ -622,7 +635,7 @@ mod tests {
         );
         let validated = validate_ui_request(req).unwrap();
         let url = ui_deep_link_url(&validated);
-        assert!(url.starts_with("agentero://ui?action=open-paper"));
+        assert!(url.starts_with("dovero://ui?action=open-paper"));
         assert_eq!(parse_ui_url(&url).unwrap(), validated);
         let _ = fs::remove_dir_all(&dir);
     }

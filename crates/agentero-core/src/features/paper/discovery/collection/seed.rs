@@ -47,7 +47,7 @@ use super::store::{
 };
 
 pub const DEFAULT_SEED_MANIFEST_URL: &str =
-    "https://github.com/nonsense-j/Agentero/releases/download/collection-seed-2026/manifest.json";
+    "https://github.com/nonsense-j/Dovero/releases/download/collection-seed-2026/manifest.json";
 
 pub const DEFAULT_BAKE_LLM_BASE_URL: &str = "https://x666.me/v1";
 pub const DEFAULT_BAKE_LLM_MODEL: &str = "ernie-5.5-flash-preview";

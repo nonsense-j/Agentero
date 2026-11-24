@@ -24,17 +24,22 @@ pub use record::{record_events, UsageRecord};
 /// [`rename_path`] against the process default database. Failures only warn: a
 /// stale activity row must never fail the move itself.
 pub fn rename_path_best_effort(vault: &str, from: &str, to: &str) {
-    if let Err(e) = rename_path(&usage_db_path(), vault, from, to) {
+    let path = usage_db_path();
+    crate::paths::migrate_legacy_sqlite("usage.sqlite", &path);
+    if let Err(e) = rename_path(&path, vault, from, to) {
         log::warn!(target: "agentero::usage", "rename usage paths {from} → {to}: {e}");
     }
 }
 
 pub fn record_default(events: &[UsageRecord]) -> Result<usize, AppError> {
-    record_events(&usage_db_path(), events)
+    let path = usage_db_path();
+    crate::paths::migrate_legacy_sqlite("usage.sqlite", &path);
+    record_events(&path, events)
 }
 
 pub fn clear_default(vault: Option<&str>) -> Result<u64, AppError> {
     let path = usage_db_path();
+    crate::paths::migrate_legacy_sqlite("usage.sqlite", &path);
     match vault.map(str::trim).filter(|s| !s.is_empty()) {
         Some(v) => clear_vault(&path, v),
         None => clear_all(&path),

@@ -665,6 +665,8 @@ pub fn bundled_pdfium_dir_for(exe: &Path) -> Option<PathBuf> {
     }
     candidates.push(exe_dir.join("pdfium"));
     // deb / AppImage put bundle resources under /usr/lib/<product>/.
+    candidates.push(exe_dir.join("../lib/dovero/pdfium"));
+    candidates.push(exe_dir.join("../lib/Dovero/pdfium"));
     candidates.push(exe_dir.join("../lib/agentero/pdfium"));
     candidates.push(exe_dir.join("../lib/Agentero/pdfium"));
     candidates.push(exe_dir.to_path_buf());
@@ -729,7 +731,7 @@ fn load_pdfium_file(path: &Path) -> Result<(), String> {
     let path = strip_verbatim_prefix(path);
     liteparse_pdfium::pdfium_sys::dynamic::load(&path).map_err(|error| {
         format!(
-            "{error}. Agentero needs the run-llama/pdfium-binaries build matched to liteparse ({})",
+            "{error}. Dovero needs the run-llama/pdfium-binaries build matched to liteparse ({})",
             pdfium_library_file_name()
         )
     })

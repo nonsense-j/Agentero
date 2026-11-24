@@ -31,9 +31,9 @@
 		},
 		"finder": {
 			"label": "Finder integration",
-			"description": "Adds \"Open with Agentero\" to the right-click menu for folders in Finder",
+			"description": "Adds \"Open with Dovero\" to the right-click menu for folders in Finder",
 			"descriptionInstalled": "Right-click a folder in Finder to open it as a Vault",
-			"stale": "Agentero was moved — update to fix the menu entry",
+			"stale": "Dovero was moved — update to fix the menu entry",
 			"install": "Install",
 			"update": "Update",
 			"uninstall": "Remove",
@@ -195,9 +195,9 @@
 			"portLabel": "Connector port",
 			"invalidPort": "Port must be between 1 and 65535.",
 			"notListening": "Not listening",
-			"portInUse": "Port {{port}} is in use. Agentero retries every 5 seconds. Quit Zotero or the other app using this port.",
-			"bindFailed": "Cannot listen on port {{port}}. Agentero retries every 5 seconds. Check the port or choose another one.",
-			"serverStopped": "The Connector service stopped. Agentero retries every 5 seconds. You can also retry now."
+			"portInUse": "Port {{port}} is in use. Dovero retries every 5 seconds. Quit Zotero or the other app using this port.",
+			"bindFailed": "Cannot listen on port {{port}}. Dovero retries every 5 seconds. Check the port or choose another one.",
+			"serverStopped": "The Connector service stopped. Dovero retries every 5 seconds. You can also retry now."
 		},
 		"mcp": {
 			"exposeText": {
@@ -299,7 +299,7 @@
 			"section": "Embedding model",
 			"source": {
 				"label": "Source",
-				"builtin": "Agentero built-in",
+				"builtin": "Dovero built-in",
 				"custom": "Custom endpoint"
 			},
 			"baseUrl": {
@@ -377,7 +377,7 @@
 		"lifecycleScanning": "Scanning PATH…",
 		"lifecycleProbing": "Probing ACP…",
 		"lifecycleUninstalling": "Uninstalling…",
-		"npmCacheWriteFailed": "npm cannot write to its cache. Agentero's managed installs use an isolated cache directory automatically — please retry. If it persists, run {{cacheCommand}} in Command Prompt and retry, close other Node/npm processes, allow Node.js in your antivirus, or correct the cache folder permissions.",
+		"npmCacheWriteFailed": "npm cannot write to its cache. Dovero's managed installs use an isolated cache directory automatically — please retry. If it persists, run {{cacheCommand}} in Command Prompt and retry, close other Node/npm processes, allow Node.js in your antivirus, or correct the cache folder permissions.",
 		"uninstallAgentAria": "Uninstall {{name}} agent",
 		"uninstallAgentTitle": "Uninstall agent",
 		"uninstallSuccess": "Uninstalled {{name}}",
@@ -451,8 +451,8 @@
 			"removeAcp": "Remove ACP adapter",
 			"dirsLabel": "Paths to delete",
 			"copyAria": "Copy to clipboard",
-			"registryOnly": "Only the Agentero registry entry will be removed; installed files stay on disk.",
-			"customConfirm": "Remove this custom agent from Agentero?",
+			"registryOnly": "Only the Dovero registry entry will be removed; installed files stay on disk.",
+			"customConfirm": "Remove this custom agent from Dovero?",
 			"confirm": "Uninstall"
 		}
 	},
@@ -460,7 +460,7 @@
 		"title": "Translate",
 		"provider": {
 			"label": "Default service",
-			"agentero": "Agentero built-in",
+			"agentero": "Dovero built-in",
 			"deeplx": "DeepLX",
 			"cnki": "CNKI Translate",
 			"huoshanweb": "Volcengine Web",
@@ -532,7 +532,7 @@
 			"deepl": "DeepL neural machine translation, configured with an official API key.",
 			"azure": "Microsoft Translator, configured with an Azure subscription key.",
 			"googleCloud": "Google Cloud Translation API, configured with a service-account key.",
-			"openaiCompatible": "OpenAI Chat Completions-compatible endpoint. Enter the Base URL, e.g. https://api.openai.com/v1; Agentero appends /chat/completions."
+			"openaiCompatible": "OpenAI Chat Completions-compatible endpoint. Enter the Base URL, e.g. https://api.openai.com/v1; Dovero appends /chat/completions."
 		},
 		"agentId": {
 			"label": "Agent",
@@ -568,7 +568,7 @@
 		"parserBackend": {
 			"label": "Body parse engine",
 			"local": "On-device",
-			"agentero": "Agentero built-in",
+			"agentero": "Dovero built-in",
 			"paddle": "Paddle",
 			"mineru": "MinerU",
 			"openaiCompatible": "OpenAI-compatible"
@@ -893,8 +893,8 @@
 			"tagUpdating": "Updating…",
 			"tagDownloading": "Updating {{progress}}%",
 			"tagInstalling": "Installing…",
-			"toastTitle": "Agentero {{version}} is available",
-			"toastDescription": "Download the verified update and restart Agentero"
+			"toastTitle": "Dovero {{version}} is available",
+			"toastDescription": "Download the verified update and restart Dovero"
 		},
 		"cli": {
 			"label": "Command-line tools",

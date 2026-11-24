@@ -1,4 +1,4 @@
-; Explorer context menu: "Open with Agentero" on folders and folder backgrounds.
+; Explorer context menu: "Open with Dovero" on folders and folder backgrounds.
 ; The GUI binary accepts a bare folder path argument
 ; (features/open_request::collect_open_args), which is lossless for paths with
 ; spaces, `&`, `%` or non-ASCII characters (a deep-link URL query would not be).
@@ -9,24 +9,24 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Right-click on a folder
-  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithAgentero" "" "Open with Agentero"
-  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithAgentero" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
-  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithAgentero\command" "" `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%1$\"`
+  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithDovero" "" "Open with Dovero"
+  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithDovero" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr SHCTX "Software\Classes\Directory\shell\OpenWithDovero\command" "" `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%1$\"`
   ; Right-click on the empty area inside a folder
-  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithAgentero" "" "Open with Agentero"
-  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithAgentero" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
-  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithAgentero\command" "" `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%V$\"`
+  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithDovero" "" "Open with Dovero"
+  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithDovero" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\OpenWithDovero\command" "" `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%V$\"`
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; Ownership-guarded cleanup (mirrors the upstream deep-link removal): only
   ; delete entries whose command still points at this install location.
-  ReadRegStr $R0 SHCTX "Software\Classes\Directory\shell\OpenWithAgentero\command" ""
+  ReadRegStr $R0 SHCTX "Software\Classes\Directory\shell\OpenWithDovero\command" ""
   StrCmp $R0 `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%1$\"` 0 +2
-    DeleteRegKey SHCTX "Software\Classes\Directory\shell\OpenWithAgentero"
-  ReadRegStr $R0 SHCTX "Software\Classes\Directory\Background\shell\OpenWithAgentero\command" ""
+    DeleteRegKey SHCTX "Software\Classes\Directory\shell\OpenWithDovero"
+  ReadRegStr $R0 SHCTX "Software\Classes\Directory\Background\shell\OpenWithDovero\command" ""
   StrCmp $R0 `$"$INSTDIR\${MAINBINARYNAME}.exe$" $\"%V$\"` 0 +2
-    DeleteRegKey SHCTX "Software\Classes\Directory\Background\shell\OpenWithAgentero"
+    DeleteRegKey SHCTX "Software\Classes\Directory\Background\shell\OpenWithDovero"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

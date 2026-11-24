@@ -249,7 +249,7 @@ impl ConnectorController {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let handle = g.vault_handle.clone().ok_or_else(|| {
             AppError::message(
-                "No vault open — open a vault in Agentero first (Connector needs an active vault)",
+                "No vault open — open a vault in Dovero first (Connector needs an active vault)",
             )
         })?;
         Ok((handle, g.parent_dir.clone()))
@@ -956,7 +956,7 @@ impl ConnectorController {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
         });
-        let vault_name = vault_name_owned.as_deref().unwrap_or("Agentero Vault");
+        let vault_name = vault_name_owned.as_deref().unwrap_or("Dovero Vault");
 
         let targets = if let Some(h) = handle.as_deref() {
             super::targets::list_save_targets(Path::new(h))

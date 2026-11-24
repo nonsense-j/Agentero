@@ -24,13 +24,19 @@ pub fn config_path() -> Result<PathBuf, CliError> {
     Ok(agentero_core::paths::agentero_config_dir().join("config.toml"))
 }
 
-/// Before shared paths, the CLI ignored XDG overrides and used ~/.config even
-/// on Windows. Keep this only as an input location for the one-time migration.
+/// Legacy config dir for one-time non-destructive migration: prefers the
+/// pre-rebrand shared config dir (`$XDG_CONFIG_HOME/agentero` / `%APPDATA%/agentero`)
+/// and falls back to `~/.config/agentero` from pre-XDG CLI builds.
 fn legacy_config_dir() -> Option<PathBuf> {
+    let shared_legacy =
+        agentero_core::paths::xdg_config_home().join(agentero_core::paths::LEGACY_APP_DIR_NAME);
+    if shared_legacy.is_dir() {
+        return Some(shared_legacy);
+    }
     dirs::home_dir()
         .map(|h| h.join(".config"))
         .or_else(dirs::config_dir)
-        .map(|base| base.join("agentero"))
+        .map(|base| base.join(agentero_core::paths::LEGACY_APP_DIR_NAME))
 }
 
 /// Read legacy `vaults.md` entries, if present.

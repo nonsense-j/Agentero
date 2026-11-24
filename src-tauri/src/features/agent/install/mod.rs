@@ -154,13 +154,13 @@ fn probe_cli_version(path: &Path) -> Option<String> {
 /// Directory for the downloaded/managed CLI binary (outside the App bundle).
 pub(crate) fn managed_cli_dir() -> PathBuf {
     if let Some(base) = dirs::data_local_dir() {
-        return base.join("Agentero").join("cli");
+        return base.join("Dovero").join("cli");
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local")
         .join("share")
-        .join("Agentero")
+        .join("Dovero")
         .join("cli")
 }
 
@@ -318,7 +318,7 @@ fn preferred_bin_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(base) = dirs::data_local_dir() {
-            return base.join("Agentero").join("bin");
+            return base.join("Dovero").join("bin");
         }
     }
     dirs::home_dir()
@@ -422,6 +422,7 @@ fn is_agentero_shim(shim: &Path) -> bool {
         if let Ok(target) = fs::read_link(shim) {
             let s = target.to_string_lossy();
             return s.contains("agentero-cli")
+                || s.contains("Dovero")
                 || s.contains("Agentero")
                 || s.ends_with("agentero")
                 || s.contains("/cli/agentero");
@@ -431,6 +432,7 @@ fn is_agentero_shim(shim: &Path) -> bool {
     {
         if let Ok(text) = fs::read_to_string(shim) {
             return text.contains("agentero-cli")
+                || text.contains("Dovero")
                 || text.contains("Agentero")
                 || text.contains("agentero.exe");
         }
@@ -481,7 +483,7 @@ pub fn collect_status<R: Runtime>(app: &AppHandle<R>) -> CliInstallStatus {
             )
         } else {
             format!(
-                "CLI installed at {} but that directory is not on PATH. Add it to your shell PATH (do not edit rc from Agentero).",
+                "CLI installed at {} but that directory is not on PATH. Add it to your shell PATH (do not edit rc from Dovero).",
                 bin_dir.display()
             )
         });

@@ -62,7 +62,9 @@ pub fn feeds_db_path() -> std::path::PathBuf {
 }
 
 pub fn ensure_feeds() -> Result<Connection, AppError> {
-    ensure_feeds_at(&feeds_db_path())
+    let db_path = feeds_db_path();
+    paths::migrate_legacy_sqlite("feeds.sqlite", &db_path);
+    ensure_feeds_at(&db_path)
 }
 
 pub fn ensure_feeds_at(db_path: &Path) -> Result<Connection, AppError> {

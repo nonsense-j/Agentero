@@ -107,6 +107,7 @@ pub fn run() {
                 .build(),
         );
 
+    agentero_core::paths::migrate_legacy_app_dirs();
     let settings_store = AppSettingsStore::load();
     let layout_backend = settings_store.layout_backend();
     let import_concurrency = settings_store.batch_import_concurrency();

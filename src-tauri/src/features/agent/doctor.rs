@@ -396,7 +396,7 @@ async fn codex_account_auth_status(
             "method": "initialize",
             "params": {
                 "clientInfo": {
-                    "name": "Agentero",
+                    "name": "Dovero",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "capabilities": null,

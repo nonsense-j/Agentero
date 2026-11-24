@@ -94,7 +94,7 @@ fn run_uninstall<R: Runtime>(app: &AppHandle<R>) -> Result<CliInstallResult, App
         log::warn!("cli uninstall: failed to remove shim dir from user PATH: {e}");
     }
     let mut status = collect_status(app);
-    status.message = Some("Removed the Agentero-managed CLI shim.".into());
+    status.message = Some("Removed the Dovero-managed CLI shim.".into());
     Ok(CliInstallResult {
         status,
         action: "uninstall".into(),

@@ -1015,7 +1015,9 @@ fn ensure_collection_at_locked(db_path: &Path) -> Result<Connection, AppError> {
 }
 
 pub fn ensure_collection() -> Result<Connection, AppError> {
-    ensure_collection_at(&collection_db_path())
+    let db_path = collection_db_path();
+    paths::migrate_legacy_sqlite("collection.sqlite", &db_path);
+    ensure_collection_at(&db_path)
 }
 
 pub fn ensure_collection_at(db_path: &Path) -> Result<Connection, AppError> {
@@ -1052,5 +1054,7 @@ pub(crate) fn with_default_collection_write_conn<T, F>(f: F) -> Result<T, AppErr
 where
     F: FnOnce(&mut Connection) -> Result<T, AppError>,
 {
-    with_collection_write_conn(&collection_db_path(), f)
+    let db_path = collection_db_path();
+    paths::migrate_legacy_sqlite("collection.sqlite", &db_path);
+    with_collection_write_conn(&db_path, f)
 }

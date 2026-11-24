@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Agentero",
+  "productName": "Dovero",
   "version": "0.16.1",
-  "identifier": "com.poco-ai.agentero",
+  "identifier": "io.github.nonsense-j.dovero",
   "build": {
     "beforeDevCommand": "pnpm pdfium:stage && pnpm adapters:stage && pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Agentero",
+        "title": "Dovero",
         "dragDropEnabled": false,
         "width": 1280,
         "height": 800,
@@ -35,12 +35,12 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFM0JFMzE2N0JGNUZDOUIKUldTYi9QVjdGdU03UHZ2Z0RDYTZEUWdPTWdpb1JYK0trWWVlbG1PbjZCUGR4TTZvakhtditzc1MK",
       "endpoints": [
-        "https://github.com/nonsense-j/Agentero/releases/latest/download/latest.json"
+        "https://github.com/nonsense-j/Dovero/releases/latest/download/latest.json"
       ]
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["agentero"]
+        "schemes": ["dovero"]
       }
     }
   },

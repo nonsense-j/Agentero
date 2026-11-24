@@ -1510,8 +1510,8 @@ impl ServerHandler for AgenteroMcp {
         ))
         .with_server_info(
             Implementation::new("agentero", env!("CARGO_PKG_VERSION"))
-                .with_title("Agentero")
-                .with_website_url("https://github.com/nonsense-j/Agentero")
+                .with_title("Dovero")
+                .with_website_url("https://github.com/nonsense-j/Dovero")
                 .with_icons(icons::server_icons()),
         )
     }
@@ -2324,7 +2324,7 @@ mod schema_tests {
         let icons = info.server_info.icons.as_ref().expect("serverInfo.icons");
         assert!(!icons.is_empty());
         assert!(icons[0].src.starts_with("data:image/png;base64,"));
-        assert_eq!(info.server_info.title.as_deref(), Some("Agentero"));
+        assert_eq!(info.server_info.title.as_deref(), Some("Dovero"));
     }
 
     #[tokio::test]

@@ -89,7 +89,7 @@ function saveOpts(o: SavedOpts) {
 
 /** "View import tutorial" target: the "Migrate from Zotero" section in repo docs. */
 const IMPORT_TUTORIAL_URL =
-	"https://github.com/nonsense-j/Agentero/blob/main/docs/usage/import-papers.md#%E4%BB%8E-zotero-%E8%BF%81%E7%A7%BB";
+	"https://github.com/nonsense-j/Dovero/blob/main/docs/usage/import-papers.md#%E4%BB%8E-zotero-%E8%BF%81%E7%A7%BB";
 function openTutorial() {
 	void openUrl(IMPORT_TUTORIAL_URL).catch(() => {
 		window.open(IMPORT_TUTORIAL_URL, "_blank");

@@ -310,7 +310,7 @@ export const PdfViewer = memo(function PdfViewer(props: PdfViewerProps) {
 			}),
 			createPluginRegistration(AnnotationPluginPackage, {
 				...PDF_LINK_ANNOTATION_CONFIG,
-				annotationAuthor: "Agentero",
+				annotationAuthor: "Dovero",
 				colorPresets: HIGHLIGHT_HEX_LIST,
 				selectAfterCreate: false,
 				deactivateToolAfterCreate: true,

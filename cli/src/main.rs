@@ -112,8 +112,8 @@ fn color_choice(when: ColorWhen) -> ColorChoice {
 #[command(
     name = "agentero",
     version,
-    about = "Agentero headless CLI — Vault / Catalog machine interface (no BYOA)",
-    long_about = "Discover, manage, and expose a local Agentero research vault and catalog.\n\
+    about = "Dovero headless CLI — Vault / Catalog machine interface (no BYOA)",
+    long_about = "Discover, manage, and expose a local Dovero research vault and catalog.\n\
                   Does not run agents or paper-reader. Prefer --json for scripts and external agents.\n\
                   Open a vault in the desktop app: `agentero open <PATH>` or `agentero <PATH>`.\n\
                   Design: docs/backend/cli.md",

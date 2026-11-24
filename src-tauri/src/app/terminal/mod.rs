@@ -74,28 +74,28 @@ struct ConfirmCopy {
 #[cfg(windows)]
 const CONFIRM_LOGIN: ConfirmCopy = ConfirmCopy {
     stem: "login",
-    title: "Agentero - agent login",
-    done_hint: "Done. Agentero will re-check the login status automatically.",
+    title: "Dovero - agent login",
+    done_hint: "Done. Dovero will re-check the login status automatically.",
 };
 
 #[cfg(not(windows))]
 const CONFIRM_LOGIN: ConfirmCopy = ConfirmCopy {
     stem: "login",
-    title: "Agentero — agent login",
-    done_hint: "Done. Agentero will re-check the login status automatically.",
+    title: "Dovero — agent login",
+    done_hint: "Done. Dovero will re-check the login status automatically.",
 };
 
 #[cfg(windows)]
 const CONFIRM_AGENT_CLI: ConfirmCopy = ConfirmCopy {
     stem: "agent-cli",
-    title: "Agentero - agent CLI",
+    title: "Dovero - agent CLI",
     done_hint: "Agent CLI session ended. You can close this window.",
 };
 
 #[cfg(not(windows))]
 const CONFIRM_AGENT_CLI: ConfirmCopy = ConfirmCopy {
     stem: "agent-cli",
-    title: "Agentero — agent CLI",
+    title: "Dovero — agent CLI",
     done_hint: "Agent CLI session ended. You can close this window.",
 };
 

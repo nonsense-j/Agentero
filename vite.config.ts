@@ -83,7 +83,7 @@ export default defineConfig(async () => ({
 									(req.headers.accept as string) ||
 									"text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
 								"User-Agent":
-									"Mozilla/5.0 (compatible; Agentero/0.1; +https://github.com/nonsense-j/Agentero)",
+									"Mozilla/5.0 (compatible; Dovero/0.1; +https://github.com/nonsense-j/Dovero)",
 							},
 						});
 						res.statusCode = upstream.status;

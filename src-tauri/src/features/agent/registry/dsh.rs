@@ -129,7 +129,7 @@ fn npm_launch_with(
         }
     }
     Err(format!(
-        "failed to start Dsh: Node.js 22.19+ or 24.2+ is required (including import.meta.main); no compatible Node was found on the agent PATH or alongside {}. Upgrade Node.js and restart Agentero",
+        "failed to start Dsh: Node.js 22.19+ or 24.2+ is required (including import.meta.main); no compatible Node was found on the agent PATH or alongside {}. Upgrade Node.js and restart Dovero",
         command.display()
     ))
 }

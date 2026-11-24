@@ -1064,7 +1064,7 @@ fn open_path_shorthand_and_explicit_dry_run() {
     assert!(v["data"]["url"]
         .as_str()
         .unwrap()
-        .starts_with("agentero://open?path="));
+        .starts_with("dovero://open?path="));
 
     // Shorthand rewrite: bare directory path → open
     let out2 = agentero()
@@ -1120,7 +1120,7 @@ fn paper_open_dry_run_resolves_ref() {
     assert!(v["data"]["url"]
         .as_str()
         .unwrap()
-        .starts_with("agentero://ui?action=open-paper"));
+        .starts_with("dovero://ui?action=open-paper"));
 
     agentero()
         .env("AGENTERO_OPEN_DRY_RUN", "1")

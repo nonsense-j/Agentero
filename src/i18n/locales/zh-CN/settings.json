@@ -31,9 +31,9 @@
 		},
 		"finder": {
 			"label": "访达集成",
-			"description": "在访达文件夹右键菜单中添加“用 Agentero 打开”",
+			"description": "在访达文件夹右键菜单中添加“用 Dovero 打开”",
 			"descriptionInstalled": "在访达中右键文件夹即可作为 Vault 打开",
-			"stale": "Agentero 位置已变化，更新以修复菜单项",
+			"stale": "Dovero 位置已变化，更新以修复菜单项",
 			"install": "安装",
 			"update": "更新",
 			"uninstall": "移除",
@@ -195,9 +195,9 @@
 			"portLabel": "Connector 端口",
 			"invalidPort": "端口必须在 1 到 65535 之间。",
 			"notListening": "未监听",
-			"portInUse": "端口 {{port}} 已被占用。Agentero 每 5 秒自动重试，请退出 Zotero 或其他占用此端口的应用。",
-			"bindFailed": "无法监听端口 {{port}}。Agentero 每 5 秒自动重试，请检查端口或更换端口。",
-			"serverStopped": "Connector 服务已停止。Agentero 每 5 秒自动重试，也可立即重试。"
+			"portInUse": "端口 {{port}} 已被占用。Dovero 每 5 秒自动重试，请退出 Zotero 或其他占用此端口的应用。",
+			"bindFailed": "无法监听端口 {{port}}。Dovero 每 5 秒自动重试，请检查端口或更换端口。",
+			"serverStopped": "Connector 服务已停止。Dovero 每 5 秒自动重试，也可立即重试。"
 		},
 		"mcp": {
 			"exposeText": {
@@ -299,7 +299,7 @@
 			"section": "Embedding 模型",
 			"source": {
 				"label": "来源",
-				"builtin": "Agentero 内置",
+				"builtin": "Dovero 内置",
 				"custom": "自定义接口"
 			},
 			"baseUrl": {
@@ -377,7 +377,7 @@
 		"lifecycleScanning": "正在扫描 PATH…",
 		"lifecycleProbing": "正在探测 ACP…",
 		"lifecycleUninstalling": "正在卸载…",
-		"npmCacheWriteFailed": "npm 无法写入缓存。Agentero 的受管安装会自动使用独立缓存目录——请重试。若仍失败，请在“命令提示符”中运行 {{cacheCommand}} 后重试，并关闭其他 Node/npm 进程、在杀毒软件中允许 Node.js、修正缓存目录权限。",
+		"npmCacheWriteFailed": "npm 无法写入缓存。Dovero 的受管安装会自动使用独立缓存目录——请重试。若仍失败，请在“命令提示符”中运行 {{cacheCommand}} 后重试，并关闭其他 Node/npm 进程、在杀毒软件中允许 Node.js、修正缓存目录权限。",
 		"uninstallAgentAria": "卸载 {{name}} Agent",
 		"uninstallAgentTitle": "卸载 Agent",
 		"uninstallSuccess": "已卸载 {{name}}",
@@ -451,8 +451,8 @@
 			"removeAcp": "移除 ACP 适配器",
 			"dirsLabel": "要删除的路径",
 			"copyAria": "复制到剪贴板",
-			"registryOnly": "仅移除 Agentero 注册项，磁盘上的文件保留。",
-			"customConfirm": "从 Agentero 中移除此自定义 Agent？",
+			"registryOnly": "仅移除 Dovero 注册项，磁盘上的文件保留。",
+			"customConfirm": "从 Dovero 中移除此自定义 Agent？",
 			"confirm": "卸载"
 		}
 	},
@@ -460,7 +460,7 @@
 		"title": "翻译",
 		"provider": {
 			"label": "默认服务",
-			"agentero": "Agentero 内置",
+			"agentero": "Dovero 内置",
 			"deeplx": "DeepLX",
 			"cnki": "CNKI 翻译助手",
 			"huoshanweb": "火山翻译 Web",
@@ -532,7 +532,7 @@
 			"deepl": "DeepL 神经机器翻译，使用官方 API Key。",
 			"azure": "微软翻译，使用 Azure 订阅密钥。",
 			"googleCloud": "谷歌云翻译 API，使用服务账号密钥。",
-			"openaiCompatible": "兼容 OpenAI Chat Completions 的接口。填写 Base URL，如 https://api.openai.com/v1；Agentero 会自动追加 /chat/completions。"
+			"openaiCompatible": "兼容 OpenAI Chat Completions 的接口。填写 Base URL，如 https://api.openai.com/v1；Dovero 会自动追加 /chat/completions。"
 		},
 		"agentId": {
 			"label": "Agent",
@@ -568,7 +568,7 @@
 		"parserBackend": {
 			"label": "正文解析引擎",
 			"local": "本地解析",
-			"agentero": "Agentero 内置",
+			"agentero": "Dovero 内置",
 			"paddle": "Paddle",
 			"mineru": "MinerU",
 			"openaiCompatible": "OpenAI 兼容"
@@ -893,8 +893,8 @@
 			"tagUpdating": "更新中…",
 			"tagDownloading": "更新中 {{progress}}%",
 			"tagInstalling": "安装中…",
-			"toastTitle": "Agentero {{version}} 已可用",
-			"toastDescription": "下载已验证的更新并重启 Agentero"
+			"toastTitle": "Dovero {{version}} 已可用",
+			"toastDescription": "下载已验证的更新并重启 Dovero"
 		},
 		"cli": {
 			"label": "命令行工具",

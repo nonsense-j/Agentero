@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "desktop")]
 pub mod commands;
 
-pub const WORKFLOW_NAME: &str = "Open with Agentero";
+pub const WORKFLOW_NAME: &str = "Open with Dovero";
 /// Ownership marker — never overwrite a `.workflow` we did not create.
-pub const MARKER_BUNDLE_ID: &str = "com.poco-ai.agentero.open-vault-service";
+pub const MARKER_BUNDLE_ID: &str = "io.github.nonsense-j.dovero.open-vault-service";
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -227,9 +227,9 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.poco-ai.agentero.open-vault-service</string>
+	<string>io.github.nonsense-j.dovero.open-vault-service</string>
 	<key>CFBundleName</key>
-	<string>Open with Agentero</string>
+	<string>Open with Dovero</string>
 	<key>CFBundlePackageType</key>
 	<string>Wflow</string>
 	<key>CFBundleShortVersionString</key>
@@ -240,7 +240,7 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Open with Agentero</string>
+				<string>Open with Dovero</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>

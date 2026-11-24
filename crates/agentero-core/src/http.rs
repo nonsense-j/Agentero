@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 /// The repo + mailto contacts keep Crossref / Semantic Scholar requests in
 /// their polite pools.
 pub const USER_AGENT: &str = concat!(
-    "Agentero/",
+    "Dovero/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/nonsense-j/Agentero; mailto:agentero@users.noreply.github.com)"
+    " (+https://github.com/nonsense-j/Dovero; mailto:dovero@users.noreply.github.com)"
 );
 
 /// Browser-like UA for endpoints that reject non-browser agents with HTTP 403

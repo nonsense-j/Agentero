@@ -15,10 +15,10 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Build the desktop deep-link URL for `agentero open <path>`.
+/// Build the desktop deep-link URL for `open <path>`.
 pub fn open_deep_link_url(absolute_path: &Path) -> String {
     let encoded = urlencoding_encode(&absolute_path.to_string_lossy());
-    format!("agentero://open?path={encoded}")
+    format!("dovero://open?path={encoded}")
 }
 
 fn urlencoding_encode(s: &str) -> String {
@@ -326,8 +326,8 @@ fn notify_single_instance(url: &str) -> bool {
         use std::os::unix::net::UnixStream;
 
         // Must match tauri-plugin-single-instance socket_path():
-        // identifier "com.poco-ai.agentero" → /tmp/com_poco_ai_agentero_si.sock
-        let socket = PathBuf::from("/tmp/com_poco_ai_agentero_si.sock");
+        // identifier "io.github.nonsense-j.dovero" → /tmp/io_github_nonsense_j_dovero_si.sock
+        let socket = PathBuf::from("/tmp/io_github_nonsense_j_dovero_si.sock");
         let Ok(stream) = UnixStream::connect(&socket) else {
             return false;
         };
@@ -335,8 +335,8 @@ fn notify_single_instance(url: &str) -> bool {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        // Args: fake argv0 + deep-link URL (Host scans argv for agentero://).
-        let args = ["agentero-cli-notify", url].join("\0");
+        // Args: fake argv0 + deep-link URL (Host scans argv for dovero://).
+        let args = ["dovero-cli-notify", url].join("\0");
         let mut payload = Vec::new();
         payload.extend_from_slice(cwd.as_bytes());
         payload.extend_from_slice(b"\0\0");
@@ -361,7 +361,7 @@ fn activate_agentero_frontmost() {
         let _ = Command::new("osascript")
             .args([
                 "-e",
-                r#"tell application "System Events" to set frontmost of first process whose name is "agentero" to true"#,
+                r#"tell application "System Events" to set frontmost of first process whose name is "Dovero" or name is "agentero" to true"#,
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -395,7 +395,7 @@ fn open_system_url(url: &str) -> Result<(), CliError> {
             .map_err(|e| CliError::message(format!("failed to invoke {program}: {e}")))?;
         if !status.success() {
             return Err(CliError::message(format!(
-                "{program} failed ({status}); scheme agentero:// not registered"
+                "{program} failed ({status}); scheme dovero:// not registered"
             )));
         }
         Ok(())
@@ -405,7 +405,7 @@ fn open_system_url(url: &str) -> Result<(), CliError> {
 fn launch_gui_with_url(url: &str) -> Result<PathBuf, CliError> {
     let gui = find_gui_binary().ok_or_else(|| {
         CliError::message(
-            "desktop binary not found (looked for Agentero.app and target/{debug,release}/agentero)",
+            "desktop binary not found (looked for Dovero.app and target/{debug,release}/agentero)",
         )
     })?;
 
@@ -466,6 +466,9 @@ fn find_gui_binary() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // Prefer workspace GUI next to this CLI (dev).
+            candidates.push(dir.join("Dovero"));
+            #[cfg(windows)]
+            candidates.push(dir.join("Dovero.exe"));
             candidates.push(dir.join("agentero"));
             #[cfg(windows)]
             candidates.push(dir.join("agentero.exe"));
@@ -475,6 +478,9 @@ fn find_gui_binary() -> Option<PathBuf> {
                 candidates.push(ancestor.join("target/release/agentero"));
                 #[cfg(target_os = "macos")]
                 {
+                    candidates
+                        .push(ancestor.join("src-tauri/target/release/bundle/macos/Dovero.app"));
+                    candidates.push(ancestor.join("target/release/bundle/macos/Dovero.app"));
                     candidates
                         .push(ancestor.join("src-tauri/target/release/bundle/macos/Agentero.app"));
                     candidates.push(ancestor.join("target/release/bundle/macos/Agentero.app"));
@@ -487,6 +493,10 @@ fn find_gui_binary() -> Option<PathBuf> {
     // lacks open handlers while a new binary is available.
     #[cfg(target_os = "macos")]
     {
+        candidates.push(PathBuf::from("/Applications/Dovero.app"));
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join("Applications/Dovero.app"));
+        }
         candidates.push(PathBuf::from("/Applications/Agentero.app"));
         if let Some(home) = dirs::home_dir() {
             candidates.push(home.join("Applications/Agentero.app"));
@@ -503,7 +513,7 @@ mod tests {
     #[test]
     fn deep_link_encodes_path() {
         let url = open_deep_link_url(Path::new("/tmp/my vault"));
-        assert!(url.starts_with("agentero://open?path="));
+        assert!(url.starts_with("dovero://open?path="));
         assert!(url.contains("%20") || url.contains("my%20vault") || url.contains("%2F"));
         assert!(!url.contains(" "));
     }
