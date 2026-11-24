@@ -174,6 +174,16 @@ const NAMED_ENTITIES: Record<string, string> = {
 	quot: '"',
 };
 
+const INLINE_FORMAT_HTML_TAGS = new Set([
+	"del",
+	"kbd",
+	"mark",
+	"s",
+	"sub",
+	"sup",
+	"u",
+]);
+
 function decodeEntity(raw: string): string | null {
 	if (raw.startsWith("#x") || raw.startsWith("#X")) {
 		const value = Number.parseInt(raw.slice(2), 16);
@@ -451,6 +461,26 @@ function scanInline(line: string, base: number, builder: Builder): boolean {
 					builder.literal(inner, base + index + 1);
 					index += match[0].length;
 					continue;
+				}
+				const tagMatch = /^([a-zA-Z]+)$/.exec(inner);
+				if (
+					tagMatch &&
+					INLINE_FORMAT_HTML_TAGS.has(tagMatch[1].toLowerCase())
+				) {
+					const closeTag = `</${tagMatch[1]}>`;
+					const close = findClosingRun(line, index + match[0].length, closeTag);
+					if (close >= 0) {
+						if (
+							!scanInline(
+								line.slice(index + match[0].length, close),
+								base + index + match[0].length,
+								builder,
+							)
+						)
+							return false;
+						index = close + closeTag.length;
+						continue;
+					}
 				}
 			}
 		}
